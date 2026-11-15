@@ -74,12 +74,12 @@ pub(crate) async fn observe_gate_visibility(
 /// always initialized once a commit returned a known outcome; absence is
 /// silently ignored (pure telemetry).
 pub(crate) fn record_pending_kind(
-    repo: &RepoInstance,
+    gate: Option<&shamir_tx::RepoTxGate>,
     visibility: VisibilityState,
     kind: PendingKind,
 ) {
     if let VisibilityState::Pending { reason, .. } = visibility {
-        if let Some(gate) = repo.initialized_tx_gate() {
+        if let Some(gate) = gate {
             let reason = match reason {
                 VisibilityPendingReason::Timeout => PendingReason::Timeout,
                 VisibilityPendingReason::ReopenRequired => PendingReason::ReopenRequired,

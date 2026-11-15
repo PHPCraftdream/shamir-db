@@ -155,7 +155,7 @@ impl RepoInstance {
         tx: shamir_tx::TxContext,
         wait: VisibilityWait,
     ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
-        crate::tx::commit::commit_tx_with_options(tx, self, wait).await
+        crate::tx::commit::commit_tx_with_options(tx, &self.core, wait).await
     }
 
     /// Borrow rather than clone the retained gate on the acknowledgement fast path.

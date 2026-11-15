@@ -246,7 +246,7 @@ fn reconcile_crash_child_entrypoint() {
         let wal = repo.repo_wal().await.unwrap();
         let entries = wal.recover().await.unwrap();
         let permit = repo.write_domain().admit().await.unwrap();
-        let _ = reconcile_with_hook(&repo, &entries, &permit, &mut |at| {
+        let _ = reconcile_with_hook(&repo.core, &entries, &permit, &mut |at| {
             if at == phase {
                 if let Ok(marker) = std::env::var("SHAMIR_COLD_RECONCILE_PHASE_MARKER") {
                     let mut file = std::fs::File::create(marker).expect("create reached marker");
@@ -415,7 +415,7 @@ async fn retention_checkpoint_protects_wal_and_bypass_control_exposes_loss() {
             .unwrap();
         assert!(store.flush().await.is_ok());
         drop(store);
-        Drainer::new().drain_all(&protected).await.unwrap();
+        Drainer::new().drain_all(&protected.core).await.unwrap();
     }
     let protected_reads = protected.read_changelog_from(1, usize::MAX).await.unwrap();
     assert!(protected_reads.gap_at.is_none());
@@ -442,9 +442,9 @@ async fn retention_checkpoint_protects_wal_and_bypass_control_exposes_loss() {
     let gate = bypass.tx_gate().await.unwrap();
     gate.mark_durable(gate.last_committed());
     drop(gate);
-    test_seam::with_state(&bypass, |state| state.bypass_checkpoint = true);
+    test_seam::with_state(&bypass.core, |state| state.bypass_checkpoint = true);
     for _ in 0..8 {
-        Drainer::new().drain_all(&bypass).await.unwrap();
+        Drainer::new().drain_all(&bypass.core).await.unwrap();
     }
     assert_eq!(bypass_feed.clean_horizon(), 0);
     let bypass_reads = bypass.read_changelog_from(1, usize::MAX).await.unwrap();

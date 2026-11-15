@@ -79,10 +79,6 @@ impl RepoInstance {
         Ok(instance)
     }
 
-    pub(crate) async fn settle_unwritten_version(&self, version: u64) {
-        self.core.settle_unwritten_version(version).await;
-    }
-
     pub(crate) fn initialized_mem_wal(&self) -> bool {
         self.core.initialized_mem_wal()
     }
@@ -248,6 +244,7 @@ impl RepoInstance {
         crate::meta::repo_identity::mark_clean(&store).await
     }
 
+    #[cfg(test)]
     /// Open-time unclean bump (called from `tx::recovery` AFTER
     /// `certify_cold_start`): an Armed lifecycle record with no later Clean
     /// certificate costs a history-epoch bump — followers must re-seed. The

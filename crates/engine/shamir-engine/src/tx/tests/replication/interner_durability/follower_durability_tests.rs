@@ -77,7 +77,7 @@ async fn corrupt_marker_fails_the_receipt_apply_without_writes() {
         .set(marker_key(), Bytes::from_static(b"corrupt"))
         .await
         .unwrap();
-    apply_replicated_batch(&repo, &events(), 0, ApplyPolicy::Trusted)
+    apply_replicated_batch(&repo.core, &events(), 0, ApplyPolicy::Trusted)
         .await
         .expect_err("corrupt recovery marker must fail the apply");
     assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
@@ -139,7 +139,7 @@ async fn normal_commit_tail_preserves_reserved_floor_and_transaction_id() {
         .await
         .unwrap();
     info.flush().await.unwrap();
-    crate::tx::commit_phases::persist_markers(&repo, &gate, 0)
+    crate::tx::commit_phases::persist_markers(&repo.core, &gate, 0)
         .await
         .unwrap();
     assert_eq!(

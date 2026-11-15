@@ -30,7 +30,7 @@ async fn apply_batch(
     policy: ApplyPolicy,
 ) -> shamir_storage::error::DbResult<ApplyOutcome> {
     apply_replicated_batch(
-        repo,
+        &repo.core,
         &[ReplicatedEvent {
             event: event.clone(),
             field_bindings: field_bindings.to_vec(),

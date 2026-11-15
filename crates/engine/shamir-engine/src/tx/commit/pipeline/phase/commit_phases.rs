@@ -8,7 +8,7 @@ use super::materialize::{apply_vector_delta_batch, apply_vector_graph_batch};
 use crate::meta::recovery_marker::{
     load_last_committed, load_next_tx_id_snapshot, save_last_committed, save_next_tx_id_snapshot,
 };
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::tx_outcome::MaterializationState;
 
 /// Bounded inline retry budget for a post-commit materialization
@@ -182,7 +182,7 @@ async fn fire_index_batch_bump_apply_test_hook() {
 /// `Arc<AtomicBool>` so the background tail can flip its final state to
 /// `Deferred` if a data write actually failed. The DATA write must finish
 /// before ack so read-your-own-writes on data holds.
-pub(crate) async fn apply_data_phase(tx: &mut TxContext, repo: &RepoInstance, commit_version: u64) {
+pub(crate) async fn apply_data_phase(tx: &mut TxContext, repo: &RepoCore, commit_version: u64) {
     let tx_id = tx.tx_id.0;
     let data_batches = collect_data_batches(tx);
     for (table_id, base, ops) in data_batches {
@@ -238,7 +238,7 @@ pub(crate) async fn apply_data_phase(tx: &mut TxContext, repo: &RepoInstance, co
 /// `Store::set` overwrites the same chunk key (last-writer-wins).
 pub(crate) async fn apply_vector_delta_phase(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     _commit_version: u64,
 ) {
     let tx_id = tx.tx_id.0;
@@ -327,7 +327,7 @@ pub(crate) async fn apply_vector_delta_phase(
 /// sync deferral path. `recover_v2_inflight` is the eventual reconciler.
 pub(crate) async fn materialize_async_tail(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     commit_version: u64,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
@@ -478,7 +478,7 @@ pub(crate) async fn materialize_async_tail(
 ///   We therefore log a warning and leave `materialization` untouched
 ///   (`Complete`). The delta chunk is the durable bridge; the graph is
 ///   re-derived from snapshot + delta on open.
-pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_version: u64) {
+pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoCore, commit_version: u64) {
     let tx_id = tx.tx_id.0;
 
     // We iterate exactly the tables the tx staged vectors into
@@ -618,7 +618,7 @@ pub(crate) fn collect_data_batches(
 /// `Vec<KvOp>` by its trait signature — that clone is confined to that
 /// cold path and paid only there.
 pub(crate) async fn apply_data_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     table_id: u64,
     base: std::sync::Arc<dyn shamir_storage::types::Store>,
     ops: &[shamir_storage::types::KvOp],
@@ -752,7 +752,7 @@ pub(crate) async fn apply_data_batch(
 /// moving the existing `bump_touched_indexes` call ahead of the existing
 /// `apply_index_ops_at_commit` call.
 pub(crate) async fn apply_index_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     token: u64,
     ops: &[IndexWriteOp],
     _tx_id: u64,
@@ -848,7 +848,7 @@ pub(crate) async fn apply_index_batch(
 /// already used. Writing the monotonic max guarantees the marker never goes
 /// backwards regardless of commit interleaving.
 pub(crate) async fn persist_markers(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     _commit_version: u64,
 ) -> Result<(), DbError> {

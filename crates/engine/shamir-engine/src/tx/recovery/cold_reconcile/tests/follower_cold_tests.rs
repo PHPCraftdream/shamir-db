@@ -111,7 +111,7 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         );
         let repo = open(temp.path(), &name).await;
         assert_eq!(
-            apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+            apply_replicated_batch(&repo.core, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
                 .await
                 .expect("first batch applies"),
             ApplyOutcome::Applied { local_version: 1 }
@@ -125,9 +125,10 @@ async fn follower_batch_crash_points_certify_only_the_in_flight_batch() {
         hook.fail_after_sticky
             .store(true, std::sync::atomic::Ordering::Release);
         test_seam::install(&name, Arc::clone(&hook));
-        let error = apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
-            .await
-            .expect_err("the injected failure must fail the second batch");
+        let error =
+            apply_replicated_batch(&repo.core, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+                .await
+                .expect_err("the injected failure must fail the second batch");
         assert!(
             matches!(error, shamir_storage::error::DbError::Storage(_)),
             "expected the injected Storage failure at {tag}: {error:?}"
@@ -266,7 +267,7 @@ async fn legacy_bookmark_refuses_reopen_before_replay() {
     // REAL in-flight WAL evidence: a committed tx (receipt pipeline) whose
     // WAL entry survives the close.
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .expect("the seed batch applies"),
         ApplyOutcome::Applied { local_version: 1 }

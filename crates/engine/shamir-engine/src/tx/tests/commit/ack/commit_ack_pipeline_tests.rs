@@ -172,7 +172,7 @@ async fn construction_policy_applies_to_commit_and_explicit_strict_overrides_it(
         .insert_tx(&InnerValue::Str("default".into()), Some(&mut tx))
         .await
         .unwrap();
-    let receipt = crate::tx::commit_tx(tx, &repo).await.unwrap();
+    let receipt = crate::tx::commit_tx(tx, &repo.core).await.unwrap();
     assert!(matches!(
         receipt.visibility,
         VisibilityState::Pending { .. }
@@ -278,7 +278,7 @@ async fn cancellation_releases_waiter_without_aborting_async_tail() {
         repo.observe_visibility(target, STATUS).await.unwrap(),
         VisibilityState::Visible
     );
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(
         table.get(id).await.unwrap(),
         InnerValue::Str("survives".into())
@@ -355,10 +355,11 @@ async fn real_abort_and_indeterminate_entry_keep_no_commit_metadata() {
         crate::tx::commit::wal_completion(&gate, 1, Err(shamir_wal::WalAppendError::Indeterminate))
             .0
             .unwrap_err();
-    let info = crate::tx::commit::acknowledge_known_outcome(Err(error), &repo, &gate, STATUS, 0)
-        .await
-        .unwrap_err()
-        .into_transaction_info(7, 0);
+    let info =
+        crate::tx::commit::acknowledge_known_outcome(Err(error), &repo.core, &gate, STATUS, 0)
+            .await
+            .unwrap_err()
+            .into_transaction_info(7, 0);
     assert!(!info.is_committed());
     assert_eq!(info.visibility, None);
     assert!(gate.requires_reopen());

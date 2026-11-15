@@ -6,7 +6,7 @@ use crate::table::interner_manager::InternerManager;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, Repo as _, Store};
 use shamir_types::types::common::THasher;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 impl RepoCore {
     pub(crate) fn name(&self) -> &str {
@@ -180,5 +180,57 @@ impl RepoCore {
             })
             .await
             .cloned()
+    }
+
+    /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
+    /// Identical to a plain [`Clone`] except `live_weak` is dead (the task
+    /// does not count toward repo liveness) and `worker_lifecycle = None`
+    /// (the task does not retain foreground lifecycle ownership).
+    /// See [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
+    fn clone_for_background(&self) -> Self {
+        let mut bg = self.clone();
+        bg.live_weak = Weak::new();
+        // Background handles own only drainer resources, never foreground
+        // lifecycle ownership.
+        bg.worker_lifecycle = None;
+        bg
+    }
+
+    /// D2 P1d-2b: the repo's background drainer, spawned once (single-owner).
+    ///
+    /// First call lazily creates the [`Drainer`](crate::tx::drainer::Drainer)
+    /// and starts its background loop (a leak-free task owning a
+    /// `clone_for_background` of this core plus a `Weak<()>` of the repo's
+    /// liveness token). Subsequent calls (from any foreground clone) return
+    /// the same `Arc<Drainer>` via the shared `OnceLock`. The commit path
+    /// calls `repo.drainer().wake()` after publishing a version to nudge
+    /// the loop.
+    pub(crate) fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
+        #[cfg(test)]
+        if self
+            .background_drainer_disabled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Arc::clone(
+                self.horizon
+                    .drainer_cell()
+                    .get_or_init(|| Arc::new(crate::tx::drainer::Drainer::new())),
+            );
+        }
+
+        Arc::clone(self.horizon.drainer_cell().get_or_init(|| {
+            let drainer = Arc::new(crate::tx::drainer::Drainer::new());
+            // 50 ms backstop: prompt drain even if a wake is missed, cheap
+            // when idle (the loop short-circuits when nothing is undrained).
+            const DRAIN_INTERVAL_MS: u64 = 50;
+            // A background core asking for the drainer (shouldn't happen on
+            // the commit path) carries a dead weak, so the loop exits at once.
+            drainer.spawn(
+                self.clone_for_background(),
+                self.live_weak.clone(),
+                std::time::Duration::from_millis(DRAIN_INTERVAL_MS),
+            );
+            drainer
+        }))
     }
 }

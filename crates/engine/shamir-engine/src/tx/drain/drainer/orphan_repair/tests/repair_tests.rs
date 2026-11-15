@@ -21,7 +21,7 @@ async fn orphan_is_repaired_and_bounded_pull_has_no_gap() {
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     let entry = repo.drainer().window_entry(version).unwrap();
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     let (events, gap) = repo
         .read_changelog_for_replication(version, 10)
         .await
@@ -59,7 +59,7 @@ async fn existing_mismatch_is_error_and_orphan_is_preserved() {
         )
         .await
         .unwrap();
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(
         repo.drainer()
             .orphan_replay_failures_total
@@ -104,8 +104,8 @@ async fn double_repair_leaves_one_event() {
     drop(snapshot);
     let entry = repo.drainer().window_entry(version).unwrap();
     let handle = repo.changefeed().await.unwrap();
-    repair_event(&repo, &entry).await.unwrap();
-    repair_event(&repo, &entry).await.unwrap();
+    repair_event(&repo.core, &entry).await.unwrap();
+    repair_event(&repo.core, &entry).await.unwrap();
     let rows = handle
         .store
         .range_from(shamir_tx::changefeed::version_key(version), 1)
@@ -131,11 +131,11 @@ async fn missing_table_orphan_remains_retryable() {
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     assert!(repo.remove_table_for_test("a"));
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert!(repo.drainer().window_entry(version).is_some());
     assert!(repo.tx_gate().await.unwrap().is_orphaned_post_wal(version));
     repo.add_table_for_test(TableConfig::new("a"));
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert!(repo
         .read_changelog_for_replication(version, 1)
         .await
@@ -157,7 +157,7 @@ async fn closed_writer_fallback_records_gap_after_gap_admission() {
     drop(snapshot);
     let handle = repo.changefeed().await.unwrap();
     handle.feed.shutdown_and_wait().await.unwrap();
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     let (events, gap) = repo
         .read_changelog_for_replication(version, 1)
         .await
@@ -192,7 +192,7 @@ async fn later_queued_event_cannot_be_served_before_repaired_orphan() {
         .unwrap();
     assert!(events.is_empty());
     assert_eq!(gap_before, None);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 2);
     task.await.unwrap().unwrap();
     let (events, gap) = repo
         .read_changelog_for_replication(orphan, 10)

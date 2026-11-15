@@ -1,8 +1,8 @@
 use super::rename_freeze::RenameFreeze;
-use super::rename_in_doubt::RenameInDoubt;
 use super::RepoInstance;
 use crate::repo::RepoWritePermit;
 use crate::table::TableManager;
+use crate::tx::commit::rename_fence::{RenameInDoubt, RetainedFreeze};
 use shamir_storage::error::{DbError, DbResult};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,15 @@ impl<'p> RenameAttempt<'p> {
     ) -> Self {
         let was_fenced = pair.is_some();
         let (source, freeze) = match pair {
-            Some(pair) => (pair.freeze.source().clone(), Some(pair.freeze)),
+            Some(pair) => match pair.freeze.into_inner::<RenameFreeze>() {
+                Ok(freeze) => (freeze.source().clone(), Some(freeze)),
+                Err(_) => {
+                    log::error!(
+                        "rename fence invariant violated: retained freeze for '{from}' to '{to}' is not a RenameFreeze"
+                    );
+                    (source, None)
+                }
+            },
             None => (source, None),
         };
         Self {
@@ -107,7 +115,7 @@ impl<'p> RenameAttempt<'p> {
             self.repo.raise_rename_fence(RenameInDoubt {
                 from: self.from.clone(),
                 to: self.to.clone(),
-                freeze,
+                freeze: RetainedFreeze::new(freeze),
             });
         }
     }

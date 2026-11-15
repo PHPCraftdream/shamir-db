@@ -11,7 +11,7 @@ use shamir_tx::{IsolationLevel, MvccStore, TxContext};
 use shamir_types::types::common::THasher;
 use tokio::runtime::Handle;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 use crate::tx::TxOutcome;
 
@@ -29,10 +29,10 @@ pub(crate) struct CommitDriver {
 }
 
 impl CommitDriver {
-    pub(crate) fn new<F, Make>(tx: TxContext, repo: &RepoInstance, make: Make) -> Self
+    pub(crate) fn new<F, Make>(tx: TxContext, repo: &RepoCore, make: Make) -> Self
     where
         F: Future<Output = Result<TxOutcome, TxError>> + Send + 'static,
-        Make: FnOnce(TxContext, RepoInstance) -> F,
+        Make: FnOnce(TxContext, RepoCore) -> F,
     {
         let handle = Handle::current();
         let locked_keys = LockSnapshot::capture(&tx, repo);
@@ -120,7 +120,7 @@ struct LockSnapshot {
 }
 
 impl LockSnapshot {
-    fn capture(tx: &TxContext, repo: &RepoInstance) -> Option<Self> {
+    fn capture(tx: &TxContext, repo: &RepoCore) -> Option<Self> {
         if tx.isolation != IsolationLevel::Pessimistic {
             return None;
         }

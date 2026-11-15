@@ -66,10 +66,11 @@ impl RepoInstance {
     /// repo (see the core method for the init contract).
     pub(crate) async fn changefeed(&self) -> DbResult<ChangefeedHandle> {
         #[cfg(test)]
-        test_seam::record(self, "before_feed_init");
+        test_seam::record(&self.core, "before_feed_init");
         self.core.changefeed().await
     }
 
+    #[cfg(test)]
     /// Resolve before entering the synchronous publish block. Failure is
     /// logged, but does not mark a gap until this version actually publishes.
     pub(crate) async fn prepare_journal_event(
@@ -82,23 +83,16 @@ impl RepoInstance {
         self.core.prepare_journal_event(event).await
     }
 
-    pub(crate) async fn mark_changefeed_gap(&self, version: u64) -> DbResult<()> {
-        self.core.mark_changefeed_gap(version).await
-    }
-
+    #[cfg(test)]
     /// Synchronous publish-time fallback; minimum is shared across repo clones.
     pub(crate) fn record_pending_changefeed_gap(&self, version: u64) {
         self.core.record_pending_changefeed_gap(version);
     }
 
+    #[cfg(test)]
     /// Live only: never re-enqueue an event already handled before publish.
     pub(crate) fn broadcast_changefeed_event(&self, event: Option<Arc<shamir_tx::ChangelogEvent>>) {
         self.core.broadcast_changefeed_event(event);
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn fire_post_publish_pre_broadcast_test_hook(&self) {
-        self.core.fire_post_publish_pre_broadcast_test_hook().await
     }
 
     /// Subscribe to this repo's live changefeed.

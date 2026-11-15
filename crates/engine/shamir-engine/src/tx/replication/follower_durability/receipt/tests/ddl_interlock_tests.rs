@@ -92,7 +92,7 @@ async fn parked_apply_blocks_ddl_via_the_write_domain() {
     test_seam::install(&name, Arc::clone(&hook));
     let events = [event(1, 1)];
     let mut apply = Box::pin(apply_replicated_batch(
-        &repo,
+        &repo.core,
         &events,
         0,
         ApplyPolicy::Trusted,
@@ -155,7 +155,7 @@ async fn parked_apply_blocks_ddl_via_the_write_domain() {
     // domain, so by the time it runs the receipt is retired and the durable
     // v3 bookmark is 1 — a deterministic Skipped no-op.
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped
@@ -183,7 +183,7 @@ async fn paused_reservation_rejects_ordinary_admission_resume_uses_it() {
     *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     test_seam::remove(&name);
@@ -212,7 +212,7 @@ async fn paused_reservation_rejects_ordinary_admission_resume_uses_it() {
     // identical allocation, and the reservation clears with the receipt.
     hook.fail_after.lock().unwrap().take();
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }

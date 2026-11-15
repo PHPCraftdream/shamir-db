@@ -304,7 +304,7 @@ async fn run_child_scenario(path: PathBuf) {
     // (pre_commit..phase6_5) the process has already `process::abort`ed inside
     // `commit_tx` above and never reaches this line.
     let drainer = repo.drainer();
-    let drain = drainer.drain_all(&repo);
+    let drain = drainer.drain_all(repo.core());
     if tokio::time::timeout(Duration::from_secs(10), drain)
         .await
         .is_err()

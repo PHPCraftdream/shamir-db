@@ -144,7 +144,7 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
 
     // (4) Recovery materializes the deferred projection — index posting +
     //     data both land, and the marker is cleaned.
-    let count = repo.drainer().drain_all(&repo).await.unwrap();
+    let count = repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(count, 1, "online replay must settle the one inflight entry");
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome.materialization, MaterializationState::Deferred);
@@ -271,7 +271,7 @@ async fn deferred_materialization_increments_metric() {
     let task = spawn_deferred_commit(&repo, tx).await;
     FAIL_PHASE_5C_TX_ID.store(0, Ordering::SeqCst);
     drop(inject_guard);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(
         outcome.materialization,
@@ -385,7 +385,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     // (d) AFTER recovery: BOTH tables consistent. Recovery replays the one
     //     inflight WAL entry, which carries every table's ops (Put(A), Put(B),
     //     IndexPut(A)), so table B's data lands and table A is unchanged.
-    let count = repo.drainer().drain_all(&repo).await.unwrap();
+    let count = repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(count, 1, "online replay must settle the one inflight entry");
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome.materialization, MaterializationState::Deferred);

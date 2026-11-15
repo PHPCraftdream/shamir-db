@@ -26,7 +26,7 @@ fn make_repo() -> RepoInstance {
 async fn commit_empty_tx_succeeds() {
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(outcome.tx_id, 1);
     assert_eq!(
         outcome.commit_version, outcome.snapshot_version,
@@ -52,7 +52,7 @@ async fn commit_advances_last_committed() {
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     staging.set(Bytes::from_static(b"k").into(), Bytes::from_static(b"v"));
     tx.write_set.insert(2, staging);
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
 
     let after = gate.last_committed();
     assert!(
@@ -75,7 +75,7 @@ async fn commit_writes_wal_entry() {
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     staging.set(Bytes::from_static(b"k").into(), Bytes::from_static(b"v"));
     tx.write_set.insert(3, staging);
-    let _ = commit_tx(tx, &repo).await.unwrap();
+    let _ = commit_tx(tx, &repo.core).await.unwrap();
 
     // F5e: the single WAL write path appends the entry to the segment; it
     // stays there (no per-entry removal) until F6 truncation, and replay
@@ -103,11 +103,11 @@ async fn commit_two_txs_monotonic_versions() {
 
     let mut tx1 = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
     tx1.write_set.insert(10, staged(b"k1"));
-    let o1 = commit_tx(tx1, &repo).await.unwrap();
+    let o1 = commit_tx(tx1, &repo.core).await.unwrap();
 
     let mut tx2 = TxContext::new(TxId::new(11), 0, 0, IsolationLevel::Snapshot);
     tx2.write_set.insert(11, staged(b"k2"));
-    let o2 = commit_tx(tx2, &repo).await.unwrap();
+    let o2 = commit_tx(tx2, &repo.core).await.unwrap();
 
     assert!(o2.commit_version > o1.commit_version);
 }
@@ -173,7 +173,7 @@ async fn commit_phase5_applies_write_set_to_base_store() {
         "data_store must not have the key before commit"
     );
 
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.commit_version > 0);
 
     let got = data_store
@@ -199,7 +199,7 @@ async fn commit_applies_multiple_tables_atomically() {
     st2.set(Bytes::from_static(b"b").into(), Bytes::from_static(b"2"));
     tx.write_set.insert(2, st2);
 
-    let _ = commit_tx(tx, &repo).await.unwrap();
+    let _ = commit_tx(tx, &repo.core).await.unwrap();
 
     assert_eq!(
         s1.get(Bytes::from_static(b"a").into()).await.unwrap(),
@@ -216,7 +216,7 @@ async fn commit_empty_write_set_still_succeeds() {
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(300), 0, 0, IsolationLevel::Snapshot);
     // C6: empty tx commits via the fast-path (no version, no WAL).
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(outcome.commit_version, outcome.snapshot_version);
     assert!(outcome.materialized());
 }
@@ -228,7 +228,7 @@ async fn commit_serializable_with_empty_read_set_succeeds() {
     let tx = TxContext::new(TxId::new(500), 0, 0, IsolationLevel::Serializable);
     // empty read_set + zero provider → passes Phase 2, then the empty
     // op-set takes the C6 fast-path (no version, no WAL).
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(outcome.commit_version, outcome.snapshot_version);
     assert!(outcome.materialized());
 }
@@ -243,7 +243,7 @@ async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
     let repo = make_repo();
     let mut tx = TxContext::new(TxId::new(501), 0, 0, IsolationLevel::Serializable);
     tx.record_read(7, Bytes::from_static(b"key"), 5);
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(outcome.commit_version, outcome.snapshot_version);
     assert!(outcome.materialized());
 }
@@ -266,7 +266,7 @@ async fn commit_serializable_real_provider_detects_conflict() {
     tx.record_read(7, Bytes::from_static(b"k"), 5);
     tx.set_version_provider(Arc::new(ConflictProvider));
 
-    let result = commit_tx(tx, &repo).await;
+    let result = commit_tx(tx, &repo.core).await;
     assert!(result.is_err(), "real provider with conflict must abort");
     match result.unwrap_err() {
         crate::tx::CommitError::SsiConflict { key } => {
@@ -296,7 +296,7 @@ async fn commit_serializable_real_provider_no_conflict_succeeds() {
 
     // Read-only Serializable tx, SSI validation passes (no conflict) → C6
     // fast-path. `commit_version` pins to the snapshot version (10).
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(outcome.commit_version, outcome.snapshot_version);
     assert_eq!(outcome.commit_version, 10);
     assert!(outcome.materialized());
@@ -341,7 +341,7 @@ async fn commit_with_non_empty_overlay_proceeds_with_warning() {
     let _ = tx.interner_overlay.insert_sync("foo".to_string(), 12345);
 
     // Commit succeeds despite non-empty overlay (warning-only path).
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.commit_version > 0);
 }
 
@@ -589,7 +589,7 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     // Real tx #1 → assigns version V.
     let mut tx1 = TxContext::new(TxId::new(6001), 0, 0, IsolationLevel::Snapshot);
     tx1.write_set.insert(6001, staged(b"k1"));
-    let v1 = commit_tx(tx1, &repo).await.unwrap().commit_version;
+    let v1 = commit_tx(tx1, &repo.core).await.unwrap().commit_version;
     assert!(v1 > 0);
 
     // WAL entry count after the real tx (which appended one entry; entries
@@ -600,7 +600,7 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     // P0c: no version is allocated (assign is deferred past C6 check).
     let snap_before = repo.tx_gate().await.unwrap().last_committed();
     let empty = TxContext::new(TxId::new(6002), 0, snap_before, IsolationLevel::Snapshot);
-    let out = commit_tx(empty, &repo).await.unwrap();
+    let out = commit_tx(empty, &repo.core).await.unwrap();
     assert_eq!(
         out.commit_version, snap_before,
         "empty fast-path pins commit_version to the snapshot version"
@@ -621,7 +621,7 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     // Real tx #2 → gets V+1 (the empty tx consumed no version slot — P0c).
     let mut tx3 = TxContext::new(TxId::new(6003), 0, 0, IsolationLevel::Snapshot);
     tx3.write_set.insert(6003, staged(b"k3"));
-    let v2 = commit_tx(tx3, &repo).await.unwrap().commit_version;
+    let v2 = commit_tx(tx3, &repo.core).await.unwrap().commit_version;
     assert_eq!(
         v2,
         v1 + 1,
@@ -653,7 +653,7 @@ async fn read_only_serializable_no_conflict_fast_paths() {
     tx.record_read(7, Bytes::from_static(b"k"), 5);
     tx.set_version_provider(Arc::new(OkProvider));
 
-    let out = commit_tx(tx, &repo).await.unwrap();
+    let out = commit_tx(tx, &repo.core).await.unwrap();
     assert_eq!(
         out.commit_version, 7,
         "read-only fast-path pins commit_version to the snapshot version"
@@ -688,7 +688,7 @@ async fn read_only_serializable_with_conflict_still_aborts() {
     tx.record_read(7, Bytes::from_static(b"k"), 5);
     tx.set_version_provider(Arc::new(ConflictProvider));
 
-    let result = commit_tx(tx, &repo).await;
+    let result = commit_tx(tx, &repo.core).await;
     match result {
         Err(crate::tx::CommitError::SsiConflict { key }) => {
             assert_eq!(key, Bytes::from_static(b"k"));
@@ -732,7 +732,7 @@ async fn p2c_disjoint_table_commits_run_in_parallel() {
     // Spawn both commits concurrently — without commit_mutex they should
     // not block each other.
     let repo2 = repo.clone();
-    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo), commit_tx(tx_b, &repo2),);
+    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo.core), commit_tx(tx_b, &repo2.core),);
 
     let oa = ra.expect("disjoint tx_a must succeed");
     let ob = rb.expect("disjoint tx_b must succeed");
@@ -765,7 +765,7 @@ async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
     let tx_b = make_tx(9011);
 
     let repo2 = repo.clone();
-    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo), commit_tx(tx_b, &repo2),);
+    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo.core), commit_tx(tx_b, &repo2.core),);
 
     // Under Snapshot isolation, both commits succeed (no conflict detection
     // for write-write — last-writer-wins at the data layer).
@@ -959,7 +959,7 @@ async fn committed_wal_entry_carries_a_derivable_event() {
     tx.table_tokens.insert(token, "items".to_string());
     tx.write_set.insert(token, staging);
 
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
 
     let wal = repo.repo_wal().await.unwrap();
     let inflight = wal.recover().await.unwrap();

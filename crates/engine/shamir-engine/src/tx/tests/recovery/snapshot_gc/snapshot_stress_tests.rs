@@ -200,7 +200,7 @@ async fn seeded_writers_and_parked_commits_preserve_repeated_snapshot_reads() {
             task.await.unwrap();
         }
         drop(parked_pin);
-        repo.drainer().drain_all(&repo).await.unwrap();
+        repo.drainer().drain_all(&repo.core).await.unwrap();
     }
     let (reader, pin) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let (point, rows, count) = observe(&repo, &point_table, id, &reader).await;

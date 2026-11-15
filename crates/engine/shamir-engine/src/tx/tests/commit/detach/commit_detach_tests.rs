@@ -128,7 +128,7 @@ async fn cancelled_post_wal_tail_keeps_unique_lock_changefeed_and_postings() {
     assert!(tbl.update_tx(rid, &new, Some(&mut later)).await.unwrap());
     within(repo.commit_tx(later)).await.unwrap();
     drop(replay);
-    within(drainer.drain_all(&repo)).await.unwrap();
+    within(drainer.drain_all(&repo.core)).await.unwrap();
     assert_eq!(tbl.get(rid).await.unwrap(), new);
     assert_eq!(
         tbl.index_manager()
@@ -293,9 +293,9 @@ async fn level3_tail(detach: bool, panic_tail: bool, name: &str) {
         assert_eq!(repo.tx_metrics().snapshot().post_wal_orphans_total, 0);
         assert_eq!(tbl.get(rid).await.unwrap(), value);
     }
-    crate::tx::commit::release_pessimistic_locks(&younger, &repo).await;
+    crate::tx::commit::release_pessimistic_locks(&younger, &repo.core).await;
     drop(replay);
-    within(drainer.drain_all(&repo)).await.unwrap();
+    within(drainer.drain_all(&repo.core)).await.unwrap();
     assert!(!gate.is_orphaned_post_wal(version));
     assert!(gate.durable_watermark() >= version);
     assert_eq!(tbl.get(rid).await.unwrap(), value);

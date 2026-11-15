@@ -149,23 +149,23 @@ async fn crash_child(path: PathBuf, mode: &str) {
 
     match mode {
         "failure" => {
-            test_seam::with_state(&repo, |state| state.fail_checkpoint = true);
+            test_seam::with_state(&repo.core, |state| state.fail_checkpoint = true);
             repo.drainer()
-                .drain_all(&repo)
+                .drain_all(&repo.core)
                 .await
                 .expect("failed checkpoint retains WAL");
             assert_eq!(wal_file_count(&path), baseline);
             let journal = journal_checkpoint(&repo).await;
             assert!(journal < orphan, "failed checkpoint must not advance raw J");
-            test_seam::with_state(&repo, |state| state.fail_checkpoint = false);
+            test_seam::with_state(&repo.core, |state| state.fail_checkpoint = false);
         }
-        "bypass" => test_seam::with_state(&repo, |state| state.bypass_checkpoint = true),
+        "bypass" => test_seam::with_state(&repo.core, |state| state.bypass_checkpoint = true),
         "crash" => {}
         _ => panic!("unknown child mode {mode}"),
     }
     if mode == "failure" {
         repo.drainer()
-            .drain_all(&repo)
+            .drain_all(&repo.core)
             .await
             .expect("retry checkpoint and truncate");
         assert!(wal_file_count(&path) < baseline);
@@ -174,7 +174,7 @@ async fn crash_child(path: PathBuf, mode: &str) {
     }
     if mode == "bypass" {
         repo.drainer()
-            .drain_all(&repo)
+            .drain_all(&repo.core)
             .await
             .expect("bypassed checkpoint truncation");
         let journal = journal_checkpoint(&repo).await;
@@ -193,7 +193,7 @@ async fn crash_child(path: PathBuf, mode: &str) {
         std::process::abort();
     }
     repo.drainer()
-        .drain_all(&repo)
+        .drain_all(&repo.core)
         .await
         .expect("production drain and checkpoint");
     let journal = journal_checkpoint(&repo).await;

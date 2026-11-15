@@ -18,7 +18,8 @@ use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::CompletionState;
 use shamir_wal::WalOpV2;
 
-use crate::repo::{RepoInstance, RepoWritePermit};
+use crate::repo::RepoWritePermit;
+use crate::tx::commit::core::RepoCore;
 
 /// Test-only injection (CRIT-1 / #435): when set to a non-zero `txn_id`,
 /// `seed_version_cache_for_entry` returns a synthetic error for the matching
@@ -53,7 +54,7 @@ pub(crate) static FAIL_HISTORY_SEED_TX_ID: std::sync::atomic::AtomicU64 =
 /// Stage 7.1.d: IndexPut / IndexDel are applied (table_id_interned=0
 ///   broadcasts to all tables' info_stores).
 /// InternerOverlayMerge is deferred (Stage 5 — repo-level interner).
-pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
+pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoCore) -> DbResult<()> {
     let permit = repo
         .write_domain()
         .admit()
@@ -70,7 +71,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
 #[inline(never)]
 fn replay_v2_op_admitted<'a>(
     op: &'a WalOpV2,
-    repo: &'a RepoInstance,
+    repo: &'a RepoCore,
     permit: &'a RepoWritePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
     Box::pin(replay_v2_op_admitted_inner(op, repo, permit))
@@ -78,7 +79,7 @@ fn replay_v2_op_admitted<'a>(
 
 async fn replay_v2_op_admitted_inner(
     op: &WalOpV2,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);
@@ -367,7 +368,7 @@ async fn replay_v2_op_admitted_inner(
 ///    floor survives the *next* restart. Once step 2 clears the markers,
 ///    the inflight pre-scan in step 1 would find nothing, so the durable
 ///    marker must now carry the recovered max or the floor would rewind.
-pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) -> DbResult<usize> {
+pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> DbResult<usize> {
     repo.write_domain().debug_check_permit(permit);
     // Step 1: build the gate before replay so its version floor is seeded
     // from the inflight commit_versions while the markers still exist.
@@ -573,7 +574,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
 /// writes go straight to `data_store()` (bypassing `apply_committed_ops`),
 /// so without this the version cache would report `0` for recovered keys.
 /// See `seed_version_cache_for_entry` for why this matters.
-pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoCore) -> DbResult<()> {
     let permit = repo
         .write_domain()
         .admit()
@@ -586,7 +587,7 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
 #[inline(never)]
 fn replay_v2_entry_admitted<'a>(
     entry: &'a shamir_wal::WalEntryV2,
-    repo: &'a RepoInstance,
+    repo: &'a RepoCore,
     permit: &'a RepoWritePermit,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
     Box::pin(replay_v2_entry_admitted_inner(entry, repo, permit))
@@ -594,7 +595,7 @@ fn replay_v2_entry_admitted<'a>(
 
 async fn replay_v2_entry_admitted_inner(
     entry: &shamir_wal::WalEntryV2,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);
@@ -674,7 +675,7 @@ async fn replay_v2_entry_admitted_inner(
 /// it, so F6 truncation cannot unlink the segment holding it.
 async fn seed_version_cache_for_entry(
     entry: &shamir_wal::WalEntryV2,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);

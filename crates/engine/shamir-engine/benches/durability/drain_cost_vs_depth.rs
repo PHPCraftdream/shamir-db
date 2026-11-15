@@ -122,7 +122,7 @@ fn main() {
                 // will hit the gap-reseed path (wal.recover()) once, then
                 // drain from the window.
                 let drainer = Drainer::new();
-                let drained: usize = drainer.drain_all(&repo).await.unwrap();
+                let drained: usize = drainer.drain_all(repo.core()).await.unwrap();
 
                 assert_eq!(
                     drained as u64, w,

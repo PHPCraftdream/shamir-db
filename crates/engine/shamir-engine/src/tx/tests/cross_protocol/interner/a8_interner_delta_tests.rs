@@ -85,7 +85,7 @@ async fn a8_referenced_id_above_hwm_recorded_in_delta() {
     tx.write_set.insert(token, staging);
 
     let wal = repo.repo_wal().await.unwrap();
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.materialized(), "tx2 must commit successfully");
 
     // Inspect the WAL entry's interner_delta for the (name, id) pair.
@@ -134,7 +134,7 @@ async fn rv_engine_905a1f59_mixed_raw_and_captured_rows_persist_raw_id_in_wal() 
     tx.write_set.insert(token, staging);
 
     let wal = repo.repo_wal().await.unwrap();
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.materialized());
     let entries = wal.recover().await.unwrap();
     let entry = entries
@@ -185,7 +185,7 @@ async fn a8_fast_path_first_interner_still_recorded() {
     tx.write_set.insert(token, staging);
 
     let wal = repo.repo_wal().await.unwrap();
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.materialized());
 
     let inflight = wal.recover().await.unwrap();
@@ -238,7 +238,7 @@ async fn a8_no_spurious_delta_for_persisted_ids() {
     tx.write_set.insert(token, staging);
 
     let wal = repo.repo_wal().await.unwrap();
-    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let outcome = commit_tx(tx, &repo.core).await.unwrap();
     assert!(outcome.materialized());
 
     let inflight = wal.recover().await.unwrap();

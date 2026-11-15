@@ -11,7 +11,7 @@ use super::base_index::rederive_base_index_ops_post_stage;
 use super::claims::{fire_post_prelock_pre_materialize_test_hook, PreLockResult};
 use super::index2::rederive_index2_ops_post_stage;
 use super::stale_value::rederive_stale_value_ops_post_stage;
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 
 /// Pre-lock phase of the commit pipeline: runs OUTSIDE `commit_lock`,
@@ -45,7 +45,7 @@ use crate::tx::commit::TxError;
 /// Phase 2.6 reads info_store (cancel-safe — read-only).
 pub(in crate::tx) async fn pre_commit_prelock(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<PreLockResult, TxError> {
     // F-68 (#895) cluster D diagnostic instrumentation, task #124 — entry
     // timestamp. F-70 (#897, P0) confirmed and fixed a genuine lock-order
@@ -798,10 +798,7 @@ pub(in crate::tx) async fn pre_commit_prelock(
     })
 }
 
-async fn validate_staging_table_identities(
-    tx: &TxContext,
-    repo: &RepoInstance,
-) -> Result<(), TxError> {
+async fn validate_staging_table_identities(tx: &TxContext, repo: &RepoCore) -> Result<(), TxError> {
     for (token, staging) in &tx.write_set {
         // Named table staging is created through TableManager and records the
         // table name in `table_tokens`; enforce incarnation identity there.

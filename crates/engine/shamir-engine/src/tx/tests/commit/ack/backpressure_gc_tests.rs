@@ -110,7 +110,7 @@ async fn overlay_gc_collapses_after_drain() {
     // raced here — current_thread, no prior await between the commits and now
     // that would let it run to completion; even if it had, the END state is
     // identical, which is what we assert).
-    let drained = Drainer::new().drain_all(&repo).await.unwrap();
+    let drained = Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(drained >= 1, "drain_all must drain the committed tail");
 
     // Durable caught up to visibility.
@@ -172,7 +172,7 @@ async fn overlay_bounded_across_rounds() {
             repo.commit_tx(tx).await.unwrap();
         }
 
-        drainer.drain_all(&repo).await.unwrap();
+        drainer.drain_all(&repo.core).await.unwrap();
 
         // Invariant after every round: durable == visibility, overlay empty.
         assert_eq!(
@@ -221,7 +221,7 @@ async fn backpressure_fast_path_returns_immediately() {
     // a path that does two atomic loads and returns without parking.
     let r = tokio::time::timeout(
         std::time::Duration::from_millis(1),
-        apply_backpressure(&repo, 1),
+        apply_backpressure(&repo.core, 1),
     )
     .await;
     assert!(r.is_ok(), "gap <= high must return immediately (no park)");
@@ -289,7 +289,7 @@ async fn backpressure_engages_then_releases_on_drain() {
         // `drain_task.await` (after the timeout-bounded join) completes
         // immediately since the drain has already converged by then.
         loop {
-            let n = drainer_bg.drain_step(&repo_bg).await.unwrap();
+            let n = drainer_bg.drain_step(&repo_bg.core).await.unwrap();
             tokio::task::yield_now().await;
             if n == 0 {
                 break;
@@ -303,7 +303,7 @@ async fn backpressure_engages_then_releases_on_drain() {
     // so a timeout here would itself be a real hang BUG (not a flaky margin).
     let braked = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        apply_backpressure(&repo, 40),
+        apply_backpressure(&repo.core, 40),
     )
     .await;
     assert!(
@@ -352,7 +352,7 @@ async fn backpressure_abandons_when_drain_stuck() {
     let start = std::time::Instant::now();
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        apply_backpressure(&repo, 10),
+        apply_backpressure(&repo.core, 10),
     )
     .await;
     assert!(

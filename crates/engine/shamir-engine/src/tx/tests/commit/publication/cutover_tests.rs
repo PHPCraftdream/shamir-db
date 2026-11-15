@@ -113,7 +113,7 @@ async fn durable_lags_visibility_but_overlay_serves_read() {
     );
 
     // Drain → durable catches up AND the value lands in history.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
     assert!(dur <= vis);
@@ -149,7 +149,7 @@ async fn commit_then_drain_all_makes_value_durable_in_history() {
         .unwrap();
     let outcome = repo.commit_tx(tx).await.unwrap();
 
-    let drained = repo.drainer().drain_all(&repo).await.unwrap();
+    let drained = repo.drainer().drain_all(&repo.core).await.unwrap();
     assert!(drained >= 1, "drain_all must drain the committed version");
 
     assert_eq!(
@@ -299,7 +299,7 @@ async fn async_index_tail_must_not_truncate_drainer_converges() {
     // `drain_all` forces convergence. On the buggy code the tail truncated the
     // entry before the drainer wrote history → there is nothing to drain →
     // `durable` cannot reach `vis` and `history` stays empty.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
 
     assert_eq!(
         gate.durable_watermark(),

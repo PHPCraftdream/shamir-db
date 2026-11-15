@@ -18,7 +18,6 @@ use std::sync::Arc;
 mod rename_attempt;
 mod rename_fence;
 mod rename_freeze;
-pub(super) mod rename_in_doubt;
 mod rename_outcome;
 mod repo_membership_impl;
 pub(crate) mod visibility_impl;
@@ -136,6 +135,7 @@ impl RepoInstance {
         self.core.table_by_token(token).await
     }
 
+    #[cfg(test)]
     /// Catalogue read; see `TableCatalog`.
     pub(crate) async fn table_by_token_if_live(&self, token: u64) -> Option<TableManager> {
         self.core.table_by_token_if_live(token).await
@@ -162,6 +162,7 @@ impl RepoInstance {
         self.core.catalog.table_config(name)
     }
 
+    #[cfg(test)]
     /// Catalogue read; see `TableCatalog`.
     pub(crate) fn mapped_table_store_names(&self, name: &str) -> Option<(String, String, String)> {
         self.core.mapped_table_store_names(name)
@@ -376,7 +377,10 @@ impl RepoInstance {
         }
         let pair = self.take_rename_fence(from, to);
         let source_table = match pair.as_ref() {
-            Some(pair) => pair.freeze.source().clone(),
+            Some(pair) => match pair.freeze.as_ref::<RenameFreeze>() {
+                Some(freeze) => freeze.source().clone(),
+                None => self.get_table_admitted(from, &permit).await?,
+            },
             None => self.get_table_admitted(from, &permit).await?,
         };
         let mut attempt = RenameAttempt::new(self, &permit, from, to, source_table, pair);
@@ -432,7 +436,10 @@ impl RepoInstance {
         }
         let pair = self.take_rename_fence(from, to);
         let source = match pair.as_ref() {
-            Some(pair) => pair.freeze.source().clone(),
+            Some(pair) => match pair.freeze.as_ref::<RenameFreeze>() {
+                Some(freeze) => freeze.source().clone(),
+                None => self.get_table_admitted(from, &permit).await?,
+            },
             None => self.get_table_admitted(from, &permit).await?,
         };
         let mut attempt = RenameAttempt::new(self, &permit, from, to, source, pair);

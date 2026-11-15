@@ -67,7 +67,7 @@ async fn drain_step_batches_multiple_index_postings_across_tables() {
     gate.publish_committed_max(1);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 1);
     assert_eq!(gate.durable_watermark(), 1);
 
@@ -110,7 +110,7 @@ async fn drain_step_batches_index_postings_across_multiple_entries_same_table() 
     gate.publish_committed_max(3);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 3, "all three entries drained in one pass");
     assert_eq!(gate.durable_watermark(), 3);
 
@@ -175,7 +175,7 @@ async fn drain_step_index_batch_failure_surfaces_and_blocks_only_that_table() {
         .store(token_b, std::sync::atomic::Ordering::SeqCst);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
 
     // Reset immediately so no other test in this binary can bleed.
     crate::tx::drainer::FAIL_INDEX_BATCH_TABLE_ID.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -196,7 +196,7 @@ async fn drain_step_index_batch_failure_surfaces_and_blocks_only_that_table() {
     );
 
     // The failed entry stays inflight — a retry (now disarmed) converges.
-    let drained2 = drainer.drain_step(&repo).await.unwrap();
+    let drained2 = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained2, 1, "retry succeeds once the fault is disarmed");
     assert_eq!(gate.durable_watermark(), 2);
     assert_eq!(tb.info_store().get(key_b.into()).await.unwrap(), val_b);

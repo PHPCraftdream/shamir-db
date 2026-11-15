@@ -40,11 +40,11 @@ use crate::meta::repl::bookmark_v3::{load_bookmark_v3, save_bookmark_v3, Bookmar
 use crate::meta::repl::{ReceiptBinding, ReceiptPhase, ReplicationReceipt, MAX_RECEIPT_EVENTS};
 use crate::meta::repl_bookmark::load_replication_bookmark;
 use crate::repo::changelog_store::write_domain::{RepoWritePermit, RepoWriteReservation};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::ReplicatedEvent;
 
 pub(crate) async fn apply_batch_receipt(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     info: Arc<dyn Store>,
     events: Vec<ReplicatedEvent>,
     bookmark: u64,
@@ -86,7 +86,7 @@ impl Drop for PausedReservation<'_> {
 }
 
 pub(crate) async fn run_receipt_pipeline(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     info: Arc<dyn Store>,
     events: Vec<ReplicatedEvent>,
     bookmark: u64,
@@ -273,7 +273,7 @@ pub(crate) async fn run_receipt_pipeline(
 /// Map a write-domain admission rejection to the repo's `Internal` error
 /// style (see repo_instance.rs's mapping).
 fn admission_error(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     error: crate::repo::changelog_store::write_domain::RepoWriteError,
 ) -> DbError {
     DbError::Internal(format!(
@@ -287,7 +287,7 @@ fn admission_error(
 /// receipt's combined structural bounds and run the pipeline per chunk.
 #[allow(clippy::too_many_arguments)]
 async fn apply_fresh(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     gate: &Arc<RepoTxGate>,
@@ -457,7 +457,7 @@ async fn apply_fresh(
 /// guards), then the post-Prepared tail.
 #[allow(clippy::too_many_arguments)]
 async fn try_chunk(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     gate: &Arc<RepoTxGate>,
@@ -539,7 +539,7 @@ async fn try_chunk(
 /// the durable Materialized batch, the publication build, and the
 /// durability tail. Returns `(new_bookmark, chunk_local_end)`.
 async fn run_chunk_tail(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     gate: &Arc<RepoTxGate>,
@@ -641,7 +641,7 @@ async fn run_chunk_tail(
 /// counters, checkpoint bookmark+J WITH the RAM publication in the same
 /// poll, then broadcast.
 async fn durable_tail(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     gate_and_lease: (&Arc<RepoTxGate>, &ReceiptLease),

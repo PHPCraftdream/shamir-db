@@ -4,6 +4,7 @@ use crate::repo::fk_reverse_cache::FkReverseCache;
 use crate::repo::repo_types::{BoxRepoFactory, RepoFactory};
 use crate::table::interner_manager::InternerManager;
 use crate::table::TableConfig;
+#[cfg(test)]
 use crate::tx::CommitTailBarrier;
 use shamir_storage::error::{DbError, DbResult};
 #[cfg(any(test, feature = "test-util"))]
@@ -39,6 +40,7 @@ impl RepoInstance {
         SYNC_WAL_FAULT_COUNTDOWN.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
         self.core.commit_tail()
     }
@@ -59,24 +61,11 @@ impl RepoInstance {
             })
     }
 
+    #[cfg(test)]
     /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
     /// field doc on [`marker_write_mutex`](Self) for why this exists.
     pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
         self.core.marker_write_mutex()
-    }
-
-    /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
-    /// Identical to a foreground [`Clone`] except `live = None` (the task
-    /// does not count toward repo liveness) and `worker_lifecycle = None`
-    /// (the task does not retain foreground lifecycle ownership).
-    /// See [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
-    fn clone_for_background(&self) -> Self {
-        let mut bg = self.clone();
-        bg.live = None;
-        // Background handles own only drainer resources, never foreground
-        // lifecycle ownership.
-        bg.core.worker_lifecycle = None;
-        bg
     }
 
     /// Read-only progress of initialized state; never opens stores or starts
@@ -95,48 +84,18 @@ impl RepoInstance {
         snapshot
     }
 
-    /// D2 P1d-2b: the repo's background drainer, spawned once (single-owner).
-    ///
-    /// First call lazily creates the [`Drainer`](crate::tx::drainer::Drainer)
-    /// and starts its background loop (a leak-free task owning a
-    /// `clone_for_background` of this repo plus a
-    /// `Weak<()>` of `live`). Subsequent calls (from any
-    /// foreground clone) return the same `Arc<Drainer>` via the shared
-    /// `OnceCell`. The commit path calls `repo.drainer().wake()` after
-    /// publishing a version to nudge the loop.
-    pub fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
-        #[cfg(test)]
-        if self
-            .core
-            .background_drainer_disabled
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Arc::clone(
-                self.core
-                    .horizon
-                    .drainer_cell()
-                    .get_or_init(|| Arc::new(crate::tx::drainer::Drainer::new())),
-            );
-        }
+    /// The tx-layer core of this repository, for the crate's own benches and
+    /// integration tests that call the `tx` free functions directly. The core
+    /// type is unnameable outside the crate; it can only be passed through.
+    #[doc(hidden)]
+    pub fn core(&self) -> &crate::tx::commit::core::RepoCore {
+        &self.core
+    }
 
-        Arc::clone(self.core.horizon.drainer_cell().get_or_init(|| {
-            let drainer = Arc::new(crate::tx::drainer::Drainer::new());
-            // 50 ms backstop: prompt drain even if a wake is missed, cheap
-            // when idle (the loop short-circuits when nothing is undrained).
-            const DRAIN_INTERVAL_MS: u64 = 50;
-            let live_weak = match &self.live {
-                Some(l) => Arc::downgrade(l),
-                // Background clone asking for the drainer (shouldn't happen on
-                // the commit path) — a dead weak makes the loop exit at once.
-                None => std::sync::Weak::new(),
-            };
-            drainer.spawn(
-                self.clone_for_background(),
-                live_weak,
-                std::time::Duration::from_millis(DRAIN_INTERVAL_MS),
-            );
-            drainer
-        }))
+    /// D2 P1d-2b: the repo's background drainer, spawned once (single-owner).
+    /// The body lives on `RepoCore::drainer`.
+    pub fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
+        self.core.drainer()
     }
 
     /// cancel-safe: NO — recovery can apply durable history and certify a gap
@@ -291,7 +250,10 @@ impl RepoInstance {
             .map_err(|error| DbError::Internal(error.to_string()))?;
         // Round-11 (stack layout): heap-pin the recovery body (replays every
         // inflight entry through the admitted chain) off this wrapper's frame.
-        Box::pin(crate::tx::recovery::recover_inflight_v2(self, &permit)).await
+        Box::pin(crate::tx::recovery::recover_inflight_v2(
+            &self.core, &permit,
+        ))
+        .await
     }
 
     pub(crate) async fn recover_v2_inflight_admitted(
@@ -303,7 +265,7 @@ impl RepoInstance {
             .write_domain
             .debug_check_permit(permit);
         // Round-11 (stack layout): see `recover_v2_inflight`.
-        Box::pin(crate::tx::recovery::recover_inflight_v2(self, permit)).await
+        Box::pin(crate::tx::recovery::recover_inflight_v2(&self.core, permit)).await
     }
 
     /// F6b (I2): flush every per-table `history` version-log to disk WITHOUT

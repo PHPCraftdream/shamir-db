@@ -39,7 +39,7 @@ async fn run_child_scenario_multi_table(path: PathBuf) {
     // drainer so a `phase7` crash fires here. For the inline phases
     // (pre_commit..phase6_5) the process has already `process::abort`ed inside
     // `commit_tx` above and never reaches this line.
-    let _ = repo.drainer().drain_all(&repo).await;
+    let _ = repo.drainer().drain_all(repo.core()).await;
     settle_background_drain(&repo).await;
 
     drop(guard);
@@ -144,7 +144,7 @@ async fn run_child_scenario_trunc(path: PathBuf) {
     // the background drainer has not already crashed at the armed seam, this
     // crosses the boundary and aborts here. If no seam matches, this returns
     // and the child exits cleanly (the parent's `!status.success()` flags it).
-    let _ = repo.drainer().drain_all(&repo).await;
+    let _ = repo.drainer().drain_all(repo.core()).await;
     settle_background_drain(&repo).await;
 }
 

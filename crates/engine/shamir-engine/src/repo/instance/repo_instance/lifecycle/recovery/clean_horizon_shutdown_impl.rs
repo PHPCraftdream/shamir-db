@@ -193,7 +193,13 @@ impl RepoInstance {
         // drainer (no commit), this is a cheap no-op. A drain error is returned
         // after subsequent stores are still flushed; recovery on next open can
         // then converge from WAL.
-        if let Err(e) = timed_stage(&self.name, "drain_all", self.drainer().drain_all(self)).await {
+        if let Err(e) = timed_stage(
+            &self.name,
+            "drain_all",
+            self.drainer().drain_all(&self.core),
+        )
+        .await
+        {
             log::warn!("flush_buffers: drain_all {}: {}", self.name, e);
             if first_err.is_none() {
                 first_err = Some(e);

@@ -239,7 +239,7 @@ async fn wait_event_stored(store: &Arc<ParkStore>, version: u64) {
 /// Drain passes until every repair-pending version is retired.
 async fn drain_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
     for _ in 0..100 {
-        repo.drainer().drain_all(repo).await.unwrap();
+        repo.drainer().drain_all(&repo.core).await.unwrap();
         if feed.repair_pending_depth() == 0 {
             return;
         }
@@ -258,7 +258,7 @@ async fn drain_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
 #[cfg(feature = "fjall")]
 async fn repair_until_empty(repo: &RepoInstance, feed: &RepoChangefeed) {
     for _ in 0..100 {
-        drain_repair_pending(repo).await.unwrap();
+        drain_repair_pending(&repo.core).await.unwrap();
         if feed.repair_pending_depth() == 0 {
             return;
         }
@@ -350,7 +350,7 @@ async fn retention_gate_holds_segment_until_checkpointed() {
     let group = repo.wal_group().await.unwrap();
 
     // Clamped pass: the ceiling may not cross the still-pending version.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     assert!(
         group.has_truncatable(last),
         "frames at or below the seal commits' watermark must be truncatable \
@@ -380,7 +380,7 @@ async fn retention_gate_holds_segment_until_checkpointed() {
     feed.repair_pending().test_set_clamp_disabled();
     let mut gone = false;
     for _ in 0..500 {
-        repo.drainer().drain_all(&repo).await.unwrap();
+        repo.drainer().drain_all(&repo.core).await.unwrap();
         gone = !group
             .replay()
             .await
@@ -513,7 +513,7 @@ async fn legacy_entry_declares_minimal_gap() {
         .unwrap();
     feed.repair_pending().record_channel_full(v);
 
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(
         feed.first_gap_version(),
         v,
@@ -544,8 +544,8 @@ async fn double_repair_produces_one_put() {
     // still parked: `journal_enqueue_tracked` hits Full both times, so the
     // version stays pending with NO premature put — this is the
     // "repaired twice produces one put" proof.
-    drain_repair_pending(&repo).await.unwrap();
-    drain_repair_pending(&repo).await.unwrap();
+    drain_repair_pending(&repo.core).await.unwrap();
+    drain_repair_pending(&repo.core).await.unwrap();
     assert_eq!(feed.repair_pending_depth(), 1);
     assert_eq!(put_count(&store, v), 0, "no put while the channel is full");
     assert_eq!(feed.first_gap_version(), 0);
@@ -555,7 +555,7 @@ async fn double_repair_produces_one_put() {
     // through the now-empty channel → exactly one put.
     store.release_filler.notify_one();
     wait_persisted(&feed, BACKLOG_KEY).await;
-    drain_repair_pending(&repo).await.unwrap();
+    drain_repair_pending(&repo.core).await.unwrap();
     wait_event_stored(&store, v).await;
     assert_eq!(feed.repair_pending_depth(), 0);
     assert_eq!(
@@ -568,7 +568,7 @@ async fn double_repair_produces_one_put() {
     // `drain_all` ran → no `settle_and_truncate` → no truncation): the store
     // probe finds the event present and equal — retire, never re-put.
     feed.repair_pending().record_channel_full(v);
-    drain_repair_pending(&repo).await.unwrap();
+    drain_repair_pending(&repo.core).await.unwrap();
     assert_eq!(feed.repair_pending_depth(), 0);
     assert_eq!(put_count(&store, v), 1, "the probe pass must not re-put");
     assert_eq!(feed.repair_pending().repair_mismatch_total(), 0);
@@ -607,7 +607,7 @@ async fn mismatching_event_is_loud_error() {
         .unwrap();
 
     feed.repair_pending().record_channel_full(v);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
 
     assert_eq!(feed.repair_pending().repair_mismatch_total(), 1);
     assert_eq!(feed.repair_pending_depth(), 0);
@@ -741,9 +741,9 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
         // hang. The checkpoint bypass isolates the actual subject, the
         // repair-pending CEILING clamp: truncation still runs, but must
         // stop below the pending version.
-        test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
-        repo.drainer().drain_all(&repo).await.unwrap();
-        test_seam::with_state(&repo, |state| state.bypass_checkpoint = false);
+        test_seam::with_state(&repo.core, |state| state.bypass_checkpoint = true);
+        repo.drainer().drain_all(&repo.core).await.unwrap();
+        test_seam::with_state(&repo.core, |state| state.bypass_checkpoint = false);
         assert!(
             group
                 .replay()
@@ -781,7 +781,7 @@ async fn persistent_retention_gate_holds_until_checkpointed_reopens() {
         // the "until checkpointed" release is observed via a DIRECT
         // checkpoint instead (the channel now has room, so
         // `record_clean_horizon` is admitted).
-        assert!(checkpoint_before_truncate(&repo).await);
+        assert!(checkpoint_before_truncate(&repo.core).await);
         assert!(
             feed.clean_horizon() >= v,
             "the checkpoint must lift the clean horizon past the repaired version"
@@ -870,8 +870,8 @@ async fn persistent_negative_control_unclamped_truncation_yields_gap() {
         // would now fail closed on the closed channel — the second guard)
         // exactly like `checkpoint_seam_tests.rs`, to reach the unclamped
         // truncation and prove the end-to-end loss.
-        test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
-        repo.drainer().drain_all(&repo).await.unwrap();
+        test_seam::with_state(&repo.core, |state| state.bypass_checkpoint = true);
+        repo.drainer().drain_all(&repo.core).await.unwrap();
         assert_eq!(feed.repair_pending_depth(), 0);
         assert_eq!(
             feed.first_gap_version(),

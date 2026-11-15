@@ -1,32 +1,17 @@
-use super::rename_in_doubt::{RenameFenceEntry, RenameInDoubt};
+use super::rename_freeze::RenameFreeze;
 use super::RepoInstance;
-use shamir_storage::error::{DbError, DbResult};
-use std::hash::BuildHasher;
+use crate::tx::commit::rename_fence::{RenameFenceEntry, RenameInDoubt};
+use shamir_storage::error::DbResult;
 use std::sync::atomic::Ordering;
 
 impl RepoInstance {
     /// Reject access to a name in an unresolved rename pair.
     pub fn check_table_rename_fence(&self, name: &str) -> DbResult<()> {
-        if self.rename_fence_len.load(Ordering::Acquire) == 0 {
-            return Ok(());
-        }
-        let pair = fence_pair(&self.rename_fence, name);
-        pair.map_or(Ok(()), |(from, to)| Err(rename_conflict(&from, &to)))
+        self.core.rename_fence.check_table_rename_fence(name)
     }
 
-    /// Check source and destination before a rename, allowing a retry of its exact pair.
     pub fn check_rename_pair(&self, from: &str, to: &str) -> DbResult<()> {
-        if self.rename_fence_len.load(Ordering::Acquire) == 0 {
-            return Ok(());
-        }
-        for name in [from, to] {
-            if let Some((source, destination)) = fence_pair(&self.rename_fence, name) {
-                if source != from || destination != to {
-                    return Err(rename_conflict(&source, &destination));
-                }
-            }
-        }
-        Ok(())
+        self.core.rename_fence.check_rename_pair(from, to)
     }
 
     /// Whether this repository has an unresolved rename.
@@ -123,7 +108,12 @@ impl RepoInstance {
                     "rename fence invariant violated: source name '{from}' already present outside retry while raising '{from}' to '{to}'"
                 );
                 // Keep the source frozen (fail closed) and leave the counter alone.
-                source.freeze.retire();
+                match source.freeze.into_inner::<RenameFreeze>() {
+                    Ok(freeze) => freeze.retire(),
+                    Err(_) => log::error!(
+                        "rename fence invariant violated: retained freeze for '{from}' to '{to}' is not a RenameFreeze"
+                    ),
+                }
                 return;
             }
             scc::hash_map::Entry::Vacant(vacant) => {
@@ -147,21 +137,4 @@ impl RepoInstance {
         }
         drop((source, destination));
     }
-}
-
-fn fence_pair(
-    fence: &scc::HashMap<String, RenameFenceEntry, impl BuildHasher>,
-    name: &str,
-) -> Option<(String, String)> {
-    fence
-        .read_sync(name, |_, entry| match entry {
-            RenameFenceEntry::Source(pair) => Some((pair.from.clone(), pair.to.clone())),
-            RenameFenceEntry::Destination { from } => Some((from.clone(), name.to_string())),
-            RenameFenceEntry::InFlight { from, to } => Some((from.clone(), to.clone())),
-        })
-        .flatten()
-}
-
-fn rename_conflict(from: &str, to: &str) -> DbError {
-    DbError::Conflict(format!("rename in doubt: '{from}' to '{to}'"))
 }

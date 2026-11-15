@@ -95,6 +95,50 @@ impl RepoCore {
     /// inside the init closure, the cell remains empty so subsequent
     /// calls retry; no partial table is exposed. The clone of the cell
     /// value is in-memory.
+    pub(crate) async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
+        self.rename_fence.check_table_rename_fence(table_name)?;
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
+        let permit = self
+            .durability_handle
+            .write_domain
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        self.rename_fence.check_table_rename_fence(table_name)?;
+        // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
+        // cold-init chain inline (`create_table_context` →
+        // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
+        // Pinning it — exactly like the admitted twin below — keeps that
+        // await state on the heap instead of widening this fn's future,
+        // which is embedded inline in every catalogue read/write along the
+        // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
+        Box::pin(self.get_table_ctx(table_name, &permit)).await
+    }
+
+    /// Admitted twin of `get_table`: requires the caller to hold THIS
+    /// repository's write-admission permit; the permit is checked
+    /// (`debug_check_permit`) and threaded into table construction. Otherwise
+    /// identical semantics to `get_table`.
+    pub(crate) async fn get_table_admitted(
+        &self,
+        table_name: &str,
+        permit: &RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
+        self.rename_fence.check_table_rename_fence(table_name)?;
+        Box::pin(self.get_table_ctx(table_name, permit)).await
+    }
+
+    /// Trusted embedding: the returned raw table handle does not authorize actors.
+    ///
+    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
+    /// inside the init closure, the cell remains empty so subsequent
+    /// calls retry; no partial table is exposed. The clone of the cell
+    /// value is in-memory.
     pub(crate) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         if let Some(table) = self.catalog.initialized_table(table_name) {
             return Ok(table);

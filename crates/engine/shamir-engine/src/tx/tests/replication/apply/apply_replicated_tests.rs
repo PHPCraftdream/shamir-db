@@ -32,7 +32,7 @@ async fn apply_one(
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
     apply_replicated_batch(
-        repo,
+        &repo.core,
         &[ReplicatedEvent {
             event: event.clone(),
             field_bindings: field_bindings.to_vec(),
@@ -391,7 +391,9 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // InMemory commit (see durable_watermark_tests::staged_tx).
     local_tx.write_set.insert(7777u64, staging);
 
-    let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
+    let outcome = crate::tx::commit_tx(local_tx, &follower.core)
+        .await
+        .unwrap();
     let m = outcome.commit_version;
     assert!(m > n, "local commit M ({m}) must be > N ({n})");
     assert!(outcome.materialized(), "InMemory local commit is Complete");

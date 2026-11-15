@@ -47,7 +47,7 @@ async fn timeout_skips_backpressure_and_reconciles_without_changing_materializat
     gate.raise_published(target);
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         BOUNDED,
         0,
@@ -94,7 +94,7 @@ async fn strict_waits_then_returns_visible() {
     higher.commit();
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         VisibilityWait::Strict,
         u64::MAX,
@@ -115,10 +115,15 @@ async fn reopen_keeps_deferred_marker_and_visible_wins_over_reopen() {
     let lower = gate.assign_next_version_guarded();
     let target = lower.version();
     gate.set_requires_reopen();
-    let receipt =
-        acknowledge_known_outcome(outcome(target), &repo, &gate, VisibilityWait::Strict, 0)
-            .await
-            .unwrap();
+    let receipt = acknowledge_known_outcome(
+        outcome(target),
+        &repo.core,
+        &gate,
+        VisibilityWait::Strict,
+        0,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         receipt.visibility,
         VisibilityState::Pending {
@@ -129,7 +134,7 @@ async fn reopen_keeps_deferred_marker_and_visible_wins_over_reopen() {
     );
     assert_eq!(receipt.materialization, MaterializationState::Deferred);
     lower.commit();
-    let receipt = acknowledge_known_outcome(outcome(target), &repo, &gate, BOUNDED, u64::MAX)
+    let receipt = acknowledge_known_outcome(outcome(target), &repo.core, &gate, BOUNDED, u64::MAX)
         .await
         .unwrap();
     assert_eq!(receipt.visibility, VisibilityState::Visible);
@@ -146,7 +151,7 @@ async fn settlement_at_expiry_wins_and_backpressure_has_no_fresh_budget() {
     gate.raise_published(target);
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         BOUNDED,
         0,
@@ -178,7 +183,7 @@ async fn visible_backpressure_uses_only_remaining_budget() {
     gate.raise_published(target);
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         BOUNDED,
         0,
@@ -208,7 +213,7 @@ async fn strict_visible_keeps_five_second_soft_brake_ceiling() {
     version.commit();
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         VisibilityWait::Strict,
         0,
@@ -235,7 +240,7 @@ async fn strict_empty_commit_keeps_soft_backpressure() {
     version.commit();
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(0),
-        &repo,
+        &repo.core,
         &gate,
         VisibilityWait::Strict,
         0,
@@ -271,7 +276,7 @@ async fn no_allocation_and_immediate_visible_need_no_waiter() {
     // No-allocation skips only visibility observation, not the soft brake.
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(0),
-        &repo,
+        &repo.core,
         &gate,
         BOUNDED,
         0,
@@ -332,7 +337,7 @@ async fn published_warning_preserves_pending_and_abort_classification() {
             materialization: MaterializationState::Deferred,
             visibility: VisibilityState::Visible,
         }),
-        &repo,
+        &repo.core,
         &gate,
         VisibilityWait::Bounded { timeout_ms: 0 },
         0,
@@ -355,7 +360,7 @@ async fn published_warning_preserves_pending_and_abort_classification() {
         TxError::WalRequiresReopen,
         TxError::Storage(DbError::Validation("abort".into())),
     ] {
-        let info = acknowledge_known_outcome(Err(error), &repo, &gate, BOUNDED, 0)
+        let info = acknowledge_known_outcome(Err(error), &repo.core, &gate, BOUNDED, 0)
             .await
             .unwrap_err()
             .into_transaction_info(7, 0);

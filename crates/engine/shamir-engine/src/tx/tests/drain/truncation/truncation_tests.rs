@@ -120,7 +120,7 @@ async fn truncation_collapses_wal_after_drain() {
     );
 
     // Drain → replay into history, advance durable to visibility, TRUNCATE.
-    let drained = Drainer::new().drain_all(&repo).await.unwrap();
+    let drained = Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(drained >= 1, "drain_all must drain the committed tail");
     assert_eq!(
         gate.durable_watermark(),
@@ -187,7 +187,7 @@ async fn truncate_only_when_truncatable_not_per_commit() {
     // `truncation_collapses_wal_after_drain`. Here we only assert the gate is
     // version-driven, not commit-driven.)
     let dur_before = gate.durable_watermark();
-    Drainer::new().drain_step(&repo).await.unwrap();
+    Drainer::new().drain_step(&repo.core).await.unwrap();
     assert!(
         gate.durable_watermark() > dur_before,
         "drain advanced durable over the committed version"
@@ -262,7 +262,7 @@ async fn wal_segment_count_bounded_under_drain() {
         // Drain every few commits so durable chases visibility and sealed
         // segments are reclaimed continuously (steady-state, not one-shot).
         if i % 4 == 3 {
-            drainer.drain_all(&repo).await.unwrap();
+            drainer.drain_all(&repo.core).await.unwrap();
             let files = shamirwal_seg_count(&repo_dir);
             if files > max_seen {
                 max_seen = files;
@@ -272,7 +272,7 @@ async fn wal_segment_count_bounded_under_drain() {
 
     // Final drain: durable converges to visibility, all sealed segments below
     // it are gone.
-    drainer.drain_all(&repo).await.unwrap();
+    drainer.drain_all(&repo.core).await.unwrap();
     assert_eq!(
         gate.durable_watermark(),
         gate.last_committed(),
@@ -328,7 +328,7 @@ async fn reopen_after_truncation_recovers_all() {
         }
 
         // Drain → history durable + WAL truncated.
-        Drainer::new().drain_all(&repo).await.unwrap();
+        Drainer::new().drain_all(&repo.core).await.unwrap();
         assert_eq!(
             gate.durable_watermark(),
             gate.last_committed(),
@@ -466,7 +466,7 @@ async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {
     // exactly the flake this comment now documents (found under a full
     // `@engine --full` stress run: 1/4 runs failed with
     // `segments before=6, after=5`).
-    drainer.drain_all(&repo).await.unwrap();
+    drainer.drain_all(&repo.core).await.unwrap();
     guard.mark("drain_all completed with the A5 fault armed");
     guard.note(
         "gate state in the unsafe window",
@@ -532,7 +532,7 @@ async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {
         if segs_after_safe_drain < segs_before_drain {
             break;
         }
-        drainer.drain_all(&repo).await.unwrap();
+        drainer.drain_all(&repo.core).await.unwrap();
         segs_after_safe_drain = shamirwal_seg_count(&repo_dir);
         if segs_after_safe_drain >= segs_before_drain {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

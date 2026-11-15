@@ -129,7 +129,7 @@ fn legacy_bookmark_bytes() -> Vec<Vec<u8>> {
 }
 
 async fn assert_legacy_bookmark_refusal(repo: &RepoInstance) {
-    let error = apply_replicated_batch(repo, &[event(1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1)], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("a legacy bookmark record must refuse the apply");
     assert!(
@@ -142,7 +142,7 @@ async fn assert_legacy_bookmark_refusal(repo: &RepoInstance) {
         "{error:?}"
     );
     // Nothing was adopted or written: still refused, still no v3.
-    let error = apply_replicated_batch(repo, &[event(1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1)], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("the refusal must hold on a repeated attempt");
     assert!(matches!(
@@ -194,7 +194,7 @@ async fn floor_without_bookmark_refuses_follower_apply_repeatedly() {
     repo.get_table("items").await.unwrap();
     save_last_committed_flushed(&info, 6).await.unwrap();
     for _ in 0..2 {
-        let error = apply_replicated_batch(&repo, &[event(1)], 0, ApplyPolicy::Trusted)
+        let error = apply_replicated_batch(&repo.core, &[event(1)], 0, ApplyPolicy::Trusted)
             .await
             .expect_err("floor-without-bookmark must refuse the apply");
         assert!(matches!(
@@ -257,7 +257,7 @@ async fn valid_v3_record_including_zero_bookmark_applies() {
         // `prepare_event` skips events <= watermark, so event(bookmark + 1)
         // is the first version that survives and applies.
         let outcome =
-            apply_replicated_batch(&repo, &[event(bookmark + 1)], 0, ApplyPolicy::Trusted)
+            apply_replicated_batch(&repo.core, &[event(bookmark + 1)], 0, ApplyPolicy::Trusted)
                 .await
                 .unwrap();
         assert_eq!(
@@ -285,7 +285,7 @@ async fn v3_native_follower_applies_and_checkpoints_the_bookmark() {
     )
     .await
     .unwrap();
-    let outcome = apply_replicated_batch(&repo, &[event(11)], 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated_batch(&repo.core, &[event(11)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(
@@ -341,7 +341,7 @@ async fn legacy_floor_refusal_holds_across_reopen() {
     let reopened = open_with_retry(&path, name).await;
     // The reopened store handle must stay alive for the assertion scope.
     let _reopened_info = reopened.raw_store("__tx__").await.unwrap();
-    let error = apply_replicated_batch(&reopened, &[event(1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&reopened.core, &[event(1)], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("the refusal must survive reopen");
     assert!(matches!(
@@ -361,7 +361,7 @@ async fn admit_follower_fresh_and_native_verdicts() {
     let repo = repo();
     let info = info();
     assert!(matches!(
-        admit_follower(&repo, &info).await.unwrap(),
+        admit_follower(&repo.core, &info).await.unwrap(),
         FollowerAdmission::Fresh
     ));
     // Native: a valid v3 record exists.
@@ -377,7 +377,7 @@ async fn admit_follower_fresh_and_native_verdicts() {
     .await
     .unwrap();
     assert!(matches!(
-        admit_follower(&repo, &info).await.unwrap(),
+        admit_follower(&repo.core, &info).await.unwrap(),
         FollowerAdmission::Native
     ));
 }
@@ -387,7 +387,7 @@ async fn admit_follower_refuses_conflicting_seed_install_state() {
     let repo = repo();
     let info = info();
     write_seed_install_state(&info, &SeedInstallState::Installing(seed_receipt())).await;
-    let error = admit_follower(&repo, &info)
+    let error = admit_follower(&repo.core, &info)
         .await
         .expect_err("conflicting seed-install state must refuse");
     assert!(matches!(
@@ -398,7 +398,7 @@ async fn admit_follower_refuses_conflicting_seed_install_state() {
     ));
     // A Complete receipt conflicts just the same — no bookmark exists.
     write_seed_install_state(&info, &SeedInstallState::Complete(seed_receipt())).await;
-    let error = admit_follower(&repo, &info).await.unwrap_err();
+    let error = admit_follower(&repo.core, &info).await.unwrap_err();
     assert!(matches!(
         error,
         DbError::FollowerStateRefused {
@@ -412,7 +412,7 @@ async fn admit_follower_refuses_floor_without_bookmark() {
     let repo = repo();
     let info = info();
     save_last_committed_flushed(&info, 3).await.unwrap();
-    let error = admit_follower(&repo, &info).await.unwrap_err();
+    let error = admit_follower(&repo.core, &info).await.unwrap_err();
     assert!(matches!(
         error,
         DbError::FollowerStateRefused {

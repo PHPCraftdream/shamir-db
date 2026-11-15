@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use shamir_storage::error::DbResult;
 
-use crate::repo::RepoInstance;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
 
 use super::Drainer;
@@ -13,7 +13,7 @@ use super::Drainer;
 impl Drainer {
     async fn seed_startup(
         &self,
-        repo: &RepoInstance,
+        repo: &RepoCore,
         entries: Vec<shamir_wal::WalEntryV2>,
     ) -> DbResult<()> {
         let _replay_guard = self.replaying.lock().await;
@@ -43,7 +43,7 @@ impl Drainer {
     /// Replay callers serialize on `replaying`; this helper is only called
     /// under that guard and never acquires it again. The ceiling is recomputed
     /// from `pending_unsafe` and the current durable watermark on every pass.
-    pub(super) async fn settle_and_truncate(&self, repo: &RepoInstance) -> DbResult<()> {
+    pub(super) async fn settle_and_truncate(&self, repo: &RepoCore) -> DbResult<()> {
         // S5c-X PR5b: land repair-pending (channel-full deferred) journal
         // events BEFORE computing the truncation ceiling — an admission here
         // lifts its clamp below, and a still-pending version holds the WAL
@@ -170,7 +170,7 @@ impl Drainer {
     /// Shutdown callers must quiesce commits first.
     ///
     /// Returns the total number of versions drained across all passes.
-    pub async fn drain_all(&self, repo: &RepoInstance) -> DbResult<usize> {
+    pub async fn drain_all(&self, repo: &RepoCore) -> DbResult<usize> {
         let mut total = 0usize;
         loop {
             let n = self.drain_step(repo).await?;
@@ -187,14 +187,14 @@ impl Drainer {
     ///
     /// ## Lifecycle (the hard part)
     ///
-    /// [`RepoInstance`] is `Clone`-of-`Arc`s (every field is `Arc`-shared;
-    /// there is NO canonical `Arc<RepoInstance>` to take a `Weak` from). A
-    /// task holding an owned `RepoInstance` clone would therefore bump every
+    /// `RepoInstance` and its `RepoCore` are `Clone`-of-`Arc`s (every field is
+    /// `Arc`-shared; there is NO canonical `Arc<RepoInstance>` to take a `Weak`
+    /// from). A task holding an owned `RepoCore` clone of the foreground repo would therefore bump every
     /// inner `Arc` and keep the repo alive forever — a leak for ephemeral
     /// repos (tests create/drop many).
     ///
-    /// The fix: `repo` here is a BACKGROUND clone whose `live` token is `None`
-    /// (`RepoInstance::clone_for_background`), so it does NOT count toward the
+    /// The fix: `repo` here is the core of a BACKGROUND clone whose `live` token
+    /// is `None` (`RepoInstance::clone_for_background`), so it does NOT count toward the
     /// repo's liveness. `live` is a `Weak<()>` of the repo's shared liveness
     /// `Arc<()>`, held STRONGLY only by the real (foreground) repo clones. The
     /// loop parks on the wake/interval, then checks `live.upgrade()`: once the
@@ -208,7 +208,7 @@ impl Drainer {
     /// backstop so a missed wakeup still makes progress. The single-owner
     /// contract (exactly one task per repo) is the caller's responsibility
     /// (spawn once behind the repo's `OnceCell<Arc<Drainer>>`).
-    pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
+    pub fn spawn(self: &Arc<Self>, repo: RepoCore, live: Weak<()>, interval: Duration) {
         #[cfg(any(test, feature = "test-util"))]
         if crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
             .get()

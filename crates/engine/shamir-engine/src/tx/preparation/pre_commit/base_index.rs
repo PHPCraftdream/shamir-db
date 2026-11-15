@@ -5,7 +5,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::index2::{read_pre_tx_bytes, retract_stale_provenance_ops};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 
 /// P0-2 (#958): base_index `IndexManager` (regular + unique) ops-plan
@@ -37,7 +37,7 @@ use crate::tx::commit::TxError;
 /// re-derivation entirely.
 pub(in crate::tx) async fn rederive_base_index_ops_post_stage(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<(), TxError> {
     if tx.base_index_stage_gens.is_empty() {
         return Ok(());

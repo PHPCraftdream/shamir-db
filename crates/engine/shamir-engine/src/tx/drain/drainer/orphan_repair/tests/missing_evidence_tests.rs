@@ -30,7 +30,7 @@ async fn missing_evidence_gap_init_failure_is_counted_and_retry_clears_error() {
     let drainer = Drainer::new();
 
     for expected in 1..=2 {
-        let error = drainer.drain_step(&repo).await.unwrap_err();
+        let error = drainer.drain_step(&repo.core).await.unwrap_err();
         assert!(error
             .to_string()
             .contains("injected changefeed init failure"));
@@ -49,7 +49,7 @@ async fn missing_evidence_gap_init_failure_is_counted_and_retry_clears_error() {
     }
 
     assert_eq!(hook.init_failures.load(Ordering::Acquire), 0);
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
     let mut snapshot = gate.diagnostics();
     drainer.enrich_diagnostics(&mut snapshot);
     assert_eq!(snapshot.orphan_replay_attempts_total, 3);
@@ -76,7 +76,7 @@ async fn absent_gate_and_window_evidence_recovers_then_certifies_gap() {
     assert!(gate.is_orphaned_post_wal(version));
     assert!(gate.orphan_entry(version).is_none());
 
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert!(!gate.is_orphaned_post_wal(version));
     assert_eq!(repo.drainer().recover_calls(), 1);
 
@@ -107,7 +107,7 @@ async fn missing_evidence_does_not_settle_version_present_in_window() {
         WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version),
     ));
     let drainer = repo.drainer();
-    settle_missing_evidence(&drainer, &repo, &gate)
+    settle_missing_evidence(&drainer, &repo.core, &gate)
         .await
         .unwrap();
     assert!(gate.is_orphaned_post_wal(version));
@@ -126,14 +126,14 @@ async fn missing_evidence_does_not_settle_non_contiguous_orphan() {
     drop(second);
 
     let drainer = repo.drainer();
-    settle_missing_evidence(&drainer, &repo, &gate)
+    settle_missing_evidence(&drainer, &repo.core, &gate)
         .await
         .unwrap();
     assert!(gate.is_orphaned_post_wal(second_version));
     assert_eq!(gate.durable_watermark(), 0);
 
     drop(first);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert!(!gate.is_orphaned_post_wal(second_version));
     assert_eq!(gate.durable_watermark(), second_version);
     assert_eq!(

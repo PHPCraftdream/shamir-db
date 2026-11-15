@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};
-use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::error::DbResult;
 
 use super::super::RepoInstance;
 
@@ -42,26 +42,7 @@ impl RepoInstance {
     /// calls retry; no partial table is exposed. The clone of the cell
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
-        self.check_table_rename_fence(table_name)?;
-        if let Some(table) = self.core.catalog.initialized_table(table_name) {
-            return Ok(table);
-        }
-        let permit = self
-            .core
-            .durability_handle
-            .write_domain
-            .admit()
-            .await
-            .map_err(|error| DbError::Internal(error.to_string()))?;
-        self.check_table_rename_fence(table_name)?;
-        // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
-        // cold-init chain inline (`create_table_context` →
-        // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
-        // Pinning it — exactly like the admitted twin below — keeps that
-        // await state on the heap instead of widening this fn's future,
-        // which is embedded inline in every catalogue read/write along the
-        // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
-        Box::pin(self.core.get_table_ctx(table_name, &permit)).await
+        self.core.get_table(table_name).await
     }
 
     /// Resolve a table during frozen-source token lookups without checking the name fence.
@@ -86,12 +67,7 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        self.check_table_rename_fence(table_name)?;
-        Box::pin(self.core.get_table_ctx(table_name, permit)).await
+        self.core.get_table_admitted(table_name, permit).await
     }
 
     /// Register a new table in the repository.

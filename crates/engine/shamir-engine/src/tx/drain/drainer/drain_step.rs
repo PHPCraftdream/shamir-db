@@ -7,8 +7,8 @@ use shamir_storage::types::{KvOp, RecordKey};
 use shamir_wal::{WalEntryV2, WalOpV2, WalTicketState};
 
 use super::Drainer;
-use crate::repo::RepoInstance;
 use crate::tx::clean_horizon::repair_pending_drain::entry_interner_max_id;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::drainer::orphan_repair;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
 
@@ -48,7 +48,7 @@ impl Drainer {
     /// **Phase C** (per-entry, ascending v): for entries whose tables ALL
     /// succeeded: `mark_durable(v)` -> A5 gate -> `wal.commit` -> crash seams.
     /// Stop at the first entry with a failed table (contiguity).
-    pub async fn drain_step(&self, repo: &RepoInstance) -> DbResult<usize> {
+    pub async fn drain_step(&self, repo: &RepoCore) -> DbResult<usize> {
         let _replay_guard = self.replaying.lock().await;
         let gate = repo.tx_gate().await?;
         let mut unresolved_ceiling = u64::MAX;
@@ -964,7 +964,7 @@ impl Drainer {
 /// Extracted from `replay_v2_entry` (recovery.rs) for use in the drainer's
 /// Phase A. The interner is per-REPO (Stage I); the first u64 of each
 /// triple (scope constant) is ignored.
-async fn apply_interner_delta(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+async fn apply_interner_delta(entry: &shamir_wal::WalEntryV2, repo: &RepoCore) -> DbResult<()> {
     let repo_interner = repo.repo_interner().await?;
     let interner = repo_interner.get().await?;
     for (_scope, name, id) in &entry.interner_delta {

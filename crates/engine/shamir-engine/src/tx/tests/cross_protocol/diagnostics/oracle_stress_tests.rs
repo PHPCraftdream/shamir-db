@@ -145,7 +145,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
                 Bytes::from(format!("val_{i}")),
             );
             tx.write_set.insert(table_token_for("shared"), staging);
-            let outcome = commit_tx(tx, &r).await.unwrap();
+            let outcome = commit_tx(tx, &r.core).await.unwrap();
             outcome.commit_version
         }));
     }
@@ -229,7 +229,7 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
         let mut staging = StagingStore::new(Arc::clone(&a_data_store));
         staging.set(raw_key.clone().into(), Bytes::from_static(b"a_writes"));
         tx_a.write_set.insert(table_token, staging);
-        let outcome = commit_tx(tx_a, &repo).await.unwrap();
+        let outcome = commit_tx(tx_a, &repo.core).await.unwrap();
         outcome.commit_version
     };
     // A must commit at V_a > 0; otherwise the SSI check `V_a > 0` would not fire.
@@ -267,7 +267,7 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
                 Bytes::from_static(b"b_val"),
             );
             tx.write_set.insert(table_token, staging);
-            commit_tx(tx, &r).await
+            commit_tx(tx, &r.core).await
         }));
     }
 

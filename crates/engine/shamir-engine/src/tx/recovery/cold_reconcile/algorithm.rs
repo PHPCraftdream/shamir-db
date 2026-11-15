@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::meta::repl::{classify_follower_bookmark, FollowerBookmarkState};
-use crate::repo::RepoInstance;
 use crate::tx::apply_replicated::follower_durability::in_flight_range;
 use crate::tx::clean_horizon::recovery_floor::reserve_recovery_floor;
+use crate::tx::commit::core::RepoCore;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::key_bytes::KeyBytes;
 use shamir_tx::changefeed::cold::{
@@ -41,7 +41,7 @@ fn missing_intervals(known: &BTreeSet<u64>, after: u64, through: u64) -> Vec<(u6
 }
 
 pub(crate) async fn reconcile_cold_start(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     entries: &[WalEntryV2],
     permit: &crate::repo::RepoWritePermit,
 ) -> DbResult<()> {
@@ -49,7 +49,7 @@ pub(crate) async fn reconcile_cold_start(
 }
 
 pub(super) async fn reconcile_with_hook(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     entries: &[WalEntryV2],
     permit: &crate::repo::RepoWritePermit,
     hook: &mut (dyn FnMut(&'static str) -> DbResult<()> + Send),

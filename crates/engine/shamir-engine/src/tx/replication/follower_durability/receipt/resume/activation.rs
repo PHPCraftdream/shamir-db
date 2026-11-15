@@ -20,7 +20,7 @@ use shamir_storage::error::{DbError, DbResult, FollowerRefusalReason};
 use shamir_storage::types::Store;
 
 use crate::meta::repl::bookmark_v3::{classify_follower_bookmark, FollowerBookmarkState};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
 /// Admission verdict for the first follower apply.
 #[derive(Debug)]
@@ -70,7 +70,7 @@ pub(crate) fn admission_decision(
 /// refusals propagate; `Fresh` means the caller must adopt (write the v3
 /// baseline) before any apply work.
 pub(crate) async fn admit_follower(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     info: &Arc<dyn Store>,
 ) -> DbResult<FollowerAdmission> {
     let state = classify_follower_bookmark(info).await?;

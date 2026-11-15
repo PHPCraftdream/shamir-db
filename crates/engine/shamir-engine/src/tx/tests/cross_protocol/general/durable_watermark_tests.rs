@@ -50,7 +50,7 @@ async fn single_tx_commit_durable_equals_visibility() {
     assert_eq!(gate.durable_watermark(), 0);
     assert_eq!(gate.last_committed(), 0);
 
-    let outcome = commit_tx(staged_tx(1, 100, b"k", b"v"), &repo)
+    let outcome = commit_tx(staged_tx(1, 100, b"k", b"v"), &repo.core)
         .await
         .unwrap();
     assert!(outcome.materialized(), "InMemoryRepo commit is Complete");
@@ -63,7 +63,7 @@ async fn single_tx_commit_durable_equals_visibility() {
     assert_eq!(vis, outcome.commit_version);
 
     // Drain the inflight tail → durable catches up to visibility.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
     assert!(dur <= vis, "durable={dur} must not lead visibility={vis}");
@@ -82,7 +82,7 @@ async fn many_tx_commits_durable_tracks_visibility() {
 
     let mut last_commit_version = 0;
     for i in 0..6u64 {
-        let outcome = commit_tx(staged_tx(10 + i, 200, b"k", b"v"), &repo)
+        let outcome = commit_tx(staged_tx(10 + i, 200, b"k", b"v"), &repo.core)
             .await
             .unwrap();
         assert!(outcome.materialized());
@@ -97,7 +97,7 @@ async fn many_tx_commits_durable_tracks_visibility() {
     }
 
     // Drain the tail → durable converges to the final visible version.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
     assert!(dur <= vis);
@@ -121,12 +121,12 @@ async fn mixed_tx_and_nontx_durable_equals_visibility_at_end() {
     // contiguous durable prefix has no hole before the non-tx burst (whose
     // inline mark_durable would otherwise be blocked behind the undrained tx
     // version, leaving durable < visibility).
-    let o1 = commit_tx(staged_tx(1, 300, b"a", b"1"), &repo)
+    let o1 = commit_tx(staged_tx(1, 300, b"a", b"1"), &repo.core)
         .await
         .unwrap();
     assert!(o1.materialized());
     assert!(gate.durable_watermark() <= gate.last_committed());
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
 
     // non-tx style burst: assign + commit + mark_durable (matches MvccStore
@@ -146,13 +146,13 @@ async fn mixed_tx_and_nontx_durable_equals_visibility_at_end() {
     }
 
     // tx commit #2 — again lags; drain to converge.
-    let o2 = commit_tx(staged_tx(2, 300, b"b", b"2"), &repo)
+    let o2 = commit_tx(staged_tx(2, 300, b"b", b"2"), &repo.core)
         .await
         .unwrap();
     assert!(o2.materialized());
     assert!(o2.commit_version > o1.commit_version);
     assert!(gate.durable_watermark() <= gate.last_committed());
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(&repo.core).await.unwrap();
 
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
@@ -175,7 +175,7 @@ async fn durable_never_exceeds_visibility_under_load() {
         let before_vis = gate.last_committed();
         assert!(before_dur <= before_vis, "pre-commit step {i}");
 
-        let outcome = commit_tx(staged_tx(100 + i, 400, b"k", b"v"), &repo)
+        let outcome = commit_tx(staged_tx(100 + i, 400, b"k", b"v"), &repo.core)
             .await
             .unwrap();
         assert!(outcome.materialized());

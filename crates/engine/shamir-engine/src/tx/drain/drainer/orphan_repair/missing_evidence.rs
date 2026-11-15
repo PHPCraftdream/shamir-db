@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::drainer::Drainer;
 use shamir_storage::error::DbResult;
 use shamir_tx::RepoTxGate;
@@ -9,7 +9,7 @@ use shamir_tx::RepoTxGate;
 /// WAL. Ordinary pending versions and any retained evidence are untouched.
 pub(in crate::tx::drain::drainer) async fn settle_missing_evidence(
     drainer: &Drainer,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &RepoTxGate,
 ) -> DbResult<()> {
     for version in gate.orphaned_post_wal_versions() {

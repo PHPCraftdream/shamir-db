@@ -175,7 +175,7 @@ async fn crashed_prepared(
     *hook.fail_after.lock().unwrap() = Some(Phase::Prepared);
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(name, Arc::clone(&hook));
-    let error = apply_replicated_batch(repo, events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(
@@ -207,9 +207,14 @@ async fn fresh_apply_writes_receipt_pipeline_atomically() {
     let repo = open(temp.path(), &name).await;
 
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_replicated_batch(
+            &repo.core,
+            &[event(1, 1), event(2, 2)],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
     );
 
@@ -271,7 +276,7 @@ async fn crash_prepared_resumes_with_identical_allocation() {
     // guard retires (≤ watermark, no-op) and the reservation clears.
     disarm(&hook);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -307,7 +312,7 @@ async fn changed_pull_boundary_converges() {
     disarm(&hook);
     assert_eq!(
         apply_replicated_batch(
-            &repo,
+            &repo.core,
             &[event(1, 1), event(2, 2), event(3, 3)],
             0,
             ApplyPolicy::Trusted,
@@ -354,7 +359,7 @@ async fn identity_rejection_is_fail_closed() {
     .unwrap();
     drop(info);
 
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(
@@ -378,8 +383,13 @@ async fn uncertain_materialization_reconciles_by_read_back() {
     let keys = [key_bytes(1).await, key_bytes(2).await];
 
     set_simulate_uncertain(true);
-    let outcome =
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    let outcome = apply_replicated_batch(
+        &repo.core,
+        &[event(1, 1), event(2, 2)],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await;
     set_simulate_uncertain(false);
     assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
     assert_eq!(history_versions(&repo, &keys[0]).await, vec![1]);
@@ -403,7 +413,7 @@ async fn receipt_path_writes_absolute_counters() {
 
     assert_eq!(
         apply_replicated_batch(
-            &repo,
+            &repo.core,
             &[event(1, 7), delete_event(2, 7)],
             0,
             ApplyPolicy::Trusted,
@@ -432,9 +442,14 @@ async fn periodic_persist_cannot_overwrite_committed_counter() {
     let name = repo_name("receipt-counter", temp.path());
     let repo = open(temp.path(), &name).await;
 
-    apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
-        .await
-        .unwrap();
+    apply_replicated_batch(
+        &repo.core,
+        &[event(1, 1), event(2, 2)],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await
+    .unwrap();
     let counter = repo.get_table("items").await.unwrap().counter().clone();
     assert_eq!(counter.get().await.unwrap(), 2);
     counter.persist().await.unwrap();
@@ -476,7 +491,7 @@ async fn materialized_pause_hits_injected_failure_replays_recorded_counters() {
     // FIRST batch publishes cleanly: the counter cache becomes 1 (the
     // floor the paused batch's counters must be built ON).
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -492,9 +507,14 @@ async fn materialized_pause_hits_injected_failure_replays_recorded_counters() {
     // succeed within the same call instead of pausing.
     hook.fail_after_sticky.store(true, Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
-    let error = apply_replicated_batch(&repo, &[event(2, 2), event(3, 3)], 1, ApplyPolicy::Trusted)
-        .await
-        .unwrap_err();
+    let error = apply_replicated_batch(
+        &repo.core,
+        &[event(2, 2), event(3, 3)],
+        1,
+        ApplyPolicy::Trusted,
+    )
+    .await
+    .unwrap_err();
     test_seam::remove(&name);
     assert!(
         matches!(&error, DbError::Storage(message) if message == "injected"),
@@ -577,9 +597,14 @@ async fn materialized_pause_hits_injected_failure_replays_recorded_counters() {
     // the stored receipt.
     disarm(&hook);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(2, 2), event(3, 3)], 1, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_replicated_batch(
+            &repo.core,
+            &[event(2, 2), event(3, 3)],
+            1,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Applied { local_version: 3 }
     );
 
@@ -654,7 +679,7 @@ async fn non_retryable_error_parks_guards() {
     // NON-retryable kind: the retry loop only retries `DbError::Storage`.
     hook.fail_after_reopen.store(true, Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     test_seam::remove(&name);
@@ -680,7 +705,7 @@ async fn non_retryable_error_parks_guards() {
     // parked guard retires.
     disarm(&hook);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -702,7 +727,7 @@ async fn upstream_bookmark_does_not_skip_unpublished_local_chunk() {
     let _reset = FailFlushReset(name.clone());
     super::super::checkpoint::set_fail_final_flush(&name, true);
     let outcome = apply_replicated_batch(
-        &repo,
+        &repo.core,
         &[event(100, 1), event(101, 2)],
         0,
         ApplyPolicy::Trusted,
@@ -737,7 +762,7 @@ async fn upstream_bookmark_does_not_skip_unpublished_local_chunk() {
         2
     );
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(102, 3)], 101, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(102, 3)], 101, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 3 }
@@ -767,7 +792,7 @@ async fn paused_reservation_survives_a_failed_resume() {
     let hook = crashed_prepared(&repo, &name, &[event(1, 1)]).await;
     assert!(repo.write_domain().has_outstanding_reservation());
     disarm(&hook);
-    let error = apply_replicated_batch(&repo, &[event(9, 9)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(9, 9)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(
@@ -776,7 +801,7 @@ async fn paused_reservation_survives_a_failed_resume() {
     );
     assert!(repo.write_domain().has_outstanding_reservation());
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -795,7 +820,7 @@ async fn fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen() {
 
     // Receipt-native v3 record with a fence at bookmark 1.
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -822,7 +847,7 @@ async fn fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen() {
         .collect();
     assert_eq!(batch.len(), n);
     assert_eq!(
-        apply_replicated_batch(&repo, &batch, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &batch, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied {
@@ -851,7 +876,7 @@ async fn fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen() {
 
     assert_eq!(
         apply_replicated_batch(
-            &repo,
+            &repo.core,
             &[event(1 + n as u64, ((1 + n as u64) % 251) as u8)],
             0,
             ApplyPolicy::Trusted
@@ -874,7 +899,7 @@ async fn post_checkpoint_flush_failure_fresh_chunk_is_done() {
     let _reset = FailFlushReset(name.clone());
     super::super::checkpoint::set_fail_final_flush(&name, true);
     assert_eq!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -904,7 +929,7 @@ async fn post_checkpoint_flush_failure_fresh_chunk_is_done() {
     drop(info);
     assert!(!repo.write_domain().has_outstanding_reservation());
     assert_eq!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped
@@ -929,7 +954,7 @@ async fn post_checkpoint_flush_failure_resumed_chunk_is_done() {
     disarm(&hook);
     let _reset = FailFlushReset(name.clone());
     super::super::checkpoint::set_fail_final_flush(&name, true);
-    let error = apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     super::super::checkpoint::set_fail_final_flush(&name, false);
@@ -938,7 +963,7 @@ async fn post_checkpoint_flush_failure_resumed_chunk_is_done() {
     let permit = repo.write_domain().admit().await.unwrap();
     drop(permit);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped
