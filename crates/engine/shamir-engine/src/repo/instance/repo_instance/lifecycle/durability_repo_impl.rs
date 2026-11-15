@@ -86,19 +86,19 @@ impl RepoInstance {
     }
 
     pub(crate) fn initialized_mem_wal(&self) -> bool {
-        self.durability_handle.initialized_mem_wal()
+        self.core.durability_handle.initialized_mem_wal()
     }
 
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
     #[must_use]
     pub fn durability_metrics_snapshot(&self) -> DurabilityMetricsSnapshot {
-        self.durability_handle.durability_metrics_snapshot()
+        self.core.durability_handle.durability_metrics_snapshot()
     }
 
     /// Snapshot read of the shared policy; pins the value against concurrent stores.
     #[must_use]
     pub fn durability_policy(&self) -> arc_swap::Guard<Arc<DurabilityPolicy>> {
-        self.durability_handle.durability_policy()
+        self.core.durability_handle.durability_policy()
     }
 
     /// Check whether an already-initialized transaction gate requires repo
@@ -120,14 +120,14 @@ impl RepoInstance {
         if self.durability_change_requires_reopen() {
             return Err(DbError::RepoRequiresReopen(self.name.clone()));
         }
-        resolve(server_default, Some(over), self.wal_segment_bytes)
+        resolve(server_default, Some(over), self.core.wal_segment_bytes)
     }
 
     /// Validate before storing; rejected policies leave every clone unchanged.
     /// Factory opens validate once and install before recovery/admission.
     /// Later setters use the same captured segment size as WAL rotation.
     pub fn set_durability(&self, policy: DurabilityPolicy) -> DbResult<()> {
-        let resolved = resolve(&policy, None, self.wal_segment_bytes)?;
+        let resolved = resolve(&policy, None, self.core.wal_segment_bytes)?;
         // `completed_reseed` on an ephemeral backend (in-memory / hybrid;
         // Mem WAL sink, `!has_persistent_wal()`) is ALLOWED: it is the only
         // honest serve mode when nothing survives a restart. `wal_commit`
@@ -137,8 +137,11 @@ impl RepoInstance {
         // here (durable mem repos are relied on by tests and legal at the
         // engine layer); durable-ephemeral publication-time validation lives
         // server-side.
-        let policy = resolved.for_wal_backend(self.durability_handle.wal_dir.is_some());
-        self.durability_handle.durability.store(Arc::new(policy));
+        let policy = resolved.for_wal_backend(self.core.durability_handle.wal_dir.is_some());
+        self.core
+            .durability_handle
+            .durability
+            .store(Arc::new(policy));
         Ok(())
     }
 
@@ -147,7 +150,8 @@ impl RepoInstance {
     /// Also exposes the recoverability watermark to embedded callers.
     pub async fn wal_group(&self) -> DbResult<Arc<shamir_wal::WalGroupCommit>> {
         self.repo_wal().await?;
-        self.durability_handle
+        self.core
+            .durability_handle
             .wal_group
             .get()
             .cloned()
@@ -190,7 +194,7 @@ impl RepoInstance {
             first,
             &group,
             mode,
-            &self.durability_handle.durability_metrics,
+            &self.core.durability_handle.durability_metrics,
             |clamp| self.read_changelog_bounded_impl(from_version, limit, false, clamp),
         )
         .await
@@ -202,6 +206,7 @@ impl RepoInstance {
     /// identical and idempotent, so no ordering hazard exists.
     pub(crate) async fn ensure_replication_armed(&self) -> DbResult<()> {
         if self
+            .core
             .replication_armed
             .load(std::sync::atomic::Ordering::Acquire)
         {
@@ -209,7 +214,8 @@ impl RepoInstance {
         }
         let store = self.tx_info_store().await?;
         crate::meta::repo_identity::ensure_armed(&store).await?;
-        self.replication_armed
+        self.core
+            .replication_armed
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
@@ -278,7 +284,10 @@ impl RepoInstance {
             return Ok(());
         }
         self.bump_history_epoch_admitted(permit).await?;
-        self.durability_handle.durability_metrics.note_epoch_bump();
+        self.core
+            .durability_handle
+            .durability_metrics
+            .note_epoch_bump();
         Ok(())
     }
 }

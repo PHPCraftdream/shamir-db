@@ -49,9 +49,11 @@ impl RepoInstance {
     /// recovered entry will replay at. The scan is the same cheap
     /// `recover()` replay recovery runs and happens once per gate (OnceCell).
     pub async fn tx_gate(&self) -> DbResult<Arc<shamir_tx::RepoTxGate>> {
-        self.tx_gate
+        self.core
+            .horizon
+            .tx_gate_cell()
             .get_or_try_init(|| async {
-                let info_store = self.repo.store_get("__tx__").await?;
+                let info_store = self.core.repo.store_get("__tx__").await?;
 
                 let marker = crate::meta::recovery_marker::load_last_committed(&info_store)
                     .await?
@@ -134,10 +136,10 @@ impl RepoInstance {
     /// even a repeated txn_id after a crash carries no ordering ambiguity
     /// or data loss; the floor is a belt-and-braces anti-collision guard.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
-        self.durability_handle
+        self.core.durability_handle
             .repo_wal
             .get_or_try_init(|| async {
-                let info_store = self.repo.store_get("__tx__").await?;
+                let info_store = self.core.repo.store_get("__tx__").await?;
                 let initial_txn_id =
                     crate::meta::recovery_marker::load_next_tx_id_snapshot(&info_store)
                         .await
@@ -152,7 +154,7 @@ impl RepoInstance {
                 // append, `recover()` (segment/Mem `replay()`) to recover.
                 // Only disk repos get a background fsync — the Mem sink's
                 // `sync` is a no-op, so a timer would be pointless.
-                let group = match &self.durability_handle.wal_dir {
+                let group = match &self.core.durability_handle.wal_dir {
                     Some(dir) => {
                         let wal_dir = match dir.file_name() {
                             Some(name) => {
@@ -188,7 +190,7 @@ impl RepoInstance {
                         // NOT a debug-only seam — left live in every build, but
                         // Captured at construction so validation and rotation
                         // cannot observe different environment values.
-                        let seg_max_bytes = self.wal_segment_bytes;
+                        let seg_max_bytes = self.core.wal_segment_bytes;
                         let segset =
                             shamir_wal::SegmentSet::open(wal_dir.clone(), seg_max_bytes).await?;
                         let sink = shamir_wal::WalSink::File(segset);
@@ -217,7 +219,7 @@ impl RepoInstance {
                 };
                 let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, Arc::clone(&group));
                 // Publish the group for the replication read path's R bound.
-                let _ = self.durability_handle.wal_group.set(group);
+                let _ = self.core.durability_handle.wal_group.set(group);
 
                 // Anti-collision safeguard: floor next_txn_id above any
                 // inflight txn_id replayed from the WAL, so a fresh
@@ -256,7 +258,7 @@ impl RepoInstance {
         &self,
         isolation: shamir_tx::IsolationLevel,
     ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
-        self.tx_metrics.on_tx_start();
+        self.core.horizon.tx_metrics().on_tx_start();
         let gate = self.tx_gate().await?;
         // Open the snapshot BEFORE constructing TxContext so that any
         // concurrent non-tx write sees active_serializable_count > 0 for
@@ -278,7 +280,7 @@ impl RepoInstance {
         // checks pays only a thin `Arc` construction + clone, no behavior
         // change to Phase 2 (still gated on `isolation == Serializable`).
         let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
-            per_table_mvcc: Arc::clone(&self.catalog.per_table_mvcc),
+            per_table_mvcc: Arc::clone(&self.core.catalog.per_table_mvcc),
         });
         tx.set_version_provider(provider);
 
@@ -314,12 +316,12 @@ impl RepoInstance {
     /// unchanged even though they share the same gate and storage.
     /// Value-only implicit commits remain Strict until VIS-4 provides receipts.
     pub fn with_commit_visibility_wait(mut self, wait: VisibilityWait) -> Self {
-        self.commit_visibility_wait = wait;
+        self.core.horizon.set_commit_visibility_wait(wait);
         self
     }
 
     pub fn commit_visibility_wait(&self) -> VisibilityWait {
-        self.commit_visibility_wait
+        self.core.horizon.commit_visibility_wait()
     }
 
     /// Commit with an explicit acknowledgement policy, resolved before the pipeline.
@@ -336,7 +338,11 @@ impl RepoInstance {
 
     /// Borrow rather than clone the retained gate on the acknowledgement fast path.
     pub(crate) fn initialized_tx_gate(&self) -> Option<&shamir_tx::RepoTxGate> {
-        self.tx_gate.get().map(|gate| gate.as_ref())
+        self.core
+            .horizon
+            .tx_gate_cell()
+            .get()
+            .map(|gate| gate.as_ref())
     }
 
     /// R1-b — read the durable per-(db,repo) follower replication bookmark.

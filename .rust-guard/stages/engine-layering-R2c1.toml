@@ -1,0 +1,1170 @@
+base = "a18833ee3af37758af00cb5c0225138cf7cfbed3"
+
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::TEST_POST_PUBLISH_PRE_RETURN_HOOK"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::TEST_POST_PUBLISH_PRE_RETURN_HOOK"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::fire_post_publish_pre_return_test_hook"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::fire_post_publish_pre_return_test_hook"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::ReverseFkEntry"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::ReverseFkEntry"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::TaggedReverseFkEntry"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::TaggedReverseFkEntry"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::ParentIndex"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::ParentIndex"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::ChildIndex"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::ChildIndex"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::CacheState"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::CacheState"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::VersionedState"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::VersionedState"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot::cache"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot::cache"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot::by_parent"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot::by_parent"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot::is_fk_child"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot::is_fk_child"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot::is_parent_with_delete_action"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot::is_parent_with_delete_action"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkSnapshot::is_parent_with_update_action"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkSnapshot::is_parent_with_update_action"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::default"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::default"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::new"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::new"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::invalidate"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::invalidate"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::get_or_build_by_parent"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::get_or_build_by_parent"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::get_or_build_snapshot"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::get_or_build_snapshot"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::is_fk_parent_with_delete_action"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::is_fk_parent_with_delete_action"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::is_fk_parent_with_update_action"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::is_fk_parent_with_update_action"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::FkReverseCache::try_publish"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::FkReverseCache::try_publish"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::PostGenCheckPrePublishHook"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::PostGenCheckPrePublishHook"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::TEST_POST_GENCHECK_PRE_PUBLISH_HOOK"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::TEST_POST_GENCHECK_PRE_PUBLISH_HOOK"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::fire_post_gencheck_pre_publish_test_hook"
+to_path = "crates/engine/shamir-engine/src/table/support/storage/fk_reverse_cache.rs"
+to_item = "shamir-engine::lib::table::support::storage::fk_reverse_cache::fire_post_gencheck_pre_publish_test_hook"
+reason = "R2c1: the FK reverse cache type moves to the table layer (table/support/storage)"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/mod.rs"
+item = "shamir-engine::lib::table::support::storage::fk_reverse_cache"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/mod.rs"
+item = "shamir-engine::lib::tx::commit::core::repo_core"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/mod.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "shamir-engine::lib::tx::commit::core::repo_core::RepoCore"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::new"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::tx_gate_cell"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::tx_metrics"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::commit_tail"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::drainer_cell"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::commit_visibility_wait"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_horizon::TxHorizon::set_commit_visibility_wait"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/mod.rs"
+item = "shamir-engine::lib::tx::commit::core"
+reason = "R2c1: new RepoCore, TxHorizon or table-layer module item of the stage"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_admitted_unfenced"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_ctx"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::create_table_context"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::table_by_token_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::add_table"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::add_table_inner"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::remove_table"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::remove_table_inner"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_unfenced"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_by_token"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_by_token_if_live"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::install_table_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::list_table_names"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::has_table"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_config"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::mapped_table_store_names"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_count"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::degraded_index_count"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_stores"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::repo_identity"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::repo_identity_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::bump_history_epoch"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::bump_history_epoch_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::apply_restore_operation"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::apply_restore_operation_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::recover_table_rename_with"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_transition"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_stores_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::prepare_table_rename_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::copy_table_stores_for_rename"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::commit_table_rename_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::changelog_store_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::set_wal_segment_bytes_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::disable_background_drainer_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::clean_horizon_test_state"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_gate"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_refuse_writes"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_metrics"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::reserve_recovery_floor"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::validate_durability_change"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::set_durability"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::wal_group"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::read_changelog_replication_page"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::ensure_replication_armed"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::note_unclean_open_bump"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::initialized_mem_wal"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::durability_metrics_snapshot"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::durability_policy"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::record_pending_changefeed_gap"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::broadcast_changefeed_event"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::fire_post_publish_pre_broadcast_test_hook"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::read_changelog_bounded_impl"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::install_journal_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::changefeed"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::RepoInstance::worker_lifecycle"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::RepoInstance::flush_buffers"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::has_persistent_wal"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::changelog_store_for_cold_reconcile"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::write_domain"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::with_name"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::per_table_mvcc"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::fk_reverse_cache"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::tx_metrics"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::tx_info_store"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::from_factory_with_interner_quota_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::install_repo_interner_for_test"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::repo_interner"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::flush_all_history"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::synced_flush"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::commit_tail"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::quiesce_commits"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::run_gc"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::marker_write_mutex"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::clone_for_background"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::diagnostics"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::drainer"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/seed_backing_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::seed_backing_impl::RepoInstance::seed_backing_repo"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/seed_backing_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::seed_backing_impl::RepoInstance::seed_schema_store"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/seed_metadata_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::seed_metadata_impl::RepoInstance::flush_seed_metadata"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::checkpoint_allocation_floor"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::clone"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::from_box_repo_with_wal_dir"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::follower_journal_store"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::validate_repo_wide_atomic_batch"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::storage_supports_atomic_batch"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::raw_store"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::begin_repo_atomic_batch"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::receipt_worker_installed"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::submit_receipt_job"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::receipt_worker_parked_guards"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::repo_wal"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::tx_gate"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::begin_tx"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::with_commit_visibility_wait"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::commit_visibility_wait"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::initialized_tx_gate"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/write_domain_membership.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::write_domain_membership::RepoInstance::add_table_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/write_domain_membership.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::write_domain_membership::RepoInstance::remove_table_admitted"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/durability_tests.rs"
+item = "shamir-engine::lib::repo::instance::seed::install::tests::durability_tests::real_history_and_bookmark_helpers_propagate_failed_barriers"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::begin"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::durability_completion::commit_wal_durability"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/tests/helpers.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::tests::helpers::seed_journal"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/identity/table_init_retry_tests.rs"
+item = "shamir-engine::lib::repo::tests::table_init_retry_tests::retired_initializer_cannot_disrupt_replacement"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/identity/table_init_retry_tests.rs"
+item = "shamir-engine::lib::repo::tests::table_init_retry_tests::dropped_config_rolls_back_retired_publication"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/identity/table_init_retry_tests.rs"
+item = "shamir-engine::lib::repo::tests::table_init_retry_tests::setup_failure_retries_with_coherent_mvcc"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/identity/table_init_retry_tests.rs"
+item = "shamir-engine::lib::repo::tests::table_init_retry_tests::cancelled_setup_retries_with_coherent_mvcc"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/missing_evidence_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::missing_evidence_tests::missing_evidence_gap_init_failure_is_counted_and_retry_clears_error"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_stale_promote_loses_to_newer_vector"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_upsert_then_delete_stays_absent"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_delete_then_reinsert_present_newest"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_failed_promote_releases_turn"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_no_wait_cycle_across_tables_global_order"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/promote_order/promote_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::promote_order::promote_order_tests::rv_index_l3b_promote_order_transient_promote_failure_retries_in_turn"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_init_failure_retry_keeps_pending_minimum_at_publish"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_pending_minimum_restored_and_persisted_on_retry"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_pending_gap_survives_oncecell_publication_after_snapshot"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::park_before_broadcast"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/repo_diagnostics_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::repo_diagnostics_tests::orphan_gap_init_failure_is_observed_and_retry_clears_error"
+reason = "R2c1: the shell method reads the moved fields through self.core"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::name"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::repo"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::catalog"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::durability_handle"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::horizon"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::fk_reverse_cache"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::receipt_worker"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::worker_lifecycle"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::replication_armed"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::wal_segment_bytes"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::journal_publish_hook"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::table_init_hook"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::clean_horizon_test_state"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore::background_drainer_disabled"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::new"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::tx_gate_cell"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::tx_metrics"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::commit_tail"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::drainer_cell"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::commit_visibility_wait"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_horizon.rs"
+item = "TxHorizon::set_commit_visibility_wait"
+reason = "R2c1: RepoCore and TxHorizon members are crate-visible so the shell and the later stages reach them"
+owner = "<wave-R2c1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor"
+reason = "R2c1: the shell method or test reads the moved fields through self.core"
+owner = "<wave-R2c1>"

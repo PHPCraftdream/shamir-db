@@ -8,7 +8,12 @@ impl RepoInstance {
     /// explicitly crosses the backing store's flush boundary every time.
     pub async fn flush_seed_metadata(&self) -> DbResult<()> {
         self.repo_interner().await?.persist().await?;
-        self.repo.store_get("__interner__").await?.flush().await?;
+        self.core
+            .repo
+            .store_get("__interner__")
+            .await?
+            .flush()
+            .await?;
         self.tx_info_store().await?.flush().await?;
         Ok(())
     }

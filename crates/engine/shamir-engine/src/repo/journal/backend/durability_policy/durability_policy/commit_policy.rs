@@ -14,7 +14,7 @@ pub(crate) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurab
     {
         return shamir_wal::WalDurability::Synced;
     }
-    wal_durability_for(&repo.durability_handle)
+    wal_durability_for(&repo.core.durability_handle)
 }
 
 /// `Ok(bool)` is the `durability_failed` flag (`WrittenNotDurable` = written

@@ -167,7 +167,8 @@ impl RepoInstance {
     fn worker_lifecycle(
         &self,
     ) -> Option<&Arc<RepoWorkerLifecycle<ReceiptApplyJob, DbResult<ApplyOutcome>>>> {
-        self.worker_lifecycle
+        self.core
+            .worker_lifecycle
             .as_ref()
             .map(|foreground| foreground.lifecycle())
     }
@@ -223,6 +224,7 @@ impl RepoInstance {
             // inside the shutdown budget and register it for MVCC routing. The
             // map guard is dropped before any await.
             let Some(table) = self
+                .core
                 .catalog
                 .tables
                 .get(&table_name)
@@ -296,7 +298,8 @@ impl RepoInstance {
         // `persist(SyncAll)` makes ALL of it durable, byte-for-byte the same
         // end state as the loop. Non-fjall backends: default no-op — their
         // per-store `flush()` semantics are unchanged.
-        if let Err(e) = timed_stage(&self.name, "persist_once", self.repo.persist_once()).await {
+        if let Err(e) = timed_stage(&self.name, "persist_once", self.core.repo.persist_once()).await
+        {
             log::warn!("flush_buffers: persist_once {}: {}", self.name, e);
             if first_err.is_none() {
                 first_err = Some(e);

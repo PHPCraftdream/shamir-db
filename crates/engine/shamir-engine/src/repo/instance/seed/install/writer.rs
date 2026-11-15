@@ -76,6 +76,7 @@ impl SeedImageWriter {
             }
         }
         if repo
+            .core
             .repo
             .stores_list()
             .await?
@@ -113,7 +114,7 @@ impl SeedImageWriter {
             ));
         }
         let journal = crate::repo::changelog_store::StoreChangelog::new(
-            repo.repo.store_get("__changelog__").await?,
+            repo.core.repo.store_get("__changelog__").await?,
         );
         if journal.load_clean_horizon().await? != 0
             || journal.load_gap_marker().await? != (None, false)

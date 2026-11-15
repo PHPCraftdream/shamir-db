@@ -56,6 +56,9 @@ use crate::index2::backend::{IndexBackend, IndexQuery, IndexResult};
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::TableConfig;
+use crate::tx::commit_phases::{
+    FAIL_VECTOR_PROMOTE_ONCE_REMAINING, FAIL_VECTOR_PROMOTE_ONCE_TX_ID, FAIL_VECTOR_PROMOTE_TX_ID,
+};
 use crate::tx::tests::journal_publish_order_tests::JournalPublishHook;
 use crate::tx::tx_outcome::MaterializationState;
 use shamir_index::vector::vector_backend::VectorBackend;
@@ -252,7 +255,7 @@ async fn rv_index_l3b_promote_order_stale_promote_loses_to_newer_vector() {
 
     // NOW arm: A parks pre-promote, B waits at the turnstile behind A.
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
@@ -360,7 +363,7 @@ async fn rv_index_l3b_promote_order_upsert_then_delete_stays_absent() {
 
     // NOW arm: A parks pre-promote, B waits at the turnstile behind A.
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
@@ -444,7 +447,7 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
 
     // NOW arm: A parks pre-promote, B waits at the turnstile behind A.
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
@@ -522,8 +525,6 @@ async fn rv_index_l3b_promote_order_delete_then_reinsert_present_newest() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn rv_index_l3b_promote_order_failed_promote_releases_turn() {
-    use crate::tx::commit_phases::FAIL_VECTOR_PROMOTE_TX_ID;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
@@ -549,7 +550,7 @@ async fn rv_index_l3b_promote_order_failed_promote_releases_turn() {
     assert_eq!(backend.applied_prefix(), 1, "chunk 0 must be acknowledged");
 
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 
@@ -698,7 +699,7 @@ async fn rv_index_l3b_promote_order_no_wait_cycle_across_tables_global_order() {
     // ascending token order); B must wait at the LOW-token table's
     // turnstile.
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     low_be.arm_promote_turn_wait_hook_for_test(turn_tx);
 
@@ -810,10 +811,6 @@ async fn rv_index_l3b_promote_order_no_wait_cycle_across_tables_global_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn rv_index_l3b_promote_order_transient_promote_failure_retries_in_turn() {
-    use crate::tx::commit_phases::{
-        FAIL_VECTOR_PROMOTE_ONCE_REMAINING, FAIL_VECTOR_PROMOTE_ONCE_TX_ID,
-    };
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let tbl = within(repo.get_table("vecs")).await.unwrap();
@@ -837,7 +834,7 @@ async fn rv_index_l3b_promote_order_transient_promote_failure_retries_in_turn() 
     assert_eq!(backend.applied_prefix(), 1, "chunk 0 must be acknowledged");
 
     let park = park_hook();
-    repo.journal_publish_hook.store(Some(park.clone()));
+    repo.core.journal_publish_hook.store(Some(park.clone()));
     let (turn_tx, turn_rx) = oneshot::channel();
     backend.arm_promote_turn_wait_hook_for_test(turn_tx);
 

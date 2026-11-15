@@ -1,4 +1,5 @@
 pub(crate) mod acknowledgement;
+pub(crate) mod core;
 pub(crate) mod pipeline;
 
 // The stage-B2 commit pipeline files (entry, legacy_and_lockfree and their

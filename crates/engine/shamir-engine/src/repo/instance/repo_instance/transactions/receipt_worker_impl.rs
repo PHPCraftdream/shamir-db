@@ -15,10 +15,11 @@ impl RepoInstance {
     /// FIRST submission and lives until shutdown or repo drop.
     pub(crate) async fn receipt_worker_installed(&self) -> DbResult<Arc<ReceiptLease>> {
         let lease = self
+            .core
             .receipt_worker
             .get_or_try_init(|| async {
                 let gate = self.tx_gate().await?;
-                let lifecycle = self.worker_lifecycle.as_ref().ok_or_else(|| {
+                let lifecycle = self.core.worker_lifecycle.as_ref().ok_or_else(|| {
                     DbError::Internal(format!(
                         "receipt worker for repo {} has no foreground lifecycle",
                         self.name()
@@ -58,7 +59,7 @@ impl RepoInstance {
     ) -> DbResult<ApplyOutcome> {
         // Lazy install on the first submission (no-op afterwards).
         self.receipt_worker_installed().await?;
-        let lifecycle = self.worker_lifecycle.as_ref().ok_or_else(|| {
+        let lifecycle = self.core.worker_lifecycle.as_ref().ok_or_else(|| {
             DbError::Internal(format!("receipt worker for repo {} shut down", self.name()))
         })?;
         let payload = ReceiptApplyJob {
@@ -92,7 +93,10 @@ impl RepoInstance {
     /// the worker was never installed.
     #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn receipt_worker_parked_guards(&self) -> Option<usize> {
-        self.receipt_worker.get().map(|lease| lease.parked_count())
+        self.core
+            .receipt_worker
+            .get()
+            .map(|lease| lease.parked_count())
     }
 
     /// Deterministic test wait: no receipt job is in flight on this repo's

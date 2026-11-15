@@ -12,7 +12,8 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
-use crate::repo::{build_reverse_fk_entries, ReverseFkEntry};
+use crate::repo::build_reverse_fk_entries;
+use crate::repo::fk_reverse_cache::ReverseFkEntry;
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
 

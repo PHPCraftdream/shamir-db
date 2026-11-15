@@ -82,11 +82,12 @@ impl RepoInstance {
         #[cfg(test)]
         test_seam::record(self, "before_feed_init");
         let handle = self
+            .core
             .durability_handle
             .changefeed
             .get_or_try_init(|| async {
                 #[cfg(test)]
-                if let Some(hook) = self.journal_publish_hook.load_full() {
+                if let Some(hook) = self.core.journal_publish_hook.load_full() {
                     if hook
                         .init_failures
                         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
@@ -95,12 +96,13 @@ impl RepoInstance {
                         return Err(DbError::Storage("injected changefeed init failure".into()));
                     }
                 }
-                let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
+                let store: Arc<dyn Store> = self.core.repo.store_get("__changelog__").await?;
                 let adapter = crate::repo::changelog_store::StoreChangelog::new(store);
                 let clean_horizon = adapter.load_clean_horizon().await?;
                 let (marker, repair_marker) = adapter.load_gap_marker().await?;
                 let cl_store: Arc<dyn shamir_tx::ChangelogStore> = Arc::new(adapter);
                 let pending = self
+                    .core
                     .durability_handle
                     .pending_changefeed_gap
                     .load(Ordering::Acquire);
@@ -110,7 +112,7 @@ impl RepoInstance {
                     (Some((first, through)), p) => Some((first.min(p), through.max(p))),
                 };
                 #[cfg(test)]
-                if let Some(hook) = self.journal_publish_hook.load_full() {
+                if let Some(hook) = self.core.journal_publish_hook.load_full() {
                     if hook.init_snapshot_armed.swap(false, Ordering::AcqRel) {
                         hook.reached.notify_one();
                         hook.resume.notified().await;
@@ -151,6 +153,7 @@ impl RepoInstance {
         // already-published OnceCell. This closes the store-buffering schedule
         // without SeqCst or another lock, including publication after snapshot.
         let pending = self
+            .core
             .durability_handle
             .pending_changefeed_gap
             .fetch_or(0, Ordering::AcqRel);
@@ -182,18 +185,21 @@ impl RepoInstance {
 
     /// Synchronous publish-time fallback; minimum is shared across repo clones.
     pub(crate) fn record_pending_changefeed_gap(&self, version: u64) {
-        self.durability_handle
+        self.core
+            .durability_handle
             .record_pending_changefeed_gap(version);
     }
 
     /// Live only: never re-enqueue an event already handled before publish.
     pub(crate) fn broadcast_changefeed_event(&self, event: Option<Arc<shamir_tx::ChangelogEvent>>) {
-        self.durability_handle.broadcast_changefeed_event(event);
+        self.core
+            .durability_handle
+            .broadcast_changefeed_event(event);
     }
 
     #[cfg(test)]
     pub(crate) async fn fire_post_publish_pre_broadcast_test_hook(&self) {
-        if let Some(hook) = self.journal_publish_hook.load_full() {
+        if let Some(hook) = self.core.journal_publish_hook.load_full() {
             if hook.broadcast_armed.swap(false, Ordering::AcqRel) {
                 hook.reached.notify_one();
                 hook.resume.notified().await;
@@ -262,7 +268,8 @@ impl RepoInstance {
     ) -> DbResult<crate::repo::BoundedJournalRead> {
         let sampled_w = self.tx_gate().await?.completion().watermark();
         let h = self.changefeed().await?;
-        self.durability_handle
+        self.core
+            .durability_handle
             .read_changelog_bounded_from(
                 h,
                 sampled_w,
@@ -303,7 +310,7 @@ impl RepoInstance {
     /// Install an isolated journal fixture before lazy initialization.
     #[cfg(test)]
     pub(crate) fn install_journal_for_test(&self, handle: ChangefeedHandle) {
-        assert!(self.durability_handle.changefeed.set(handle).is_ok());
+        assert!(self.core.durability_handle.changefeed.set(handle).is_ok());
     }
 
     /// Test-only read-side observation of writer persistence/confirmation.
