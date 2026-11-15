@@ -2609,9 +2609,9 @@ owner = "<wave-R2c2>"
 [[moved]]
 path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
 item = "shamir-engine::bench::main"
-to_path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
+to_path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
 to_item = "shamir-engine::bench::main"
-reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the gate cannot choose between the two same-named bench mains, so the pairing is declared crosswise"
 owner = "<wave-R2c2>"
 
 [[changed]]
@@ -2623,9 +2623,9 @@ owner = "<wave-R2c2>"
 [[moved]]
 path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
 item = "shamir-engine::bench::main"
-to_path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+to_path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
 to_item = "shamir-engine::bench::main"
-reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the gate cannot choose between the two same-named bench mains, so the pairing is declared crosswise"
 owner = "<wave-R2c2>"
 
 [[changed]]
