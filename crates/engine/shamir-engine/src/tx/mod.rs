@@ -21,6 +21,7 @@ pub(super) use commit::pipeline::phase::{finalize, materialize};
 pub use drain::drainer;
 pub(super) use preparation::pre_commit;
 pub use preparation::predicate_range;
+pub use preparation::repo_version_provider::RepoVersionProvider;
 pub(crate) use replication::follower_durability;
 
 pub use apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};

@@ -4,6 +4,7 @@ use crate::meta::repl::gate_provenance::with_follower_provenance as provenance_g
 use crate::repo::meta::repo_identity::repo_token;
 use crate::repo::RepoWritePermit;
 use crate::table::interner_manager::InternerManager;
+use crate::tx::preparation::repo_version_provider::RepoVersionProvider;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, Repo as _, Store};
 use shamir_types::types::common::THasher;
@@ -169,7 +170,7 @@ impl RepoCore {
         // at commit regardless of isolation — a Snapshot tx with no CAS
         // checks pays only a thin `Arc` construction + clone, no behavior
         // change to Phase 2 (still gated on `isolation == Serializable`).
-        let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
+        let provider = std::sync::Arc::new(RepoVersionProvider {
             per_table_mvcc: Arc::clone(&self.catalog.per_table_mvcc),
         });
         tx.set_version_provider(provider);

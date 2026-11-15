@@ -25,7 +25,6 @@ pub use changelog_store::write_domain::{
     RepoWriteDomain, RepoWriteError, RepoWritePermit, RepoWriteReservation,
 };
 pub use durability_policy::{DurabilityPolicy, RetentionOverflow, WalCommitTier};
-pub use fk_reverse_cache::build_reverse_fk_entries;
 pub use instance::repo_instance;
 pub(crate) use journal::backend::durability_handle::DurabilityHandle;
 pub use journal::bounded_journal_read::BoundedJournalRead;
@@ -37,7 +36,6 @@ pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 pub use seed_install::{SeedImageWriter, SeedInstallState, SeedReceipt, SeedTable};
 pub use version_provider::repo_token;
 pub use version_provider::to_mvcc_retention;
-pub use version_provider::RepoVersionProvider;
 
 /// Re-export the engine-internal retention policy so downstream crates
 /// (e.g. `shamir-db`) can reference it without a direct `shamir-tx` dep.

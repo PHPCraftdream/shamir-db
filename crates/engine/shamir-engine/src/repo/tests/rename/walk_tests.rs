@@ -18,14 +18,13 @@ use shamir_types::types::record_id::RecordId;
 use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::batch::build_reverse_fk_entries;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::BatchError;
 use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{
-    build_reverse_fk_entries, BoxRepo, RenamePersistOutcome, RepoConfig, RepoInstance,
-};
+use crate::repo::{BoxRepo, RenamePersistOutcome, RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
 use crate::validator::schema::constraints::Constraints;
 use crate::validator::schema::field_rule::FieldRule;
