@@ -1,6 +1,5 @@
 base = "05fdcaa52556a34823c84627a84c36b41f133165"
 
-
 [[moved]]
 path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_in_doubt.rs"
 item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_in_doubt::RenameFenceEntry"
@@ -31,18 +30,6 @@ item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_in_do
 to_path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/in_doubt.rs"
 to_item = "shamir-engine::lib::tx::commit::rename_fence::in_doubt::RenameInDoubt"
 reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
-owner = "<wave-R2c2>"
-
-[[removed]]
-path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
-item = "shamir-engine::bench::main"
-reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
-owner = "<wave-R2c2>"
-
-[[removed]]
-path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
-item = "shamir-engine::bench::main"
-reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
 owner = "<wave-R2c2>"
 
 [[removed]]
@@ -2433,7 +2420,6 @@ item = "RenameFenceView"
 reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
 owner = "<wave-R2c2>"
 
-
 [[moved]]
 path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/visibility_impl.rs"
 item = "shamir-engine::lib::repo::instance::repo_instance::catalog::visibility_impl::record_pending_kind"
@@ -2612,4 +2598,38 @@ item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::
 to_path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint/test_seam.rs"
 to_item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::State"
 reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/gate_visibility.rs"
+item = "shamir-engine::lib::repo::gate_visibility::record_pending_kind"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
+item = "shamir-engine::bench::main"
+to_path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
+to_item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
+item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
+owner = "<wave-R2c2>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::main"
+to_path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+to_item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: the bench main bodies pass the core; the two same-named mains are paired explicitly"
 owner = "<wave-R2c2>"
