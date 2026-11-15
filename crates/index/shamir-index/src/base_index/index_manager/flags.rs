@@ -59,7 +59,7 @@ impl IndexManager {
     /// both `NotFound` and empty-vec uniformly.
     pub(super) async fn save_dropping_regular(&self) -> DbResult<()> {
         let snapshot: Vec<(u64, Option<String>)> = {
-            let map = self.dropping_regular.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.dropping_regular);
             map.iter().map(|(&k, v)| (k, v.clone())).collect()
         };
         let key = RecordId::system("idx_drop").to_bytes();
@@ -73,7 +73,7 @@ impl IndexManager {
     /// Mirror of `save_dropping_regular` for the unique family.
     pub(super) async fn save_dropping_unique(&self) -> DbResult<()> {
         let snapshot: Vec<(u64, Option<String>)> = {
-            let map = self.dropping_unique.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.dropping_unique);
             map.iter().map(|(&k, v)| (k, v.clone())).collect()
         };
         let key = RecordId::system("uidx_drop").to_bytes();
@@ -162,7 +162,7 @@ impl IndexManager {
             &self.dropping_regular
         };
         {
-            let mut map = dropping.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(dropping);
             map.insert(name_interned, op_id);
         }
         let result = if is_unique {
@@ -172,7 +172,7 @@ impl IndexManager {
         };
         if result.is_err() {
             // Roll back the in-memory map so the guard stays consistent.
-            let mut map = dropping.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(dropping);
             map.remove(&name_interned);
         }
         result
@@ -202,7 +202,7 @@ impl IndexManager {
         };
         // Compute the snapshot without the entry (do NOT modify in-memory yet).
         let snapshot: Vec<(u64, Option<String>)> = {
-            let map = dropping.lock().unwrap();
+            let map = Self::lock_ddl_guard(dropping);
             map.iter()
                 .filter(|(&k, _)| k != name_interned)
                 .map(|(&k, v)| (k, v.clone()))
@@ -216,7 +216,7 @@ impl IndexManager {
         self.info_store.set(key.into(), Bytes::from(bytes)).await?;
         // Only now update in-memory.
         {
-            let mut map = dropping.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(dropping);
             map.remove(&name_interned);
         }
         Ok(())
@@ -271,7 +271,7 @@ impl IndexManager {
     /// no-op.
     pub fn clear_build_in_flight(&self, name_interned: u64) {
         let _ = self.in_flight_builds.remove_sync(&name_interned);
-        let mut dirty = self.dirty_sets.lock().unwrap();
+        let mut dirty = Self::lock_ddl_guard(&self.dirty_sets);
         dirty.remove(&name_interned);
     }
 
@@ -284,10 +284,10 @@ impl IndexManager {
         if !self.is_build_in_flight(name_interned) {
             return Vec::new();
         }
-        let dirty = self.dirty_sets.lock().unwrap();
+        let dirty = Self::lock_ddl_guard(&self.dirty_sets);
         match dirty.get(&name_interned) {
             Some(set) => {
-                let mut inner = set.lock().unwrap();
+                let mut inner = Self::lock_ddl_guard(set);
                 std::mem::take(&mut *inner).into_iter().collect()
             }
             None => Vec::new(),
@@ -304,7 +304,7 @@ impl IndexManager {
             return None;
         }
 
-        let mut dirty = self.dirty_sets.lock().unwrap();
+        let mut dirty = Self::lock_ddl_guard(&self.dirty_sets);
         dirty
             .entry(name_interned)
             .or_insert_with(|| Arc::new(Mutex::new(BTreeSet::new())))
@@ -359,7 +359,7 @@ impl IndexManager {
     /// empty-vec uniformly. Mirrors #959's `save_dropping_regular`.
     pub async fn save_renaming_regular(&self) -> DbResult<()> {
         let snapshot: Vec<HashRenameTombstone> = {
-            let map = self.renaming_regular.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.renaming_regular);
             map.values().cloned().collect()
         };
         let key = RecordId::system("idx_ren").to_bytes();
@@ -373,7 +373,7 @@ impl IndexManager {
     /// `save_renaming_regular` for the unique family.
     pub async fn save_renaming_unique(&self) -> DbResult<()> {
         let snapshot: Vec<HashRenameTombstone> = {
-            let map = self.renaming_unique.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.renaming_unique);
             map.values().cloned().collect()
         };
         let key = RecordId::system("uidx_ren").to_bytes();
@@ -428,7 +428,7 @@ impl IndexManager {
             &self.renaming_regular
         };
         {
-            let mut map = renaming.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(renaming);
             map.insert(old_name_interned, entry);
         }
         let result = if is_unique {
@@ -437,7 +437,7 @@ impl IndexManager {
             self.save_renaming_regular().await
         };
         if result.is_err() {
-            let mut map = renaming.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(renaming);
             map.remove(&old_name_interned);
         }
         result
@@ -464,7 +464,7 @@ impl IndexManager {
             &self.renaming_regular
         };
         let snapshot: Vec<HashRenameTombstone> = {
-            let map = renaming.lock().unwrap();
+            let map = Self::lock_ddl_guard(renaming);
             map.iter()
                 .filter(|(&k, _)| k != old_name_interned)
                 .map(|(_, v)| v.clone())
@@ -476,7 +476,7 @@ impl IndexManager {
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(key.into(), Bytes::from(bytes)).await?;
         {
-            let mut map = renaming.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(renaming);
             map.remove(&old_name_interned);
         }
         Ok(())
@@ -511,7 +511,7 @@ impl IndexManager {
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(key.into(), Bytes::from(empty)).await?;
         {
-            let mut map = renaming.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(renaming);
             map.clear();
         }
         Ok(())

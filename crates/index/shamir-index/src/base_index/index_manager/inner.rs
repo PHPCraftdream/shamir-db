@@ -8,7 +8,7 @@ use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
@@ -448,6 +448,16 @@ pub(super) async fn fire_post_flag_set_pre_gen_bump_test_hook(
 }
 
 impl IndexManager {
+    /// Poison recovery for the DDL guard sets: every critical section on
+    /// these sets is ONE insert/remove/clear/snapshot, so a panic while
+    /// holding the lock cannot leave the guarded structure half-updated —
+    /// recover the data and continue instead of cascading the panic.
+    pub(in crate::base_index) fn lock_ddl_guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Создаёт новый менеджер индексов.
     ///
     /// Загружает существующие индексы из служебного хранилища.
