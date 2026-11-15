@@ -168,6 +168,7 @@ impl RepoInstance {
         // instructions (a `String` clone), bounding every wait. The fn stays
         // `async`; this call no longer suspends.
         match self
+            .core
             .catalog
             .token_names
             .read_sync(&token, |_, name| name.clone())
@@ -179,43 +180,43 @@ impl RepoInstance {
 
     /// Catalogue read; see `TableCatalog`.
     pub(crate) async fn table_by_token_if_live(&self, token: u64) -> Option<TableManager> {
-        self.catalog.table_by_token_if_live(token).await
+        self.core.catalog.table_by_token_if_live(token).await
     }
 
     /// Catalogue install; see `TableCatalog`.
     #[cfg(feature = "test-util")]
     pub fn install_table_for_test(&self, name: &str, table: TableManager) {
-        self.catalog.install_table_for_test(name, table)
+        self.core.catalog.install_table_for_test(name, table)
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub fn list_table_names(&self) -> Vec<String> {
-        self.catalog.list_table_names()
+        self.core.catalog.list_table_names()
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub fn has_table(&self, name: &str) -> bool {
-        self.catalog.has_table(name)
+        self.core.catalog.has_table(name)
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub fn table_config(&self, name: &str) -> Option<TableConfig> {
-        self.catalog.table_config(name)
+        self.core.catalog.table_config(name)
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub(crate) fn mapped_table_store_names(&self, name: &str) -> Option<(String, String, String)> {
-        self.catalog.mapped_table_store_names(name)
+        self.core.catalog.mapped_table_store_names(name)
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub fn table_count(&self) -> usize {
-        self.catalog.table_count()
+        self.core.catalog.table_count()
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub async fn degraded_index_count(&self) -> u64 {
-        self.catalog.degraded_index_count().await
+        self.core.catalog.degraded_index_count().await
     }
 
     /// Rename table stores using the repository's normal write admission.
@@ -237,6 +238,7 @@ impl RepoInstance {
     ///
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -248,6 +250,7 @@ impl RepoInstance {
     /// Load or create the persistent repository identity.
     pub async fn repo_identity(&self) -> DbResult<RepoIdentity> {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -261,10 +264,11 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
-        let _guard = self.durability_handle.marker_write_mutex.lock().await;
+        let _guard = self.core.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::load_or_create(&store).await
     }
@@ -272,6 +276,7 @@ impl RepoInstance {
     /// Advance the repository history epoch.
     pub async fn bump_history_epoch(&self) -> DbResult<RepoIdentity> {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -285,10 +290,11 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
-        let _guard = self.durability_handle.marker_write_mutex.lock().await;
+        let _guard = self.core.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::bump(&store, None).await
     }
@@ -298,6 +304,7 @@ impl RepoInstance {
     /// Apply an idempotent restore operation to the history epoch.
     pub async fn apply_restore_operation(&self, operation: [u8; 16]) -> DbResult<RepoIdentity> {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -313,10 +320,11 @@ impl RepoInstance {
         operation: [u8; 16],
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
-        let _guard = self.durability_handle.marker_write_mutex.lock().await;
+        let _guard = self.core.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::bump(&store, Some(operation)).await
     }
@@ -364,6 +372,7 @@ impl RepoInstance {
         Fut: Future<Output = RenamePersistOutcome>,
     {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -376,11 +385,13 @@ impl RepoInstance {
             ));
         }
         let source = self
+            .core
             .catalog
             .configs
             .get(from)
             .map(|source| source.value().clone());
         let destination = self
+            .core
             .catalog
             .configs
             .get(to)
@@ -462,16 +473,17 @@ impl RepoInstance {
         Fut: Future<Output = RenamePersistOutcome>,
     {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
         self.check_rename_pair(from, to)?;
-        if !self.catalog.configs.contains_key(from) {
+        if !self.core.catalog.configs.contains_key(from) {
             return Ok(false);
         }
-        if self.catalog.configs.contains_key(to) {
+        if self.core.catalog.configs.contains_key(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         let pair = self.take_rename_fence(from, to);
@@ -545,7 +557,8 @@ impl RepoInstance {
         to: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
@@ -553,10 +566,10 @@ impl RepoInstance {
         let rts_started = std::time::Instant::now();
         log::debug!("rename_table_stores: enter from={from} to={to}");
         self.check_rename_pair(from, to)?;
-        if !self.catalog.configs.contains_key(from) {
+        if !self.core.catalog.configs.contains_key(from) {
             return Ok(false);
         }
-        if self.catalog.configs.contains_key(to) {
+        if self.core.catalog.configs.contains_key(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         self.check_table_rename_fence(from)?;
@@ -601,10 +614,12 @@ impl RepoInstance {
         permit: &RepoWritePermit,
         freeze: &RenameFreeze,
     ) -> DbResult<Option<TableConfig>> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         let Some(config) = self
+            .core
             .catalog
             .configs
             .get(from)
@@ -612,7 +627,7 @@ impl RepoInstance {
         else {
             return Ok(None);
         };
-        if self.catalog.configs.contains_key(to) {
+        if self.core.catalog.configs.contains_key(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         // 0. Force-drain the source table's MVCC overlay into
@@ -631,6 +646,7 @@ impl RepoInstance {
         // so holding it across the awaits below wedges a current-thread
         // runtime (#589 class).
         if let Some(mvcc) = self
+            .core
             .catalog
             .per_table_mvcc
             .read_sync(&from_token, |_, mvcc| Arc::clone(mvcc))
@@ -669,7 +685,7 @@ impl RepoInstance {
         new_config.validate_store_name()?;
         let destination_names =
             super::table_store::table_store_names(to, new_config.store_id.as_ref());
-        let existing = self.repo.stores_list().await?;
+        let existing = self.core.repo.stores_list().await?;
         if existing.iter().any(|name| {
             [
                 destination_names.data.as_str(),
@@ -683,19 +699,19 @@ impl RepoInstance {
             )));
         }
         super::table_store::copy_table_store(
-            &self.repo,
+            &self.core.repo,
             &source_names.data,
             &destination_names.data,
         )
         .await?;
         super::table_store::copy_table_store(
-            &self.repo,
+            &self.core.repo,
             &source_names.info,
             &destination_names.info,
         )
         .await?;
         super::table_store::copy_table_store(
-            &self.repo,
+            &self.core.repo,
             &source_names.history,
             &destination_names.history,
         )
@@ -710,7 +726,8 @@ impl RepoInstance {
         config: TableConfig,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         let to = config.name.clone();
@@ -719,10 +736,10 @@ impl RepoInstance {
                 "rename source and destination must differ".into(),
             ));
         }
-        if self.catalog.configs.contains_key(&to) {
+        if self.core.catalog.configs.contains_key(&to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
-        if !self.catalog.configs.contains_key(from) {
+        if !self.core.catalog.configs.contains_key(from) {
             return Err(DbError::NotFound(format!("Table '{from}' not found")));
         }
         self.remove_table(from, permit);

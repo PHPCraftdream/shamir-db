@@ -24,7 +24,9 @@ async fn missing_evidence_gap_init_failure_is_counted_and_retry_clears_error() {
 
     let hook = Arc::new(JournalPublishHook::default());
     hook.init_failures.store(2, Ordering::Release);
-    repo.journal_publish_hook.store(Some(Arc::clone(&hook)));
+    repo.core
+        .journal_publish_hook
+        .store(Some(Arc::clone(&hook)));
     let drainer = Drainer::new();
 
     for expected in 1..=2 {

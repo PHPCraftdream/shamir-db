@@ -45,8 +45,9 @@ use crate::query::batch::{
 };
 use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
+use crate::repo::fk_reverse_cache::{ReverseFkEntry, TaggedReverseFkEntry};
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{RepoConfig, ReverseFkEntry, TaggedReverseFkEntry};
+use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 use crate::validator::schema::constraints::Constraints;
 use crate::validator::schema::field_rule::FieldRule;

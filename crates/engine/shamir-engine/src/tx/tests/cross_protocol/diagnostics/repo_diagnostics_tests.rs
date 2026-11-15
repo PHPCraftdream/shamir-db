@@ -197,7 +197,9 @@ async fn orphan_gap_init_failure_is_observed_and_retry_clears_error() {
     );
     let hook = Arc::new(JournalPublishHook::default());
     hook.init_failures.store(2, Ordering::Release);
-    repo.journal_publish_hook.store(Some(Arc::clone(&hook)));
+    repo.core
+        .journal_publish_hook
+        .store(Some(Arc::clone(&hook)));
     let drainer = Drainer::new();
     for expected in 1..=2 {
         let error = drainer.drain_step(&repo).await.unwrap_err();

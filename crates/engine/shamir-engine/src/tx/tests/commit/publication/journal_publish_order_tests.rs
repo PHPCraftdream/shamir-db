@@ -66,7 +66,7 @@ async fn park_before_broadcast(visibility: CommitVisibility) {
     let mut live = handle.feed.subscribe();
     let hook = Arc::new(JournalPublishHook::default());
     hook.broadcast_armed.store(true, Ordering::Release);
-    repo.journal_publish_hook.store(Some(hook.clone()));
+    repo.core.journal_publish_hook.store(Some(hook.clone()));
     let (mut tx_a, pin_a) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tx_a.set_visibility(visibility);
     let id_a = tx_a.tx_id.0;
@@ -143,7 +143,7 @@ async fn journal_init_failure_retry_keeps_pending_minimum_at_publish() {
     let repo = fixture();
     let gate = repo.tx_gate().await.unwrap();
     let hook = Arc::new(JournalPublishHook::default());
-    repo.journal_publish_hook.store(Some(hook.clone()));
+    repo.core.journal_publish_hook.store(Some(hook.clone()));
     hook.init_failures.store(3, Ordering::Release);
     let cancelled = gate.assign_next_version_guarded();
     let prepared = repo
@@ -182,7 +182,7 @@ async fn journal_pending_minimum_restored_and_persisted_on_retry() {
     );
     let gate = repo.tx_gate().await.unwrap();
     let hook = Arc::new(JournalPublishHook::default());
-    repo.journal_publish_hook.store(Some(hook.clone()));
+    repo.core.journal_publish_hook.store(Some(hook.clone()));
     hook.init_failures.store(2, Ordering::Release);
     let earlier = gate.assign_next_version_guarded();
     let first = earlier.version();
@@ -257,7 +257,7 @@ async fn journal_pending_gap_survives_oncecell_publication_after_snapshot() {
     let repo = fixture();
     let gate = repo.tx_gate().await.unwrap();
     let hook = Arc::new(JournalPublishHook::default());
-    repo.journal_publish_hook.store(Some(hook.clone()));
+    repo.core.journal_publish_hook.store(Some(hook.clone()));
     hook.init_failures.store(1, Ordering::Release);
     let guard = gate.assign_next_version_guarded();
     let v = guard.version();

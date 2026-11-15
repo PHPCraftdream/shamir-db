@@ -38,7 +38,7 @@ impl RepoInstance {
     }
 
     pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
-        &self.commit_tail
+        self.core.horizon.commit_tail()
     }
 
     /// cancel-safe: yes — timeout or cancellation only stops this wait.
@@ -47,7 +47,7 @@ impl RepoInstance {
     /// This does not drain WAL history and must not be called by `flush_buffers`
     /// while commits are running.
     pub async fn quiesce_commits(&self, timeout: std::time::Duration) -> DbResult<()> {
-        tokio::time::timeout(timeout, self.commit_tail.wait_zero())
+        tokio::time::timeout(timeout, self.core.horizon.commit_tail().wait_zero())
             .await
             .map_err(|_| {
                 DbError::Internal(format!(
@@ -60,7 +60,7 @@ impl RepoInstance {
     /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
     /// field doc on [`marker_write_mutex`](Self) for why this exists.
     pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
-        &self.durability_handle.marker_write_mutex
+        &self.core.durability_handle.marker_write_mutex
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
@@ -73,7 +73,7 @@ impl RepoInstance {
         bg.live = None;
         // Background handles own only drainer resources, never foreground
         // lifecycle ownership.
-        bg.worker_lifecycle = None;
+        bg.core.worker_lifecycle = None;
         bg
     }
 
@@ -81,11 +81,13 @@ impl RepoInstance {
     /// a drainer. An untouched gate reports an idle snapshot.
     pub fn diagnostics(&self) -> shamir_tx::GateDiagnostics {
         let mut snapshot = self
-            .tx_gate
+            .core
+            .horizon
+            .tx_gate_cell()
             .get()
             .map(|gate| gate.diagnostics())
             .unwrap_or_default();
-        if let Some(drainer) = self.drainer.get() {
+        if let Some(drainer) = self.core.horizon.drainer_cell().get() {
             drainer.enrich_diagnostics(&mut snapshot);
         }
         snapshot
@@ -103,16 +105,19 @@ impl RepoInstance {
     pub fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
         #[cfg(test)]
         if self
+            .core
             .background_drainer_disabled
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return Arc::clone(
-                self.drainer
+                self.core
+                    .horizon
+                    .drainer_cell()
                     .get_or_init(|| Arc::new(crate::tx::drainer::Drainer::new())),
             );
         }
 
-        Arc::clone(self.drainer.get_or_init(|| {
+        Arc::clone(self.core.horizon.drainer_cell().get_or_init(|| {
             let drainer = Arc::new(crate::tx::drainer::Drainer::new());
             // 50 ms backstop: prompt drain even if a wake is missed, cheap
             // when idle (the loop short-circuits when nothing is undrained).
@@ -174,7 +179,7 @@ impl RepoInstance {
     /// S5c-X PR6b-2a: this repository's write-admission domain (one per
     /// repository instance, shared by every clone).
     pub fn write_domain(&self) -> &Arc<RepoWriteDomain> {
-        &self.durability_handle.write_domain
+        &self.core.durability_handle.write_domain
     }
 
     /// Repository name.
@@ -189,6 +194,7 @@ impl RepoInstance {
     /// are keyed by table name *inside* the repo, not by the repo name.
     pub fn with_name(&self, new_name: String) -> Self {
         let mut cloned = self.clone();
+        cloned.core.name = new_name.clone();
         cloned.name = new_name;
         cloned
     }
@@ -196,7 +202,7 @@ impl RepoInstance {
     /// Per-table MvccStore map used by the commit pipeline to route
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
-        &self.catalog.per_table_mvcc
+        &self.core.catalog.per_table_mvcc
     }
 
     /// F-28 Step 4 (#831): this repo's cached reverse-FK map. See
@@ -205,11 +211,11 @@ impl RepoInstance {
     /// discovery functions (via `TableResolver::resolve_repo`) and by
     /// `ShamirDb::compile_table_schema`'s invalidation call.
     pub fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
-        &self.fk_reverse_cache
+        &self.core.fk_reverse_cache
     }
     /// Atomic transaction telemetry counters.
     pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
-        &self.tx_metrics
+        self.core.horizon.tx_metrics()
     }
 
     /// Returns the repo's transactional info_store under the
@@ -222,7 +228,7 @@ impl RepoInstance {
     /// `crate::tx::commit`) so a clean restart can seed the gate
     /// without scanning every active WAL marker.
     pub async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
-        self.repo.store_get("__tx__").await
+        self.core.repo.store_get("__tx__").await
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -234,7 +240,7 @@ impl RepoInstance {
     ) -> DbResult<Self> {
         let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
         let manager = InternerManager::new_labeled(
-            instance.repo.store_get("__interner__").await?,
+            instance.core.repo.store_get("__interner__").await?,
             instance.name().to_string(),
         )
         .with_quota_for_test(quota);
@@ -253,7 +259,7 @@ impl RepoInstance {
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_repo_interner_for_test(&self, manager: InternerManager) {
         assert!(
-            self.catalog.repo_interner.set(manager).is_ok(),
+            self.core.catalog.repo_interner.set(manager).is_ok(),
             "repo interner must be uninitialized before test injection",
         );
     }
@@ -273,10 +279,11 @@ impl RepoInstance {
     /// tables in the repo. V2 WAL recovery resolves this single interner
     /// instead of a per-table one (Stage I keystone).
     pub async fn repo_interner(&self) -> DbResult<InternerManager> {
-        self.catalog
+        self.core
+            .catalog
             .repo_interner
             .get_or_try_init(|| async {
-                let store: Arc<dyn Store> = self.repo.store_get("__interner__").await?;
+                let store: Arc<dyn Store> = self.core.repo.store_get("__interner__").await?;
                 Ok::<InternerManager, DbError>(InternerManager::new_labeled(
                     store,
                     self.name().to_string(),
@@ -295,6 +302,7 @@ impl RepoInstance {
     /// Returns the count of recovered entries.
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -309,7 +317,8 @@ impl RepoInstance {
         &self,
         permit: &crate::repo::RepoWritePermit,
     ) -> DbResult<usize> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         // Round-11 (stack layout): see `recover_v2_inflight`.
@@ -337,7 +346,7 @@ impl RepoInstance {
     /// first one returned after attempting them all.
     pub async fn flush_all_history(&self) -> DbResult<()> {
         let mut mvccs = Vec::new();
-        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
+        self.core.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
             mvccs.push(Arc::clone(mvcc));
             true
         });
@@ -352,7 +361,7 @@ impl RepoInstance {
             }
         }
         if any {
-            if let Err(e) = self.repo.persist_once().await {
+            if let Err(e) = self.core.repo.persist_once().await {
                 log::warn!("flush_all_history: persist_once {}: {}", self.name, e);
                 if first_err.is_none() {
                     first_err = Some(e);
@@ -375,7 +384,8 @@ impl RepoInstance {
     /// caller cannot strand `leader_busy`).
     pub async fn synced_flush(&self) -> DbResult<()> {
         let repo = self.clone();
-        self.durability_handle
+        self.core
+            .durability_handle
             .group_commit
             .clone()
             .run(move || {
@@ -468,7 +478,7 @@ impl RepoInstance {
         // `Arc::clone` + push), bounding every wait. The fn stays `async` (the
         // per-store `gc().await` below still legitimately suspends); this scan no
         // longer suspends.
-        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
+        self.core.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
             stores.push(Arc::clone(mvcc));
             true
         });
@@ -490,19 +500,19 @@ impl RepoInstance {
         // `prune_commit_log_below` walks an empty `TreeIndex` range and
         // returns 0 immediately. The gate may not even exist yet (the
         // `OnceCell` is lazy-init'd on the first `tx_gate()` call); we use
-        // `self.tx_gate.get()` (non-allocating peek) to skip cleanly when
+        // `self.core.horizon.tx_gate_cell().get()` (non-allocating peek) to skip cleanly when
         // the gate has never been initialised.
         //
         // Lock order: `prune_commit_log_below` takes NO locks — it uses
         // `scc::TreeIndex::remove_range` (lock-free CAS). Callers MUST NOT
         // hold `commit_mutex` here (we don't — `run_gc` is an independent
         // background task).
-        if let Some(gate) = self.tx_gate.get() {
+        if let Some(gate) = self.core.horizon.tx_gate_cell().get() {
             let min_alive = gate.min_alive();
             let _pruned = gate.prune_commit_log_below(min_alive);
         }
 
-        self.tx_metrics.on_gc_run(total);
+        self.core.horizon.tx_metrics().on_gc_run(total);
         Ok(total)
     }
 }

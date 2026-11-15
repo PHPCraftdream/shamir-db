@@ -74,11 +74,11 @@ use std::sync::Arc;
 use shamir_query_types::admin::FkAction;
 use tokio::sync::Notify;
 
+use crate::repo::fk_reverse_cache::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 use crate::repo::fk_reverse_cache::{
     PostGenCheckPrePublishHook, TEST_POST_GENCHECK_PRE_PUBLISH_HOOK,
     TEST_POST_PUBLISH_PRE_RETURN_HOOK,
 };
-use crate::repo::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 
 async fn cas_loss_releases_lock_to_queued_waiter(hook: &PostGenCheckPrePublishHook) {
     let cache = Arc::new(FkReverseCache::new());

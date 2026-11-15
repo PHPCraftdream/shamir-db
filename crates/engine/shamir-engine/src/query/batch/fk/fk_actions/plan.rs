@@ -10,7 +10,7 @@ use shamir_types::types::value::QueryValue;
 use crate::query::batch::BatchResolver;
 use crate::query::filter::FilterContext;
 use crate::query::TableRef;
-use crate::repo::ReverseFkEntry;
+use crate::repo::fk_reverse_cache::ReverseFkEntry;
 use crate::table::TableManager;
 
 use super::helpers::{

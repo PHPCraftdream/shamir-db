@@ -8,23 +8,23 @@ use crate::repo::RepoInstance;
 
 impl RepoInstance {
     pub(crate) async fn follower_journal_store(&self) -> DbResult<Arc<dyn Store>> {
-        self.repo.store_get("__changelog__").await
+        self.core.repo.store_get("__changelog__").await
     }
 
     pub fn validate_repo_wide_atomic_batch(&self, destination: &str) -> DbResult<()> {
-        self.repo.validate_repo_wide_atomic_batch(destination)
+        self.core.repo.validate_repo_wide_atomic_batch(destination)
     }
 
     /// Backend capability for the S5c-X PR6b-2 receipt apply protocol.
     pub(crate) fn storage_supports_atomic_batch(&self) -> bool {
-        self.repo.supports_atomic_batch()
+        self.core.repo.supports_atomic_batch()
     }
 
     /// Raw named-store access, test-only: every caller lives under `tests/`,
     /// so this would be dead code in the non-test build.
     #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn raw_store(&self, name: &str) -> DbResult<Arc<dyn Store>> {
-        self.repo.store_get(name).await
+        self.core.repo.store_get(name).await
     }
 
     /// Begin a repository-wide atomic batch over named stores (PR6b-2).
@@ -35,9 +35,10 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<Box<dyn AtomicBatch>> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
-        self.repo.begin_atomic_batch().await
+        self.core.repo.begin_atomic_batch().await
     }
 }

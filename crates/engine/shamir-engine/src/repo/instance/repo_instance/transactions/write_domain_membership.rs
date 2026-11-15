@@ -15,7 +15,8 @@ impl RepoInstance {
         config: TableConfig,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         self.check_table_rename_fence(&config.name)?;
@@ -31,7 +32,8 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         self.check_table_rename_fence(table_name)?;

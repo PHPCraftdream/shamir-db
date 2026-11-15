@@ -28,8 +28,9 @@ use crate::query::batch::fk_on_update::discover_on_update_refs;
 use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::build_reverse_fk_entries;
+use crate::repo::fk_reverse_cache::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{FkReverseCache, RepoConfig, RepoInstance, ReverseFkEntry, TaggedReverseFkEntry};
+use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 

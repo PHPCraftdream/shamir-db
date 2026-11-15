@@ -3,6 +3,7 @@ mod support;
 pub(in crate::table) use support::guards::migration_freeze_guard;
 pub use support::guards::{in_flight_create_guard, writer_drain_barrier};
 pub use support::model::{buffer_config, table, table_config};
+pub use support::storage::fk_reverse_cache;
 pub use support::storage::{interner_manager, persistable, record_counter, record_cow};
 pub use support::table_resolver::TableResolver;
 #[cfg(test)]

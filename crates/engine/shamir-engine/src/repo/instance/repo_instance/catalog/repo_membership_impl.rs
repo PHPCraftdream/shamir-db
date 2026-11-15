@@ -34,10 +34,12 @@ impl RepoInstance {
         token: u64,
         permit: &RepoWritePermit,
     ) -> DbResult<Option<TableManager>> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         let name = self
+            .core
             .catalog
             .token_names
             .read_sync(&token, |_, name| name.clone());
@@ -58,10 +60,11 @@ impl RepoInstance {
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         self.check_table_rename_fence(table_name)?;
-        if let Some(table) = self.catalog.initialized_table(table_name) {
+        if let Some(table) = self.core.catalog.initialized_table(table_name) {
             return Ok(table);
         }
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -86,10 +89,11 @@ impl RepoInstance {
     /// resolves a name for a user request. `pub` (not `pub(crate)`) because
     /// the seed-catalogue walker lives in the downstream `shamir-db` crate.
     pub async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
-        if let Some(table) = self.catalog.initialized_table(table_name) {
+        if let Some(table) = self.core.catalog.initialized_table(table_name) {
             return Ok(table);
         }
         let permit = self
+            .core
             .durability_handle
             .write_domain
             .admit()
@@ -109,7 +113,8 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         self.check_table_rename_fence(table_name)?;
@@ -125,7 +130,8 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         Box::pin(self.get_table_ctx(table_name, permit)).await
@@ -147,7 +153,8 @@ impl RepoInstance {
         // `OnceCell` itself provides the single-init serialization — the
         // shard lock only needs to protect the map insert, not the init.
         let cell = Arc::clone(
-            self.catalog
+            self.core
+                .catalog
                 .tables
                 .entry(table_name.to_string())
                 .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -163,7 +170,7 @@ impl RepoInstance {
         // cell empty so subsequent calls retry.
         let tbl = cell
             .get_or_try_init(|| async {
-                if !self.catalog.configs.contains_key(table_name) {
+                if !self.core.catalog.configs.contains_key(table_name) {
                     return Err(DbError::NotFound(format!(
                         "Table '{}' is not configured in this repository",
                         table_name
@@ -176,14 +183,15 @@ impl RepoInstance {
 
         // Close the insertion-to-OnceCell-completion window against DROP.
         // No map guard survives an await; rollback can only evict our Arc.
-        let current = self.catalog.tables.get(table_name);
-        if !self.catalog.configs.contains_key(table_name)
+        let current = self.core.catalog.tables.get(table_name);
+        if !self.core.catalog.configs.contains_key(table_name)
             || !current
                 .as_ref()
                 .is_some_and(|entry| Arc::ptr_eq(entry.value(), &cell))
         {
             if let Some(mvcc) = tbl.mvcc_store() {
                 let _ = self
+                    .core
                     .catalog
                     .per_table_mvcc
                     .remove_if_sync(&table_token_for(table_name), |existing| {
@@ -206,6 +214,7 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
         let config = self
+            .core
             .catalog
             .configs
             .get(table_name)
@@ -218,23 +227,24 @@ impl RepoInstance {
         let id = config.store_id;
         let names =
             super::super::table_store::table_store_names(table_name, config.store_id.as_ref());
-        let data_store: Arc<dyn Store> = self.repo.store_get(names.data).await?;
-        let info_store: Arc<dyn Store> = self.repo.store_get(names.info).await?;
-        let history_store: Arc<dyn Store> = self.repo.store_get(names.history).await?;
+        let data_store: Arc<dyn Store> = self.core.repo.store_get(names.data).await?;
+        let info_store: Arc<dyn Store> = self.core.repo.store_get(names.info).await?;
+        let history_store: Arc<dyn Store> = self.core.repo.store_get(names.history).await?;
 
         let gate = self.tx_gate().await?;
 
         // This seam models a failure/cancellation in setup that used to run
         // AFTER registration. It is per-repo and consumed once, never global.
         #[cfg(test)]
-        if let Some(hook) = self.table_init_hook.swap(None) {
+        if let Some(hook) = self.core.table_init_hook.swap(None) {
             hook.run().await?;
         }
 
         // Complete ALL asynchronous/fallible setup before publication.
         // __data__ is inert under MVCC; __info__ keeps its wrappers.
         let data_store = fully_unwrap_store(&data_store).await;
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         // The MVCC store is handed to the open itself (not registered yet):
@@ -242,6 +252,7 @@ impl RepoInstance {
         // inert here and would yield no rows.
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
         if self
+            .core
             .catalog
             .configs
             .get(table_name)
@@ -256,7 +267,7 @@ impl RepoInstance {
             table_name.to_string(),
             data_store,
             info_store,
-            Arc::clone(&self.durability_handle.write_domain),
+            Arc::clone(&self.core.durability_handle.write_domain),
             permit,
             Some(Arc::clone(&mvcc)),
         )
@@ -276,6 +287,7 @@ impl RepoInstance {
         // caller's `OnceCell::get_or_try_init` leaves the cell empty and a
         // retry re-attempts the attach cleanly.
         if self
+            .core
             .catalog
             .per_table_mvcc
             .insert_sync(token, Arc::clone(&mvcc))
@@ -298,13 +310,14 @@ impl RepoInstance {
 
         // DROP may have removed/replaced our OnceCell while setup awaited.
         // Existence alone is insufficient after DROP + CREATE of the same name.
-        let current = self.catalog.tables.get(table_name);
-        if !self.catalog.configs.contains_key(table_name)
+        let current = self.core.catalog.tables.get(table_name);
+        if !self.core.catalog.configs.contains_key(table_name)
             || !current
                 .as_ref()
                 .is_some_and(|entry| Arc::ptr_eq(entry.value(), cell))
         {
             let _ = self
+                .core
                 .catalog
                 .per_table_mvcc
                 .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
@@ -336,7 +349,8 @@ impl RepoInstance {
     ///
     /// S5c-X PR6b-2a: callers must pass a permit for this repository.
     pub(crate) fn add_table(&self, config: TableConfig, permit: &RepoWritePermit) {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         self.add_table_inner(config);
@@ -345,10 +359,13 @@ impl RepoInstance {
     fn add_table_inner(&self, config: TableConfig) {
         // Same synchronous DDL lock order as remove_table. This closes the
         // config/reverse-token re-add window without holding guards over await.
-        let _entry = self.catalog.tables.entry(config.name.clone());
-        crate::repo::version_provider::register_token(&self.catalog.token_names, &config.name);
-        self.catalog.configs.insert(config.name.clone(), config);
-        self.fk_reverse_cache.invalidate();
+        let _entry = self.core.catalog.tables.entry(config.name.clone());
+        crate::repo::version_provider::register_token(&self.core.catalog.token_names, &config.name);
+        self.core
+            .catalog
+            .configs
+            .insert(config.name.clone(), config);
+        self.core.fk_reverse_cache.invalidate();
     }
 
     /// Remove a table from the repository.
@@ -360,7 +377,8 @@ impl RepoInstance {
     ///
     /// S5c-X PR6b-2a: callers must pass a permit for this repository.
     pub(crate) fn remove_table(&self, table_name: &str, permit: &RepoWritePermit) -> bool {
-        self.durability_handle
+        self.core
+            .durability_handle
             .write_domain
             .debug_check_permit(permit);
         self.remove_table_inner(table_name)
@@ -370,18 +388,20 @@ impl RepoInstance {
         // DDL-only synchronous critical section: tables -> configs -> scc.
         // Keep the table shard exclusive until owned MVCC cleanup completes,
         // so a replacement initializer cannot publish in the removal window.
-        let entry = self.catalog.tables.entry(table_name.to_string());
-        let removed = self.catalog.configs.remove(table_name).is_some();
+        let entry = self.core.catalog.tables.entry(table_name.to_string());
+        let removed = self.core.catalog.configs.remove(table_name).is_some();
         if removed {
-            self.fk_reverse_cache.invalidate();
+            self.core.fk_reverse_cache.invalidate();
             let token = table_token_for(table_name);
             let _ = self
+                .core
                 .catalog
                 .token_names
                 .remove_if_sync(&token, |existing| existing.as_str() == table_name);
             if let dashmap::mapref::entry::Entry::Occupied(entry) = &entry {
                 if let Some(mvcc) = entry.get().get().and_then(TableManager::mvcc_store) {
                     let _ = self
+                        .core
                         .catalog
                         .per_table_mvcc
                         .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));

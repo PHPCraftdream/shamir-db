@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 impl RepoInstance {
     pub(crate) async fn changelog_store_for_cold_reconcile(&self) -> DbResult<Arc<dyn Store>> {
-        self.repo.store_get("__changelog__").await
+        self.core.repo.store_get("__changelog__").await
     }
 
     /// Backend capability: does this repo persist a WAL across reopen?
     /// Read on the cold publication path only (replication DDL enforcement).
     pub fn has_persistent_wal(&self) -> bool {
-        self.durability_handle.has_persistent_wal()
+        self.core.durability_handle.has_persistent_wal()
     }
 
     /// Reconcile the persistent journal from surviving WAL entries before service.

@@ -67,7 +67,9 @@ fn assert_unregistered(repo: &RepoInstance) {
 #[tokio::test]
 async fn setup_failure_retries_with_coherent_mvcc() {
     let repo = make_repo();
-    repo.table_init_hook.store(Some(TableInitHook::new(true)));
+    repo.core
+        .table_init_hook
+        .store(Some(TableInitHook::new(true)));
     let error = match repo.get_table("orders").await {
         Err(error) => error,
         Ok(_) => panic!("injected setup failure must propagate"),
@@ -90,7 +92,7 @@ async fn setup_failure_retries_with_coherent_mvcc() {
 async fn cancelled_setup_retries_with_coherent_mvcc() {
     let repo = make_repo();
     let hook = TableInitHook::new(false);
-    repo.table_init_hook.store(Some(Arc::clone(&hook)));
+    repo.core.table_init_hook.store(Some(Arc::clone(&hook)));
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
     hook.entered.notified().await;
@@ -109,7 +111,7 @@ async fn retired_initializer_cannot_disrupt_replacement() {
         .install_contended_admission_for_test(Arc::clone(&contended));
 
     let hook = TableInitHook::new(false);
-    repo.table_init_hook.store(Some(Arc::clone(&hook)));
+    repo.core.table_init_hook.store(Some(Arc::clone(&hook)));
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
     hook.entered.notified().await;
@@ -142,7 +144,7 @@ async fn retired_initializer_cannot_disrupt_replacement() {
 async fn dropped_config_rolls_back_retired_publication() {
     let repo = make_repo();
     let hook = TableInitHook::new(false);
-    repo.table_init_hook.store(Some(Arc::clone(&hook)));
+    repo.core.table_init_hook.store(Some(Arc::clone(&hook)));
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
     hook.entered.notified().await;
