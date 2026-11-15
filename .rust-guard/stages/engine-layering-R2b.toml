@@ -736,3 +736,9 @@ path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.r
 item = "DurabilityHandle::durability_policy"
 reason = "R2b: item crosses a module or layer boundary"
 owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::ChangefeedHandle"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
