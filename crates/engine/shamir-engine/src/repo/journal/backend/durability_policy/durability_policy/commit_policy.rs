@@ -1,6 +1,8 @@
 //! Commit policy and typed WAL outcome classification.
 use super::*;
 
+use crate::repo::journal::backend::durability_handle::wal_durability_for;
+
 #[cfg(test)]
 pub(crate) static TEST_SYNCED_WAL_REPO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -12,11 +14,7 @@ pub(crate) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurab
     {
         return shamir_wal::WalDurability::Synced;
     }
-    let policy = repo.durability().load();
-    match policy.effective_wal_commit() {
-        crate::repo::WalCommitTier::Synced => shamir_wal::WalDurability::Synced,
-        crate::repo::WalCommitTier::Buffered => shamir_wal::WalDurability::Buffered,
-    }
+    wal_durability_for(&repo.durability_handle)
 }
 
 /// `Ok(bool)` is the `durability_failed` flag (`WrittenNotDurable` = written

@@ -236,6 +236,7 @@ impl RepoInstance {
     ///
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -246,6 +247,7 @@ impl RepoInstance {
     /// Load or create the persistent repository identity.
     pub async fn repo_identity(&self) -> DbResult<RepoIdentity> {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -258,8 +260,10 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.write_domain.debug_check_permit(permit);
-        let _guard = self.marker_write_mutex.lock().await;
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
+        let _guard = self.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::load_or_create(&store).await
     }
@@ -267,6 +271,7 @@ impl RepoInstance {
     /// Advance the repository history epoch.
     pub async fn bump_history_epoch(&self) -> DbResult<RepoIdentity> {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -279,8 +284,10 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.write_domain.debug_check_permit(permit);
-        let _guard = self.marker_write_mutex.lock().await;
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
+        let _guard = self.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::bump(&store, None).await
     }
@@ -290,6 +297,7 @@ impl RepoInstance {
     /// Apply an idempotent restore operation to the history epoch.
     pub async fn apply_restore_operation(&self, operation: [u8; 16]) -> DbResult<RepoIdentity> {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -304,8 +312,10 @@ impl RepoInstance {
         operation: [u8; 16],
         permit: &RepoWritePermit,
     ) -> DbResult<RepoIdentity> {
-        self.write_domain.debug_check_permit(permit);
-        let _guard = self.marker_write_mutex.lock().await;
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
+        let _guard = self.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::bump(&store, Some(operation)).await
     }
@@ -353,6 +363,7 @@ impl RepoInstance {
         Fut: Future<Output = RenamePersistOutcome>,
     {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -450,6 +461,7 @@ impl RepoInstance {
         Fut: Future<Output = RenamePersistOutcome>,
     {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -532,7 +544,9 @@ impl RepoInstance {
         to: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
         // timestamped entry/exit — NOT a behavior change, logging only.
         let rts_started = std::time::Instant::now();
@@ -586,7 +600,9 @@ impl RepoInstance {
         permit: &RepoWritePermit,
         freeze: &RenameFreeze,
     ) -> DbResult<Option<TableConfig>> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         let Some(config) = self
             .catalog
             .configs
@@ -693,7 +709,9 @@ impl RepoInstance {
         config: TableConfig,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         let to = config.name.clone();
         if to == from {
             return Err(DbError::Validation(

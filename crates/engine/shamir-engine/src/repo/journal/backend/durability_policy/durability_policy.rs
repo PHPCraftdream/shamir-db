@@ -10,7 +10,7 @@ mod recoverability_coverage;
 mod recovered_open;
 mod replication_page;
 pub(crate) use recovered_open::{
-    certify_recovered_open, checkpoint_allocation_floor, install_empty_coverage,
+    checkpoint_allocation_floor as checkpoint_allocation_floor_for, install_empty_coverage,
 };
 pub(crate) use replication_page::read_replication_page;
 mod segment_bytes;

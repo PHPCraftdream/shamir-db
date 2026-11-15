@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::super::RepoInstance;
-use super::super::JOURNAL_CONFIRM_BUDGET;
 
 impl RepoInstance {
     /// Read the unchanged journal, attaching name bindings only for Pull.
@@ -83,6 +82,7 @@ impl RepoInstance {
         #[cfg(test)]
         test_seam::record(self, "before_feed_init");
         let handle = self
+            .durability_handle
             .changefeed
             .get_or_try_init(|| async {
                 #[cfg(test)]
@@ -100,7 +100,10 @@ impl RepoInstance {
                 let clean_horizon = adapter.load_clean_horizon().await?;
                 let (marker, repair_marker) = adapter.load_gap_marker().await?;
                 let cl_store: Arc<dyn shamir_tx::ChangelogStore> = Arc::new(adapter);
-                let pending = self.pending_changefeed_gap.load(Ordering::Acquire);
+                let pending = self
+                    .durability_handle
+                    .pending_changefeed_gap
+                    .load(Ordering::Acquire);
                 let restored = match (marker, pending) {
                     (m, 0) => m,
                     (None, p) => Some((p, p)),
@@ -147,7 +150,10 @@ impl RepoInstance {
         // if ours is first, its Acquire observes our Release and therefore the
         // already-published OnceCell. This closes the store-buffering schedule
         // without SeqCst or another lock, including publication after snapshot.
-        let pending = self.pending_changefeed_gap.fetch_or(0, Ordering::AcqRel);
+        let pending = self
+            .durability_handle
+            .pending_changefeed_gap
+            .fetch_or(0, Ordering::AcqRel);
         if pending != 0 {
             handle.feed.mark_gap(pending);
         }
@@ -176,30 +182,13 @@ impl RepoInstance {
 
     /// Synchronous publish-time fallback; minimum is shared across repo clones.
     pub(crate) fn record_pending_changefeed_gap(&self, version: u64) {
-        let version = version.max(1);
-        let _ = self.pending_changefeed_gap.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| {
-                Some(if current == 0 {
-                    version
-                } else {
-                    current.min(version)
-                })
-            },
-        );
-        if let Some(handle) = self.changefeed.get() {
-            handle.feed.mark_gap(version);
-        }
+        self.durability_handle
+            .record_pending_changefeed_gap(version);
     }
 
     /// Live only: never re-enqueue an event already handled before publish.
     pub(crate) fn broadcast_changefeed_event(&self, event: Option<Arc<shamir_tx::ChangelogEvent>>) {
-        if let (Some(event), Some(handle)) = (event, self.changefeed.get()) {
-            if handle.feed.subscriber_count() > 0 {
-                handle.feed.broadcast(event);
-            }
-        }
+        self.durability_handle.broadcast_changefeed_event(event);
     }
 
     #[cfg(test)]
@@ -273,38 +262,16 @@ impl RepoInstance {
     ) -> DbResult<crate::repo::BoundedJournalRead> {
         let sampled_w = self.tx_gate().await?.completion().watermark();
         let h = self.changefeed().await?;
-        let bound = h
-            .feed
-            .confirm_through(sampled_w, JOURNAL_CONFIRM_BUDGET)
-            .await
-            .min(sampled_w)
-            .min(r_clamp.unwrap_or(u64::MAX));
-        let observed = preserve_errors.then(|| {
-            Arc::new(
-                crate::repo::bounded_journal_read::ErrorPreservingJournalStore::new(
-                    h.store.clone(),
-                ),
+        self.durability_handle
+            .read_changelog_bounded_from(
+                h,
+                sampled_w,
+                from_version,
+                limit,
+                preserve_errors,
+                r_clamp,
             )
-        });
-        let store: Arc<dyn shamir_tx::ChangelogStore> = match &observed {
-            Some(store) => store.clone(),
-            None => h.store,
-        };
-        let read = h
-            .feed
-            .read_from_bounded(&store, from_version, limit, bound)
-            .await;
-        if let Some(observed) = observed {
-            if let Some(error) = observed.error() {
-                return Err(DbError::Storage(error.to_owned()));
-            }
-        }
-        Ok(crate::repo::BoundedJournalRead {
-            read,
-            sampled_w,
-            bound,
-            confirmed: bound >= sampled_w,
-        })
+            .await
     }
 
     /// Park until the completion prefix reaches `target_version`, including
@@ -336,7 +303,7 @@ impl RepoInstance {
     /// Install an isolated journal fixture before lazy initialization.
     #[cfg(test)]
     pub(crate) fn install_journal_for_test(&self, handle: ChangefeedHandle) {
-        assert!(self.changefeed.set(handle).is_ok());
+        assert!(self.durability_handle.changefeed.set(handle).is_ok());
     }
 
     /// Test-only read-side observation of writer persistence/confirmation.

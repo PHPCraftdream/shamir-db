@@ -1,8 +1,9 @@
 //! PR2 S5c-X — runtime clean-horizon checkpoint + WAL retention
 //! enforcement (module manifest; re-exports only).
 //!
-//! * `retention_gate::RetentionGate` — lock-free refuse flag + counters;
-//!   the commit hot path reads it with exactly one atomic load
+//! * the repo layer's `RetentionGate` (now under
+//!   `repo::journal::backend::durability_handle`) — lock-free refuse flag +
+//!   counters; the commit hot path reads it with exactly one atomic load
 //!   (`RepoInstance::wal_retention_refuse_writes`).
 //! * `checkpoint::checkpoint_before_truncate` — journal checkpoint ahead of
 //!   any WAL unlink.
@@ -16,7 +17,6 @@ pub(crate) mod checkpoint;
 pub(crate) mod recovery_floor;
 pub(crate) mod repair_pending_drain;
 pub(crate) mod retention;
-pub(crate) mod retention_gate;
 
 #[cfg(test)]
 pub(crate) mod tests;

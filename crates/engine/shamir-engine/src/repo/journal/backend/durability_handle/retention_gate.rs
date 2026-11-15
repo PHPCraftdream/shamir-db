@@ -1,4 +1,12 @@
+//! Lock-free WAL retention gate and recovery-marker floor reservation.
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use shamir_storage::error::DbResult;
+use shamir_storage::types::Store;
+
+use super::DurabilityHandle;
 
 #[derive(Default)]
 pub struct RetentionGate {
@@ -74,5 +82,33 @@ impl RetentionGate {
             self.refusal_passes_total(),
             self.declare_gaps_total(),
         ]
+    }
+}
+
+impl DurabilityHandle {
+    pub(crate) fn wal_retention_gate(&self) -> &Arc<RetentionGate> {
+        &self.wal_retention_gate
+    }
+
+    pub(crate) fn wal_retention_refuse_writes(&self) -> bool {
+        self.wal_retention_gate.refuse_writes()
+    }
+
+    pub(crate) fn wal_retention_metrics(&self) -> [u64; 5] {
+        self.wal_retention_gate.snapshot()
+    }
+
+    pub(crate) async fn reserve_recovery_floor(
+        &self,
+        info: &Arc<dyn Store>,
+        minimum: u64,
+    ) -> DbResult<u64> {
+        let _guard = self.marker_write_mutex.lock().await;
+        let current = crate::meta::recovery_marker::load_last_committed(info)
+            .await?
+            .unwrap_or(0);
+        let floor = current.max(minimum);
+        crate::meta::recovery_marker::save_last_committed_flushed(info, floor).await?;
+        Ok(floor)
     }
 }

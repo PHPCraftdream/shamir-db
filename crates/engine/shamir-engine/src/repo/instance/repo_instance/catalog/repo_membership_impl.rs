@@ -34,7 +34,9 @@ impl RepoInstance {
         token: u64,
         permit: &RepoWritePermit,
     ) -> DbResult<Option<TableManager>> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         let name = self
             .catalog
             .token_names
@@ -60,6 +62,7 @@ impl RepoInstance {
             return Ok(table);
         }
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -87,6 +90,7 @@ impl RepoInstance {
             return Ok(table);
         }
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -105,7 +109,9 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         self.check_table_rename_fence(table_name)?;
         Box::pin(self.get_table_ctx(table_name, permit)).await
     }
@@ -119,7 +125,9 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         Box::pin(self.get_table_ctx(table_name, permit)).await
     }
 
@@ -226,7 +234,9 @@ impl RepoInstance {
         // Complete ALL asynchronous/fallible setup before publication.
         // __data__ is inert under MVCC; __info__ keeps its wrappers.
         let data_store = fully_unwrap_store(&data_store).await;
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         // The MVCC store is handed to the open itself (not registered yet):
         // open-time index rebuilds read the records through it, `__data__` is
         // inert here and would yield no rows.
@@ -246,7 +256,7 @@ impl RepoInstance {
             table_name.to_string(),
             data_store,
             info_store,
-            Arc::clone(&self.write_domain),
+            Arc::clone(&self.durability_handle.write_domain),
             permit,
             Some(Arc::clone(&mvcc)),
         )
@@ -326,7 +336,9 @@ impl RepoInstance {
     ///
     /// S5c-X PR6b-2a: callers must pass a permit for this repository.
     pub(crate) fn add_table(&self, config: TableConfig, permit: &RepoWritePermit) {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         self.add_table_inner(config);
     }
 
@@ -348,7 +360,9 @@ impl RepoInstance {
     ///
     /// S5c-X PR6b-2a: callers must pass a permit for this repository.
     pub(crate) fn remove_table(&self, table_name: &str, permit: &RepoWritePermit) -> bool {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         self.remove_table_inner(table_name)
     }
 

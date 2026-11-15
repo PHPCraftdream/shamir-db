@@ -2,23 +2,26 @@
 
 use shamir_query_types::ReplicationServe;
 use shamir_storage::error::DbResult;
+use shamir_wal::WalGroupCommit;
+use std::future::Future;
 
 use super::super::{replication_bound_observed, DurabilityMetrics, REPLICATION_BOUND_WAIT};
-use crate::repo::{BoundedJournalRead, RepoInstance};
+use crate::repo::BoundedJournalRead;
 
-pub(crate) async fn read_replication_page(
-    repo: &RepoInstance,
-    from_version: u64,
-    limit: usize,
-    // Mode snapshot taken ONCE upstream in `read_changelog_replication_page`
-    // (before any `.await`, out of the arc_swap Guard) — no second load here.
+pub(crate) async fn read_replication_page<R, RF>(
+    mut first: BoundedJournalRead,
+    group: &WalGroupCommit,
+    // Mode snapshot taken ONCE upstream in the shell's
+    // `read_changelog_replication_page` (before any `.await`, out of the
+    // arc_swap Guard) — no second load here.
     mode: ReplicationServe,
     metrics: &DurabilityMetrics,
-) -> DbResult<BoundedJournalRead> {
-    let mut first = repo
-        .read_changelog_bounded_impl(from_version, limit, false, None)
-        .await?;
-    let group = repo.wal_group().await?;
+    re_read: R,
+) -> DbResult<BoundedJournalRead>
+where
+    R: FnOnce(Option<u64>) -> RF,
+    RF: Future<Output = DbResult<BoundedJournalRead>>,
+{
     // Negative control removes the complete page clamp, metadata included.
     #[cfg(test)]
     if super::super::replication_bound::SKIP_S_CLAMP_FOR_TEST
@@ -27,7 +30,7 @@ pub(crate) async fn read_replication_page(
         return Ok(first);
     }
     // PR8 chunk 3 (`replication_serve = completed_reseed`): the serve bound is
-    // `min(confirmed, W)` — exactly what `read_changelog_bounded_impl` already
+    // `min(confirmed, W)` — exactly what the shell's bounded read already
     // applied — with NO recoverability clamp `R`. Speculative serving past `R`
     // is legal ONLY because the lifecycle record is armed BEFORE this call
     // (chunk 2) and an unclean restart bumps `history_epoch`, so a follower's
@@ -51,7 +54,7 @@ pub(crate) async fn read_replication_page(
         .map_or(first.bound, |version| {
             version.max(first.read.gap_at.unwrap_or(0))
         });
-    let covered = replication_bound_observed(&group, target, REPLICATION_BOUND_WAIT, metrics).await;
+    let covered = replication_bound_observed(group, target, REPLICATION_BOUND_WAIT, metrics).await;
     let bound = first.bound.min(group.recoverable_through());
     if covered >= target {
         first.bound = bound;
@@ -59,6 +62,5 @@ pub(crate) async fn read_replication_page(
         return Ok(first);
     }
     // Re-read once: the initial journal page may contain events above R.
-    repo.read_changelog_bounded_impl(from_version, limit, false, Some(bound))
-        .await
+    re_read(Some(bound)).await
 }

@@ -134,7 +134,8 @@ impl RepoInstance {
     /// even a repeated txn_id after a crash carries no ordering ambiguity
     /// or data loss; the floor is a belt-and-braces anti-collision guard.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
-        self.repo_wal
+        self.durability_handle
+            .repo_wal
             .get_or_try_init(|| async {
                 let info_store = self.repo.store_get("__tx__").await?;
                 let initial_txn_id =
@@ -151,7 +152,7 @@ impl RepoInstance {
                 // append, `recover()` (segment/Mem `replay()`) to recover.
                 // Only disk repos get a background fsync — the Mem sink's
                 // `sync` is a no-op, so a timer would be pointless.
-                let group = match &self.wal_dir {
+                let group = match &self.durability_handle.wal_dir {
                     Some(dir) => {
                         let wal_dir = match dir.file_name() {
                             Some(name) => {
@@ -216,7 +217,7 @@ impl RepoInstance {
                 };
                 let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, Arc::clone(&group));
                 // Publish the group for the replication read path's R bound.
-                let _ = self.wal_group.set(group);
+                let _ = self.durability_handle.wal_group.set(group);
 
                 // Anti-collision safeguard: floor next_txn_id above any
                 // inflight txn_id replayed from the WAL, so a fresh
