@@ -1,9 +1,10 @@
 //! Module map of one crate: files, logical module paths, module-name
 //! bindings (`use` re-exports) and type ownership, all under the
-//! crate's `src/` tree. Test code (`#[cfg(test)]`/loom items and
-//! test-named modules) is not part of the map. Shadow rule: a re-export
-//! of an EXTERNAL item is a shadow, not an edge — references through it
-//! never attribute to the declaring module.
+//! crate's `src/` tree. Test code (cfg predicates that REQUIRE
+//! `test`/`loom`, bare `#[test]` fns, files under `tests/` directories)
+//! is not part of the map. Shadow rule: a re-export of an EXTERNAL item
+//! is a shadow, not an edge — references through it never attribute to
+//! the declaring module.
 
 use crate::commands::modules_cmd::resolution;
 use crate::common::gitfs::GitFs;
@@ -42,16 +43,11 @@ pub(crate) struct CrateGraph {
     pub(crate) types: BTreeMap<String, BTreeSet<ModPath>>,
 }
 
-/// True for test-only module names: `tests`, `*_tests`, `*_loom`.
-pub(crate) fn is_test_name(name: &str) -> bool {
-    name == "tests" || name.ends_with("_tests") || name.ends_with("_loom")
-}
-
 /// True when the attributes mark the item as test code: any `cfg`
-/// predicate mentioning `test`/`loom`, or a bare `#[test]`/`#[tokio::test]`.
-/// Unparseable predicates are NOT test (conservative: the item stays in
-/// the map).
-pub(crate) fn cfg_mentions_test(attrs: &[syn::Attribute]) -> bool {
+/// predicate REQUIRING `test`/`loom`, or a bare `#[test]`/`#[tokio::test]`.
+/// `not(test)`/`not(loom)` are production. Unparseable predicates are
+/// NOT test (conservative: the item stays in the map).
+pub(crate) fn cfg_requires_test(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
         let path = attr.path();
         if path.is_ident("test") || path.is_ident("tokio::test") {
@@ -61,7 +57,7 @@ pub(crate) fn cfg_mentions_test(attrs: &[syn::Attribute]) -> bool {
             continue;
         }
         if let Ok(expr) = attr.parse_args::<syn::Expr>() {
-            if expr_mentions_test(&expr) {
+            if expr_requires_test(&expr) {
                 return true;
             }
         }
@@ -69,21 +65,72 @@ pub(crate) fn cfg_mentions_test(attrs: &[syn::Attribute]) -> bool {
     false
 }
 
-/// Recurses into the expression forms a cfg predicate uses, looking for
-/// the idents `test` or `loom`.
-fn expr_mentions_test(expr: &syn::Expr) -> bool {
+/// Evaluates a cfg predicate: true only when it REQUIRES `test`/`loom`,
+/// i.e. is false whenever neither is set — the bare ident, any `all(...)`
+/// conjunct, or an `any(...)` whose every alternative requires it.
+/// `not(e)` requires them exactly when `e` is excluded by them (see
+/// [`expr_excludes_test`]); `feature = ".."` and unknown predicates are
+/// neutral.
+fn expr_requires_test(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Path(p) => p
             .path
             .segments
             .iter()
             .any(|s| s.ident == "test" || s.ident == "loom"),
-        syn::Expr::Call(c) => expr_mentions_test(&c.func) || c.args.iter().any(expr_mentions_test),
-        syn::Expr::Paren(inner) => expr_mentions_test(&inner.expr),
-        syn::Expr::Assign(a) => expr_mentions_test(&a.left) || expr_mentions_test(&a.right),
-        syn::Expr::Tuple(t) => t.elems.iter().any(expr_mentions_test),
+        syn::Expr::Paren(inner) => expr_requires_test(&inner.expr),
+        syn::Expr::Call(c) => {
+            let Some(name) = call_ident(&c.func) else {
+                return false;
+            };
+            match name.as_str() {
+                "not" => c.args.len() == 1 && expr_excludes_test(&c.args[0]),
+                "all" => c.args.iter().any(expr_requires_test),
+                "any" => !c.args.is_empty() && c.args.iter().all(expr_requires_test),
+                _ => false,
+            }
+        }
         _ => false,
     }
+}
+
+/// Dual of [`expr_requires_test`]: true only when the predicate is false
+/// whenever `test`/`loom` is set (`not(test)`), so its negation requires
+/// them. A bare ident, `feature = ".."` and unknown predicates never
+/// exclude.
+fn expr_excludes_test(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => expr_excludes_test(&inner.expr),
+        syn::Expr::Call(c) => {
+            let Some(name) = call_ident(&c.func) else {
+                return false;
+            };
+            match name.as_str() {
+                "not" => c.args.len() == 1 && expr_requires_test(&c.args[0]),
+                "all" => c.args.iter().any(expr_excludes_test),
+                "any" => !c.args.is_empty() && c.args.iter().all(expr_excludes_test),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Final identifier of a plain call-function path (`all` in `all(...)`);
+/// `None` for anything else.
+fn call_ident(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Path(p) if p.qself.is_none() => {
+            p.path.segments.last().map(|s| s.ident.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// True when a repo-relative file path has a `tests` path component
+/// (the repo's rule: tests live in `tests/` folders).
+fn file_in_tests_dir(file: &str) -> bool {
+    file.split('/').any(|seg| seg == "tests")
 }
 
 /// One imported name from a use tree: remaining path segments and the
@@ -330,7 +377,7 @@ fn process_item(
     graph: &mut CrateGraph,
 ) -> Result<(), String> {
     let attrs = item_attrs(item);
-    if cfg_mentions_test(attrs) {
+    if cfg_requires_test(attrs) {
         return Ok(());
     }
     match item {
@@ -411,7 +458,7 @@ fn handle_mod(
     graph: &mut CrateGraph,
 ) -> Result<(), String> {
     let name = m.ident.to_string();
-    if is_test_name(&name) || cfg_mentions_test(&m.attrs) {
+    if cfg_requires_test(&m.attrs) {
         return Ok(());
     }
     if resolution::cfg_attr_has_path(&m.attrs) {
@@ -438,6 +485,9 @@ fn handle_mod(
             let path = resolution::path_attr(&m.attrs);
             match resolution::resolve(fs, &name, mod_dir, attr_dir, path.as_deref()) {
                 resolution::Resolution::Found(child) => {
+                    if file_in_tests_dir(&child) {
+                        return Ok(());
+                    }
                     if ancestors.contains(&child) {
                         return Err(format!("mod `{name}` reaches ancestor file `{child}`"));
                     }

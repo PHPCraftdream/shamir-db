@@ -457,8 +457,13 @@ really lives), `impl` self-types owned by another module, and
 An EXTERNAL shadow — a re-export whose target leaves the crate
 (`pub use shamir_engine_validator::validator::*;` then
 `crate::validator::X`) — is NOT an edge into the re-exporting module.
-Test code (`#[cfg(test)]`/loom items, test-named modules, `#[test]`
-fns, `tests/` target dirs) is skipped and never fails the gate.
+Test code is skipped and never fails the gate. A `cfg` predicate marks
+code test-only exactly when it REQUIRES `test`/`loom` — the bare ident,
+an `all(...)` conjunct, or an `any(...)` all of whose alternatives
+require it; `not(test)`, `not(loom)`, `any(not(test), ..)`,
+`all(not(test), feature = "x")` are production. A module is test code
+when its declaration carries a test-only cfg or its file lives in a
+`tests` directory; the name (`*_tests`, `*_loom`) alone never decides.
 
 Resolution fails closed: mod.rs files and the crate root are pure
 re-export surfaces — a name they neither bind nor locally glob resolves
@@ -496,6 +501,8 @@ Fixture → finding map:
 | `layers_baseline_stale` | `STALE_BASELINE` (pruned by `--update-baseline`) |
 | `layers_baseline_grow` | two `LAYER_BACKWARD` (`--update-baseline` refused) |
 | `layers_update_lower` | none (exit 0) — `--update-baseline` lowers 2 → 1 |
+| `layers_cfg_not_test` / `layers_cfg_not_loom` / `layers_cfg_any_test_feature` / `layers_test_name_no_tests_dir` | `LAYER_BACKWARD` (the cfg or the name does not make the code test-only) |
+| `layers_cfg_test` / `layers_cfg_all_test_feature` / `layers_cfg_any_test_loom` / `layers_test_name_in_tests_dir` | none (exit 0) — the cfg requires `test`/`loom`, or the file lives in a `tests/` directory |
 
 ## When the gates run
 
