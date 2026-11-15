@@ -1,1 +1,738 @@
 base = "754ad75e9c0f73c7bf0fa2c199906e8b3bcc64f7"
+
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::refuse_writes"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::refuse_writes"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::record_refusal"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::record_refusal"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::clear_refuse_if_set"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::clear_refuse_if_set"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::record_overflow_event"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::record_overflow_event"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::record_declare_gap"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::record_declare_gap"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::record_checkpoint_success"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::record_checkpoint_success"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::record_checkpoint_failure"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::record_checkpoint_failure"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::checkpoint_successes_total"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::checkpoint_successes_total"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::refusal_passes_total"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::refusal_passes_total"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::declare_gaps_total"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::declare_gaps_total"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::retention_overflow_events_total"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::retention_overflow_events_total"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::checkpoint_failures_total"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::checkpoint_failures_total"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention_gate.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate::RetentionGate::snapshot"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::RetentionGate::snapshot"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::ChangefeedHandle"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::ChangefeedHandle"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::JOURNAL_CONFIRM_BUDGET"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::JOURNAL_CONFIRM_BUDGET"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/mod.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention_gate"
+to_path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+to_item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate"
+reason = "R2b: moved with its module"
+owner = "<wave-R2b>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::journal_dropped_total"
+reason = "R2b: item left its module"
+owner = "<wave-R2b>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::durability"
+reason = "R2b: item left its module"
+owner = "<wave-R2b>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/recovered_open.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::durability_policy::recovered_open::certify_recovered_open"
+reason = "R2b: item left its module"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::checkpoint_allocation_floor"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::DurabilityHandle::record_pending_changefeed_gap"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::DurabilityHandle::broadcast_changefeed_event"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::DurabilityHandle::journal_dropped_total"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed::DurabilityHandle::read_changelog_bounded_from"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::DurabilityHandle::reserve_recovery_floor"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::DurabilityHandle::wal_retention_gate"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::DurabilityHandle::wal_retention_refuse_writes"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::retention_gate::DurabilityHandle::wal_retention_metrics"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle::has_persistent_wal"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::wal_durability_for"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle::initialized_mem_wal"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle::durability"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle::durability_metrics_snapshot"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::changefeed"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle::DurabilityHandle::durability_policy"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/mod.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_handle"
+reason = "R2b: new item of the wave"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_gate"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/recovered_open.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::durability_policy::recovered_open::checkpoint_allocation_floor"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/replication_page.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::durability_policy::replication_page::read_replication_page"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_admitted_unfenced"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::create_table_context"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::table_by_token_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::add_table"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::remove_table"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_unfenced"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_stores"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::repo_identity"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::repo_identity_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::bump_history_epoch"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::bump_history_epoch_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::apply_restore_operation"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::apply_restore_operation_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::recover_table_rename_with"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_transition"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_stores_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::prepare_table_rename_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::commit_table_rename_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_refuse_writes"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::wal_retention_metrics"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::reserve_recovery_floor"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::set_durability"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::wal_group"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::read_changelog_replication_page"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::note_unclean_open_bump"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::initialized_mem_wal"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::durability_metrics_snapshot"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::durability_policy"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::record_pending_changefeed_gap"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::broadcast_changefeed_event"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::read_changelog_bounded_impl"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::install_journal_for_test"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::changefeed"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::has_persistent_wal"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::certify_legacy_cold_start"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::write_domain"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::synced_flush"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::marker_write_mutex"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::clone"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::from_box_repo_with_wal_dir"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::begin_repo_atomic_batch"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::repo_wal"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/write_domain_membership.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::write_domain_membership::RepoInstance::add_table_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/write_domain_membership.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::write_domain_membership::RepoInstance::remove_table_admitted"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::durability_completion::commit_wal_durability"
+reason = "R2b: imports, bounds or signature follow the move"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "DurabilityHandle::record_pending_changefeed_gap"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "DurabilityHandle::broadcast_changefeed_event"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "DurabilityHandle::journal_dropped_total"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/changefeed.rs"
+item = "DurabilityHandle::read_changelog_bounded_from"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "DurabilityHandle::reserve_recovery_floor"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "DurabilityHandle::wal_retention_gate"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "DurabilityHandle::wal_retention_refuse_writes"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle/retention_gate.rs"
+item = "DurabilityHandle::wal_retention_metrics"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::has_persistent_wal"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "wal_durability_for"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::repo_wal"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::wal_group"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::group_commit"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::changefeed"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::pending_changefeed_gap"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::wal_dir"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::durability"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::durability_metrics"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::wal_retention_gate"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::marker_write_mutex"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::write_domain"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::initialized_mem_wal"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::durability"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::durability_metrics_snapshot"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_handle.rs"
+item = "DurabilityHandle::durability_policy"
+reason = "R2b: item crosses a module or layer boundary"
+owner = "<wave-R2b>"
