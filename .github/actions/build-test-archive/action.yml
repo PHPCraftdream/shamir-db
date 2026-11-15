@@ -1,7 +1,8 @@
 name: 'Build nextest test archive'
 description: >
   Shared build steps for the archive consumed only by the lib `test` job;
-  `integration` builds in place. Uses rust-cache and sccache, then
+  `integration` restores the same rust-cache shared key and builds in place.
+  Uses rust-cache and sccache, then
   ./scripts/test.sh --archive-to. Optionally uploads the archive artifact.
   `packages` takes validated `-p <crate>` pairs from CI; the default
   `--workspace` remains for `cache-warm.yml` compatibility. Empty selection

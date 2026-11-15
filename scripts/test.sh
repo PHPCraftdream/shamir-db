@@ -11,6 +11,7 @@
 # Usage:
 #   ./scripts/test.sh                          # lib tests, all crates
 #   ./scripts/test.sh --full                   # lib + integration + e2e, all crates
+#   ./scripts/test.sh --integration -p crate --test it  # CI: build only the named integration targets
 #   ./scripts/test.sh -p shamir-tx             # one crate (lib only)
 #   ./scripts/test.sh -p shamir-tx --full      # one crate (lib + tests)
 #   ./scripts/test.sh -- mvcc                  # filter by test name
@@ -30,6 +31,10 @@
 #   --archive-to builds `cargo nextest archive [--workspace | -p ...] --locked`
 #   by default; `--full` omits --lib (nextest default target selection).
 #   Only the lib `test` job consumes the archive; `integration` builds in place.
+#   --integration (CI only) behaves like --full but REQUIRES explicit cargo
+#   --test <target> selectors (passed by the workflow from the matrix helper);
+#   it refuses to run without them so the job can never silently fall back to
+#   building every test target, lib tests included.
 #   Explicit `-p` args archive just those crates (affected-crate runs).
 #   --from-archive runs archived tests, omitting only --lib and --locked while
 #   forwarding every other argument unchanged; CI auto-selects profile ci.
@@ -152,6 +157,10 @@ while [[ $# -gt 0 ]]; do
             mode="full"
             shift
             ;;
+        --integration)
+            mode="integration"
+            shift
+            ;;
         --archive-to)
             [[ $# -ge 2 ]] || { echo "ERROR: --archive-to requires a file path" >&2; exit 2; }
             archive_to="$2"
@@ -217,7 +226,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Archive-build mode (CI): only the lib `test` job consumes this archive;
-# `integration` builds in place. Benches are never built by nextest's default
+# `integration` builds in place and restores the same rust-cache shared key
+# (`--integration` mode, below); benches are never built by nextest's default
 # target selection.
 # ---------------------------------------------------------------------------
 if [[ -n "$archive_to" ]]; then
@@ -249,6 +259,18 @@ case "$mode" in
         nextest_args=(--lib --no-fail-fast)
         ;;
     full)
+        nextest_args=(--no-fail-fast)
+        ;;
+    integration)
+        # CI integration job: cargo's explicit --test target selection is
+        # mandatory here — without it nextest's default selection builds
+        # every test target of the selected packages, including the lib-test
+        # binaries this job never runs (its -E 'kind(test)' filter cannot
+        # select them; they are the `test` job's archive).
+        printf '%s\n' "${extra_args[@]:-}" | grep -Eq -- '^--test(=.*)?$' || {
+            echo "ERROR: --integration requires explicit --test <target> selectors" >&2
+            exit 2
+        }
         nextest_args=(--no-fail-fast)
         ;;
 esac
