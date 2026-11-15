@@ -21,9 +21,10 @@ fn many_observations_snapshot_matches_expected_state() {
     assert_eq!(snap.count, values.len() as u64);
     assert_eq!(snap.sum, values.iter().sum::<u64>());
     let mut expected = vec![0u64; crate::LATENCY_NS_BOUNDS.len() + 1];
-    expected[0] = 1; // 5_000
-    expected[1] = 2; // 100_000, 120_000
-    expected[3] = 2; // 1_000_000, 2_500_000
+    expected[0] = 2; // 5_000, 100_000 (<= 100_000)
+    expected[1] = 1; // 120_000 (<= 250_000)
+    expected[3] = 1; // 1_000_000 (<= 1_000_000)
+    expected[4] = 1; // 2_500_000 (<= 2_500_000)
     expected[18] = 1; // 60_000_000_000 == last bound (inclusive)
     assert_eq!(snap.buckets, expected);
 }

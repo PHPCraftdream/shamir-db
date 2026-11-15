@@ -30,8 +30,8 @@ fn snapshot_reports_bucket_cell_counts_le_sum() {
     h.observe(150_000);
     h.observe(500_000);
     let snap = h.snapshot();
-    assert_eq!(snap.buckets[0], 1);
-    assert_eq!(snap.buckets[1], 1);
-    assert_eq!(snap.buckets[3], 1);
+    assert_eq!(snap.buckets[0], 1); // 100_000 <= 100_000
+    assert_eq!(snap.buckets[1], 1); // 150_000 <= 250_000
+    assert_eq!(snap.buckets[2], 1); // 500_000 <= 500_000
     assert_eq!(snap.buckets.iter().sum::<u64>(), snap.count);
 }
