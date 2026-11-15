@@ -9,7 +9,7 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::migration::shadow_key::ShadowKey;
+use super::shadow_key::ShadowKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ShadowOp {

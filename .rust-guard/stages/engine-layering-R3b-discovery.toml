@@ -1,0 +1,281 @@
+base = "8d86f2c97c63da70f54c9121c3c68b8697316705"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::cannot_rollback_after_commit"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::cannot_rollback_after_commit"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::committed_migration_purges_shadow_log"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::committed_migration_purges_shadow_log"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::deletes_propagated_to_dst"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::deletes_propagated_to_dst"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::drain_applies_mixed_put_delete_via_batched_calls"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::drain_applies_mixed_put_delete_via_batched_calls"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::drain_until_caught_up_terminates_under_sustained_writes"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::drain_until_caught_up_terminates_under_sustained_writes"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::full_migration_lifecycle"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::full_migration_lifecycle"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::mixed_same_key_failure_replays_whole_page_for_both_drains"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::mixed_same_key_failure_replays_whole_page_for_both_drains"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::phase_transitions_enforced"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::phase_transitions_enforced"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::rollback_before_commit"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::rollback_before_commit"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_delete_put_delete_preserves_lsn_order"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_delete_put_delete_preserves_lsn_order"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_delete_then_put_preserves_lsn_order"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_delete_then_put_preserves_lsn_order"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_duplicate_put_run_is_last_writer_wins"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_duplicate_put_run_is_last_writer_wins"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_lcg_multiple_keys_match_sequential_model"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_lcg_multiple_keys_match_sequential_model"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_lcg_one_key_matches_sequential_model"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_lcg_one_key_matches_sequential_model"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_put_delete_put_preserves_lsn_order"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_put_delete_put_preserves_lsn_order"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::coordinator_tests::shadow_put_then_delete_preserves_lsn_order"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::coordinator_tests::shadow_put_then_delete_preserves_lsn_order"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::cutover_guard_tests::committed_state_recovers_without_changing_legacy_state_layout"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::cutover_guard_tests::committed_state_recovers_without_changing_legacy_state_layout"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::cutover_guard_tests::cutover_ready_recovers_after_purge_before_committed_state_write"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::cutover_guard_tests::cutover_ready_recovers_after_purge_before_committed_state_write"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::cutover_guard_tests::final_drain_more_than_three_pages_matches_sequential_model"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::cutover_guard_tests::final_drain_more_than_three_pages_matches_sequential_model"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::cutover_guard_tests::residual_lag_rejects_cutover_and_draining_remains_retryable"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::cutover_guard_tests::residual_lag_rejects_cutover_and_draining_remains_retryable"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_key_tests::binary_layout_length_prefixes_id"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_key_tests::binary_layout_length_prefixes_id"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_key_tests::parse_lsn_extracts_be_suffix"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_key_tests::parse_lsn_extracts_be_suffix"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_key_tests::round_trip"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_key_tests::round_trip"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_key_tests::scan_prefix_is_not_a_byte_prefix_of_a_different_ids_keys"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_key_tests::scan_prefix_is_not_a_byte_prefix_of_a_different_ids_keys"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_key_tests::scan_prefix_length_prefixes_id"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_key_tests::scan_prefix_length_prefixes_id"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::adversarial_prefix_ids_do_not_collide"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::adversarial_prefix_ids_do_not_collide"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::append_and_read_back"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::append_and_read_back"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::append_batch_allocates_sequential_lsns"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::append_batch_allocates_sequential_lsns"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::purge_removes_all_entries"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::purge_removes_all_entries"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::read_from_fails_closed_on_empty_entry_bytes"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::read_from_fails_closed_on_empty_entry_bytes"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::read_from_fails_closed_on_unrecognized_version_byte"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::read_from_fails_closed_on_unrecognized_version_byte"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::read_from_filters_by_lsn"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::read_from_filters_by_lsn"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::read_from_range_scans_from_start_lsn_and_caps_page_size"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::read_from_range_scans_from_start_lsn_and_caps_page_size"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::recover_restores_lsn_counter"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::recover_restores_lsn_counter"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
+
+[[moved]]
+path = "shamir-engine"
+item = "db_instance::migration::tests::shadow_log_tests::separate_migration_ids_are_isolated"
+to_path = "shamir-engine"
+to_item = "table::table_manager::migration::tests::shadow_log_tests::separate_migration_ids_are_isolated"
+reason = "R3b: tests move with their module"
+owner = "<wave-R3b>"
