@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Maximum nesting depth. Mirrors `messagepack::MAX_MSGPACK_DEPTH` so the lens
+/// Maximum nesting depth. Mirrors `messagepack::decode::MAX_MSGPACK_DEPTH` so the lens
 /// and the tree decoder agree on where "too deep" begins; deeper input returns
 /// [`RecordViewError::DepthExceeded`] rather than overflowing the stack.
 pub const MAX_MSGPACK_DEPTH: usize = 128;

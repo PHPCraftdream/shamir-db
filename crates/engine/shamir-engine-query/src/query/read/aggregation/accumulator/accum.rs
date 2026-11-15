@@ -1,30 +1,12 @@
-//! Aggregation helpers: accumulators, GROUP BY, aggregate-all.
-//!
-//! S4 (#76) — the aggregation pipeline is now lens-fed. Each row reaches the
-//! accumulators as raw storage `Bytes`; a per-row `RecordView` (the zero-copy
-//! msgpack lens) supplies every aggregated/group field via `scalar_at` →
-//! `ScalarRef`. Owned state survives only where §5b of the anti-formal doc
-//! demands it:
-//!
-//! - **Min/Max** hold the running extreme as a small `OwnedScalar` (leaf bytes
-//!   / scalar), not a `Value<K>` tree — the incoming `ScalarRef` is compared
-//!   against it directly.
-//! - **Sum/Avg/Count** keep their numeric accumulators; the input is read as
-//!   `ScalarRef::Int`/`F64` straight off the lens — no `Value` materialised.
-//! - **funclib aggregate slots** are fed `QueryValue` built at the funclib
-//!   boundary only (scalar ⇒ cheap; container ⇒ one `materialize_at` per row).
-//! - **HAVING** compares the predicate against the `QueryValue` result map via
-//!   a `RecordRef` adapter that re-keys String → `InternerKey` once and leaves
-//!   the leaves as `QueryValue` — the `query_value_to_inner` bridge is gone.
+//! The per-aggregate accumulator (`AggAccum`) and its numeric helpers.
 
 use std::cmp::Ordering;
 
 use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::query::filter::eval::{compare_values, resolve_filter_query};
+use crate::query::filter::eval::compare_values;
 use crate::query::filter::numeric_cmp::cmp_i64_f64;
-use crate::query::filter::{FilterContext, FilterValue};
 use crate::query::read::{AggFunc, AggregateField};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::{
@@ -33,307 +15,9 @@ use shamir_types::codecs::interned::{
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::common::new_map_wc;
-use shamir_types::types::numeric_key::decimal_exact_parts;
-use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-// ============================================================================
-// OwnedExtreme — the running-state currency for Min/Max (§5b boundary #2).
-// ============================================================================
-
-/// The running extreme held across rows by Min/Max. Two reprs:
-///
-/// - `Scalar` — the overwhelming common case (Min/Max over Int/F64/Str/Bool).
-///   Owns at most the leaf bytes; the incoming `ScalarRef` is compared
-///   against it directly via [`OwnedScalar::cmp_scalar`] — no `Value` tree.
-/// - `Tree` — the rare Min/Max-over-container case (Map/List/Set/Dec/Big).
-///   Owns an `InnerValue` (the materialised container leaf from
-///   `materialize_at`); comparison is via the generic `compare_values`
-///   which is key-agnostic for scalars. Converted to `QueryValue` only
-///   in `finish` (§5b boundary #3: output form).
-///
-/// This split keeps the hot scalar path allocation-light (a single i64 / f64
-/// / small Box) while still preserving byte-identity for the rare container
-/// case (which the pre-S4 path supported by holding `&'a InnerValue`).
-/// Storing `InnerValue` in `Tree` avoids the need for `&Interner` in `step`.
-pub(in crate::query::read) enum OwnedExtreme {
-    Scalar(OwnedScalar),
-    Tree(InnerValue),
-}
-
-/// An owned scalar leaf. Cheaper than a `Value<K>` tree: only the 6 scalar
-/// arms are represented.
-#[derive(Debug, Clone)]
-pub(in crate::query::read) enum OwnedScalar {
-    Null,
-    Bool(bool),
-    Int(i64),
-    F64(f64),
-    Str(Box<str>),
-    Bin(Box<[u8]>),
-}
-
-impl OwnedScalar {
-    /// Materialise from a borrowed `ScalarRef` (the lens leaf). This is the
-    /// one justified owned-materialisation on the aggregator hot path — the
-    /// running extreme must outlive the per-row borrow (§5b boundary #2).
-    #[inline]
-    fn from_scalar(s: ScalarRef<'_>) -> Self {
-        match s {
-            ScalarRef::Null => OwnedScalar::Null,
-            ScalarRef::Bool(b) => OwnedScalar::Bool(b),
-            ScalarRef::Int(i) => OwnedScalar::Int(i),
-            ScalarRef::F64(f) => OwnedScalar::F64(f),
-            ScalarRef::Str(s) => OwnedScalar::Str(s.into()),
-            ScalarRef::Bin(b) => OwnedScalar::Bin(b.into()),
-        }
-    }
-
-    /// Compare a borrowed incoming `ScalarRef` against the owned running
-    /// extreme. Mirrors `compare_values` / `scalar_ref_cmp` arm-for-arm:
-    /// Null==Null, Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str.
-    /// Returns `None` for non-comparable pairs (mismatched families, Bin).
-    #[inline]
-    fn cmp_scalar(&self, incoming: ScalarRef<'_>) -> Option<Ordering> {
-        // Returns `self.cmp(incoming)` (current-vs-incoming) — the call sites
-        // (`cur.cmp_scalar(s)`) take the incoming for Min on `Greater` (current
-        // > incoming) and for Max on `Less` (current < incoming).
-        match (self, incoming) {
-            (OwnedScalar::Null, ScalarRef::Null) => Some(Ordering::Equal),
-            (OwnedScalar::Bool(b), ScalarRef::Bool(a)) => Some(b.cmp(&a)),
-            (OwnedScalar::Int(b), ScalarRef::Int(a)) => Some(b.cmp(&a)),
-            // Int<->F64: F-2 (#791), exact via the shared
-            // `numeric_cmp::cmp_i64_f64` — replaces the lossy `*b as f64`/
-            // `a as f64` casts, which could round a large `i64` running
-            // extreme (or incoming value) to a DIFFERENT `f64` than what it
-            // actually represents (same class of bug as W-1/CR-D3).
-            (OwnedScalar::Int(b), ScalarRef::F64(a)) => cmp_i64_f64(*b, a),
-            (OwnedScalar::F64(b), ScalarRef::Int(a)) => cmp_i64_f64(a, *b).map(Ordering::reverse),
-            (OwnedScalar::F64(b), ScalarRef::F64(a)) => b.partial_cmp(&a),
-            (OwnedScalar::Str(b), ScalarRef::Str(a)) => Some(b.as_ref().cmp(a)),
-            // Bin and cross-family pairs are non-comparable (mirrors
-            // `compare_values` returning `None`).
-            _ => None,
-        }
-    }
-
-    /// Materialise to the v1-output `QueryValue` form (§5b boundary #3).
-    #[inline]
-    fn to_query(&self) -> QueryValue {
-        match self {
-            OwnedScalar::Null => QueryValue::Null,
-            OwnedScalar::Bool(b) => QueryValue::Bool(*b),
-            OwnedScalar::Int(i) => QueryValue::Int(*i),
-            OwnedScalar::F64(f) => QueryValue::F64(*f),
-            OwnedScalar::Str(s) => QueryValue::Str(s.as_ref().into()),
-            OwnedScalar::Bin(b) => QueryValue::Bin(b.as_ref().into()),
-        }
-    }
-}
-
-// ============================================================================
-// Group-key fragment
-// ============================================================================
-
-/// Typed hashable key fragment used to bucket records under GROUP BY.
-///
-/// S4: built directly from the lens leaf (`ScalarRef`) — no extra
-/// round-trip per record. Composite (Map/List/Set) group fields stay
-/// rare; they fall back to a `Box<str>` canonical form materialised once
-/// at the boundary (one `materialize_at` per row for that field only).
-///
-/// Numeric leaves share the engine-wide canonical numeric key
-/// (`NumericKey`, RV-FUNCLIB-5FA455F7 S2): `Int(1)`, `F64(1.0)`, `-0.0`,
-/// `Big(1)` and `Dec(1.0)` all key as one group; NaN keys per its own bit
-/// pattern (each NaN is its own group); Int↔Big/Dec is exact — distinct
-/// integers beyond `2^53` never collapse.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(in crate::query::read) enum GroupKeyItem {
-    Missing,
-    Null,
-    Bool(bool),
-    Num(NumericKey),
-    /// A NaN leaf — OCCURRENCE-unique (NaN != NaN): the payload is a
-    /// per-execution counter advanced once per NaN leaf, so every NaN
-    /// forms its own group (GROUP BY per-occurrence NaN, S2 contract).
-    NanOnce(u64),
-    Str(Box<str>),
-    Bin(Box<[u8]>),
-    Complex(Box<str>),
-}
-
-/// Build a `GroupKeyItem` from a borrowed `ScalarRef` (the common case — no
-/// allocation beyond the leaf bytes).
-#[inline]
-pub(in crate::query::read) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) -> GroupKeyItem {
-    match s {
-        None => GroupKeyItem::Missing,
-        Some(ScalarRef::Null) => GroupKeyItem::Null,
-        Some(ScalarRef::Bool(b)) => GroupKeyItem::Bool(b),
-        Some(ScalarRef::Int(i)) => GroupKeyItem::Num(NumericKey::Int(i)),
-        Some(ScalarRef::F64(f)) => GroupKeyItem::Num(NumericKey::from_f64(f)),
-        Some(ScalarRef::Str(s)) => GroupKeyItem::Str(s.into()),
-        Some(ScalarRef::Bin(b)) => GroupKeyItem::Bin(b.into()),
-    }
-}
-
-/// Build the complex-group-key fallback from an owned `InnerValue` (a
-/// container / Dec / Big leaf materialised once via `materialize_at`).
-///
-/// Numeric leaves (Dec/Big) use the shared canonical `NumericKey` (S2):
-/// an integral Dec/Big keys like the equal Int; a non-integral Dec keys
-/// by exact decimal value (normalized mantissa+scale). Other composites
-/// convert to a canonical string that matches the equivalence classes of
-/// the old string-keyed path — preserving grouping behaviour.
-///
-/// NaN occurrence caveat (S2 contract): per-occurrence NaN groups are
-/// guaranteed only for SCALAR group fields (`group_key_item_scalar` →
-/// `GroupKeyItem::NanOnce`). A NaN nested INSIDE a container group field
-/// goes through [`query_value_canonical_str`], which renders every NaN as
-/// the same `"NaN"` string — such NaNs are NOT occurrence-separated (they
-/// share one group). This is a documented limitation of the string-keyed
-/// container fallback, left as-is until a canonical-key container path
-/// exists.
-#[inline]
-pub(in crate::query::read) fn group_key_item_complex(
-    val: &InnerValue,
-    interner: &Interner,
-    overlay: Option<&shamir_collections::TFxMap<u64, String>>,
-) -> GroupKeyItem {
-    match val {
-        InnerValue::Dec(d) => {
-            if let Some(key) = NumericKey::from_decimal(d) {
-                return GroupKeyItem::Num(key);
-            }
-            let (mantissa, scale) = decimal_exact_parts(d);
-            GroupKeyItem::Complex(format!("dec:{mantissa}:{scale}").into_boxed_str())
-        }
-        InnerValue::Big(b) => GroupKeyItem::Num(NumericKey::from_bigint(b)),
-        _ => {
-            let qv = match overlay {
-                Some(overlay) => inner_value_to_query_value_with(val, &|id| {
-                    if id >= shamir_tx::OVERLAY_ID_BASE {
-                        overlay.get(&id).cloned()
-                    } else {
-                        interner
-                            .get_str(&InternerKey::new(id))
-                            .map(|name| name.to_string())
-                    }
-                }),
-                None => inner_value_to_query_value(val, interner),
-            }
-            .unwrap_or(QueryValue::Null);
-            GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
-        }
-    }
-}
-
-/// Produce a canonical string for a `QueryValue` that matches the equivalence
-/// classes of the pre-J3 code path.
-///
-/// This gives the same GROUP BY equivalence classes as the pre-J3 code path,
-/// with no external allocations.
-fn query_value_canonical_str(qv: &QueryValue) -> String {
-    match qv {
-        QueryValue::Null => "null".to_string(),
-        QueryValue::Bool(b) => {
-            if *b {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            }
-        }
-        QueryValue::Int(i) => i.to_string(),
-        QueryValue::F64(f) => {
-            if f.is_finite() {
-                // Finite f64: use Rust's default float formatter which
-                // uses Grisu/Dragon and produces the shortest round-trip
-                // representation.
-                format!("{f}")
-            } else {
-                // Non-finite f64 becomes a quoted string in the old path.
-                format!("\"{}\"", f)
-            }
-        }
-        QueryValue::Dec(d) => format!("\"{}\"", d),
-        QueryValue::Big(b) => format!("\"{}\"", b),
-        QueryValue::Str(s) => {
-            // Escape the string: backslash and double-quote are the only
-            // characters that must be escaped for the ASCII content that
-            // appears in group keys. Full unicode escaping is not needed —
-            // non-ASCII chars are written as UTF-8 (no \uXXXX).
-            let mut out = String::with_capacity(s.len() + 2);
-            out.push('"');
-            for c in s.chars() {
-                match c {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    c if (c as u32) < 0x20 => {
-                        // Control characters: \uXXXX
-                        let _ = std::fmt::Write::write_fmt(
-                            &mut out,
-                            format_args!("\\u{:04x}", c as u32),
-                        );
-                    }
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-            out
-        }
-        QueryValue::Bin(bytes) => {
-            // Bin → canonical Array([byte as i64, ...]) representation.
-            let mut out = String::with_capacity(bytes.len() * 3 + 2);
-            out.push('[');
-            for (i, &b) in bytes.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{}", b));
-            }
-            out.push(']');
-            out
-        }
-        QueryValue::List(l) => {
-            let mut out = String::from("[");
-            for (i, item) in l.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&query_value_canonical_str(item));
-            }
-            out.push(']');
-            out
-        }
-        QueryValue::Set(s) => {
-            let mut out = String::from("[");
-            for (i, item) in s.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&query_value_canonical_str(item));
-            }
-            out.push(']');
-            out
-        }
-        QueryValue::Map(m) => {
-            let mut out = String::from("{");
-            for (i, (k, v)) in m.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                out.push_str(&query_value_canonical_str(&QueryValue::Str(k.clone())));
-                out.push(':');
-                out.push_str(&query_value_canonical_str(v));
-            }
-            out.push('}');
-            out
-        }
-    }
-}
+use super::extreme::{OwnedExtreme, OwnedScalar};
 
 // ============================================================================
 // Per-aggregate accumulator
@@ -353,7 +37,7 @@ pub(in crate::query::read) struct AggAccum {
     overlay: Option<std::sync::Arc<shamir_collections::TFxMap<u64, String>>>,
     /// `AggregateField::All` → step() uses the whole record as the value.
     all_field: bool,
-    pub(super) state: AggState,
+    pub(in crate::query::read::aggregation) state: AggState,
 }
 
 pub(in crate::query::read) enum AggState {
@@ -779,6 +463,64 @@ impl AggAccum {
     }
 }
 
+impl OwnedScalar {
+    /// Materialise from a borrowed `ScalarRef` (the lens leaf). This is the
+    /// one justified owned-materialisation on the aggregator hot path — the
+    /// running extreme must outlive the per-row borrow (§5b boundary #2).
+    #[inline]
+    fn from_scalar(s: ScalarRef<'_>) -> Self {
+        match s {
+            ScalarRef::Null => OwnedScalar::Null,
+            ScalarRef::Bool(b) => OwnedScalar::Bool(b),
+            ScalarRef::Int(i) => OwnedScalar::Int(i),
+            ScalarRef::F64(f) => OwnedScalar::F64(f),
+            ScalarRef::Str(s) => OwnedScalar::Str(s.into()),
+            ScalarRef::Bin(b) => OwnedScalar::Bin(b.into()),
+        }
+    }
+
+    /// Compare a borrowed incoming `ScalarRef` against the owned running
+    /// extreme. Mirrors `compare_values` / `scalar_ref_cmp` arm-for-arm:
+    /// Null==Null, Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str.
+    /// Returns `None` for non-comparable pairs (mismatched families, Bin).
+    #[inline]
+    fn cmp_scalar(&self, incoming: ScalarRef<'_>) -> Option<Ordering> {
+        // Returns `self.cmp(incoming)` (current-vs-incoming) — the call sites
+        // (`cur.cmp_scalar(s)`) take the incoming for Min on `Greater` (current
+        // > incoming) and for Max on `Less` (current < incoming).
+        match (self, incoming) {
+            (OwnedScalar::Null, ScalarRef::Null) => Some(Ordering::Equal),
+            (OwnedScalar::Bool(b), ScalarRef::Bool(a)) => Some(b.cmp(&a)),
+            (OwnedScalar::Int(b), ScalarRef::Int(a)) => Some(b.cmp(&a)),
+            // Int<->F64: F-2 (#791), exact via the shared
+            // `numeric_cmp::cmp_i64_f64` — replaces the lossy `*b as f64`/
+            // `a as f64` casts, which could round a large `i64` running
+            // extreme (or incoming value) to a DIFFERENT `f64` than what it
+            // actually represents (same class of bug as W-1/CR-D3).
+            (OwnedScalar::Int(b), ScalarRef::F64(a)) => cmp_i64_f64(*b, a),
+            (OwnedScalar::F64(b), ScalarRef::Int(a)) => cmp_i64_f64(a, *b).map(Ordering::reverse),
+            (OwnedScalar::F64(b), ScalarRef::F64(a)) => b.partial_cmp(&a),
+            (OwnedScalar::Str(b), ScalarRef::Str(a)) => Some(b.as_ref().cmp(a)),
+            // Bin and cross-family pairs are non-comparable (mirrors
+            // `compare_values` returning `None`).
+            _ => None,
+        }
+    }
+
+    /// Materialise to the v1-output `QueryValue` form (§5b boundary #3).
+    #[inline]
+    fn to_query(&self) -> QueryValue {
+        match self {
+            OwnedScalar::Null => QueryValue::Null,
+            OwnedScalar::Bool(b) => QueryValue::Bool(*b),
+            OwnedScalar::Int(i) => QueryValue::Int(*i),
+            OwnedScalar::F64(f) => QueryValue::F64(*f),
+            OwnedScalar::Str(s) => QueryValue::Str(s.as_ref().into()),
+            OwnedScalar::Bin(b) => QueryValue::Bin(b.as_ref().into()),
+        }
+    }
+}
+
 // ============================================================================
 // Small helpers — keep the impl above readable.
 // ============================================================================
@@ -839,7 +581,7 @@ fn agg_leaf_exact(v: &InnerValue) -> Option<AggLeafExact> {
 }
 
 /// Intern a `&[String]` path into `InternerKey`s; `None` on any un-internable segment.
-pub(super) fn intern_field_path_keys_with_overlay(
+pub(in crate::query::read::aggregation) fn intern_field_path_keys_with_overlay(
     field: &[String],
     interner: &Interner,
     overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
@@ -860,85 +602,13 @@ pub(super) fn intern_field_path_keys_with_overlay(
 // Aggregate-select validation (Fix 1b + Fix 2b)
 // ============================================================================
 
-/// Whether a [`FilterValue`] is a literal. Dynamic execution constants are
-/// validated after binding, while literal type/range errors are caught early.
-pub(super) fn is_literal(fv: &FilterValue) -> bool {
-    matches!(
-        fv,
-        FilterValue::Null
-            | FilterValue::Bool(_)
-            | FilterValue::Int(_)
-            | FilterValue::Float(_)
-            | FilterValue::String(_)
-            | FilterValue::Binary(_)
-            | FilterValue::Array(_)
-    )
-}
-
-/// Factory configuration may depend on this execution, but never on a row.
-/// Conditionals and function calls are conservatively excluded: they can carry
-/// implicit row inputs. AggregateFn.args is not the aggregate's row expression.
-pub(super) fn is_execution_constant(fv: &FilterValue) -> bool {
-    match fv {
-        FilterValue::FieldRef { .. } | FilterValue::Cond { .. } | FilterValue::FnCall { .. } => {
-            false
-        }
-        FilterValue::Array(values) => values.iter().all(is_execution_constant),
-        FilterValue::Expr { expr } => expr.args.iter().all(is_execution_constant),
-        _ => true,
-    }
-}
-
-/// Resolve with an empty row and a fresh execution-local context. Preflight
-/// children so the evaluator's Null fallback cannot hide an unresolved binding.
-pub(super) fn resolve_aggregate_param(
-    fv: &FilterValue,
-    ctx: &FilterContext<'_>,
-) -> DbResult<QueryValue> {
-    match fv {
-        FilterValue::Expr { expr } => {
-            for arg in &expr.args {
-                resolve_aggregate_param(arg, ctx)?;
-            }
-        }
-        FilterValue::Array(values) => {
-            for value in values {
-                resolve_aggregate_param(value, ctx)?;
-            }
-        }
-        _ => {}
-    }
-    let fresh = FilterContext::new(ctx.interner, ctx.resolved_refs)
-        .with_params(ctx.params)
-        .with_scalars(ctx.scalars.clone());
-    resolve_filter_query(fv, &InnerValue::Null, &fresh)
-        .ok_or_else(|| DbError::Validation("agg_param_unresolved".into()))
-}
-
-/// Extract a literal `f64` from a [`FilterValue`] (`Float` or `Int`).
-pub(super) fn literal_f64(fv: &FilterValue) -> Option<f64> {
-    match fv {
-        FilterValue::Float(f) => Some(*f),
-        FilterValue::Int(n) => Some(*n as f64),
-        _ => None,
-    }
-}
-
-/// Extract a literal `&str` from a [`FilterValue`] (`String`).
-pub(super) fn literal_string(fv: &FilterValue) -> Option<&str> {
-    match fv {
-        FilterValue::String(s) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
 /// Expression NULL results are skipped by all aggregates, including COUNT.
 /// Empty SUM/COUNT return 0; empty AVG/MIN/MAX return NULL. Literal NULL
 /// SUM is finalized as NULL by build_aggregate_object. Legacy field
 /// behaviour is unchanged: COUNT(field) counts present NULLs, and MIN/MAX
 /// can retain a NULL extreme. Expression SUM/AVG require numeric values;
 /// MIN/MAX require comparable values (including comparable numeric families).
-pub(super) fn step_aggregate_input(
+pub(in crate::query::read::aggregation) fn step_aggregate_input(
     acc: &mut AggAccum,
     value: &QueryValue,
     interner: &Interner,
