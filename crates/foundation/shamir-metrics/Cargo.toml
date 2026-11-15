@@ -1,0 +1,34 @@
+[package]
+name = "shamir-metrics"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Fixed-bucket atomic histogram with a torn-free seqlock snapshot for S.H.A.M.I.R."
+
+[lib]
+# Doctests are banned project-wide — they recompile the crate per example and
+# dominate `cargo test` wall-clock. Examples stay in the docs as illustration
+# (rendered, not executed); behavioural coverage lives in the `tests/` modules.
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Model-checker for the two-counter seqlock snapshot (`src/tests/loom_model.rs`).
+# A regular dependency that ONLY the `loom` feature turns on, so normal builds
+# and tests do not compile loom. The `build.rs` emits `cfg(loom)` ONLY for this
+# crate when the feature is on (precedent: shamir-engine) — see its doc for
+# the opt-in command.
+loom = { version = "0.7", optional = true }
+
+[features]
+loom = ["dep:loom"]
+
+[dev-dependencies]
+bench-scale-tool = { workspace = true }
+
+[[bench]]
+name = "histogram_observe"
+harness = false

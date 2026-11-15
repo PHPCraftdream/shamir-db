@@ -215,7 +215,8 @@ Latency buckets: static bounds in nanoseconds, 19 bounds, ~powers pattern 100 µ
 Byte buckets: 12 bounds, 1 KiB → 1 GiB, powers of 2:
 
 ```
-1_024, 2_048, 4_096, ..., 1_073_741_824
+1_024, 2_048, 4_096, 16_384, 65_536, 262_144, 1_048_576, 4_194_304,
+16_777_216, 67_108_864, 268_435_456, 1_073_741_824
 ```
 
 Overflow bucket implicit: values above the last bound are counted in one extra cell so `le=+Inf` renders correctly. A bucket cell counts observations `v <= bound` (inclusive, Prometheus `le` semantics); the last rendered bucket is `le="+Inf"`. `sum` is an integer in the bucket unit (ns, bytes) — no float, and u64 ns overflow is unreachable for realistic rates.
@@ -224,18 +225,20 @@ Overflow bucket implicit: values above the last bound are counted in one extra c
 
 Chosen approach: linear scan over a small const array of u64 with early exit; cost target ≤ ~20 ns; measured in the primitive's own bench (§5). Branchy binary search is fine at 12-20 bounds and is the fallback if the linear scan fails the bench, but 20 short u64 comparisons fit a cache line pair and predict well. Update: single `fetch_add(Relaxed)` per bucket plus one each for count and sum — three Relaxed RMWs per `observe`.
 
-Memory per instance: (n_bounds + 1 overflow) × 8 B + count + sum + epoch = ~184 B (20 cells × 8 B = 160 B, + count + sum + epoch, before alignment). Instances live in engine structs (per repo / per op kind), bounded by the cardinality policy (§4).
+Memory per instance: (n_bounds + 1 overflow) × 8 B + count + sum + started + completed = ~192 B (20 cells × 8 B = 160 B, + count + sum + two seqlock counters, before alignment). Instances live in engine structs (per repo / per op kind), bounded by the cardinality policy (§4).
 
-### 3.4 Snapshot semantics (torn-free reader): seqlock epoch
+### 3.4 Snapshot semantics (torn-free reader): two-counter seqlock
 
-- Writer: `epoch.fetch_add(1, AcqRel)` **before** the bucket/count/sum updates and **again after**; odd epoch = write in progress.
-- Reader: `loop { e1 = epoch.load(Acquire); if e1 odd { retry } copy cells with Relaxed loads; e2 = epoch.load(Acquire); if e1 == e2 { return consistent } }`.
-- Bounded retries (e.g. 8), then return a best-effort copy with `torn: true` rather than blocking a scrape. The exporter renders only `torn == false` snapshots — it drops the sample for that instance on that scrape, mirroring the visibility-family precedent of closed-registry omission. Epoch is u64: wrap is unreachable in practice (2^64/2 increments), and the loom model uses a narrowed width to exercise it. A writer preempted between its two increments leaves the epoch odd for the duration; readers burn their retry budget and drop that instance's sample for the scrape — the same degradation path as `torn: true`, not a hang.
-- Rejected alternative: per-bucket consistency without an epoch — a reader can mix pre/post-observe buckets and sum/count can disagree with buckets, violating the "never torn" requirement for a published snapshot pair.
+- Writer: `started.fetch_add(1, Relaxed)`; `fence(Release)`; the three Relaxed `fetch_add`s (bucket cell, count, sum); `completed.fetch_add(1, Release)`.
+- Reader attempt: `c1 = completed.load(Acquire); s1 = started.load(Relaxed); if s1 != c1 { retry }`; otherwise copy cells, count and sum with Relaxed loads; `fence(Acquire)`; `s2 = started.load(Relaxed)`; accept only if `s2 == s1`, else retry.
+- Soundness: equal counters at the first read mean no writer was in flight at the moment of the `started` read; an unchanged `started` after the copy means no writer began during it. The writer's Release fence before the data writes and the reader's Acquire fence before the final `started` read order any visible data write of a late writer before that read — so it forces `s2 != s1` and the attempt retries.
+- Why not one odd/even epoch: with concurrent writers A and B the epoch goes 0→1→2, i.e. EVEN while both are mid-update, so a reader can copy half-updated state (A's writes visible, B's not) and return a supposedly consistent snapshot. Two independent counters make "in flight" unambiguous under any number of writers.
+- Bounded retries (e.g. 8), then return a best-effort copy with `torn: true` rather than blocking a scrape. The exporter renders only `torn == false` snapshots — it drops the sample for that instance on that scrape, mirroring the visibility-family precedent of closed-registry omission. The counters are u64: wrap is unreachable in practice (2^64 increments). A writer preempted mid-update leaves `started > completed` for the duration; readers burn their retry budget and drop that instance's sample for the scrape — the same degradation path as `torn: true`, not a hang.
+- Rejected alternative: per-bucket consistency without a seqlock — a reader can mix pre/post-observe buckets and sum/count can disagree with buckets, violating the "never torn" requirement for a published snapshot pair.
 
 ### 3.5 loom-testability
 
-The epoch protocol must stay small enough for a loom model. Add a `loom_model` test in the crate (pattern precedent `crates/engine/shamir-engine/src/table/support/guards/tests/loom_model.rs`): writer thread observes 2 values, reader snapshots, loom asserts the snapshot is a consistent prefix (all buckets ≤ their post-state). The CI `loom-model` gate pattern applies: `cargo nextest list -E 'test(loom_model)' --features loom` with `--no-tests=fail`.
+The snapshot protocol must stay small enough for a loom model. Add a `loom_model` test in the crate (pattern precedent `crates/engine/shamir-engine/src/table/support/guards/tests/loom_model.rs`): writer thread observes 2 values, reader snapshots, loom asserts the snapshot is a consistent prefix (all buckets ≤ their post-state). The CI `loom-model` gate pattern applies: `cargo nextest list -E 'test(loom_model)' --features loom` with `--no-tests=fail`.
 
 ### 3.6 Export rendering
 
@@ -318,6 +321,8 @@ R4b (activity views, cancellation) and R4c (OTLP tracing) are untouched here. R4
 ## 10. Verification notes
 
 This document was written without modifying source. Two brief claims were checked against the worktree and corrected/cited from observation:
+
+- The snapshot protocol was revised after review (2026-11-15): the single odd/even epoch was replaced by the two-counter (`started`/`completed`) protocol in §3.4 — see §10 above and the crate's `histogram.rs`.
 
 - Foundation group holds 6 crates today (verified by directory listing of `crates/foundation/`), so the 7-crate cap accommodates `shamir-metrics` as the last slot.
 - The table-listing accessor is `RepoInstance::list_table_names()` at `crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs:151` (with `table_count()` at `:171`) — the brief's guess of the `catalog.rs:268-293` region was not where the accessor lives; the cited lines above are the verified ones. All other file paths and line numbers are carried from the companion brief unverified at line precision.

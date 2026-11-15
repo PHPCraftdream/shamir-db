@@ -31,13 +31,13 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*/*` glob doesn't try to load it). Crates live in layer folders
 `crates/<group>/<crate>/` (names do not change; at most 7 crates per group). The
-default workspace ships **38 crates** (including the `shamir-client-node`
+default workspace ships **39 crates** (including the `shamir-client-node`
 napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
 | Group | Crates |
 |---|---|
-| `foundation` | `shamir-collections`, `shamir-types`, `shamir-tunables`, `shamir-numa`, `shamir-private-dir`, `shamir-proc-tree` |
+| `foundation` | `shamir-collections`, `shamir-types`, `shamir-tunables`, `shamir-numa`, `shamir-private-dir`, `shamir-proc-tree`, `shamir-metrics` |
 | `storage` | `shamir-storage`, `shamir-wal`, `shamir-tx` |
 | `query` | `shamir-query-types`, `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-funclib` |
 | `index` | `shamir-index-core`, `shamir-index`, `shamir-vector` |
