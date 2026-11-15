@@ -85,29 +85,33 @@ impl Drop for RenameFreeze {
 /// Facade twin of the table-internal freeze entry points: maps the
 /// table-local `MigrationFreezeError` into the public `CommitError`
 /// contract for shamir-db.
-impl TableManager {
-    pub async fn begin_migration_freeze(&self) -> Result<MigrationFreezeGuard, CommitError> {
-        self.begin_migration_freeze_impl()
-            .await
-            .map_err(|error| match error {
-                MigrationFreezeError::Storage(error) => CommitError::Storage(error),
-                MigrationFreezeError::MigrationFrozen { table } => {
-                    CommitError::MigrationFrozen { table }
-                }
-            })
-    }
+pub async fn begin_migration_freeze(
+    table: &TableManager,
+) -> Result<MigrationFreezeGuard, CommitError> {
+    table
+        .begin_migration_freeze_impl()
+        .await
+        .map_err(|error| match error {
+            MigrationFreezeError::Storage(error) => CommitError::Storage(error),
+            MigrationFreezeError::MigrationFrozen { table } => {
+                CommitError::MigrationFrozen { table }
+            }
+        })
+}
 
-    pub async fn begin_migration_freeze_admitted(
-        &self,
-        permit: &RepoWritePermit,
-    ) -> Result<MigrationFreezeGuard, CommitError> {
-        self.begin_migration_freeze_admitted_impl(permit)
-            .await
-            .map_err(|error| match error {
-                MigrationFreezeError::Storage(error) => CommitError::Storage(error),
-                MigrationFreezeError::MigrationFrozen { table } => {
-                    CommitError::MigrationFrozen { table }
-                }
-            })
-    }
+/// Admitted variant of [`begin_migration_freeze`]; the caller holds the
+/// repository write permit.
+pub async fn begin_migration_freeze_admitted(
+    table: &TableManager,
+    permit: &RepoWritePermit,
+) -> Result<MigrationFreezeGuard, CommitError> {
+    table
+        .begin_migration_freeze_admitted_impl(permit)
+        .await
+        .map_err(|error| match error {
+            MigrationFreezeError::Storage(error) => CommitError::Storage(error),
+            MigrationFreezeError::MigrationFrozen { table } => {
+                CommitError::MigrationFrozen { table }
+            }
+        })
 }

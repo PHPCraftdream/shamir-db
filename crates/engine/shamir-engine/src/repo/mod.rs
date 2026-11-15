@@ -34,6 +34,7 @@ pub(crate) use journal::backend::durability_handle::DurabilityHandle;
 pub use journal::bounded_journal_read::BoundedJournalRead;
 pub use repo_config::RepoConfig;
 pub use repo_instance::catalog::RenamePersistOutcome;
+pub use repo_instance::catalog::{begin_migration_freeze, begin_migration_freeze_admitted};
 pub use repo_instance::RepoInstance;
 pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 pub use seed_install::{SeedImageWriter, SeedInstallState, SeedReceipt, SeedTable};

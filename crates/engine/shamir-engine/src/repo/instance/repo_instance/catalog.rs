@@ -1,5 +1,6 @@
 use self::rename_attempt::RenameAttempt;
 use self::rename_freeze::RenameFreeze;
+pub use self::rename_freeze::{begin_migration_freeze, begin_migration_freeze_admitted};
 pub use self::rename_outcome::RenamePersistOutcome;
 use super::RepoInstance;
 use crate::meta::repo_identity::RepoIdentity;
