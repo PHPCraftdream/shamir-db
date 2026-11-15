@@ -1275,6 +1275,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The feature cell names `shamir-engine` features; cargo rejects them
+          # when the campaign packages do not include that crate, so such a
+          # campaign runs the cell without feature flags.
+          flags='${{ matrix.config.flags }}'
+          case ",$PKGS," in *,shamir-engine,*) ;; *) flags='' ;; esac
           git worktree add .scratch-ci-base "$MERGE_BASE"
           (
             cd .scratch-ci-base
@@ -1285,7 +1290,7 @@ jobs:
             IFS=',' read -ra packages <<< "$present"
             for pkg in "${packages[@]}"; do args+=(-p "$pkg"); done
             CARGO_TARGET_DIR="$RUNNER_TEMP/base-target" \
-              cargo nextest list "${args[@]}" ${{ matrix.config.flags }} --message-format json
+              cargo nextest list "${args[@]}" $flags --message-format json
           ) > "$GITHUB_WORKSPACE/base-list.json"
           git worktree remove --force .scratch-ci-base
       - name: head list
@@ -1295,10 +1300,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Same rule as the base list: shamir-engine features only apply when
+          # the campaign packages include that crate.
+          flags='${{ matrix.config.flags }}'
+          case ",$PKGS," in *,shamir-engine,*) ;; *) flags='' ;; esac
           args=()
           IFS=',' read -ra packages <<< "$PKGS"
           for pkg in "${packages[@]}"; do args+=(-p "$pkg"); done
-          cargo nextest list "${args[@]}" ${{ matrix.config.flags }} --message-format json > head-list.json
+          cargo nextest list "${args[@]}" $flags --message-format json > head-list.json
       # Findings (lost test, duplicate, lost target, empty list, blocked
       # comparison) fail the step — the gate is fail-closed.
       - name: discovery diff (fails on findings)
