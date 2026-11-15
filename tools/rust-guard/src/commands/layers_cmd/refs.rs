@@ -6,8 +6,7 @@
 //! produces references.
 
 use crate::commands::layers_cmd::graph::{
-    absolute_base, cfg_mentions_test, expand_use_tree, is_test_name, item_attrs, CrateGraph,
-    ModPath,
+    absolute_base, cfg_requires_test, expand_use_tree, item_attrs, CrateGraph, ModPath,
 };
 use proc_macro2::TokenTree;
 use std::collections::BTreeMap;
@@ -75,14 +74,14 @@ impl<'a> RefVisitor<'a> {
 impl<'a> Visit<'a> for RefVisitor<'a> {
     /// Test-attributed items are skipped entirely (no descent).
     fn visit_item(&mut self, i: &'a syn::Item) {
-        if cfg_mentions_test(item_attrs(i)) {
+        if cfg_requires_test(item_attrs(i)) {
             return;
         }
         visit::visit_item(self, i);
     }
 
     fn visit_item_mod(&mut self, m: &'a syn::ItemMod) {
-        if is_test_name(&m.ident.to_string()) || cfg_mentions_test(&m.attrs) {
+        if cfg_requires_test(&m.attrs) {
             return;
         }
         let Some((_, items)) = &m.content else {
@@ -98,7 +97,7 @@ impl<'a> Visit<'a> for RefVisitor<'a> {
     }
 
     fn visit_item_use(&mut self, u: &'a syn::ItemUse) {
-        if cfg_mentions_test(&u.attrs) {
+        if cfg_requires_test(&u.attrs) {
             return;
         }
         let line = span_line(&u.span());
@@ -143,7 +142,7 @@ impl<'a> Visit<'a> for RefVisitor<'a> {
     }
 
     fn visit_item_impl(&mut self, i: &'a syn::ItemImpl) {
-        if cfg_mentions_test(&i.attrs) {
+        if cfg_requires_test(&i.attrs) {
             return;
         }
         if let syn::Type::Path(tp) = i.self_ty.as_ref() {

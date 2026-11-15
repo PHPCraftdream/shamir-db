@@ -200,3 +200,60 @@ fn update_lowers_entry() {
     assert!(baseline.contains("\"a -> b\" = 1"), "{baseline}");
     assert!(!baseline.contains("= 2"), "{baseline}");
 }
+
+#[test]
+fn cfg_not_test_is_production() {
+    // `not(test)` does not REQUIRE test: the module is production and
+    // its backward edge counts.
+    let repo = TempRepo::with_fixture("layers/layers_cfg_not_test");
+    assert_finding(&repo.run_guard(&["layers"]), "LAYER_BACKWARD");
+}
+
+#[test]
+fn cfg_not_loom_is_production() {
+    let repo = TempRepo::with_fixture("layers/layers_cfg_not_loom");
+    assert_finding(&repo.run_guard(&["layers"]), "LAYER_BACKWARD");
+}
+
+#[test]
+fn cfg_test_is_test_code() {
+    let repo = TempRepo::with_fixture("layers/layers_cfg_test");
+    assert_clean(&repo.run_guard(&["layers"]));
+}
+
+#[test]
+fn cfg_all_test_feature_is_test_code() {
+    // A conjunct requiring test makes the whole predicate test-only.
+    let repo = TempRepo::with_fixture("layers/layers_cfg_all_test_feature");
+    assert_clean(&repo.run_guard(&["layers"]));
+}
+
+#[test]
+fn cfg_any_test_loom_is_test_code() {
+    // Every alternative requires test/loom: test-only.
+    let repo = TempRepo::with_fixture("layers/layers_cfg_any_test_loom");
+    assert_clean(&repo.run_guard(&["layers"]));
+}
+
+#[test]
+fn cfg_any_test_feature_is_production() {
+    // `feature = "x"` is neutral: one alternative never requires test,
+    // so the predicate can hold without test — production.
+    let repo = TempRepo::with_fixture("layers/layers_cfg_any_test_feature");
+    assert_finding(&repo.run_guard(&["layers"]), "LAYER_BACKWARD");
+}
+
+#[test]
+fn test_named_module_without_cfg_is_production() {
+    // `foo_tests` without cfg outside a tests/ directory: the name
+    // alone does not make it test code.
+    let repo = TempRepo::with_fixture("layers/layers_test_name_no_tests_dir");
+    assert_finding(&repo.run_guard(&["layers"]), "LAYER_BACKWARD");
+}
+
+#[test]
+fn module_file_in_tests_dir_is_test_code() {
+    // Same name and no cfg, but the file lives under tests/: skipped.
+    let repo = TempRepo::with_fixture("layers/layers_test_name_in_tests_dir");
+    assert_clean(&repo.run_guard(&["layers"]));
+}
