@@ -1,20 +1,23 @@
 //! Commit policy and typed WAL outcome classification.
 use super::*;
 
-use crate::repo::journal::backend::durability_handle::wal_durability_for;
+use crate::repo::journal::backend::durability_handle::{wal_durability_for, DurabilityHandle};
 
 #[cfg(test)]
 pub(crate) static TEST_SYNCED_WAL_REPO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-pub(crate) fn commit_wal_durability(repo: &RepoCore) -> shamir_wal::WalDurability {
+pub(crate) fn commit_wal_durability(
+    durability: &DurabilityHandle,
+    _repo_name: &str,
+) -> shamir_wal::WalDurability {
     #[cfg(test)]
     if TEST_SYNCED_WAL_REPO
         .get()
-        .is_some_and(|name| name == repo.name())
+        .is_some_and(|name| name == _repo_name)
     {
         return shamir_wal::WalDurability::Synced;
     }
-    wal_durability_for(&repo.durability_handle)
+    wal_durability_for(durability)
 }
 
 /// `Ok(bool)` is the `durability_failed` flag (`WrittenNotDurable` = written

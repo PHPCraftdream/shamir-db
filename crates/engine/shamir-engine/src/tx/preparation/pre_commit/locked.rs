@@ -399,8 +399,10 @@ pub(in crate::tx) async fn pre_commit_locked(
     // Record before queueing: an unwritten abort may cause spurious SSI
     // conflicts, but a written orphan must never expose a missed conflict.
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(tx, commit_version));
-    let (ticket, completion) =
-        wal.begin_grouped_ticketed(&entry_arc, crate::tx::commit::commit_wal_durability(repo))?;
+    let (ticket, completion) = wal.begin_grouped_ticketed(
+        &entry_arc,
+        crate::tx::commit::commit_wal_durability(&repo.durability_handle, repo.name()),
+    )?;
     version_guard.attach_metrics(repo.tx_metrics().clone());
     version_guard.wal_queued(ticket, entry_arc.clone());
     let (wc_result, proven_not_written) =

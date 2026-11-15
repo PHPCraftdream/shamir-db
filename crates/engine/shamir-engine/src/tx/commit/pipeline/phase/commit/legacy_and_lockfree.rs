@@ -338,7 +338,10 @@ pub(super) async fn commit_tx_lockfree(
     // Record before queueing: an unwritten abort may cause spurious SSI
     // conflicts, but a written orphan must never expose a missed conflict.
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
-    let queued = wal.begin_grouped_ticketed(&validated.wal_entry_arc, commit_wal_durability(repo));
+    let queued = wal.begin_grouped_ticketed(
+        &validated.wal_entry_arc,
+        commit_wal_durability(&repo.durability_handle, repo.name()),
+    );
     let (ticket, completion) = match queued {
         Ok(queued) => queued,
         Err(e) => {

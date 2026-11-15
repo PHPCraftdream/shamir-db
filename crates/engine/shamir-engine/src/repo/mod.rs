@@ -11,8 +11,6 @@ pub mod tests;
 // `journal/` and `seed/`; every old `crate::repo::<module>` path keeps
 // resolving with the same audience through these re-exports).
 pub use instance::config as repo_config;
-#[cfg(test)]
-pub(crate) use instance::repo_instance::catalog::visibility_impl as visibility_observer;
 pub use instance::support::catalog::fk_reverse_cache;
 pub use instance::version_provider;
 pub use journal::backend::durability_policy;
