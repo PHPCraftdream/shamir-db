@@ -404,6 +404,13 @@ What this settles:
    `functions` and `validators` (C6 + C7 = 733 ms on windows) which most boots never write; a prepared template
    directory copied for each disk-backed test instead of a fresh creation (a copy has not been timed); more tests on the
    in-memory fixture (50 already moved).
-5. The next measurement must go where the other ~4.7 s are: time marks inside one of the 7 kept disk-backed `schema_ddl`
-   tests (what the test does after the open: repositories and tables created in the test, writes, commits, the second
-   open), run alone through a nextest filter so that the share of parallel load can be separated from the work itself.
+5. The other ~4.7 s per disk-backed test are not measured, and the series stops here (owner review, 2026-11-15): after the
+   move of 50 tests to the in-memory fixture only 7 disk-backed `schema_ddl` tests remain, about 45 s of Windows test
+   time in total, and the product open path needs no change. A third measurement is warranted only if disk-backed tests
+   grow again; it would put time marks inside one of those tests (repositories and tables created in the test, writes,
+   commits, the second open) and run it alone through a nextest filter.
+
+Both measurement tests (`boot_cost_of_one_fjall_open` in `shamir-storage`, `boot_cost2_system_store_open_phases` in
+`shamir-db`) are `#[ignore]`d: they assert nothing and cost about 1.5 s and 10 s of Windows test time per run. To measure
+again, run them with nextest's `--run-ignored only`, or on a throwaway branch remove the `#[ignore]` and add a final
+failure so that the log shows the output.

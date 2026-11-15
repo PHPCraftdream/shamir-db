@@ -5,8 +5,9 @@
 //! here is already public (`FJALL_PERSIST_SYNC_ALL_COUNT`,
 //! `reset_persist_sync_all_count`).
 //!
-//! Section numbers refer to that document. Run:
-//! `./scripts/test.sh -p shamir-storage -- boot_cost`
+//! Section numbers refer to that document. Ignored by default (it asserts
+//! nothing and only costs CI time); to measure, run it with nextest's
+//! `--run-ignored only` and the `boot_cost` filter.
 #![cfg(feature = "fjall")]
 
 use std::sync::atomic::Ordering;
@@ -38,6 +39,7 @@ fn persist_count() -> u64 {
 }
 
 #[tokio::test]
+#[ignore = "measurement: prints timings, asserts nothing (boot-cost.md section 7)"]
 async fn boot_cost_of_one_fjall_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     reset_persist_sync_all_count();

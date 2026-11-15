@@ -73,6 +73,7 @@ async fn reopen_with_retry(path: PathBuf) -> (ShamirDb, usize) {
 }
 
 #[tokio::test]
+#[ignore = "measurement: prints timings, asserts nothing (boot-cost.md section 8)"]
 async fn boot_cost2_system_store_open_phases() {
     reset_persist_sync_all_count();
 
