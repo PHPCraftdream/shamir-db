@@ -110,6 +110,7 @@ jobs:
       lib_args: ${{ steps.select.outputs.lib_args }}
       integration_args: ${{ steps.select.outputs.integration_args }}
       integration_filter: ${{ steps.select.outputs.integration_filter }}
+      integration_targets: ${{ steps.select.outputs.integration_targets }}
       check_args: ${{ steps.select.outputs.check_args }}
       run_lib: ${{ steps.select.outputs.run_lib }}
       run_integration: ${{ steps.select.outputs.run_integration }}
@@ -519,7 +520,8 @@ jobs:
   # workspace compile/link was the dominant, OS-dependent cost inside `test`'s
   # 30-minute budget. This job compiles only the lib test binaries ONCE per OS
   # with its own 60-minute budget and packs them into a nextest archive; only
-  # the lib `test` job consumes it. `integration` builds in place.
+  # the lib `test` job consumes it. `integration` builds in place and restores
+  # this same rust-cache shared key.
   # The warm base cache comes from cache-warm.yml via the same composite action
   # (.github/actions/build-test-archive) and its rust-cache shared key.
   test-build:
@@ -635,10 +637,15 @@ jobs:
   # connection-cap / slow-loris defences (`max_connections.rs`,
   # `slow_loris.rs`) and the `shamir-db/tests/query_*.rs` wire-path suite.
   #
-  # `--test '*'` selects ONLY the integration test targets. We deliberately
-  # do NOT use `--all-targets` here: that also builds and *runs* the
-  # `criterion` benches (each `bench` target has a real `fn main` via
-  # `criterion_main!`), so `cargo test --all-targets` would execute the
+  # The build compiles ONLY the integration test targets, via cargo's
+  # explicit `--test <target>` selectors (the matrix helper's
+  # `integration_targets` output). nextest's default selection would also
+  # build every lib-test binary of the selected packages — shamir_engine
+  # "lib" (test) alone took 279 s in the measured run — binaries the
+  # `-E 'kind(test)'` filter never runs (they are the `test` job's archive).
+  # We deliberately do NOT use `--all-targets` here: that also builds and
+  # *runs* the `criterion` benches (each `bench` target has a real `fn main`
+  # via `criterion_main!`), so `cargo test --all-targets` would execute the
   # full benchmark suites — slow and pointless as a correctness gate.
   #
   # Thread policy: default (parallel). Every integration test was audited
@@ -700,7 +707,20 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
+      # The shared cache entry: test-build saves it on every full run and
+      # cache-warm.yml warms it weekly on the default branch (same composite
+      # rust-cache inputs; the workflow env blocks match, and rust-cache
+      # hashes CARGO_*/RUST_* env into the key). This job's own default key
+      # is never populated on the default branch: master pushes skip the test
+      # jobs through the tree-green reuse, and per-PR saves are invisible to
+      # other PRs, so the first full run of every PR compiled all dependency
+      # units from scratch (docs/dev-artifacts/perf/ci-timing-baseline.md).
+      # Keep the value in sync with .github/actions/build-test-archive's
+      # shared-key default; a save with an existing key is skipped, so no
+      # new archive class is added.
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
+        with:
+          shared-key: test-archive-v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
       # Cache workspace-crate compilation across runs (rust-cache keeps only
       # third-party deps); a crate whose inputs did not change is not rebuilt.
@@ -709,23 +729,29 @@ jobs:
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
-      # ONLY integration test binaries (crates/*/*/tests/*.rs) — the nextest
-      # filterset equivalent of cargo's `--test '*'` target selector; it
-      # deliberately excludes `kind(lib)` (covered by the `test` job above)
-      # and `kind(bench)` (never a correctness gate). $AFFECTED narrows the
-      # packages to those affected by the diff.
+      # bash on every runner (Git Bash on Windows). The build selects exactly
+      # the integration test binaries via INTEGRATION_TARGETS (cargo `--test`
+      # selectors from the matrix helper); the `-E 'kind(test)'` filterset
+      # still decides what RUNS and is unchanged — it deliberately excludes
+      # `kind(lib)` (covered by the `test` job above) and `kind(bench)` (never
+      # a correctness gate). The trailing sccache lines are diagnostics for
+      # the Windows wrapper finding (ci-timing-baseline.md) and never gate.
       - name: integration tests (selected binaries)
         env:
           INTEGRATION_ARGS: ${{ needs.affected.outputs.integration_args }}
           INTEGRATION_FILTER: ${{ needs.affected.outputs.integration_filter }}
+          INTEGRATION_TARGETS: ${{ needs.affected.outputs.integration_targets }}
           SHAMIR_CARGO_TIMINGS: '1'
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "$INTEGRATION_FILTER" ]; then echo "::notice::matrix has no matching integration targets"; exit 0; fi
           read -r -a packages <<< "$INTEGRATION_ARGS"
-          ./scripts/test.sh --full --locked "${packages[@]}" -E "$INTEGRATION_FILTER" --no-tests=fail
+          read -r -a targets <<< "$INTEGRATION_TARGETS"
+          ./scripts/test.sh --integration --locked "${packages[@]}" "${targets[@]}" -E "$INTEGRATION_FILTER" --no-tests=fail
+          printenv RUSTC_WRAPPER SCCACHE_GHA_ENABLED || true
+          command -v sccache || true
+          sccache --show-stats || true
       # Timing artifacts (CI-TIMINGS): machine-readable build and test
       # timings, 14-day retention. `if: always()` keeps them on failing
       # runs, where they matter most; a failed upload must never fail the

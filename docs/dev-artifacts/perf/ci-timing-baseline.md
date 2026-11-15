@@ -124,3 +124,109 @@ start of a run; compare only runs of the same event class (master push vs
 PR); discard runs cancelled by the concurrency group
 (`conclusion == "cancelled"`); record the median next to the "after"
 columns above when the split lands.
+
+---
+
+## Round 2 — CI-CRIT-PATH: dependency cache on the critical path, integration build scope
+
+### Measured (one full-tier run that touched the engine)
+
+- Critical path: `cargo test integration (windows-latest)` — 1544 s total,
+  build 746 s, test run ≈630 s.
+- The build compiled 484 non-workspace units (1390 s of unit time) that
+  finish only at second 503: `aws-lc-sys` build script 203 s,
+  `cranelift-codegen` 117 s, `wasmtime` 52 s, `hnsw_rs` 79 s.
+- Lib-test binaries were built but never run (the `-E 'kind(test)'` filter
+  cannot select them): `shamir_engine "lib" (test)` 279 s — the LAST build
+  unit (starts at 467 s, ends at 746 s), `shamir_db "lib" (test)` 126 s,
+  `shamir_server "lib" (test)` 47 s. Without them the same build ends at
+  second 633 (the last integration-test unit ends at 630).
+- Rust cache (rust-cache): `No cache found.` in `cargo test integration` on
+  BOTH OSes and in `test build archive (windows-latest)`; "full match" in
+  `test build archive (ubuntu-latest)` and `cargo clippy (windows-latest)`.
+- Compiler cache (sccache): ubuntu integration 760 hits of 797 requests;
+  windows `test build archive` 347 of 407; windows integration
+  `Compile requests 0` — the wrapper took no request at all while 484
+  dependency units compiled.
+- Cache store at that moment: 3125 entries, 10.54 GB against a 10 GB limit —
+  thousands of tiny compiler-cache entries next to the multi-hundred-megabyte
+  Rust cache archives, so the large archives are the natural eviction victims.
+
+### Cause
+
+**The integration jobs' cache key is never populated on the default-branch
+scope (confirmed).** The `integration` job's rust-cache step had no
+`shared-key`, so its entry used the automatic key (OS + rustc/cargo versions +
+Cargo.lock hash + CARGO_*/RUST_* env). Which events could save such an entry
+where every branch can see it?
+
+- A master push skips the test jobs (`test-build`, `test`, `integration`,
+  `loom-model`, `test-discovery` are gated on `tree_green != 'true'`): when a
+  green same-tree PR run exists, nothing runs and nothing saves. Only a
+  reuse failure runs `integration` on master.
+- The weekly `ci.yml` schedule selects only `shamir-server` + `shamir-e2e`,
+  so it saves an integration-keyed entry at most once a week — and in the
+  measured run none was present.
+- A PR run saves under the PR's branch scope, invisible to every other PR and
+  to master.
+
+`cargo clippy` has NO `tree_green` gate — it runs on every master push and
+routinely refreshes its default-key entry in the default-branch scope. That is
+exactly the observed split: `cargo clippy (windows-latest)` restored while
+`cargo test integration (windows-latest)` found nothing. The entry class that
+IS routinely present on the default branch is the shared key
+`test-archive-v1` (composite action `.github/actions/build-test-archive`),
+saved by `test-build` on every full run and warmed weekly by
+`cache-warm.yml` — which is why `test build archive (ubuntu-latest)` restored
+"full match".
+
+**Eviction at the size limit (confirmed active).** The store sat at 10.54 GB
+of a 10 GB limit; the CI provider must evict continuously. `test build archive
+(windows-latest)` missed although cache-warm warms exactly its shared key on
+the default branch — the windows archive (the largest archive class in the
+store) had been evicted or had expired between warm and run. The fix therefore
+must not add any new large archive class.
+
+**Windows compiler cache at 0 requests (unresolved from the files).** The
+step plumbing is identical between `integration` and `test build archive`
+(same workflow env block, same pinned toolchain/nextest/rust-cache/sccache
+steps, the same `enable sccache` bash step writing `SCCACHE_GHA_ENABLED` /
+`RUSTC_WRAPPER` to `$GITHUB_ENV` before a `shell: bash` build step calling
+the same `./scripts/test.sh`). Nothing in the workflow text can make cargo
+see the wrapper in one job and not the other. Decision ladder: the
+integration run step now prints `printenv RUSTC_WRAPPER SCCACHE_GHA_ENABLED`,
+`command -v sccache` and `sccache --show-stats` after the run (never gates).
+If the next run's windows integration stats again show 0 requests while
+hundreds of units compiled, the wrapper is demonstrably not reaching cargo in
+that job and the following change must instrument the build invocation
+itself; if requests > 0 appear, the earlier 0 was situational.
+
+### What changed
+
+1. `integration` restores the shared `test-archive-v1` rust-cache entry —
+   the same entry `test-build` saves on every full run and cache-warm warms
+   weekly on the default branch. No new archive class: the shared-key entry
+   keeps its current size per OS (hundreds of MB; the windows one the
+   largest), saves with an existing key are skipped by the cache service, and
+   integration's two default-key saves per full run cease.
+2. The integration build compiles only integration-test targets: the matrix
+   helper emits a new `integration_targets` output (`--test <name>` selectors
+   derived from the same target sets as the `-E` filter), the job passes them
+   to the new `./scripts/test.sh --integration` mode (fail-closed without
+   selectors), and lib-test binaries are no longer built there. The tests
+   that RUN are exactly the same: the `-E 'kind(test)'` filter is unchanged,
+   `--no-tests=fail` stays.
+
+### What the next two full runs must show
+
+- First run: `test build archive (<os>)` saves the shared-key entry for the
+  branch (its rust-cache step logs a save); if the default-branch warm entry
+  is present, `cargo test integration (<os>)` already restores it. The
+  integration timing reports contain NO `"lib" (test)` unit, and the test
+  counts match the baseline (`junit-integration-<os>`).
+- Second run: the cache restores ("full match") in `cargo test integration`
+  on BOTH OSes and in `test build archive (windows-latest)`; the windows
+  integration build is well below 746 s (the measured run's dependency units
+  alone finished at second 503, and the lib-test units cost 452 s of unit
+  time); test counts unchanged; the sccache diagnostics decide the Windows
+  wrapper question per the ladder above.

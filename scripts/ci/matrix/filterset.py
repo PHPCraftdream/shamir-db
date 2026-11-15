@@ -16,7 +16,7 @@ RANGE_RE = re.compile(r"[A-Za-z0-9_./^~:@{}+%-]+\.\.[A-Za-z0-9_./^~:@{}+%-]+")
 SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
 FLAG_NAMES = ("engine", "ts", "node", "wasm32", "deny", "pipeline", "docs_only")
 CONSUMER_OUTPUTS = (
-    "lib_args", "integration_args", "integration_filter", "check_args",
+    "lib_args", "integration_args", "integration_filter", "integration_targets", "check_args",
     "run_lib", "run_integration", "run_check", "run_engine", "run_ts",
     "run_node", "run_wasm32", "run_deny", "run_pipeline",
 )
@@ -181,6 +181,17 @@ def integration_filter(matrix: dict[str, Any], metadata: dict[str, Any]) -> str:
     return " or ".join(terms)
 
 
+def integration_targets(matrix: dict[str, Any], metadata: dict[str, Any]) -> str:
+    """Cargo --test selectors building exactly the integration test targets."""
+    matrix = validate_matrix(matrix, metadata)
+    packages = workspace_packages(metadata)
+    names: set[str] = set()
+    for row in matrix["crates"]:
+        selected = _target_names(packages[row["name"]]) if row["integration"] == "all" else set(row["integration"])
+        names |= selected
+    return " ".join("--test %s" % name for name in sorted(names))
+
+
 def consume(matrix: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     matrix = validate_matrix(matrix, metadata)
     rows = matrix["crates"]
@@ -202,6 +213,7 @@ def consume(matrix: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
         "lib_args": _matrix_args(lib_names),
         "integration_args": _matrix_args(integration_names),
         "integration_filter": integration_filter(matrix, metadata),
+        "integration_targets": integration_targets(matrix, metadata),
         "check_args": _matrix_args(all_names),
         "run_lib": bool(lib_names),
         "run_integration": bool(integration_names),
@@ -398,9 +410,9 @@ def github_output(result: dict[str, Any]) -> str:
     lines = ["matrix=" + result["matrix"], "args=" + result["args"]]
     lines.extend("%s=%s" % (name, str(result["flags"][name]).lower()) for name in FLAG_NAMES)
     lines.extend("%s=%s" % (name, result[name]) for name in (
-        "lib_args", "integration_args", "integration_filter", "check_args",
+        "lib_args", "integration_args", "integration_filter", "integration_targets", "check_args",
     ))
-    lines.extend("%s=%s" % (name, str(result[name]).lower()) for name in CONSUMER_OUTPUTS[4:])
+    lines.extend("%s=%s" % (name, str(result[name]).lower()) for name in CONSUMER_OUTPUTS[5:])
     return "\n".join(lines)
 
 

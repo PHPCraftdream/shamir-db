@@ -1,8 +1,9 @@
 name: cache warm
 
-# Warms the base cargo cache used by test-build (see ci.yml and
-# .github/actions/build-test-archive). Only the lib `test` job consumes the
-# archive; `integration` builds in place.
+# Warms the shared rust-cache entry consumed by test-build AND integration
+# (see ci.yml and .github/actions/build-test-archive). Only the lib `test` job
+# consumes the packed archive artifact; `integration` builds in place but
+# restores the same cache key.
 # The weekly schedule keeps the cache from expiring (GitHub evicts after 7
 # days of disuse). After default-branch Cargo.lock or toolchain changes,
 # manually warm it with: gh workflow run cache-warm.yml --ref master
@@ -44,7 +45,8 @@ jobs:
       # Same composite action as ci.yml's test-build → same rust-cache
       # shared key; workflow env blocks also match because rust-cache hashes
       # their CARGO_*/RUST_* values. No artifact upload: only the lib `test`
-      # job consumes the archive; `integration` builds in place.
+      # job consumes the archive; `integration` restores this same shared
+      # key and builds in place.
       - uses: ./.github/actions/build-test-archive
         with:
           upload: 'false'

@@ -64,6 +64,7 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(result["check_args"], "-p shamir-check -p shamir-lib")
         self.assertEqual(result["integration_filter"],
                          "(kind(test) and package(=shamir-lib) and binary(=shamir-lib_tests))")
+        self.assertEqual(result["integration_targets"], "--test shamir-lib_tests")
         self.assertTrue(result["run_lib"])
         self.assertTrue(result["run_integration"])
         self.assertTrue(result["run_check"])
@@ -74,6 +75,8 @@ class ConsumeTests(unittest.TestCase):
             "(kind(test) and package(=shamir-server) and binary(=shamir-server_other))",
             "(kind(test) and package(=shamir-server) and binary(=shamir-server_tests))",
         )))
+        self.assertEqual(result["integration_targets"],
+                         "--test shamir-server_other --test shamir-server_tests")
         self.assertNotIn("shamir-e2e", result["integration_filter"])
 
     def test_check_only_has_no_test_jobs_even_with_all_targets(self):
@@ -81,6 +84,7 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(result["lib_args"], "")
         self.assertEqual(result["integration_args"], "")
         self.assertEqual(result["integration_filter"], "")
+        self.assertEqual(result["integration_targets"], "")
         self.assertEqual(result["check_args"], "-p shamir-check")
         self.assertFalse(result["run_lib"])
         self.assertFalse(result["run_integration"])
@@ -150,9 +154,23 @@ class ConsumeTests(unittest.TestCase):
         output = filterset.github_output(result)
         self.assertIn("matrix={", output)
         for key in (*filterset.FLAG_NAMES, "lib_args", "integration_args", "integration_filter",
-                    "check_args", "run_lib", "run_integration", "run_check"):
+                    "integration_targets", "check_args", "run_lib", "run_integration", "run_check"):
             self.assertIn(key + "=", output)
         self.assertEqual(json.loads(result["matrix"])["crates"][0]["name"], "shamir-lib")
+
+    def test_integration_targets_deduplicate_and_sort_across_packages(self):
+        data = metadata()
+        for package in data["packages"]:
+            package["targets"].append({"name": "shared", "kind": ["test"]})
+        source = matrix([
+            row("shamir-lib", integration=["shamir-lib_tests", "shared"]),
+            row("shamir-server", integration="all"),
+        ])
+        result = filterset.consume(source, data)
+        self.assertEqual(
+            result["integration_targets"],
+            "--test shamir-lib_tests --test shamir-server_other --test shamir-server_tests --test shared",
+        )
 
 
 class PlanTests(unittest.TestCase):
@@ -225,6 +243,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(selected["integration_args"], "-p bin-only")
         self.assertEqual(selected["integration_filter"],
                          "(kind(test) and package(=bin-only) and binary(=binary_test))")
+        self.assertEqual(selected["integration_targets"], "--test binary_test")
 
     def test_schedule_is_only_top_crates_lib_and_integration(self):
         result = filterset.plan("schedule", {}, metadata())
