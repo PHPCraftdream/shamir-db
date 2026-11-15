@@ -32,7 +32,7 @@ pub struct RepoInstance {
     /// D2 P1d-2b: repo liveness token. `Some(Arc<()>)` on every FOREGROUND
     /// clone (the strong count == number of live foreground clones); `None`
     /// on the single BACKGROUND clone the drain task owns
-    /// ([`clone_for_background`](Self::clone_for_background)) so the task does
+    /// (`RepoCore::clone_for_background`) so the task does
     /// NOT keep the repo alive. The drain loop holds a `Weak<()>` of this and
     /// exits when the strong count reaches zero.
     live: Option<Arc<()>>,
