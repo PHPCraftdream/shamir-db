@@ -1,40 +1,5 @@
-//! R1-c — `run_follower_loop`: the background follower engine
-//! (REPLICATION §4/§5.2/§5.3/§5.6).
-//!
-//! Responsibilities, in order per iteration:
-//!   1. [`hello`](super::source::ReplSource::hello) once at start to seed the
-//!      max-seen `leader_epoch` (VR-style fencing, §5.2).
-//!   2. Loop (until cancelled):
-//!      - read the durable `replication_bookmark` for `(db, repo)` on the
-//!        follower;
-//!      - `pull(db, repo, bookmark+1, limit, wait_ms=poll_wait_ms)`;
-//!      - verify/adopt upstream identity FIRST, before leader-epoch fencing;
-//!      - **epoch-fence (§5.2):** if the reply's epoch is strictly lower
-//!        than the max seen, terminate with [`ReplError::StaleLeaderEpoch`];
-//!        otherwise record the new max;
-//!      - **gap-stop (§5.3 / R1 simplification):** if the reply carries
-//!        `gap_at: Some(g)` with `g > from_version`, the follower is
-//!        permanently missing `[from_version, g)` — log at `warn!`/`error!`
-//!        and terminate with [`ReplError::JournalGap`] WITHOUT applying any
-//!        events in that same reply (the supervisor marks the subscription
-//!        `resync_required`; full automated snapshot reseed is R2);
-//!      - decode the events payload (`Vec<ReplicatedEvent>`);
-//!      - apply the decoded batch through `apply_replicated_batch`: reserve
-//!        a flushed local-version upper bound before any history write, then
-//!        flush history once before the covering bookmark set+flush;
-//!      - no cursor advancement or acknowledgement precedes bookmark flush;
-//!      - if no events were returned, the leader already long-polled
-//!        `wait_ms`, so a small backoff is optional but harmless.
-//!
-//! **§5.6 invariant:** this is a background task. It holds NO follower locks
-//! and never blocks the follower's own commits. Transient transport errors
-//! are logged + retried with backoff. Epoch/gap/rejection and reopen-required
-//! errors terminate the loop; a dead destination gate is never retried.
-
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
-use shamir_db::repl_binding::SubscriptionLease;
 
 use shamir_db::engine::{
     tx::ReplicatedEvent,
@@ -45,9 +10,15 @@ use shamir_query_types::wire::repl::ReplResponse;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::error::ReplError;
-use super::source::seed::terminal::{clear_stall, note_swallowed_failure};
-use super::source::{leader_epoch_of, ReplSource};
+use crate::replication::error::ReplError;
+use crate::replication::source;
+use crate::replication::source::seed::terminal::{clear_stall, note_swallowed_failure};
+use crate::replication::source::{leader_epoch_of, ReplSource};
+
+use super::config::FollowerLoopConfig;
+
+#[cfg(test)]
+use super::test_hooks::{ApplyParkHook, IdentityStoreOverride};
 
 /// Default pull batch size (REPLICATION §6.1 `pull_limit`). Each pull returns
 /// up to this many events; a larger batch amortises the per-pull overhead,
@@ -81,147 +52,6 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 /// 30 s), a genuinely stuck loop surfaces within minutes.
 pub(crate) const STALL_VISIBILITY_THRESHOLD: usize = 10;
 
-/// Configuration for [`run_follower_loop`]: per-repo identity + tunables,
-/// grouped so the loop entry point stays under the argument-count lint and
-/// callers can build the config once and reuse it across restarts.
-///
-/// `Debug` is implemented manually because the lease (an `Arc` over the
-/// db-side [`SubscriptionLease`], which carries a `tokio::sync::RwLock`) has
-/// no `Debug` impl of its own in `shamir-db`.
-#[derive(Clone)]
-pub struct FollowerLoopConfig {
-    /// Stable identity advertised in `ReplHello`.
-    pub node_id: String,
-    /// Target database on both leader and follower (must match).
-    pub db: String,
-    /// Target repo on both leader and follower (must match).
-    pub repo: String,
-    /// Long-poll budget forwarded to each `pull` (ms). The leader blocks
-    /// up to this long waiting for new events before returning an empty
-    /// batch (REPLICATION §5.1).
-    pub poll_wait_ms: u32,
-    pub validate_replicated_payload: bool,
-    /// S5c-X PR7: the universal leader-identity fence on every Hello/Pull.
-    /// `true` in production; tests may disable it through this explicit seam
-    /// to exercise the unprotected path (negative control).
-    #[cfg(test)]
-    pub(crate) identity_fence: bool,
-    /// Test/bound hook: if `Some(n)`, the loop exits cleanly after `n`
-    /// iterations. `None` = run forever (until `cancel` fires). Production
-    /// callers pass `None`; tests pass a small cap to avoid relying on
-    /// cancellation timing.
-    pub max_iterations: Option<usize>,
-    /// S5c-X round 3: the subscription this loop serves. Empty means
-    /// "unsupervised loop" (direct/test callers) with no lease — the
-    /// lease gates below are skipped entirely — and stall visibility is
-    /// disabled. A non-empty name enables PR6b-3 stall visibility: when the
-    /// loop swallows [`STALL_VISIBILITY_THRESHOLD`] consecutive failures
-    /// without bookmark progress, that subscription row is marked with a
-    /// persistent `status_message` (the supervisor always sets it).
-    pub subscription: String,
-    /// S5c-X round 4: the per-subscription generation lease — the loop
-    /// applies only while the lease is valid. `None` for unsupervised
-    /// loops (empty [`Self::subscription`]).
-    pub lease: Option<Arc<SubscriptionLease>>,
-    /// Test-only apply park for selected target loops.
-    #[cfg(test)]
-    pub(crate) apply_park: Option<Arc<ApplyParkHook>>,
-    /// Per-loop exit notification for test observability.
-    #[cfg(test)]
-    pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
-}
-
-impl std::fmt::Debug for FollowerLoopConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FollowerLoopConfig")
-            .field("node_id", &self.node_id)
-            .field("db", &self.db)
-            .field("repo", &self.repo)
-            .field("poll_wait_ms", &self.poll_wait_ms)
-            .field(
-                "validate_replicated_payload",
-                &self.validate_replicated_payload,
-            )
-            .field("max_iterations", &self.max_iterations)
-            .field("subscription", &self.subscription)
-            .field(
-                "lease",
-                &self
-                    .lease
-                    .as_ref()
-                    .map(|l| format!("generation={}", l.generation)),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-impl FollowerLoopConfig {
-    /// Build a config for one `(db, repo)` follower with the given poll
-    /// budget and NO iteration cap (run until cancelled).
-    pub fn new(node_id: impl Into<String>, db: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self {
-            node_id: node_id.into(),
-            db: db.into(),
-            repo: repo.into(),
-            poll_wait_ms: 5000,
-            validate_replicated_payload: false,
-            #[cfg(test)]
-            identity_fence: true,
-            max_iterations: None,
-            subscription: String::new(),
-            lease: None,
-            #[cfg(test)]
-            apply_park: None,
-            #[cfg(test)]
-            exit_hook: None,
-        }
-    }
-
-    /// Override the long-poll budget (ms).
-    #[must_use]
-    pub fn with_poll_wait_ms(mut self, ms: u32) -> Self {
-        self.poll_wait_ms = ms;
-        self
-    }
-
-    #[must_use]
-    pub fn with_validate_replicated_payload(mut self, validate: bool) -> Self {
-        self.validate_replicated_payload = validate;
-        self
-    }
-
-    /// Disable the universal identity fence (negative-control tests only).
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn with_identity_fence(mut self, enabled: bool) -> Self {
-        self.identity_fence = enabled;
-        self
-    }
-
-    /// Set the iteration cap (mainly for tests).
-    #[must_use]
-    pub fn with_max_iterations(mut self, n: usize) -> Self {
-        self.max_iterations = Some(n);
-        self
-    }
-
-    /// Set the subscription row to mark on a no-progress stall
-    /// ([`STALL_VISIBILITY_THRESHOLD`] swallowed failures without bookmark
-    /// progress). The supervisor wires this; direct callers may omit it.
-    #[must_use]
-    pub fn with_subscription(mut self, name: impl Into<String>) -> Self {
-        self.subscription = name.into();
-        self
-    }
-}
-
-/// Overrides only identity persistence for full-loop durability regressions.
-#[cfg(test)]
-pub(crate) struct IdentityStoreOverride {
-    pub(crate) info: Arc<dyn shamir_db::storage::types::Store>,
-    pub(crate) startup_reflush: bool,
-}
-
 /// Round 12 F1: a stall/clear DECISION recorded while the apply-gate READ
 /// guard is held. Persistence (which takes the replication control lock
 /// inside `set_subscription_status_message`) happens only after the guard
@@ -231,16 +61,6 @@ enum PendingStall {
     Clear(u64),
     /// Another swallowed failure: report a stall at the current streak.
     Note(String),
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ApplyParkHook {
-    pub(crate) repo: Option<String>,
-    pub(crate) after_apply: bool,
-    pub(crate) arrived: Arc<tokio::sync::Notify>,
-    pub(crate) release: Arc<tokio::sync::Notify>,
-    pub(crate) exited: Arc<tokio::sync::Notify>,
 }
 
 /// Test-only park at the configured phase; cancellation releases a parked loop.
@@ -263,27 +83,6 @@ async fn apply_park_wait(
     } else {
         true
     }
-}
-
-#[cfg(test)]
-impl std::fmt::Debug for IdentityStoreOverride {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdentityStoreOverride")
-            .field("startup_reflush", &self.startup_reflush)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Run the complete production loop body with a test-only identity store.
-#[cfg(test)]
-pub(crate) async fn run_follower_loop_with_identity_store(
-    db: Arc<ShamirDb>,
-    source: Arc<dyn ReplSource>,
-    cfg: FollowerLoopConfig,
-    cancel: CancellationToken,
-    identity_store: IdentityStoreOverride,
-) -> Result<(), ReplError> {
-    run_follower_loop_internal(db, source, cfg, cancel, Some(identity_store)).await
 }
 
 /// Run the follower replication pull-loop for one `(db, repo)` against
@@ -323,7 +122,7 @@ pub async fn run_follower_loop(
     .await
 }
 
-async fn run_follower_loop_internal(
+pub(super) async fn run_follower_loop_internal(
     db: Arc<ShamirDb>,
     source: Arc<dyn ReplSource>,
     cfg: FollowerLoopConfig,
@@ -359,7 +158,7 @@ async fn run_follower_loop_internal(
         ApplyPolicy::Trusted
     };
     // 1. hello → seed max-seen epoch (§5.2).
-    let seed_receipt = super::source::seed::fence::load_receipt(&db, &db_name, &repo).await?;
+    let seed_receipt = source::seed::fence::load_receipt(&db, &db_name, &repo).await?;
     #[cfg(test)]
     let startup_reflush = identity_store
         .as_ref()
@@ -367,7 +166,7 @@ async fn run_follower_loop_internal(
     #[cfg(not(test))]
     let startup_reflush = true;
     if identity_fence && startup_reflush {
-        super::identity_fence::checks::prepare_subscription(
+        crate::replication::identity_fence::checks::prepare_subscription(
             &db,
             &db_name,
             &repo,
@@ -404,7 +203,7 @@ async fn run_follower_loop_internal(
                     &Arc<dyn shamir_db::storage::types::Store>,
                 > = None;
                 if let Some(info) = override_info {
-                    super::identity_fence::checks::fence_hello_identity(
+                    crate::replication::identity_fence::checks::fence_hello_identity(
                         info,
                         &db_name,
                         &repo,
@@ -413,7 +212,7 @@ async fn run_follower_loop_internal(
                     )
                     .await?;
                 } else {
-                    super::identity_fence::checks::fence_hello_recorded(
+                    crate::replication::identity_fence::checks::fence_hello_recorded(
                         &db,
                         &db_name,
                         &repo,
@@ -423,9 +222,9 @@ async fn run_follower_loop_internal(
                     .await?;
                 }
             } else {
-                super::source::seed::fence::fence_hello(seed_receipt.as_ref(), &resp)?;
+                source::seed::fence::fence_hello(seed_receipt.as_ref(), &resp)?;
             }
-            super::source::leader_epoch_of(&resp)
+            source::leader_epoch_of(&resp)
         }
         // A hello that already trips fencing is fatal — propagate.
         Err(e @ ReplError::StaleLeaderEpoch { .. })
@@ -639,7 +438,7 @@ async fn run_follower_loop_internal(
                 .tx_info_store()
                 .await
                 .map_err(|error| ReplError::Bookmark(error.to_string()))?;
-            super::identity_fence::checks::fence_pull_identity(
+            crate::replication::identity_fence::checks::fence_pull_identity(
                 &info,
                 &resp,
                 seed_receipt.as_ref(),
@@ -647,7 +446,7 @@ async fn run_follower_loop_internal(
             )
             .await?;
         } else {
-            super::source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
+            source::seed::fence::fence_pull(seed_receipt.as_ref(), &resp)?;
         }
 
         // 4. epoch-fence (§5.2) — check BEFORE touching the payload.
