@@ -20,7 +20,7 @@
 #             to_path/to_item identify the head binary id/test name
 
 [[campaigns]]
-name = "engine-layering-R1"
-packages = ["shamir-engine", "shamir-engine-query"]
-delta = ".rust-guard/stages/engine-layering-R1.toml"
-discovery_delta = ".rust-guard/stages/engine-layering-R1-discovery.toml"
+name = "engine-layering-R3b"
+packages = ["shamir-engine"]
+delta = ".rust-guard/stages/engine-layering-R3b.toml"
+discovery_delta = ".rust-guard/stages/engine-layering-R3b-discovery.toml"

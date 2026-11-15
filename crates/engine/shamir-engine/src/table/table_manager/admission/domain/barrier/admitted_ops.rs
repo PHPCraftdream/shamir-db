@@ -20,9 +20,9 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use super::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 use super::TableManager;
 use crate::index2::state::IndexState;
-use crate::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 use crate::repo::RepoWritePermit;
 use crate::table::MigrationFreezeGuard;
 

@@ -50,6 +50,7 @@ pub(in crate::table) mod accessors;
 mod barriers;
 pub(crate) use barriers::MigrationFreezeError;
 pub mod diagnostics;
+pub mod migration;
 pub(in crate::table) mod operations;
 pub(in crate::table) mod transactions;
 

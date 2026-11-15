@@ -173,8 +173,8 @@ impl<'a> TableInfoStoreReadView<'a> {
     pub async fn load_migration_state(
         &self,
         id: &str,
-    ) -> DbResult<Option<crate::migration::MigrationState>> {
-        crate::migration::MigrationCoordinator::load_state(&self.manager.info_store, id).await
+    ) -> DbResult<Option<super::migration::MigrationState>> {
+        super::migration::MigrationCoordinator::load_state(&self.manager.info_store, id).await
     }
 
     /// Prefix scan over this table's sidecar metadata (`info`) store.
