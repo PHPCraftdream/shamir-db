@@ -244,3 +244,34 @@ What must be observed in CI for this document's claims:
 - `persist_count_after_idle=0` after ≥3 flusher ticks (claim §4).
 - per-keyspace-open wall time roughly constant and dominating a quiet
   reopen (hypothesis §2.1).
+
+## 7. Measured on CI (one run, `workflow_dispatch` of `shamir-storage`, run 43725029429)
+
+The measurement test was run once on the three runner families with a deliberate final failure so that the log shows the
+output of the test. One run per OS: the numbers are indicative, not statistics (the outliers below are real).
+
+| Step | ubuntu-latest | macos-latest | windows-latest |
+|---|---|---|---|
+| `FjallRepo::new` (Database open) | 3 ms | 16 ms | 20 ms |
+| 16 sequential keyspace opens, sum | 43 ms | 411 ms | 1217 ms |
+| keyspace open, typical single | 2-4 ms | 14-51 ms | 26-74 ms (outliers 154 ms and 446 ms) |
+| `persist` count after the quiet open | 0 | 0 | 0 |
+| `persist` count after 1.6 s idle (7+ flusher ticks) | 0 | 0 | 0 |
+| `flush()` with nothing dirty (one SyncAll) | 0 ms | 1 ms | 0 ms |
+| close and directory removal | 6 ms | 13 ms | 14 ms |
+
+What this settles:
+
+- Section 4 holds as an executable fact on all three OS: a quiet open and an idle store issue NO `persist(SyncAll)`; the
+  500 ms flusher does nothing while `dirty_count == 0`. The earlier "SyncAll every 500 ms on an idle store" is false.
+- A keyspace open is about 17 times slower on Windows than on Linux (median 44 ms against 2.5 ms); the 16 opens of one
+  system-store open cost about 1.2 s on Windows against 43 ms on Linux.
+- This accounts for about 1.2 s of the roughly 6.4 s that `win-test-runtime.md` attributes to one system-store open on
+  Windows. About 5 s lie elsewhere in the system-store open path: not in the raw Fjall open, not in an idle flusher, and
+  not in a SyncAll of an empty store (all measured near zero here). The remaining candidates are the work done while the
+  catalogue is created (the DDL path persists with SyncAll per statement on a fresh store, section 2), and the
+  construction around the store. A second measurement is needed before any fix is chosen: time marks inside
+  `ShamirDb`'s system-store open, over the real code path, on `windows-latest`.
+- Consequence for the options of section 5: lazily opening the catalogue tables or one keyspace with prefixes can save at
+  most about 1.2 s per open on Windows, not the whole 6.4 s; parallel open of the 7 stores helps a server start but not a
+  single system-store open. Do not pick an option before the second measurement.
