@@ -275,3 +275,64 @@ What this settles:
 - Consequence for the options of section 5: lazily opening the catalogue tables or one keyspace with prefixes can save at
   most about 1.2 s per open on Windows, not the whole 6.4 s; parallel open of the 7 stores helps a server start but not a
   single system-store open. Do not pick an option before the second measurement.
+
+## 8. Second measurement: phases of a system-store open (BOOT-COST-2)
+
+Section 7 left about 5 s of the 6.4 s per system-store open on Windows unexplained. The test
+`crates/engine/shamir-db/src/shamir_db/tests/repo/boot_cost2_tests.rs` (`boot_cost2_system_store_open_phases`, fjall
+feature, plain test, no production change) replays the real open phase by phase and prints one line per phase:
+`BOOT-COST2 phase=<name> ms=<wall> persist_sync_all=<FJALL_PERSIST_SYNC_ALL_COUNT after the phase>`. The output of a
+passing test is hidden by nextest; the orchestrator reads it on a throwaway branch that fails at the end.
+
+### 8.1 The real call sequence (OBSERVED)
+
+`ShamirDb::init` -> `init_inner` (`crates/engine/shamir-db/src/shamir_db/shamir_db/core.rs:290`):
+
+1. `SystemStore::init_with_durability` (`system_store/store.rs:153`)
+   1. `DbInstance::new()` (`store.rs:157`)
+   2. `BoxRepoFactory::fjall(path)` and `RepoConfig` with 13 `add_table` (`store.rs:159-184`)
+   3. `DbInstance::add_repo_with_durability` (`store.rs:187`; `crates/engine/shamir-engine/src/db_instance/db_instance.rs:62`)
+      -> `RepoInstance::from_factory_with_durability`
+      (`crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs:51-80`):
+      `from_factory_unrecovered` (Database open + MemBuffer wrap, `lifecycle.rs:165`), `set_durability` (`:66`),
+      `tx_info_store` (opens `__tx__`, `:69`), `classify_follower_bookmark` (`:70`), `write_domain().admit()` (`:71`),
+      `repo_identity_admitted` (`:76`; `load_or_create` writes the identity on a fresh store), `recover_v2_inflight_admitted`
+      (`:77`; recovery and certification, may persist).
+   4. `rebuild_group_names` (`store.rs:212`) -> `load_groups` (opens the three `groups` stores).
+2. `WasmEngine::with_compile_cache` (or `new`), `FunctionRegistry::with_catalogue_builtins`, `GlobalVars::seed_env`,
+   `ValidatorRegistry::new` (`core.rs:305-324`).
+3. `load_databases`, `load_repositories`, `load_tables` (`core.rs:398-413`), re-attach of each persisted repo
+   (`add_repo_with_durability`, `core.rs:420-470`), `load_functions`, `load_validators`, `boot_compile_schemas`,
+   `refresh_resync_quarantine_cache` (`core.rs:470-600`).
+
+NOT separable without a production change: inside step 1.3 the engine steps are crate-private to `shamir-engine`
+(`from_factory_unrecovered`, `repo_identity_admitted`, `recover_v2_inflight_admitted`), and `rebuild_group_names` is
+private to `system_store`. The test times the smallest enclosing public call (B3 for 1.3; `load_groups` is read warm in C2
+and its first-touch cost is read in B4 `groups`). The persist counter after B3 still shows whether 1.3 persists.
+
+### 8.2 Test phases, hypotheses, what the numbers must show
+
+| Phase | Replays | Hypothesis | Confirmed if | Rejected if |
+|---|---|---|---|---|
+| A1 `raw_factory_create` | `BoxRepoFactory::fjall(..).create()`, separate dir | Database open is cheap (section 7: 20 ms) | about 20 ms on windows | tens of ms or more |
+| A2 `raw_16_keyspace_opens` | 16 `store_get` | about 1.2 s on windows (section 7) | 1.0-1.5 s on windows | far from 1.2 s: section 7 is not reproducible in this run |
+| B1, B2 | `DbInstance::new`, 13-table config | about 0 ms | under 5 ms | any visible cost |
+| B3 `add_repo_with_durability` | step 1.3 | Dominant part of the missing time: identity write plus recovery and certification persist with SyncAll on a fresh store, each SyncAll costing 100+ ms on Windows | ms large (seconds) on windows AND `persist_sync_all` after B3 is above 0 | `persist_sync_all` stays 0 and ms is about A1 plus 4 keyspace opens |
+| B4 `first_get_table_*` (4 lines) | boot readers touching the 4 catalogue tables | each about 3 keyspace opens (~130 ms on windows), plus index and table context load | 4 lines sum to about 0.5 s on windows | much larger: table creation does more than store opens |
+| B_sum | B1 to B4 | equals C1 plus the loads within noise | B_sum within 20% of C1 + C2..C5 | far off: the replay misses a real step |
+| C1 `system_store_init_whole` | real `SystemStore::init_with_durability` | this plus section 8 phase D is most of the 6.4 s | C1 on windows is 3 s or more | C1 is about 1.5 s: the rest is outside the open |
+| C2-C5 `load_*_warm` | readers on an open store | about 0 ms (stores already open) | under 10 ms | a warm read costs ms: read path itself is slow |
+| C6, C7 | `load_functions`, `load_validators` | first touch opens 3 stores each, ~130 ms on windows; not done by `SystemStore::init` itself | about 100-150 ms each | about 0 |
+| D1 `wasm_engine_with_compile_cache` | wasmtime engine plus private-directory verification of the cache dir | Possible unexplained cost on Windows (directory ACL verification, engine creation) | ms large on windows, small on linux | about the same as D2-D4 |
+| D2-D4 | registries, `seed_env` | about 0 ms | under 5 ms | any visible cost |
+| E1 `shamir_db_init_fresh_whole` | the public entry point, fresh dir | E1 is about C1 + D + the boot loads; cross-check of the sum | E1 within 20% of C1 + D1..D4 + C6 + C7 | E1 much larger: a step of `init_inner` step 3 not replayed (the load/compile steps) |
+| E2 `create_db_first_ddl` | first catalogue write | DDL persists with SyncAll per statement on a fresh store, creates catalogue tables | `persist_sync_all` rises and ms is large on windows | about 0 ms and no persist |
+| E3 `flush_all_waiting` | durable flush of all repos | one or a few SyncAll | ms large on windows | about 0 ms |
+| E4 `drop` | close | cheap; lock release is lazy | under 20 ms | seconds |
+| F1 `shamir_db_init_reopen_whole` | quiet reopen of the same directory | much cheaper than E1 (no identity write, no creation); `attempts` above 1 means the lock was still held and its wait is included | F1 well below E1, persist count unchanged from E4 | F1 about E1: the cost is not on the fresh-store work |
+| G `tempdir_removal_all` | recursive delete of 5 trees | section 7: about 14 ms per tree | tens of ms | seconds: the close-and-delete part of the 6.4 s |
+
+Reading the result: the 5 missing seconds are located by the largest of B3, C6+C7, D1, E2 and G on windows-latest, and by
+the persist counter moving or not. If B3 and E1 are both small, section 7's 6.4 s is not the open itself but the test
+fixtures around it (server boot, data-dir lock, other stores), and the next measurement must be at server launch
+(`launch.rs`), not in the system store. Numbers are filled in here after the CI run.
