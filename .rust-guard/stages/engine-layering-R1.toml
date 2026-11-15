@@ -1511,3 +1511,117 @@ to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/v
 to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_unindexed_field_scan_logs_warning"
 reason = "R1: moved with its module"
 owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_without_batch_cache_scans_per_probe"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_insert_through_execute_insert_tx_scans_parent_once"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_cache_amortizes_parent_scans_and_keeps_staged_visibility"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_bindings_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_matching_op_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::accept_validator_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::reject_validator_returns_failed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::priority_order_and_collect_all"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::stop_halts_remaining_validators"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::missing_validator_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::trap_validator_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_registry_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_final_staged_state_matrix"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_staged_corrupt_parent_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::validator_db_fk_sees_staged_parent_in_same_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_table_fails_closed_on_decode_corrupt_row"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_self_fails_closed_on_decode_corrupt_row"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_multi_child_rows_unindexed_parent_correct_decisions"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_unindexed_field_scan_logs_warning"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
