@@ -9,7 +9,6 @@ use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::Repo as _;
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -166,6 +165,5 @@ impl RepoInstance {
 /// `crate::repo::durability_policy::checkpoint_allocation_floor`). Resolves
 /// the journal store and delegates to the repo-layer core.
 pub(crate) async fn checkpoint_allocation_floor(repo: &RepoInstance) -> DbResult<u64> {
-    let store = repo.core.repo.store_get("__changelog__").await?;
-    crate::repo::durability_policy::checkpoint_allocation_floor_for(store).await
+    repo.core.checkpoint_allocation_floor().await
 }

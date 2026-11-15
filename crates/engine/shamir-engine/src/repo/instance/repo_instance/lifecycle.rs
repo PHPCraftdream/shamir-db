@@ -6,7 +6,9 @@ use crate::table::interner_manager::InternerManager;
 use crate::table::TableConfig;
 use crate::tx::CommitTailBarrier;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{Repo, Store};
+#[cfg(any(test, feature = "test-util"))]
+use shamir_storage::types::Repo as _;
+use shamir_storage::types::Store;
 use shamir_types::types::common::THasher;
 use std::sync::Arc;
 
@@ -38,7 +40,7 @@ impl RepoInstance {
     }
 
     pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
-        self.core.horizon.commit_tail()
+        self.core.commit_tail()
     }
 
     /// cancel-safe: yes — timeout or cancellation only stops this wait.
@@ -60,7 +62,7 @@ impl RepoInstance {
     /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
     /// field doc on [`marker_write_mutex`](Self) for why this exists.
     pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
-        &self.core.durability_handle.marker_write_mutex
+        self.core.marker_write_mutex()
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
@@ -179,7 +181,7 @@ impl RepoInstance {
     /// S5c-X PR6b-2a: this repository's write-admission domain (one per
     /// repository instance, shared by every clone).
     pub fn write_domain(&self) -> &Arc<RepoWriteDomain> {
-        &self.core.durability_handle.write_domain
+        self.core.write_domain()
     }
 
     /// Repository name.
@@ -202,7 +204,7 @@ impl RepoInstance {
     /// Per-table MvccStore map used by the commit pipeline to route
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
-        &self.core.catalog.per_table_mvcc
+        self.core.per_table_mvcc()
     }
 
     /// F-28 Step 4 (#831): this repo's cached reverse-FK map. See
@@ -215,7 +217,7 @@ impl RepoInstance {
     }
     /// Atomic transaction telemetry counters.
     pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
-        self.core.horizon.tx_metrics()
+        self.core.tx_metrics()
     }
 
     /// Returns the repo's transactional info_store under the
@@ -228,7 +230,7 @@ impl RepoInstance {
     /// `crate::tx::commit`) so a clean restart can seed the gate
     /// without scanning every active WAL marker.
     pub async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
-        self.core.repo.store_get("__tx__").await
+        self.core.tx_info_store().await
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -268,29 +270,8 @@ impl RepoInstance {
     /// cancellation occurs during init the cell stays empty and the next
     /// caller retries. Returned manager is a cheap clone (all internal Arcs
     /// are shared).
-    ///
-    /// The per-repo [`InternerManager`] (Stage I — moved from per-table to
-    /// per-repo ownership). Backed by the dedicated `"__interner__"` store,
-    /// distinct from `"__tx__"` (recovery markers) so the two durability
-    /// streams — chunked interner deltas vs. last-committed/next-tx markers —
-    /// never collide. Built once on first access; every
-    /// [`TableManager`](crate::table::TableManager) shares this one manager
-    /// via `with_interner`, so a field name resolves to ONE id across all
-    /// tables in the repo. V2 WAL recovery resolves this single interner
-    /// instead of a per-table one (Stage I keystone).
     pub async fn repo_interner(&self) -> DbResult<InternerManager> {
-        self.core
-            .catalog
-            .repo_interner
-            .get_or_try_init(|| async {
-                let store: Arc<dyn Store> = self.core.repo.store_get("__interner__").await?;
-                Ok::<InternerManager, DbError>(InternerManager::new_labeled(
-                    store,
-                    self.name().to_string(),
-                ))
-            })
-            .await
-            .cloned()
+        self.core.repo_interner().await
     }
     /// cancel-safe: NO — delegates to `recover_inflight_v2` which iterates
     /// entries and replays each one then removes its WAL marker. Mid-
@@ -345,33 +326,7 @@ impl RepoInstance {
     /// Best-effort over all tables: a per-store flush error is logged and the
     /// first one returned after attempting them all.
     pub async fn flush_all_history(&self) -> DbResult<()> {
-        let mut mvccs = Vec::new();
-        self.core.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
-            mvccs.push(Arc::clone(mvcc));
-            true
-        });
-        let mut first_err: Option<DbError> = None;
-        let any = !mvccs.is_empty();
-        for mvcc in mvccs {
-            if let Err(e) = mvcc.flush_history_drain().await {
-                log::warn!("flush_all_history: {}: {}", self.name, e);
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-        if any {
-            if let Err(e) = self.core.repo.persist_once().await {
-                log::warn!("flush_all_history: persist_once {}: {}", self.name, e);
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        self.core.flush_all_history().await
     }
 
     /// Durability flush for a `synced` commit, batched via group-commit so

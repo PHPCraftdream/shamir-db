@@ -142,6 +142,10 @@ mod exec;
 mod fk;
 mod runner;
 
+pub(crate) use control::implicit::{
+    begin_implicit_batch_tx, begin_implicit_batch_tx_with_isolation, commit_implicit_batch_tx,
+    run_implicit_batch_tx,
+};
 pub(crate) use control::receipts;
 use control::{authorized, op_watchdog};
 pub(crate) use exec::exec_scope;

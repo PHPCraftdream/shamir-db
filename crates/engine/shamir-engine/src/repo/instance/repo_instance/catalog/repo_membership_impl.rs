@@ -12,8 +12,6 @@ use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{fully_unwrap_store, Repo, Store};
-use tokio::sync::OnceCell;
 
 use super::super::RepoInstance;
 
@@ -34,22 +32,7 @@ impl RepoInstance {
         token: u64,
         permit: &RepoWritePermit,
     ) -> DbResult<Option<TableManager>> {
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        let name = self
-            .core
-            .catalog
-            .token_names
-            .read_sync(&token, |_, name| name.clone());
-        match name {
-            Some(name) => self
-                .get_table_admitted_unfenced(&name, permit)
-                .await
-                .map(Some),
-            None => Ok(None),
-        }
+        self.core.table_by_token_admitted(token, permit).await
     }
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
@@ -78,7 +61,7 @@ impl RepoInstance {
         // await state on the heap instead of widening this fn's future,
         // which is embedded inline in every catalogue read/write along the
         // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        Box::pin(self.core.get_table_ctx(table_name, &permit)).await
     }
 
     /// Resolve a table during frozen-source token lookups without checking the name fence.
@@ -89,17 +72,7 @@ impl RepoInstance {
     /// resolves a name for a user request. `pub` (not `pub(crate)`) because
     /// the seed-catalogue walker lives in the downstream `shamir-db` crate.
     pub async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
-        if let Some(table) = self.core.catalog.initialized_table(table_name) {
-            return Ok(table);
-        }
-        let permit = self
-            .core
-            .durability_handle
-            .write_domain
-            .admit()
-            .await
-            .map_err(|error| DbError::Internal(error.to_string()))?;
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        self.core.get_table_unfenced(table_name).await
     }
 
     /// Admitted twin of [`RepoInstance::get_table`]: requires the caller to
@@ -118,221 +91,7 @@ impl RepoInstance {
             .write_domain
             .debug_check_permit(permit);
         self.check_table_rename_fence(table_name)?;
-        Box::pin(self.get_table_ctx(table_name, permit)).await
-    }
-
-    /// Admitted table lookup that deliberately bypasses the rename name fence.
-    ///
-    /// Admitted lookup that ignores the in-doubt rename fence; used by the rename
-    /// machinery itself. Read-only repo-wide walkers use `get_table_unfenced`.
-    pub(super) async fn get_table_admitted_unfenced(
-        &self,
-        table_name: &str,
-        permit: &RepoWritePermit,
-    ) -> DbResult<TableManager> {
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        Box::pin(self.get_table_ctx(table_name, permit)).await
-    }
-
-    async fn get_table_ctx(
-        &self,
-        table_name: &str,
-        permit: &RepoWritePermit,
-    ) -> DbResult<TableManager> {
-        // Clone the `Arc<OnceCell>` out of the DashMap and DROP the shard
-        // guard BEFORE the init `.await`. DashMap shards are backed by a
-        // synchronous `RwLock`; holding the `entry()` write guard across the
-        // long-running `create_table_context().await` (which itself awaits
-        // store_get / tx_gate / changefeed init) is a guard-across-await
-        // deadlock: under runtime oversubscription every worker thread can
-        // become wedged on the OS `RwLock` of a shard whose guard-holder is
-        // parked at an `.await`, and a synchronous lock cannot yield. The
-        // `OnceCell` itself provides the single-init serialization — the
-        // shard lock only needs to protect the map insert, not the init.
-        let cell = Arc::clone(
-            self.core
-                .catalog
-                .tables
-                .entry(table_name.to_string())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .value(),
-        );
-
-        // §B13: existence-check happens INSIDE the init closure, so it
-        // is serialized with the actual context construction. Doing the
-        // check up-front would race with concurrent `remove_table`
-        // between our `configs.contains_key` and the `tables.entry`
-        // install (two independent DashMaps). On a removed table the
-        // init returns Err and `OnceCell::get_or_try_init` leaves the
-        // cell empty so subsequent calls retry.
-        let tbl = cell
-            .get_or_try_init(|| async {
-                if !self.core.catalog.configs.contains_key(table_name) {
-                    return Err(DbError::NotFound(format!(
-                        "Table '{}' is not configured in this repository",
-                        table_name
-                    )));
-                }
-                self.create_table_context(table_name, &cell, permit).await
-            })
-            .await?
-            .clone();
-
-        // Close the insertion-to-OnceCell-completion window against DROP.
-        // No map guard survives an await; rollback can only evict our Arc.
-        let current = self.core.catalog.tables.get(table_name);
-        if !self.core.catalog.configs.contains_key(table_name)
-            || !current
-                .as_ref()
-                .is_some_and(|entry| Arc::ptr_eq(entry.value(), &cell))
-        {
-            if let Some(mvcc) = tbl.mvcc_store() {
-                let _ = self
-                    .core
-                    .catalog
-                    .per_table_mvcc
-                    .remove_if_sync(&table_token_for(table_name), |existing| {
-                        Arc::ptr_eq(existing, &mvcc)
-                    });
-            }
-            return Err(DbError::NotFound(format!(
-                "Table '{table_name}' was removed during initialization"
-            )));
-        }
-        Ok(tbl)
-    }
-
-    /// cancel-safe: yes — all awaits precede MVCC publication. After insert,
-    /// only synchronous ownership checks and builders remain.
-    async fn create_table_context(
-        &self,
-        table_name: &str,
-        cell: &Arc<OnceCell<TableManager>>,
-        permit: &RepoWritePermit,
-    ) -> DbResult<TableManager> {
-        let config = self
-            .core
-            .catalog
-            .configs
-            .get(table_name)
-            .map(|entry| entry.value().clone())
-            .ok_or_else(|| {
-                DbError::NotFound(format!(
-                    "Table '{table_name}' was removed during initialization"
-                ))
-            })?;
-        let id = config.store_id;
-        let names =
-            super::super::table_store::table_store_names(table_name, config.store_id.as_ref());
-        let data_store: Arc<dyn Store> = self.core.repo.store_get(names.data).await?;
-        let info_store: Arc<dyn Store> = self.core.repo.store_get(names.info).await?;
-        let history_store: Arc<dyn Store> = self.core.repo.store_get(names.history).await?;
-
-        let gate = self.tx_gate().await?;
-
-        // This seam models a failure/cancellation in setup that used to run
-        // AFTER registration. It is per-repo and consumed once, never global.
-        #[cfg(test)]
-        if let Some(hook) = self.core.table_init_hook.swap(None) {
-            hook.run().await?;
-        }
-
-        // Complete ALL asynchronous/fallible setup before publication.
-        // __data__ is inert under MVCC; __info__ keeps its wrappers.
-        let data_store = fully_unwrap_store(&data_store).await;
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        // The MVCC store is handed to the open itself (not registered yet):
-        // open-time index rebuilds read the records through it, `__data__` is
-        // inert here and would yield no rows.
-        let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
-        if self
-            .core
-            .catalog
-            .configs
-            .get(table_name)
-            .is_none_or(|current| current.value().store_id != id)
-        {
-            return Err(DbError::NotFound(format!(
-                "Table '{table_name}' changed identity during initialization"
-            )));
-        }
-
-        let tbl = TableManager::open_with_domain_admitted(
-            table_name.to_string(),
-            data_store,
-            info_store,
-            Arc::clone(&self.core.durability_handle.write_domain),
-            permit,
-            Some(Arc::clone(&mvcc)),
-        )
-        .await?;
-        let repo_interner = self.repo_interner().await?;
-
-        let token = table_token_for(table_name);
-        // A13 follow-up: `insert_sync` returns `Err` when the token is
-        // ALREADY present — e.g. a `remove_table(name)` racing this cold
-        // init can let a second `create_table_context` run concurrently
-        // (see `remove_table`'s own A13 doc comment). Silently discarding
-        // that `Err` (the old behavior) leaves the STALE old `MvccStore`
-        // wired into the commit pipeline forever while this freshly-built
-        // `TableManager` reads through its own (orphaned) `mvcc` handle — a
-        // split-brain where committed transactions silently vanish. Fail
-        // the table open outright instead: a lost race here means the
-        // caller's `OnceCell::get_or_try_init` leaves the cell empty and a
-        // retry re-attempts the attach cleanly.
-        if self
-            .core
-            .catalog
-            .per_table_mvcc
-            .insert_sync(token, Arc::clone(&mvcc))
-            .is_err()
-        {
-            log::error!(
-                "create_table_context: per_table_mvcc already has an entry for \
-                 table '{table_name}' (token {token}) — refusing to attach a second \
-                 MvccStore, which would leave a stale store wired into the commit \
-                 pipeline while this TableManager reads through a fresh one (A13 \
-                 split-brain). Failing the table open; retry will re-attempt the \
-                 attach."
-            );
-            return Err(DbError::Internal(format!(
-                "create_table_context: per_table_mvcc attach collision for table \
-                 '{table_name}' (token {token}) — a stale MvccStore entry is still \
-                 registered"
-            )));
-        }
-
-        // DROP may have removed/replaced our OnceCell while setup awaited.
-        // Existence alone is insufficient after DROP + CREATE of the same name.
-        let current = self.core.catalog.tables.get(table_name);
-        if !self.core.catalog.configs.contains_key(table_name)
-            || !current
-                .as_ref()
-                .is_some_and(|entry| Arc::ptr_eq(entry.value(), cell))
-        {
-            let _ = self
-                .core
-                .catalog
-                .per_table_mvcc
-                .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
-            return Err(DbError::NotFound(format!(
-                "Table '{table_name}' was removed during initialization"
-            )));
-        }
-        let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
-
-        // Wire the non-tx write path to the per-repo gate so that
-        // Serializable transactions see non-tx writes in their Phase 2-bis
-        // predicate-conflict check. The table uses the SAME `gate` the tx
-        // commit pipeline uses, keeping non-tx and tx `commit_version`s on
-        // one monotonic sequence per repo.
-        Ok(tbl.with_changefeed(Arc::clone(&gate)))
+        Box::pin(self.core.get_table_ctx(table_name, permit)).await
     }
 
     /// Register a new table in the repository.
