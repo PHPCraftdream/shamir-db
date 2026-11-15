@@ -330,7 +330,7 @@ async fn adoption_retry(park: bool, reflush: bool) {
     };
     let events: Vec<ReplicatedEvent> = rmp_serde::from_slice(&events).unwrap();
     assert_eq!(events.len(), 2);
-    let outcome = apply_replicated_batch(&repo(&follower), &events, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated_batch(repo(&follower).core(), &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(matches!(outcome, ApplyOutcome::Applied { .. }));

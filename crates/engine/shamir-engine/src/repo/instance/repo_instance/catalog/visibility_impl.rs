@@ -1,13 +1,11 @@
 use std::time::Duration;
 
-use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState, VisibilityWait};
+use shamir_query_types::batch::{VisibilityState, VisibilityWait};
 use shamir_storage::error::DbResult;
-use shamir_tx::visibility_metrics::{
-    AckResult, PendingKind, PendingReason, VisibilityMetricsSnapshot,
-};
+use shamir_tx::visibility_metrics::{AckResult, VisibilityMetricsSnapshot};
 use shamir_tx::RepoTxGate;
 
-use crate::repo::gate_visibility::observe_gate_with_budget;
+use crate::repo::gate_visibility::{observe_gate_with_budget, query_ack_result};
 
 use super::super::RepoInstance;
 
@@ -66,43 +64,6 @@ pub(crate) async fn observe_gate_visibility(
         VisibilityWait::Bounded { timeout_ms } => Some(Duration::from_millis(timeout_ms)),
     };
     observe_gate_with_budget(gate, version, budget).await
-}
-
-/// VIS-4c: record the Pending-kind counter at a kind-known call site. The
-/// shared acknowledgement tail serves both explicit and implicit commits,
-/// so attribution must happen where the write family is known. The gate is
-/// always initialized once a commit returned a known outcome; absence is
-/// silently ignored (pure telemetry).
-pub(crate) fn record_pending_kind(
-    gate: Option<&shamir_tx::RepoTxGate>,
-    visibility: VisibilityState,
-    kind: PendingKind,
-) {
-    if let VisibilityState::Pending { reason, .. } = visibility {
-        if let Some(gate) = gate {
-            let reason = match reason {
-                VisibilityPendingReason::Timeout => PendingReason::Timeout,
-                VisibilityPendingReason::ReopenRequired => PendingReason::ReopenRequired,
-            };
-            gate.visibility().record_pending(reason, kind);
-        }
-    }
-}
-
-/// Metric label of a query-contract visibility observation (the tx layer
-/// keeps its own visibility types and its own `ack_result_of`).
-pub(crate) fn query_ack_result(state: VisibilityState) -> AckResult {
-    match state {
-        VisibilityState::Visible => AckResult::Visible,
-        VisibilityState::Pending {
-            reason: VisibilityPendingReason::Timeout,
-            ..
-        } => AckResult::PendingTimeout,
-        VisibilityState::Pending {
-            reason: VisibilityPendingReason::ReopenRequired,
-            ..
-        } => AckResult::PendingReopen,
-    }
 }
 
 impl RepoInstance {
