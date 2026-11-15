@@ -1,5 +1,6 @@
 //! Storage support manifest: interning, persistence traits, record helpers.
 
+pub mod catalog;
 pub mod interner_manager;
 pub mod persistable;
 pub mod record_counter;

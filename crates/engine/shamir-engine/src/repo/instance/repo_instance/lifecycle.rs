@@ -196,7 +196,7 @@ impl RepoInstance {
     /// Per-table MvccStore map used by the commit pipeline to route
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
-        &self.per_table_mvcc
+        &self.catalog.per_table_mvcc
     }
 
     /// F-28 Step 4 (#831): this repo's cached reverse-FK map. See
@@ -253,7 +253,7 @@ impl RepoInstance {
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_repo_interner_for_test(&self, manager: InternerManager) {
         assert!(
-            self.repo_interner.set(manager).is_ok(),
+            self.catalog.repo_interner.set(manager).is_ok(),
             "repo interner must be uninitialized before test injection",
         );
     }
@@ -273,7 +273,8 @@ impl RepoInstance {
     /// tables in the repo. V2 WAL recovery resolves this single interner
     /// instead of a per-table one (Stage I keystone).
     pub async fn repo_interner(&self) -> DbResult<InternerManager> {
-        self.repo_interner
+        self.catalog
+            .repo_interner
             .get_or_try_init(|| async {
                 let store: Arc<dyn Store> = self.repo.store_get("__interner__").await?;
                 Ok::<InternerManager, DbError>(InternerManager::new_labeled(
@@ -333,7 +334,7 @@ impl RepoInstance {
     /// first one returned after attempting them all.
     pub async fn flush_all_history(&self) -> DbResult<()> {
         let mut mvccs = Vec::new();
-        self.per_table_mvcc.iter_sync(|_, mvcc| {
+        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
             mvccs.push(Arc::clone(mvcc));
             true
         });
@@ -463,7 +464,7 @@ impl RepoInstance {
         // `Arc::clone` + push), bounding every wait. The fn stays `async` (the
         // per-store `gc().await` below still legitimately suspends); this scan no
         // longer suspends.
-        self.per_table_mvcc.iter_sync(|_, mvcc| {
+        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
             stores.push(Arc::clone(mvcc));
             true
         });

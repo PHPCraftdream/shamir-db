@@ -223,6 +223,7 @@ impl RepoInstance {
             // inside the shutdown budget and register it for MVCC routing. The
             // map guard is dropped before any await.
             let Some(table) = self
+                .catalog
                 .tables
                 .get(&table_name)
                 .and_then(|cell| cell.get().cloned())
