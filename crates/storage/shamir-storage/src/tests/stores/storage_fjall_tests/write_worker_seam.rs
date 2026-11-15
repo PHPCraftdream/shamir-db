@@ -1,9 +1,11 @@
 //! Test/verification seam for the Fjall write worker's `submit` admission
-//! path. Child module of `storage_fjall` (declared there with `#[path]`),
-//! so `use super::*` keeps giving access to the private `submit`/`WriteJob`
-//! with NO visibility widening.
+//! path. Child module of `storage_fjall` (declared there with `#[path]`);
+//! `submit`/`WriteJob` are `pub(super)` in the worker module and imported
+//! explicitly here.
 
-use super::*;
+use super::worker::{submit, WriteJob};
+use crate::error::DbResult;
+use tokio::sync::oneshot;
 
 fn tjob(reply: oneshot::Sender<DbResult<()>>) -> WriteJob {
     WriteJob::Transact {
