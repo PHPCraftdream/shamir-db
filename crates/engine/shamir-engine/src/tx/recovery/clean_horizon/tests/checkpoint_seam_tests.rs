@@ -67,7 +67,7 @@ async fn checkpoint_failure_prevents_unlink_then_retry_catches_up() {
     let repo = seeded_repo("checkpoint_failure", &dir).await;
     let feed = repo.changefeed().await.unwrap().feed;
     let before_j = feed.clean_horizon();
-    let before_floor = crate::repo::durability_policy::checkpoint_allocation_floor(&repo)
+    let before_floor = crate::repo::instance::repo_instance::checkpoint_allocation_floor(&repo)
         .await
         .unwrap();
     let before = shamirwal_seg_count(&dir);
@@ -77,7 +77,7 @@ async fn checkpoint_failure_prevents_unlink_then_retry_catches_up() {
     assert_eq!(shamirwal_seg_count(&dir), before);
     assert_eq!(feed.clean_horizon(), before_j);
     assert_eq!(
-        crate::repo::durability_policy::checkpoint_allocation_floor(&repo)
+        crate::repo::instance::repo_instance::checkpoint_allocation_floor(&repo)
             .await
             .unwrap(),
         before_floor,

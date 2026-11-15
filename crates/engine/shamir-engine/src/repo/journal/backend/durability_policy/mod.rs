@@ -37,11 +37,6 @@ pub(crate) use durability_policy::RecoverabilityCoverage;
 pub(crate) use durability_policy::{
     checkpoint_allocation_floor_for, install_empty_coverage, read_replication_page,
 };
-// Instance-layer wrappers keep the historical tx-facing paths resolving
-// (`crate::repo::durability_policy::checkpoint_allocation_floor(repo)`,
-// consumed by `tx/recovery/clean_horizon/checkpoint.rs` and its seam tests).
-#[cfg(test)]
-pub(crate) use crate::repo::instance::repo_instance::checkpoint_allocation_floor;
 pub use durability_policy::{DurabilityPolicy, DEFAULT_WAL_RETENTION_MAX_BYTES};
 pub(crate) use replication_bound::replication_bound_observed;
 pub use replication_bound::{replication_bound, REPLICATION_BOUND_WAIT};

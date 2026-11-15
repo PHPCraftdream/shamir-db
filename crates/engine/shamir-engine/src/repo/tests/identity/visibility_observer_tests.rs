@@ -6,7 +6,7 @@ use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState, Visibi
 use shamir_storage::error::DbError;
 use shamir_tx::RepoTxGate;
 
-use crate::repo::visibility_observer::observe_gate_visibility;
+use crate::repo::instance::repo_instance::catalog::visibility_impl::observe_gate_visibility;
 
 const STATUS: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 0 };
 
