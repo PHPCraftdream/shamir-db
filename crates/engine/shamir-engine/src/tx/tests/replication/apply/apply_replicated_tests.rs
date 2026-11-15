@@ -12,8 +12,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{Repo, Store};
-use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -32,7 +33,7 @@ async fn apply_one(
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
     apply_replicated_batch(
-        repo,
+        &repo.core,
         &[ReplicatedEvent {
             event: event.clone(),
             field_bindings: field_bindings.to_vec(),
@@ -376,9 +377,6 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // `try_advance` then needs BOTH N and N+1 terminally marked to advance
     // past N+1. Before the fix N was unmarked, so the watermark was stuck at
     // N-1 = 0 even though M was correctly marked.
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_tx::{StagingStore, TxContext};
     let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
@@ -391,7 +389,9 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // InMemory commit (see durable_watermark_tests::staged_tx).
     local_tx.write_set.insert(7777u64, staging);
 
-    let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
+    let outcome = crate::tx::commit_tx(local_tx, &follower.core)
+        .await
+        .unwrap();
     let m = outcome.commit_version;
     assert!(m > n, "local commit M ({m}) must be > N ({n})");
     assert!(outcome.materialized(), "InMemory local commit is Complete");

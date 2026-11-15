@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_wal::WalEntryV2;
 
@@ -39,7 +39,7 @@ fn is_closed_writer(error: &DbError) -> bool {
 /// existing changefeed boundary reports its exact closed-send sentinel. The
 /// sentinel is stringly typed because the existing production API does not expose a closed-writer type; backend errors are never parsed.
 pub(in crate::tx::drain::drainer) async fn repair_event(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     entry: &WalEntryV2,
 ) -> DbResult<Outcome> {
     let version = entry.commit_version;

@@ -9,7 +9,7 @@ use shamir_storage::types::Store;
 use crate::meta::repl::bookmark_v3::load_bookmark_v3;
 use crate::meta::repl::receipt::load_outstanding_receipt;
 use crate::meta::repl::{ReceiptPhase, ReplicationReceipt};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::ReplicatedEvent;
 
 pub(crate) struct Outstanding {
@@ -20,7 +20,7 @@ pub(crate) struct Outstanding {
 /// A pointer without a stored receipt, or a `Checkpointed` receipt, is a
 /// corrupt state that fail-stops the repo (reopen).
 pub(crate) async fn lookup(
-    _repo: &RepoInstance,
+    _repo: &RepoCore,
     info: &Arc<dyn Store>,
 ) -> DbResult<Option<Outstanding>> {
     let Some(v3) = load_bookmark_v3(info).await? else {

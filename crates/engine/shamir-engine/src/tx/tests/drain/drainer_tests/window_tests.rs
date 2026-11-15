@@ -148,7 +148,7 @@ async fn window_depth_atomic_mirror_matches_tree_across_mutations() {
     assert_eq!(drainer.window_depth(), drainer.window_len());
 
     // 5. drain Phase C remove: depth decrements once per finalized entry.
-    let drained = drainer.drain_all(&repo).await.unwrap();
+    let drained = drainer.drain_all(&repo.core).await.unwrap();
     assert_eq!(drained, 4);
     assert_eq!(drainer.window_depth(), 0, "all finalized → depth 0");
     assert_eq!(drainer.window_depth(), drainer.window_len());

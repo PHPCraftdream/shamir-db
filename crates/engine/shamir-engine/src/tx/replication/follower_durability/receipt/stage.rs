@@ -36,7 +36,7 @@ use crate::repo::meta::repl::{
     MAX_RECEIPT_OPS,
 };
 use crate::repo::meta::{MetaEnvelope, MetaKey};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
 const TX_STORE: &str = "__tx__";
 const CHANGELOG_STORE: &str = "__changelog__";
@@ -260,7 +260,7 @@ fn marker_key(key: MetaKey) -> RecordKey {
 /// anyway).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_plan(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     prepared: &[PreparedEvent],
     bindings: Vec<ReceiptBinding>,
     predecessor_bookmark: u64,
@@ -382,7 +382,7 @@ pub(crate) fn set_counters(plan: &mut BatchPlan, counters: Vec<ReceiptCounterDel
 /// pointer) + floor markers (`LastCommittedVersion`, `NextTxId`) — one
 /// repository-wide batch.
 async fn stage_prepared_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     plan: &BatchPlan,
     old: &BookmarkV3,
@@ -425,12 +425,12 @@ async fn stage_prepared_batch(
     Ok(batch)
 }
 
-async fn load_last_committed_marker(repo: &RepoInstance) -> DbResult<u64> {
+async fn load_last_committed_marker(repo: &RepoCore) -> DbResult<u64> {
     let info = repo.tx_info_store().await?;
     Ok(load_last_committed(&info).await?.unwrap_or(0))
 }
 
-async fn load_next_tx_id_marker(repo: &RepoInstance) -> DbResult<u64> {
+async fn load_next_tx_id_marker(repo: &RepoCore) -> DbResult<u64> {
     let info = repo.tx_info_store().await?;
     Ok(load_next_tx_id_snapshot(&info).await?.unwrap_or(1))
 }
@@ -441,7 +441,7 @@ async fn load_next_tx_id_marker(repo: &RepoInstance) -> DbResult<u64> {
 /// already ran the backend's durable persist; this covers in-memory-ish
 /// wrapper stores and is cheap.
 pub(crate) async fn commit_prepared(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     plan: &BatchPlan,
@@ -559,7 +559,7 @@ pub(crate) fn journal_records(receipt: &ReplicationReceipt) -> DbResult<Vec<(u64
 /// `get_current_many` resolves keys not already covered by the batch's own
 /// pending map; the rest is pure RAM.
 async fn compute_counters(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     events: &[EventOps],
 ) -> DbResult<Vec<ReceiptCounterDelta>> {
@@ -647,7 +647,7 @@ async fn compute_counters(
 /// Materialize work from a fresh plan: compute the counters against the live
 /// pre-state, attach them, and encode the Materialized receipt.
 pub(crate) async fn materialize_from_plan(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     plan: &mut BatchPlan,
 ) -> DbResult<MaterializedWork> {
@@ -687,7 +687,7 @@ pub(crate) async fn materialize_from_plan(
 /// Materialize work from a durable PREPARED receipt (resume): compute the
 /// counters the same way the fresh path would have (nothing was published).
 pub(crate) async fn materialize_from_prepared_receipt(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     receipt: &ReplicationReceipt,
 ) -> DbResult<MaterializedWork> {
@@ -717,7 +717,7 @@ pub(crate) async fn materialize_from_prepared_receipt(
 /// Materialized receipt, and the bookmark pointer moved to the Materialized
 /// id (see `set_counters`' id-stability note) — one repository-wide batch.
 async fn stage_materialized_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     work: &MaterializedWork,
     old: &BookmarkV3,
@@ -790,7 +790,7 @@ async fn stage_materialized_batch(
 /// First-seen table order with the derived store names and the absolute
 /// after-count for each.
 fn table_rows(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     work: &MaterializedWork,
 ) -> DbResult<Vec<(String, String, String, u64)>> {
     let mut order: Vec<String> = Vec::new();
@@ -826,7 +826,7 @@ fn table_rows(
 /// after-counts. NO info flush here — the checkpoint step syncs next; the
 /// counters only need to be visible to `adopt_absolute` in RAM.
 pub(crate) async fn commit_materialized_work(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     work: &MaterializedWork,

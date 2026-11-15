@@ -109,7 +109,7 @@ async fn follower_journal_contains_a_and_b_while_a_broadcast_is_parked() {
     let replicated = events(&[event_a.clone(), event_b.clone()]);
     let events = [event_a, event_b];
 
-    let apply = apply_replicated_batch(&follower, &replicated, 0, ApplyPolicy::Trusted);
+    let apply = apply_replicated_batch(&follower.core, &replicated, 0, ApplyPolicy::Trusted);
     tokio::pin!(apply);
     let parked = tokio::select! {
         biased;
@@ -158,7 +158,7 @@ async fn follower_materialized_failure_emits_no_journal_event_or_gap() {
     test_seam::install("follower", Arc::clone(&hook));
 
     let event = put_event("history-fails", 3, 7);
-    let error = apply_replicated_batch(&follower, &events(&[event]), 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&follower.core, &events(&[event]), 0, ApplyPolicy::Trusted)
         .await
         .expect_err("the injected materialization failure must surface");
     assert!(matches!(&error, DbError::Storage(_)), "{error:?}");

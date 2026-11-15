@@ -18,7 +18,7 @@ async fn ticket_failed_resolution_advances_both_watermarks() {
     let ticket = transfer_pending(&repo, vec![]).await;
     ticket.complete_detached_for_test(WalTicketState::Failed);
     let drainer = Drainer::new();
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
     let gate = repo.tx_gate().await.unwrap();
     assert_eq!(gate.last_committed(), 1);
     assert_eq!(gate.durable_watermark(), 1);
@@ -44,7 +44,7 @@ async fn ticket_pending_blocks_later_orphan_without_recover() {
     let drainer = Drainer::new();
     // Without the pending ceiling, the real later orphan makes vis > dur
     // and the missing v1 triggers recover; this is not an idle-pass oracle.
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
     assert_eq!(gate.last_committed(), 0);
     assert_eq!(gate.durable_watermark(), 0);
     assert_eq!(gate.unresolved_wal_versions(), vec![1]);
@@ -82,7 +82,7 @@ async fn ticket_pending_and_unknown_block_reseed_of_missing_published_prefix() {
         let drainer = Drainer::new();
         assert_eq!(drainer.window_len(), 0);
         let recover_calls = drainer.recover_calls();
-        assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+        assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
         assert_eq!(drainer.recover_calls(), recover_calls);
         assert_eq!(drainer.window_len(), 0);
         assert_eq!(gate.last_committed(), 1);
@@ -94,7 +94,7 @@ async fn ticket_pending_and_unknown_block_reseed_of_missing_published_prefix() {
         if state == WalTicketState::Pending {
             // Once absence is proven, ordinary gap recovery must resume.
             ticket.complete_detached_for_test(WalTicketState::Failed);
-            assert_eq!(drainer.drain_step(&repo).await.unwrap(), 1);
+            assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 1);
             assert_eq!(drainer.recover_calls(), recover_calls + 1);
             assert_eq!(gate.durable_watermark(), 2);
             assert_eq!(
@@ -124,7 +124,7 @@ async fn ticket_written_and_acked_replay_data_and_mark_lazy_pull_gap() {
         ticket.complete_detached_for_test(state);
         let drainer = Drainer::new();
         drainer.set_window_high_watermark(0);
-        assert_eq!(drainer.drain_step(&repo).await.unwrap(), 1);
+        assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 1);
         let gate = repo.tx_gate().await.unwrap();
         assert_eq!(gate.last_committed(), 1);
         assert_eq!(gate.durable_watermark(), 1);
@@ -152,13 +152,13 @@ async fn ticket_unknown_halts_at_predecessor_and_rejects_commit_before_allocatio
     let later = transfer_pending(&repo, vec![]).await;
     later.complete_detached_for_test(WalTicketState::Acked);
     let drainer = Drainer::new();
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 1);
     let gate = repo.tx_gate().await.unwrap();
     assert!(gate.requires_reopen());
     assert_eq!(gate.last_committed(), 1);
     assert_eq!(gate.durable_watermark(), 1);
     assert_eq!(gate.unresolved_wal_versions(), vec![2, 3]);
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
     assert_eq!(drainer.recover_calls(), 0);
     let allocated = gate.version_allocation_high_water_mark();
     let (tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -251,7 +251,7 @@ async fn synced_write_then_sync_failure_publishes_data_before_typed_commit_error
     }
 
     drop(replay_guard);
-    drainer.drain_all(&repo).await.unwrap();
+    drainer.drain_all(&repo.core).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     assert_eq!(gate.last_committed(), 2);
 }

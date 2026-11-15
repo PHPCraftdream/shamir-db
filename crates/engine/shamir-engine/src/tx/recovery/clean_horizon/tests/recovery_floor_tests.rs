@@ -32,7 +32,7 @@ async fn recovery_floor_waits_for_marker_mutex_and_preserves_higher_floor() {
 
     let mutex = Arc::clone(repo.marker_write_mutex());
     let guard = mutex.lock_owned().await;
-    let mut future = Box::pin(reserve_recovery_floor(&repo, &info, 7));
+    let mut future = Box::pin(reserve_recovery_floor(&repo.core, &info, 7));
     assert!(
         futures::poll!(&mut future).is_pending(),
         "helper must wait for the shared marker mutex"

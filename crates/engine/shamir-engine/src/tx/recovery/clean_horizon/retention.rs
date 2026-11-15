@@ -1,6 +1,6 @@
 use shamir_storage::error::DbResult;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetentionAction {
@@ -9,7 +9,7 @@ pub(crate) enum RetentionAction {
 }
 
 pub(crate) async fn enforce_retention(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     safe_ceiling: u64,
 ) -> DbResult<RetentionAction> {
     let group = repo.wal_group().await?;

@@ -139,7 +139,7 @@ async fn crash_at_phase(
     *hook.park_at.lock().unwrap() = Some(phase);
     test_seam::install(name, Arc::clone(&hook));
     let mut apply = Box::pin(apply_replicated_batch(
-        repo,
+        &repo.core,
         events,
         0,
         ApplyPolicy::Trusted,
@@ -204,9 +204,14 @@ async fn assert_settled(repo: &RepoInstance) {
     );
     drop(info);
     assert_eq!(
-        apply_replicated_batch(repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_replicated_batch(
+            &repo.core,
+            &[event(1, 1), event(2, 2)],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Skipped
     );
     let gate = repo.tx_gate().await.unwrap();
@@ -223,8 +228,13 @@ async fn panic_after_materialized_requires_reopen_without_advancing_floors() {
     *hook.panic_after.lock().unwrap() = Some(Phase::Materialized);
     test_seam::install(&name, Arc::clone(&hook));
 
-    let result =
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted).await;
+    let result = apply_replicated_batch(
+        &repo.core,
+        &[event(1, 1), event(2, 2)],
+        0,
+        ApplyPolicy::Trusted,
+    )
+    .await;
     assert!(
         result.is_err(),
         "panicking receipt worker must not report success"
@@ -445,7 +455,7 @@ async fn drop_during_checkpoint_commit_still_completes_and_publishes() {
     let worker_repo = repo.clone();
     let events = vec![event(1, 1), event(2, 2)];
     let caller = tokio::spawn(async move {
-        apply_replicated_batch(&worker_repo, &events, 0, ApplyPolicy::Trusted).await
+        apply_replicated_batch(&worker_repo.core, &events, 0, ApplyPolicy::Trusted).await
     });
     // Deterministic wait until the worker is parked at Phase::Materialized.
     reached.await;
@@ -508,7 +518,7 @@ async fn drop_during_uncertain_readback_still_completes_and_publishes() {
     let worker_repo = repo.clone();
     let events = vec![event(1, 1), event(2, 2)];
     let caller = tokio::spawn(async move {
-        apply_replicated_batch(&worker_repo, &events, 0, ApplyPolicy::Trusted).await
+        apply_replicated_batch(&worker_repo.core, &events, 0, ApplyPolicy::Trusted).await
     });
     checkpoint::wait_reconcile_park_reached().await;
     caller.abort();

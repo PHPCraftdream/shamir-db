@@ -5,7 +5,7 @@ use shamir_tx::{IndexFamily, IndexWriteOp, TxContext};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 
 /// #1100 — Re-derive posting ops for records whose value changed concurrently
@@ -30,7 +30,7 @@ use crate::tx::commit::TxError;
 /// (detected by comparing planned ops), not DEFINITION changes (detected by generation).
 pub(in crate::tx) async fn rederive_stale_value_ops_post_stage(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<(), TxError> {
     // Skip if no base_index tables were touched (zero-cost on common path)
     if tx.base_index_stage_gens.is_empty() {

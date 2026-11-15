@@ -85,7 +85,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     // B1: a present but ACTIVE WAL entry is not a missing-key gap. A later
     // orphan raises the scan bound: the completed "later" commit alone cannot
     // advance contiguous visibility past the still-active version.
-    within("drain_all@54", repo.drainer().drain_all(&repo))
+    within("drain_all@54", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     // Snapshot isolation: a Serializable committer parked after WAL accept still
@@ -142,7 +142,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert!(scan_bound > gate.durable_watermark());
     assert!(scan_bound > active_version);
     let recover_before = repo.drainer().recover_calls();
-    let drained = within("drain_step@102", repo.drainer().drain_step(&repo))
+    let drained = within("drain_step@102", repo.drainer().drain_step(&repo.core))
         .await
         .unwrap();
     let recover_after = repo.drainer().recover_calls();
@@ -157,7 +157,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert_eq!(drained, 0);
     // Red before B1: the empty prefix caused a full WAL recovery here.
     assert_eq!(recover_after, recover_before);
-    within("drain_all@110", repo.drainer().drain_all(&repo))
+    within("drain_all@110", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     assert_eq!(gate.durable_watermark(), scan_orphan_version);
@@ -194,7 +194,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     let owned = repo.clone();
     let drain_task = tokio::spawn(async move {
         let drainer = owned.drainer();
-        let drain = drainer.drain_all(&owned);
+        let drain = drainer.drain_all(&owned.core);
         tokio::pin!(drain);
         let first = poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx))).await;
         polled_tx.send(first.is_pending()).unwrap();
@@ -249,13 +249,16 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .await
         .unwrap();
     let (later_version, later_task) = spawn_settled_commit(&repo, tx).await;
-    within("drain orphan before ack", repo.drainer().drain_all(&repo))
-        .await
-        .unwrap();
+    within(
+        "drain orphan before ack",
+        repo.drainer().drain_all(&repo.core),
+    )
+    .await
+    .unwrap();
     let outcome = later_task.await.unwrap().unwrap();
     assert_eq!(outcome.commit_version, later_version);
     drop(snapshot);
-    within("drain_all@200", repo.drainer().drain_all(&repo))
+    within("drain_all@200", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
@@ -269,7 +272,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         posting_value,
     );
     assert_eq!(tbl.counter().get().await.unwrap(), 7);
-    within("drain_all@212", repo.drainer().drain_all(&repo))
+    within("drain_all@212", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     assert_eq!(tbl.counter().get().await.unwrap(), 7);
@@ -292,7 +295,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     hook.fail_orphan_markers.store(true, Ordering::Release);
     // B3 markers: injected persistence failure is advisory, not a drain error.
     assert_eq!(
-        within("drain_all@231", repo.drainer().drain_all(&repo))
+        within("drain_all@231", repo.drainer().drain_all(&repo.core))
             .await
             .unwrap(),
         1
@@ -300,7 +303,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert!(!gate.is_orphaned_post_wal(orphan_version));
     assert_eq!(gate.durable_watermark(), orphan_version);
     assert_eq!(tbl.counter().get().await.unwrap(), 8);
-    within("drain_all@235", repo.drainer().drain_all(&repo))
+    within("drain_all@235", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     assert!(!gate.is_orphaned_post_wal(orphan_version));
@@ -334,7 +337,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     assert!(counter_error.to_string().contains("cannot go below zero"));
     // Red before B3: increment(-1)? returned Err and wedged durability.
     assert_eq!(
-        within("drain_all@265", repo.drainer().drain_all(&repo))
+        within("drain_all@265", repo.drainer().drain_all(&repo.core))
             .await
             .unwrap(),
         1
@@ -348,7 +351,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         InnerValue::Str("counter-failed".into()),
     );
     assert_eq!(
-        within("drain_all@274", repo.drainer().drain_all(&repo))
+        within("drain_all@274", repo.drainer().drain_all(&repo.core))
             .await
             .unwrap(),
         0
@@ -376,9 +379,12 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     )
     .await
     .unwrap();
-    within("pre-WAL detached drain", repo.drainer().drain_all(&repo))
-        .await
-        .unwrap();
+    within(
+        "pre-WAL detached drain",
+        repo.drainer().drain_all(&repo.core),
+    )
+    .await
+    .unwrap();
     assert_eq!(tbl.get(a).await.unwrap(), InnerValue::Str("pre-WAL".into()));
     assert_eq!(gate.durable_watermark(), gate.completion().watermark());
 
@@ -397,7 +403,7 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     let segments_before = wal_segment_names(&path).await;
     assert!(segments_before.len() >= 2);
     repo.repo_interner().await.unwrap().persist().await.unwrap();
-    within("drain_all@308", repo.drainer().drain_all(&repo))
+    within("drain_all@308", repo.drainer().drain_all(&repo.core))
         .await
         .unwrap();
     repo.flush_buffers().await.unwrap();

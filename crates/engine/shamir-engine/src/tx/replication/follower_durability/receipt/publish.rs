@@ -11,9 +11,9 @@ use shamir_tx::{ChangelogEvent, MvccStore, RepoTxGate};
 
 use super::stage;
 use crate::meta::repl::ReplicationReceipt;
-use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
 use crate::table::RecordCounter;
+use crate::tx::commit::core::RepoCore;
 
 pub(crate) struct EventPublication {
     pub(crate) local_version: u64,
@@ -31,7 +31,7 @@ pub(crate) struct Publication {
     pub(crate) floor: u64,
 }
 
-async fn mvcc_for(repo: &RepoInstance, table: &str) -> DbResult<Arc<MvccStore>> {
+async fn mvcc_for(repo: &RepoCore, table: &str) -> DbResult<Arc<MvccStore>> {
     let token = table_token_for(table);
     repo.per_table_mvcc()
         .read_sync(&token, |_, mvcc| Arc::clone(mvcc))
@@ -41,7 +41,7 @@ async fn mvcc_for(repo: &RepoInstance, table: &str) -> DbResult<Arc<MvccStore>> 
 /// Build the publication from a fresh plan (no decoding — the plan already
 /// carries the downstream `Arc`s).
 pub(crate) async fn publication_from_plan(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
     plan: &stage::BatchPlan,
     counters: &[(String, u64)],
@@ -87,7 +87,7 @@ pub(crate) async fn publication_from_plan(
 /// downstream byte vec (decode failure = corrupt → reopen) and rebuild the
 /// ops via the receipt's own segmentation.
 pub(crate) async fn publication_from_receipt(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
     receipt: &ReplicationReceipt,
 ) -> DbResult<Publication> {
@@ -194,10 +194,7 @@ pub(crate) fn apply_publication(
 /// be synchronous. `adopt_absolute` only touches RAM under a lock — it
 /// cannot realistically fail here (post-commit); errors are propagated
 /// anyway.
-pub(crate) async fn adopt_counters(
-    _repo: &RepoInstance,
-    publication: &Publication,
-) -> DbResult<()> {
+pub(crate) async fn adopt_counters(_repo: &RepoCore, publication: &Publication) -> DbResult<()> {
     for (counter, after) in &publication.counters {
         counter.adopt_absolute(*after).await?;
     }

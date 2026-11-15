@@ -30,8 +30,8 @@ use crate::meta::repl::bookmark_v3::{load_bookmark_v3, BookmarkV3};
 use crate::meta::repl::receipt::load_outstanding_receipt;
 use crate::meta::repl::{ReceiptPhase, ReplicationReceipt};
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::repo::RepoInstance;
 use crate::tx::apply_replicated::follower_durability::receipt::{checkpoint, publish, stage};
+use crate::tx::commit::core::RepoCore;
 
 /// Complete the receipt referenced by the persisted bookmark v3 pointer, if
 /// any. Must run before the cold classification reads the clean horizon.
@@ -41,7 +41,7 @@ use crate::tx::apply_replicated::follower_durability::receipt::{checkpoint, publ
 /// NEVER re-admitted here (`admit()` is non-reentrant; re-entering it
 /// under a held permit self-deadlocks the domain mutex).
 pub(crate) async fn complete_outstanding_receipt(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     info: &Arc<dyn Store>,
     permit: &RepoWritePermit,
 ) -> DbResult<()> {

@@ -42,8 +42,8 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
 use self::follower_durability::receipt::apply_batch_receipt;
-use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
+use crate::tx::commit::core::RepoCore;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +112,7 @@ pub(crate) struct PreparedEvent {
 }
 
 async fn prepare_event(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     event: &ChangelogEvent,
     field_bindings: &[(u64, String)],
     applied_watermark: u64,
@@ -322,7 +322,7 @@ async fn prepare_event(
 /// cancel-safe: NO — abandonment mid-pipeline parks the gate (requires
 /// reopen); the durable receipt is the redo authority.
 pub async fn apply_replicated_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     events: &[crate::tx::ReplicatedEvent],
     bookmark: u64,
     policy: ApplyPolicy,

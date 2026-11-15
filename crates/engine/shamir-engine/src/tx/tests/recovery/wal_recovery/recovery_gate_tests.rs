@@ -275,7 +275,7 @@ async fn persist_markers_writes_monotonic_max_not_raw_version() {
 
     // Now the "current" committer (v=9) calls persist_markers. Before the
     // fix this wrote 9, regressing the marker below the already-published 10.
-    crate::tx::commit_phases::persist_markers(&repo, gate.as_ref(), 9)
+    crate::tx::commit_phases::persist_markers(&repo.core, gate.as_ref(), 9)
         .await
         .unwrap();
 
@@ -326,7 +326,7 @@ async fn persist_markers_never_regresses_the_on_disk_marker() {
     // persist_markers must NOT overwrite the already-higher on-disk value
     // (20) with the lower in-memory candidate (10) — that would be exactly
     // the disk-write-ordering regression this fix closes.
-    crate::tx::commit_phases::persist_markers(&repo, gate.as_ref(), 9)
+    crate::tx::commit_phases::persist_markers(&repo.core, gate.as_ref(), 9)
         .await
         .unwrap();
 

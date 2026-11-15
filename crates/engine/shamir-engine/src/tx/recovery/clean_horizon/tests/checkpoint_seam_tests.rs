@@ -37,16 +37,18 @@ async fn checkpoint_samples_w_before_changefeed_pending_gap_recheck() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().join("pending_gap_order");
     let repo = seeded_repo("pending_gap_order", &dir).await;
-    let _ = test_seam::take_order(&repo);
+    let _ = test_seam::take_order(&repo.core);
     repo.record_pending_changefeed_gap(7);
     let pending = repo.clone();
-    test_seam::on_sample_w(&repo, move || pending.record_pending_changefeed_gap(11));
+    test_seam::on_sample_w(&repo.core, move || {
+        pending.record_pending_changefeed_gap(11)
+    });
 
-    assert!(crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(&repo).await);
+    assert!(crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(&repo.core).await);
     let feed = repo.changefeed().await.unwrap().feed;
     assert_eq!(feed.first_gap_version(), 7);
     assert_eq!(feed.certified_gap_interval(), Some((7, 11)));
-    let order = test_seam::take_order(&repo);
+    let order = test_seam::take_order(&repo.core);
     let sampled = order
         .iter()
         .position(|phase| *phase == "sampled_w")
@@ -70,8 +72,8 @@ async fn checkpoint_failure_prevents_unlink_then_retry_catches_up() {
         .unwrap();
     let before = shamirwal_seg_count(&dir);
     assert!(before > 0);
-    test_seam::with_state(&repo, |state| state.fail_checkpoint = true);
-    Drainer::new().drain_all(&repo).await.unwrap();
+    test_seam::with_state(&repo.core, |state| state.fail_checkpoint = true);
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     assert_eq!(shamirwal_seg_count(&dir), before);
     assert_eq!(feed.clean_horizon(), before_j);
     assert_eq!(
@@ -81,8 +83,8 @@ async fn checkpoint_failure_prevents_unlink_then_retry_catches_up() {
         before_floor,
     );
     assert!(repo.wal_retention_gate().checkpoint_failures_total() > 0);
-    test_seam::with_state(&repo, |state| state.fail_checkpoint = false);
-    Drainer::new().drain_all(&repo).await.unwrap();
+    test_seam::with_state(&repo.core, |state| state.fail_checkpoint = false);
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(shamirwal_seg_count(&dir) < before);
 }
 
@@ -91,13 +93,13 @@ async fn checkpoint_order_and_unprotected_negative_control() {
     let temp = tempfile::TempDir::new().unwrap();
     let dir = temp.path().join("checkpoint_order");
     let repo = seeded_repo("checkpoint_order", &dir).await;
-    test_seam::with_state(&repo, |state| {
+    test_seam::with_state(&repo.core, |state| {
         state.fail_checkpoint = false;
         state.bypass_checkpoint = false;
         state.order.clear();
     });
-    Drainer::new().drain_all(&repo).await.unwrap();
-    let order = test_seam::take_order(&repo);
+    Drainer::new().drain_all(&repo.core).await.unwrap();
+    let order = test_seam::take_order(&repo.core);
     let cp = order
         .iter()
         .position(|phase| *phase == "checkpoint")
@@ -110,8 +112,8 @@ async fn checkpoint_order_and_unprotected_negative_control() {
     let negative_feed = repo.changefeed().await.unwrap().feed;
     let initial_j = negative_feed.clean_horizon();
     let before = shamirwal_seg_count(&negative_dir);
-    test_seam::with_state(&repo, |state| state.bypass_checkpoint = true);
-    Drainer::new().drain_all(&repo).await.unwrap();
+    test_seam::with_state(&repo.core, |state| state.bypass_checkpoint = true);
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(shamirwal_seg_count(&negative_dir) < before);
     assert_eq!(negative_feed.clean_horizon(), initial_j);
 }

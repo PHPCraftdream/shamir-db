@@ -4,7 +4,7 @@ use shamir_storage::types::RecordKey;
 use shamir_tx::{CellReservationGuard, IsolationLevel, TxContext};
 use shamir_wal::WalEntryV2;
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 
 // ── F-48b (#867) test-only pause seam ──────────────────────────────────────
@@ -122,7 +122,7 @@ pub(crate) const REPO_INTERNER_SCOPE: u64 = 0;
 /// stale cell (the partial guards drop here → release).
 pub(super) async fn claim_write_set(
     tx: &TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<Vec<CellReservationGuard>, TxError> {
     // Off Serializable: no claim (Snapshot last-writer-wins / Pessimistic
     // lock-serialized). Empty vec — zero allocation beyond the Vec header.

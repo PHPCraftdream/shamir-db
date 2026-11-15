@@ -8,6 +8,7 @@ use crate::table::{TableCatalog, TableConfig, TableManager};
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
+#[cfg(test)]
 use shamir_storage::error::DbResult;
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use std::sync::atomic::AtomicUsize;
@@ -31,20 +32,15 @@ pub struct RepoInstance {
     /// D2 P1d-2b: repo liveness token. `Some(Arc<()>)` on every FOREGROUND
     /// clone (the strong count == number of live foreground clones); `None`
     /// on the single BACKGROUND clone the drain task owns
-    /// ([`clone_for_background`](Self::clone_for_background)) so the task does
+    /// (`RepoCore::clone_for_background`) so the task does
     /// NOT keep the repo alive. The drain loop holds a `Weak<()>` of this and
     /// exits when the strong count reaches zero.
     live: Option<Arc<()>>,
     /// R2c1: the tx-layer aggregate of this repo's shared cells; every moved accessor reads through it.
     pub(crate) core: crate::tx::commit::core::RepoCore,
     /// In-doubt rename entries indexed by both involved names.
-    rename_fence: Arc<
-        scc::HashMap<
-            String,
-            super::repo_instance::catalog::rename_in_doubt::RenameFenceEntry,
-            THasher,
-        >,
-    >,
+    rename_fence:
+        Arc<scc::HashMap<String, crate::tx::commit::rename_fence::RenameFenceEntry, THasher>>,
     /// O(1) count of owned source fence entries.
     rename_fence_len: Arc<AtomicUsize>,
 }
@@ -131,12 +127,20 @@ impl RepoInstance {
             Arc::new(std::sync::OnceLock::new()),
             VisibilityWait::Strict,
         );
+        let live = Arc::new(());
+        let rename_fence = Arc::new(scc::HashMap::with_hasher(THasher::default()));
+        let rename_fence_len = Arc::new(AtomicUsize::new(0));
         let core = crate::tx::commit::core::RepoCore {
             name: name.clone(),
             repo,
             catalog,
             durability_handle,
             horizon,
+            live_weak: Arc::downgrade(&live),
+            rename_fence: crate::tx::commit::rename_fence::RenameFenceView::new(
+                Arc::clone(&rename_fence),
+                Arc::clone(&rename_fence_len),
+            ),
             fk_reverse_cache: Arc::new(FkReverseCache::new()),
             receipt_worker: Arc::new(OnceCell::new()),
             worker_lifecycle: Some(Arc::new(ForegroundLifecycle::new())),
@@ -153,10 +157,10 @@ impl RepoInstance {
         };
         Self {
             name,
-            live: Some(Arc::new(())),
+            live: Some(live),
             core,
-            rename_fence: Arc::new(scc::HashMap::with_hasher(THasher::default())),
-            rename_fence_len: Arc::new(AtomicUsize::new(0)),
+            rename_fence,
+            rename_fence_len,
         }
     }
 }
@@ -164,6 +168,7 @@ impl RepoInstance {
 /// tx-facing seam (`tx/recovery/clean_horizon/checkpoint.rs` imports
 /// `crate::repo::durability_policy::checkpoint_allocation_floor`). Resolves
 /// the journal store and delegates to the repo-layer core.
+#[cfg(test)]
 pub(crate) async fn checkpoint_allocation_floor(repo: &RepoInstance) -> DbResult<u64> {
     repo.core.checkpoint_allocation_floor().await
 }

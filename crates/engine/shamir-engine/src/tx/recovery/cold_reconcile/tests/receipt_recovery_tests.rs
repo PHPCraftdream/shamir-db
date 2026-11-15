@@ -118,7 +118,7 @@ async fn cold_reopen_completes_outstanding_receipt() {
         .store(true, std::sync::atomic::Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
     let events = [event(1, 1)];
-    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(
@@ -161,7 +161,7 @@ async fn cold_reopen_materialized_receipt_does_not_recommit() {
         .store(true, std::sync::atomic::Ordering::Release);
     test_seam::install(&name, Arc::clone(&hook));
     let events = [event(1, 1)];
-    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(

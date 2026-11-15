@@ -55,7 +55,7 @@ async fn strict_fast_path_records_only_the_counter() {
     let before = tokio::time::Instant::now();
     let receipt = acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         VisibilityWait::Strict,
         u64::MAX,
@@ -87,7 +87,7 @@ async fn bounded_timeout_records_counter_and_one_observation() {
     gate.raise_published(target);
     let mut ack = Box::pin(acknowledge_known_outcome(
         outcome(target),
-        &repo,
+        &repo.core,
         &gate,
         BOUNDED,
         0,
@@ -129,7 +129,7 @@ async fn reopen_records_the_reopen_result_without_a_wait() {
     let blocker = gate.assign_next_version_guarded();
     let target = blocker.version();
     gate.set_requires_reopen();
-    let receipt = acknowledge_known_outcome(outcome(target), &repo, &gate, BOUNDED_ZERO, 0)
+    let receipt = acknowledge_known_outcome(outcome(target), &repo.core, &gate, BOUNDED_ZERO, 0)
         .await
         .unwrap();
     assert_eq!(

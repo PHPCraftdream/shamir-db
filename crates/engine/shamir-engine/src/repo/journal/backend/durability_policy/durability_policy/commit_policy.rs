@@ -6,7 +6,7 @@ use crate::repo::journal::backend::durability_handle::wal_durability_for;
 #[cfg(test)]
 pub(crate) static TEST_SYNCED_WAL_REPO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-pub(crate) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurability {
+pub(crate) fn commit_wal_durability(repo: &RepoCore) -> shamir_wal::WalDurability {
     #[cfg(test)]
     if TEST_SYNCED_WAL_REPO
         .get()
@@ -14,7 +14,7 @@ pub(crate) fn commit_wal_durability(repo: &RepoInstance) -> shamir_wal::WalDurab
     {
         return shamir_wal::WalDurability::Synced;
     }
-    wal_durability_for(&repo.core.durability_handle)
+    wal_durability_for(&repo.durability_handle)
 }
 
 /// `Ok(bool)` is the `durability_failed` flag (`WrittenNotDurable` = written

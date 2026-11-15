@@ -4,7 +4,7 @@ use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager
 use shamir_wal::WalEntryV2;
 
 use super::claims::{claim_write_set, PreCommit, REPO_INTERNER_SCOPE};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::{maybe_crash, wal_ops_from_tx, TxError};
 
 /// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,
@@ -50,7 +50,7 @@ pub(in crate::tx) struct ValidatedPreCommit {
 /// `None` for C6 empty-tx fast-path, or `Err` on validation failure.
 pub(in crate::tx) async fn pre_commit_locked_validate(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &RepoTxGate,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
@@ -221,7 +221,7 @@ pub(in crate::tx) async fn pre_commit_locked_validate(
 /// storage failure.
 pub(in crate::tx) async fn pre_commit_locked(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &RepoTxGate,
     wal: &RepoWalManager,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,

@@ -392,7 +392,7 @@ async fn receipt_crash_child_scenario() {
     *hook.abort_at.lock().unwrap() = Some(phase);
     test_seam::install(&name, Arc::clone(&hook));
 
-    let result = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let result = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     unreachable!("abort must preempt the apply; it returned {result:?}");
 }
 
@@ -499,7 +499,7 @@ async fn run_point(scenario: Scenario) {
     let history_snapshot;
     {
         let repo = open_with_retry(temp.path(), &name).await;
-        let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+        let outcome = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
         assert!(outcome.is_ok(), "first replay failed: {outcome:?}");
         assert_converged(&repo, &scenario).await;
         assert_as_of_reads(&repo, &scenario).await;
@@ -512,7 +512,7 @@ async fn run_point(scenario: Scenario) {
     // must hold UNCHANGED (no new versions, no journal divergence).
     {
         let repo = open_with_retry(temp.path(), &name).await;
-        let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+        let outcome = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
         assert!(outcome.is_ok(), "second replay failed: {outcome:?}");
         assert_converged(&repo, &scenario).await;
         assert_as_of_reads(&repo, &scenario).await;

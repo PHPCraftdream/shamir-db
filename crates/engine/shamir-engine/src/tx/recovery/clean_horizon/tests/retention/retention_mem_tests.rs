@@ -16,7 +16,7 @@ async fn memory_wal_bypasses_retention_gate() {
         vec![TableConfig::new("t")],
     );
     assert_eq!(
-        enforce_retention(&repo, 0).await.unwrap(),
+        enforce_retention(&repo.core, 0).await.unwrap(),
         RetentionAction::NoOverflow
     );
     assert!(!repo.wal_retention_refuse_writes());

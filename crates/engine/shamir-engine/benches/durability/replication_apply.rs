@@ -49,7 +49,7 @@ async fn apply(repo: &RepoInstance, event: &ChangelogEvent, bookmark: u64) -> u6
         event: event.clone(),
         field_bindings: Vec::new(),
     }];
-    match apply_replicated_batch(repo, &events, bookmark, ApplyPolicy::Trusted)
+    match apply_replicated_batch(repo.core(), &events, bookmark, ApplyPolicy::Trusted)
         .await
         .unwrap()
     {

@@ -1,6 +1,7 @@
 pub(crate) mod acknowledgement;
 pub(crate) mod core;
 pub(crate) mod pipeline;
+pub(crate) mod rename_fence;
 
 // The stage-B2 commit pipeline files (entry, legacy_and_lockfree and their
 // mod.rs) moved under `pipeline/phase/commit/`; the logical path

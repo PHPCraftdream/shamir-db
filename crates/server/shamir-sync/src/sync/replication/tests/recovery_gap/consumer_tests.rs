@@ -315,9 +315,10 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
         // the receipt-only batch entry, then persist its leader bookmark as a
         // v3 record to model a follower caught up through H.
         let seeded = open(None).await;
-        let outcome = apply_replicated_batch(&repo(&seeded), &events, 0, ApplyPolicy::default())
-            .await
-            .unwrap();
+        let outcome =
+            apply_replicated_batch(repo(&seeded).core(), &events, 0, ApplyPolicy::default())
+                .await
+                .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
         let info = repo(&seeded).tx_info_store().await.unwrap();
         save_bookmark_v3(

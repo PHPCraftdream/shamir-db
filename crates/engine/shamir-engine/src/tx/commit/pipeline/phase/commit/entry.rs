@@ -6,8 +6,8 @@ use shamir_wal::{WalAppendError, WalOpV2};
 use super::legacy_and_lockfree::{
     commit_tx_inner_legacy_async, commit_tx_lockfree, release_pessimistic_locks,
 };
-use crate::repo::RepoInstance;
 use crate::tx::ack::commit_tx_with_options;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::pre_commit::{pre_commit_prelock, PreLockResult};
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
@@ -152,7 +152,7 @@ pub static TEST_POST_WAL_PRE_PUBLISH_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 pub(in crate::tx) async fn fire_post_wal_pre_publish_test_hook(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     after_counter: bool,
 ) {
     #[cfg(any(test, feature = "test-util"))]
@@ -167,7 +167,7 @@ pub(in crate::tx) async fn fire_post_wal_pre_publish_test_hook(
     fire_cancel_test_hook(repo, false).await;
 }
 
-pub(super) async fn fire_cancel_test_hook(repo: &RepoInstance, pre_wal: bool) {
+pub(super) async fn fire_cancel_test_hook(repo: &RepoCore, pre_wal: bool) {
     #[cfg(any(test, feature = "test-util"))]
     if let Some(hook) = TEST_POST_WAL_PRE_PUBLISH_HOOK.get() {
         if hook.repo_name == repo.name()
@@ -206,7 +206,7 @@ pub(crate) static TEST_ASYNC_INDEX_TAIL_HOOK: std::sync::OnceLock<
     std::sync::Arc<AsyncIndexTailHook>,
 > = std::sync::OnceLock::new();
 
-pub(super) async fn fire_async_index_tail_test_hook(repo: &RepoInstance) {
+pub(super) async fn fire_async_index_tail_test_hook(repo: &RepoCore) {
     #[cfg(test)]
     if let Some(hook) = TEST_ASYNC_INDEX_TAIL_HOOK.get() {
         if hook.repo_name == repo.name()
@@ -282,7 +282,7 @@ pub(super) async fn fire_async_index_tail_test_hook(repo: &RepoInstance) {
 /// `SegmentSet::truncate_below` (it cannot reach this engine hook) and aborts
 /// between two segment unlinks.
 #[cfg(debug_assertions)]
-pub(in crate::tx) async fn maybe_crash(phase: &str, repo: &RepoInstance) {
+pub(in crate::tx) async fn maybe_crash(phase: &str, repo: &RepoCore) {
     let Ok(target) = std::env::var("SHAMIR_TEST_CRASH_AFTER") else {
         return;
     };
@@ -307,7 +307,7 @@ pub(in crate::tx) async fn maybe_crash(phase: &str, repo: &RepoInstance) {
 /// Release twin: the crash seam does not exist outside debug builds.
 #[cfg(not(debug_assertions))]
 #[inline(always)]
-pub(in crate::tx) async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
+pub(in crate::tx) async fn maybe_crash(_phase: &str, _repo: &RepoCore) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
@@ -579,7 +579,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// vanish when the tx is dropped on the `Err` return below. That is the
 /// RAII win: no per-tx buffer outlives the `TxContext`, so no broadcast
 /// drain is needed (HIGH-6).
-pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
+pub async fn commit_tx(tx: TxContext, repo: &RepoCore) -> Result<TxOutcome, TxError> {
     commit_tx_with_options(tx, repo, repo.commit_visibility_wait()).await
 }
 
@@ -600,7 +600,7 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
 /// Complete, .. })`.
 pub(in crate::tx) async fn commit_tx_inner(
     mut tx: TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<TxOutcome, TxError> {
     // Level-3 wound-wait: a tx wounded by an older (higher-priority) tx must
     // abort even if it finished all its statements. The check runs at commit

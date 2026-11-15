@@ -1,11 +1,4 @@
-use super::rename_freeze::RenameFreeze;
-
-/// Owned source state retained while a rename outcome is unresolved.
-pub(crate) struct RenameInDoubt {
-    pub(crate) from: String,
-    pub(crate) to: String,
-    pub(crate) freeze: RenameFreeze,
-}
+use super::in_doubt::RenameInDoubt;
 
 /// Name-indexed value for an in-doubt rename pair.
 pub(crate) enum RenameFenceEntry {

@@ -132,10 +132,10 @@ async fn repeated_repair_event_put_is_idempotent() {
     drop(snapshot);
     let entry = repo.drainer().window_entry(version).unwrap();
     let expected = shamir_tx::event_from_wal_entry(&entry).unwrap();
-    repair_event(&repo, &entry).await.unwrap();
-    repair_event(&repo, &entry).await.unwrap();
+    repair_event(&repo.core, &entry).await.unwrap();
+    repair_event(&repo.core, &entry).await.unwrap();
     assert_eq!(store.event_puts.load(Ordering::Relaxed), 1);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(store.event_puts.load(Ordering::Relaxed), 1);
     let (events, gap) = repo
         .read_changelog_for_replication(version, 1)
@@ -165,7 +165,7 @@ async fn retry_case(name: &str, ordinal: usize) {
     drop(snapshot);
     // Repair writes the preflight horizon first and the event checkpoint second.
     store.fail_horizon_at.store(ordinal, Ordering::Release);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     let gate = repo.tx_gate().await.unwrap();
     assert!(gate.is_orphaned_post_wal(version));
     assert_eq!(
@@ -176,7 +176,7 @@ async fn retry_case(name: &str, ordinal: usize) {
     );
     assert_eq!(repo.drainer().orphan_repair_metrics.snapshot().1, 0);
     assert_eq!(repo.changefeed().await.unwrap().feed.first_gap_version(), 0);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(store.event_puts.load(Ordering::Relaxed), 1);
     assert!(!gate.is_orphaned_post_wal(version));
     let (events, gap) = repo
@@ -220,7 +220,7 @@ async fn full_journal_channel_defers_orphan_event() {
 
     store.block_lookup_once.store(true, Ordering::Release);
     let owned_repo = repo.clone();
-    let drain = tokio::spawn(async move { owned_repo.drainer().drain_all(&owned_repo).await });
+    let drain = tokio::spawn(async move { owned_repo.drainer().drain_all(&owned_repo.core).await });
     store.lookup_entered.notified().await;
 
     let feed = repo.changefeed().await.unwrap().feed;
@@ -267,7 +267,7 @@ async fn full_journal_channel_defers_orphan_event() {
     }
     // Retry: the repair-pending drain admits the deferred event and the
     // orphan settles from the now-present journal event — no gap, depth 0.
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(feed.first_gap_version(), 0);
     assert_eq!(feed.repair_pending_depth(), 0);
     feed.shutdown_and_wait().await.unwrap();

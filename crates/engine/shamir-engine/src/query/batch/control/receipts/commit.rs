@@ -57,7 +57,7 @@ async fn commit_implicit_inner(
 ) -> Result<TransactionInfo, BatchError> {
     let tx_id = tx.tx_id.0;
     let snapshot = tx.snapshot_version;
-    match commit_tx_with_kind(tx, repo, wait, PendingKind::ImplicitBatch).await {
+    match commit_tx_with_kind(tx, &repo.core, wait, PendingKind::ImplicitBatch).await {
         Ok(outcome) => Ok(TransactionInfo::committed(
             outcome.tx_id,
             outcome.snapshot_version,

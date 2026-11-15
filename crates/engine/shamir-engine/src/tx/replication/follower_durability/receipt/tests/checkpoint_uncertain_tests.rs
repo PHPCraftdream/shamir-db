@@ -169,7 +169,7 @@ async fn assert_settled(repo: &RepoInstance) {
     assert!(journal(repo, 2).await.is_some());
     assert_eq!(
         apply_replicated_batch(
-            repo,
+            &repo.core,
             &fresh_two_table_events().await,
             0,
             ApplyPolicy::Trusted
@@ -196,7 +196,7 @@ async fn materialization_batch_failure_preserves_prepared_receipt_and_retry_allo
     let repo = open(temp.path(), &name).await;
     let events = fresh_two_table_events().await;
     inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit; 3]);
-    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::Storage(_)), "{error:?}");
@@ -224,7 +224,7 @@ async fn materialization_batch_failure_preserves_prepared_receipt_and_retry_allo
     drop(info);
 
     inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit; 3]);
-    let retry_error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let retry_error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(
@@ -249,7 +249,7 @@ async fn materialization_batch_failure_preserves_prepared_receipt_and_retry_allo
 
     super::super::stage::clear_materialization_batch_failures(&name);
     assert_eq!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -291,7 +291,7 @@ async fn repeated_uncertainty_also_fail_stops_without_advancing_floors() {
     );
     set_materialization_readback_unavailable(&name, true);
 
-    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
@@ -308,7 +308,7 @@ async fn repeated_uncertainty_also_fail_stops_without_advancing_floors() {
     assert_eq!(persisted_count_for(&repo, "other").await, 1);
     assert!(journal(&repo, 1).await.is_some());
     assert!(journal(&repo, 2).await.is_some());
-    let retry = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let retry = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     assert!(matches!(retry, Err(DbError::RepoRequiresReopen(_))));
     assert!(gate.requires_reopen());
     let shutdown = repo.shutdown_clean(std::time::Duration::from_secs(5)).await;
@@ -336,7 +336,7 @@ async fn unresolved_uncertainty_retry_storage_failure_fail_stops_and_shutdown_fa
         ],
     );
     set_materialization_readback_unavailable(&name, true);
-    let error = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+    let error = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::RepoRequiresReopen(_)), "{error:?}");
@@ -353,7 +353,7 @@ async fn unresolved_uncertainty_retry_storage_failure_fail_stops_and_shutdown_fa
     assert_eq!(persisted_count_for(&repo, "other").await, 1);
     assert!(journal(&repo, 1).await.is_some());
     assert!(journal(&repo, 2).await.is_some());
-    let retry = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let retry = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     assert!(
         matches!(retry, Err(DbError::RepoRequiresReopen(_))),
         "repo must remain fail-stopped: {retry:?}"
@@ -385,7 +385,7 @@ async fn uncertain_checkpoint_reconciles_and_survives_reopens() {
     let baseline = checkpoint_reconciles();
     set_simulate_checkpoint_uncertain(true);
     let events = fresh_two_table_events().await;
-    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let outcome = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     set_simulate_checkpoint_uncertain(false);
     let applied = outcome.unwrap();
     assert_eq!(applied, ApplyOutcome::Applied { local_version: 2 });
@@ -429,9 +429,14 @@ async fn no_reconcile_counter_without_uncertain() {
 
     let before = checkpoint_reconciles();
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1), event(2, 2)], 0, ApplyPolicy::Trusted)
-            .await
-            .unwrap(),
+        apply_replicated_batch(
+            &repo.core,
+            &[event(1, 1), event(2, 2)],
+            0,
+            ApplyPolicy::Trusted
+        )
+        .await
+        .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
     );
     assert_eq!(checkpoint_reconciles(), before);
@@ -459,7 +464,7 @@ async fn negative_control_without_reconcile_state_is_not_reconciled() {
     set_uncertain_without_commit(true);
     disable_uncertain_reconcile(true);
     let events = fresh_two_table_events().await;
-    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let outcome = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     disable_uncertain_reconcile(false);
     set_uncertain_without_commit(false);
 
@@ -512,7 +517,7 @@ async fn uncertain_without_commit_is_reconciled_when_enabled() {
     let baseline = checkpoint_reconciles();
     set_uncertain_without_commit(true);
     let events = fresh_two_table_events().await;
-    let outcome = apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await;
+    let outcome = apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await;
     set_uncertain_without_commit(false);
 
     assert_eq!(outcome.unwrap(), ApplyOutcome::Applied { local_version: 2 });
@@ -545,7 +550,7 @@ async fn multichunk_materialization_failure_resumes_same_receipt_without_extra_a
 
     inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit; 3]);
     assert!(matches!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await,
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await,
         Err(DbError::Storage(_))
     ));
     let gate = repo.tx_gate().await.unwrap();
@@ -584,7 +589,7 @@ async fn multichunk_materialization_failure_resumes_same_receipt_without_extra_a
 
     inject_materialization_batch_failures(&name, &[MaterializationBatchFailure::BeforeCommit]);
     assert!(matches!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted).await,
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted).await,
         Err(DbError::Storage(_))
     ));
     let info = repo.tx_info_store().await.unwrap();
@@ -609,7 +614,7 @@ async fn multichunk_materialization_failure_resumes_same_receipt_without_extra_a
 
     super::super::stage::clear_materialization_batch_failures(&name);
     assert_eq!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied {
@@ -642,7 +647,7 @@ async fn multichunk_materialization_failure_resumes_same_receipt_without_extra_a
     }
     assert_eq!(persisted_count_for(&repo, "items").await, n as u64);
     assert_eq!(
-        apply_replicated_batch(&repo, &events, 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &events, 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped
@@ -681,7 +686,7 @@ async fn post_checkpoint_flush_failure_with_open_gap_is_done() {
     let repo = open(temp.path(), &name).await;
     let key2 = key_bytes(2).await;
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -696,7 +701,7 @@ async fn post_checkpoint_flush_failure_with_open_gap_is_done() {
     let _reset = FinalFlushReset(name.clone());
     set_fail_final_flush(&name, true);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -728,7 +733,7 @@ async fn post_checkpoint_flush_failure_with_open_gap_is_done() {
     assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(1));
     drop(info);
     assert_eq!(
-        apply_replicated_batch(&repo, &[event(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[event(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Skipped

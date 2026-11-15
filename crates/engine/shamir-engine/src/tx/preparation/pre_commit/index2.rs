@@ -7,7 +7,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::index2::kind::IndexKind;
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::TxError;
 
 // ── F-73 (#900) test-only failure-injection seam ────────────────────────────
@@ -140,7 +140,7 @@ pub(super) async fn read_pre_tx_bytes(
 /// established for this fail-open defect class.
 pub(super) async fn rederive_index2_ops_post_stage(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
 ) -> Result<(), TxError> {
     // =========================================================================
     // Index2 re-derivation (F-50 #869 Step 1) + vector staging (Step 2 Part B)

@@ -105,7 +105,7 @@ async fn declare_gap_never_unlinks_history_unsafe_segments() {
     let safe = repo.tx_gate().await.unwrap().durable_watermark();
     assert_eq!(safe, 0);
     assert_eq!(
-        enforce_retention(&repo, safe).await.unwrap(),
+        enforce_retention(&repo.core, safe).await.unwrap(),
         RetentionAction::Refused
     );
     let feed = repo.changefeed().await.unwrap().feed;
@@ -134,7 +134,9 @@ async fn declare_gap_persists_floor_and_unlinks_safe_retained_wal() {
         "all 80 commits must remain in retained WAL"
     );
     for entry in entries {
-        crate::tx::replay_v2_entry(&entry, &repo).await.unwrap();
+        crate::tx::replay_v2_entry(&entry, &repo.core)
+            .await
+            .unwrap();
     }
     repo.repo_interner().await.unwrap().persist().await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
@@ -142,7 +144,7 @@ async fn declare_gap_persists_floor_and_unlinks_safe_retained_wal() {
     repo.flush_all_history().await.unwrap();
 
     assert_eq!(
-        enforce_retention(&repo, safe).await.unwrap(),
+        enforce_retention(&repo.core, safe).await.unwrap(),
         RetentionAction::NoOverflow
     );
     let feed = repo.changefeed().await.unwrap().feed;
@@ -184,11 +186,11 @@ async fn refuse_writes_gate_clears_after_safe_drain() {
             > 1
     );
     assert_eq!(
-        enforce_retention(&repo, 0).await.unwrap(),
+        enforce_retention(&repo.core, 0).await.unwrap(),
         RetentionAction::Refused
     );
     assert!(repo.wal_retention_refuse_writes());
-    Drainer::new().drain_all(&repo).await.unwrap();
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(!repo.wal_retention_refuse_writes());
 }
 
@@ -211,7 +213,7 @@ async fn dead_writer_declare_gap_refuses_without_unlinking() {
         .await
         .unwrap();
     assert_eq!(
-        enforce_retention(&repo, u64::MAX).await.unwrap(),
+        enforce_retention(&repo.core, u64::MAX).await.unwrap(),
         RetentionAction::Refused
     );
     assert!(repo.wal_retention_refuse_writes());
@@ -229,7 +231,7 @@ async fn refused_admission_does_not_publish_and_drain_allows_retry() {
         .unwrap();
     seed(&repo, 80).await;
     assert_eq!(
-        enforce_retention(&repo, 0).await.unwrap(),
+        enforce_retention(&repo.core, 0).await.unwrap(),
         RetentionAction::Refused
     );
 
@@ -257,7 +259,7 @@ async fn refused_admission_does_not_publish_and_drain_allows_retry() {
     assert_eq!(wal.recover().await.unwrap().len(), before_entries);
     assert_eq!(count_rows(&table).await, 80);
 
-    Drainer::new().drain_all(&repo).await.unwrap();
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     assert!(!repo.wal_retention_refuse_writes());
     let (mut accepted, _guard) = repo
         .begin_tx(crate::tx::IsolationLevel::Snapshot)
@@ -293,14 +295,14 @@ async fn hybrid_wal_bypasses_retention_gate_and_checkpoint() {
     let feed = repo.changefeed().await.unwrap().feed;
     let initial_j = feed.clean_horizon();
     assert_eq!(
-        enforce_retention(&repo, u64::MAX).await.unwrap(),
+        enforce_retention(&repo.core, u64::MAX).await.unwrap(),
         RetentionAction::NoOverflow,
     );
     assert!(!repo.wal_retention_refuse_writes());
-    let _ = test_seam::take_order(&repo);
-    assert!(crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(&repo).await);
+    let _ = test_seam::take_order(&repo.core);
+    assert!(crate::tx::clean_horizon::checkpoint::checkpoint_before_truncate(&repo.core).await);
     assert_eq!(feed.clean_horizon(), initial_j);
-    assert!(test_seam::take_order(&repo).is_empty());
+    assert!(test_seam::take_order(&repo.core).is_empty());
 }
 
 /// Disk-backed (fjall_raw) — requires the `fjall` feature.
@@ -314,11 +316,11 @@ async fn successful_truncate_remeasures_retention_and_clears_gate() {
         .unwrap();
     seed(&repo, 80).await;
     assert_eq!(
-        enforce_retention(&repo, 0).await.unwrap(),
+        enforce_retention(&repo.core, 0).await.unwrap(),
         RetentionAction::Refused
     );
     assert!(repo.wal_retention_refuse_writes());
-    Drainer::new().drain_all(&repo).await.unwrap();
+    Drainer::new().drain_all(&repo.core).await.unwrap();
     let bytes = repo
         .wal_group()
         .await

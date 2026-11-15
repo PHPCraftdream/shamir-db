@@ -1,15 +1,17 @@
+#[cfg(test)]
 use shamir_storage::error::DbResult;
 #[cfg(test)]
 #[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
+#[cfg(test)]
 use shamir_storage::types::Store;
 
+#[cfg(test)]
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
+#[cfg(test)]
 use std::sync::Arc;
 
 use super::super::RepoInstance;
-#[cfg(test)]
-use crate::tx::clean_horizon::checkpoint::test_seam;
 
 impl RepoInstance {
     #[cfg(all(test, feature = "fjall"))]
@@ -30,16 +32,11 @@ impl RepoInstance {
     }
 
     #[cfg(test)]
-    pub(crate) fn clean_horizon_test_state(
-        &self,
-    ) -> &std::sync::OnceLock<Arc<std::sync::Mutex<test_seam::State>>> {
-        self.core.clean_horizon_test_state()
-    }
-
     pub(crate) fn wal_retention_gate(&self) -> &Arc<RetentionGate> {
         self.core.wal_retention_gate()
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn wal_retention_refuse_writes(&self) -> bool {
         self.core.wal_retention_refuse_writes()
@@ -47,13 +44,5 @@ impl RepoInstance {
 
     pub fn wal_retention_metrics(&self) -> [u64; 5] {
         self.core.durability_handle.wal_retention_metrics()
-    }
-
-    pub(crate) async fn reserve_recovery_floor(
-        &self,
-        info: &Arc<dyn Store>,
-        minimum: u64,
-    ) -> DbResult<u64> {
-        self.core.reserve_recovery_floor(info, minimum).await
     }
 }

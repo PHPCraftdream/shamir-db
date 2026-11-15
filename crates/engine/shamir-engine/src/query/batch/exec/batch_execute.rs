@@ -902,7 +902,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
             // locks live in the per-table MvccStore, not in TxContext, so
             // dropping TxContext alone does not free them). No-op for
             // Snapshot / Serializable (locked_keys is empty).
-            crate::tx::release_pessimistic_locks(&tx, &repo).await;
+            crate::tx::release_pessimistic_locks(&tx, &repo.core).await;
 
             // #666: a deadline-exceeded abort keeps its identity all the
             // way to the caller — `ExecutionTimedOut` is a top-level batch

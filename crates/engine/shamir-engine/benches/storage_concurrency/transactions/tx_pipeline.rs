@@ -699,7 +699,7 @@ fn main() {
                         (tx, repo)
                     },
                     move |(tx, repo)| async move {
-                        let mut outcome = commit_tx(tx, &repo).await.unwrap();
+                        let mut outcome = commit_tx(tx, repo.core()).await.unwrap();
                         if let Some(bg) = outcome.take_background() {
                             let _ = bg.join().await;
                         }
@@ -756,7 +756,7 @@ fn main() {
                         (tx, repo, tempdir)
                     },
                     move |(tx, repo, tempdir)| async move {
-                        let mut outcome = commit_tx(tx, &repo).await.unwrap();
+                        let mut outcome = commit_tx(tx, repo.core()).await.unwrap();
                         if let Some(bg) = outcome.take_background() {
                             let _ = bg.join().await;
                         }

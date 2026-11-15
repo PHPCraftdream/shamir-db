@@ -39,7 +39,7 @@ async fn staged_tx_is_rejected_after_successful_rename() {
 
         assert!(repo.rename_table_stores("a", "b").await.unwrap());
         assert!(matches!(
-            commit_tx(tx, &repo).await,
+            commit_tx(tx, &repo.core).await,
             Err(TxError::MigrationFrozen { table }) if table == "a"
         ));
         assert!(!repo.has_table("a"));
@@ -62,7 +62,7 @@ async fn staged_tx_is_rejected_after_drop_and_recreate() {
         let recreated = repo.get_table("a").await.unwrap();
 
         assert!(matches!(
-            commit_tx(tx, &repo).await,
+            commit_tx(tx, &repo.core).await,
             Err(TxError::MigrationFrozen { table }) if table == "a"
         ));
         assert!(!Arc::ptr_eq(source.data_store(), recreated.data_store()));
@@ -76,7 +76,7 @@ async fn staged_tx_for_current_incarnation_commits() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (repo, table) = fixture().await;
         let (tx, id, _snapshot_guard) = stage_write(&repo, &table).await;
-        commit_tx(tx, &repo).await.unwrap();
+        commit_tx(tx, &repo.core).await.unwrap();
         assert_eq!(
             table.get(id).await.unwrap(),
             InnerValue::Str("m5-value".into())
@@ -96,7 +96,7 @@ async fn staged_tx_for_dropped_table_is_rejected() {
         drop(permit);
 
         assert!(matches!(
-            commit_tx(tx, &repo).await,
+            commit_tx(tx, &repo.core).await,
             Err(TxError::MigrationFrozen { table }) if table == "a"
         ));
     })

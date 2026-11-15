@@ -43,7 +43,7 @@ async fn orphan_below_commit_blocks_ack_until_replay_then_snapshot_sees_both() {
     assert!(!task_b.is_finished());
 
     // fixture suppresses the background drainer: this is the sole replay pass.
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 2);
     let outcome = task_b.await.unwrap().unwrap();
     assert_eq!(outcome.commit_version, version_b);
     assert_eq!(outcome.materialization, MaterializationState::Complete);
@@ -79,7 +79,7 @@ async fn unknown_ticket_below_waiting_commit_returns_deferred_without_settling_g
     let (version_b, mut task_b) = spawn_settled_commit(&repo, tx_b).await;
     assert!(!gate.requires_reopen());
     ticket.complete_detached_for_test(WalTicketState::Unknown);
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
     assert!(gate.requires_reopen());
     // Only the borrowed JoinHandle is timed out; the commit is not cancelled.
     let result = tokio::time::timeout(Duration::from_secs(1), &mut task_b).await;

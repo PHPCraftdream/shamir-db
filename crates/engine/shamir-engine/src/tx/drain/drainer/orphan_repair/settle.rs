@@ -1,11 +1,11 @@
 use super::repair::{repair_event, Outcome};
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::drainer::{Drainer, WalEntryV2};
 use shamir_storage::error::DbResult;
 
 pub(in crate::tx::drain::drainer) async fn settle_event(
     drainer: &Drainer,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     entry: &WalEntryV2,
     orphan_failed: &mut bool,
 ) -> DbResult<bool> {

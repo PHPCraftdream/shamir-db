@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use shamir_tx::{ChangelogEvent, RepoChangefeed, VersionGuard};
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
 #[cfg(test)]
 fn maybe_crash_before_publish(
@@ -40,7 +40,7 @@ fn maybe_crash_before_publish(
 /// channel and later live broadcast (one allocation, as in the old emit).
 #[inline]
 pub(in crate::tx) fn publish_journaled(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     guard: VersionGuard,
     prepared: Option<(Arc<ChangelogEvent>, Option<Arc<RepoChangefeed>>)>,
 ) -> Option<Arc<ChangelogEvent>> {

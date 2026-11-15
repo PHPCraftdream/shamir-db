@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use shamir_tx::{RepoTxGate, TxContext};
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit_phases::promote_vectors;
 use crate::tx::materialize::{post_publish_cleanup, PostPublishState};
 use crate::tx::tx_outcome::MaterializationState;
@@ -82,7 +82,7 @@ pub(in crate::tx) async fn finalize_sync_post_publish(
     tx: &TxContext,
     post_publish_state: PostPublishState,
     changefeed_event: Option<Arc<shamir_tx::ChangelogEvent>>,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &RepoTxGate,
     commit_version: u64,
 ) -> MaterializationState {

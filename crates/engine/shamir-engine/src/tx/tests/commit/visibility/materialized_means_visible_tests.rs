@@ -127,7 +127,7 @@ async fn failed_projection_waits_for_replay(visibility: CommitVisibility, index_
         assert_eq!(table.get(id).await.unwrap(), value);
     }
     let replayed_entry = repo.drainer().window_entry(version).unwrap();
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome.commit_version, version);
     assert_eq!(outcome.materialization, MaterializationState::Deferred);

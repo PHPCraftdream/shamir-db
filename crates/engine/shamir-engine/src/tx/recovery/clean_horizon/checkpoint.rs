@@ -1,6 +1,9 @@
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
-pub(crate) async fn checkpoint_before_truncate(repo: &RepoInstance) -> bool {
+#[cfg(test)]
+pub(crate) mod test_seam;
+
+pub(crate) async fn checkpoint_before_truncate(repo: &RepoCore) -> bool {
     if repo.initialized_mem_wal() {
         return true;
     }
@@ -24,15 +27,14 @@ pub(crate) async fn checkpoint_before_truncate(repo: &RepoInstance) -> bool {
             return false;
         }
     };
-    let allocation_floor =
-        match crate::repo::durability_policy::checkpoint_allocation_floor(repo).await {
-            Ok(floor) => floor,
-            Err(error) => {
-                log::warn!("clean_horizon: allocation floor read failed: {error}");
-                repo.wal_retention_gate().record_checkpoint_failure();
-                return false;
-            }
-        };
+    let allocation_floor = match repo.checkpoint_allocation_floor().await {
+        Ok(floor) => floor,
+        Err(error) => {
+            log::warn!("clean_horizon: allocation floor read failed: {error}");
+            repo.wal_retention_gate().record_checkpoint_failure();
+            return false;
+        }
+    };
     let settled = gate.completion().watermark();
     #[cfg(test)]
     test_seam::record(repo, "sampled_w");
@@ -69,57 +71,4 @@ pub(crate) async fn checkpoint_before_truncate(repo: &RepoInstance) -> bool {
     test_seam::record(repo, "checkpoint");
     repo.wal_retention_gate().record_checkpoint_success();
     true
-}
-
-#[cfg(test)]
-pub(crate) mod test_seam {
-    use std::sync::{Arc, Mutex};
-
-    use crate::repo::RepoInstance;
-
-    #[derive(Default)]
-    pub(crate) struct State {
-        pub(crate) fail_checkpoint: bool,
-        pub(crate) bypass_checkpoint: bool,
-        pub(crate) order: Vec<&'static str>,
-        pub(crate) on_sample_w: Option<Box<dyn FnOnce() + Send>>,
-    }
-
-    pub(crate) fn with_state<T>(repo: &RepoInstance, action: impl FnOnce(&mut State) -> T) -> T {
-        let slot = repo.clean_horizon_test_state();
-        let state = slot.get_or_init(|| Arc::new(Mutex::new(State::default())));
-        action(&mut state.lock().expect("test seam mutex poisoned"))
-    }
-
-    pub(crate) fn bypass(repo: &RepoInstance) -> bool {
-        with_state(repo, |state| state.bypass_checkpoint)
-    }
-
-    pub(crate) fn should_fail(repo: &RepoInstance) -> bool {
-        with_state(repo, |state| state.fail_checkpoint)
-    }
-
-    pub(crate) fn record(repo: &RepoInstance, phase: &'static str) {
-        let callback = with_state(repo, |state| {
-            state.order.push(phase);
-            if phase == "sampled_w" {
-                state.on_sample_w.take()
-            } else {
-                None
-            }
-        });
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
-
-    #[cfg(all(test, feature = "fjall"))]
-    pub(crate) fn on_sample_w(repo: &RepoInstance, callback: impl FnOnce() + Send + 'static) {
-        with_state(repo, |state| state.on_sample_w = Some(Box::new(callback)));
-    }
-
-    #[cfg(all(test, feature = "fjall"))]
-    pub(crate) fn take_order(repo: &RepoInstance) -> Vec<&'static str> {
-        with_state(repo, |state| std::mem::take(&mut state.order))
-    }
 }

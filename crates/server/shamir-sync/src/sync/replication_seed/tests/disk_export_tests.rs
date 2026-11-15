@@ -81,7 +81,7 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, Cha
     let committed_id = table.insert_tx(&value, Some(&mut tx)).await.unwrap();
     repo.commit_tx(tx).await.unwrap();
     drop(snapshot);
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     repo.flush_all_history().await.unwrap();
     repo.flush_buffers().await.unwrap();
     repo.flush_seed_metadata().await.unwrap();

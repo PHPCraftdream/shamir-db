@@ -42,7 +42,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
     let active = repo.diagnostics();
     let blocker = active.oldest_blocker.unwrap();
     assert_eq!(blocker.class, GateBlockerClass::ActiveTail);
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
     assert_eq!(repo.diagnostics().orphan_replay_attempts_total, 0);
     hook.panic_resume.notify_one();
     assert!(task.await.unwrap_err().is_panic());
@@ -53,7 +53,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
     );
     assert!(repo.remove_table_for_test("a"));
     for expected in 1..=2 {
-        assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+        assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
         let failed = repo.diagnostics();
         assert_eq!(failed.orphan_replay_attempts_total, expected);
         assert_eq!(failed.orphan_replay_failures_total, expected);
@@ -66,7 +66,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
     }
     repo.add_table_for_test(TableConfig::new("a"));
     let restored = repo.get_table("a").await.unwrap();
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 1);
     let success = repo.diagnostics();
     assert_eq!(success.orphan_replay_attempts_total, 3);
     assert_eq!(success.orphan_replay_failures_total, 2);
@@ -78,7 +78,7 @@ async fn parked_tail_missing_table_failures_and_successful_retry_are_observed() 
         restored.get(rid).await.unwrap(),
         InnerValue::Str("replayed".into())
     );
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
     assert_eq!(repo.diagnostics().orphan_replay_attempts_total, 3);
 }
 
@@ -107,7 +107,7 @@ async fn orphan_phase_b_failure_is_counted_once_and_retry_resets_streak() {
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     FAIL_INDEX_BATCH_TABLE_ID.store(token, Ordering::SeqCst);
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
     FAIL_INDEX_BATCH_TABLE_ID.store(0, Ordering::SeqCst);
     let failed = repo.diagnostics();
     assert_eq!(failed.orphan_replay_attempts_total, 1);
@@ -118,7 +118,7 @@ async fn orphan_phase_b_failure_is_counted_once_and_retry_resets_streak() {
         .unwrap()
         .contains("index-batch failure"));
     assert!(failed.visible_floor < version);
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 1);
     let success = repo.diagnostics();
     assert_eq!(success.orphan_replay_attempts_total, 2);
     assert_eq!(success.orphan_replay_failures_total, 1);
@@ -202,7 +202,7 @@ async fn orphan_gap_init_failure_is_observed_and_retry_clears_error() {
         .store(Some(Arc::clone(&hook)));
     let drainer = Drainer::new();
     for expected in 1..=2 {
-        let error = drainer.drain_step(&repo).await.unwrap_err();
+        let error = drainer.drain_step(&repo.core).await.unwrap_err();
         assert!(error
             .to_string()
             .contains("injected changefeed init failure"));
@@ -220,7 +220,7 @@ async fn orphan_gap_init_failure_is_observed_and_retry_clears_error() {
         assert!(gate.is_orphaned_post_wal(1));
     }
     assert_eq!(hook.init_failures.load(Ordering::Acquire), 0);
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 1);
     let mut snapshot = gate.diagnostics();
     drainer.enrich_diagnostics(&mut snapshot);
     assert_eq!(snapshot.orphan_replay_attempts_total, 3);

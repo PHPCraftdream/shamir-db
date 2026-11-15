@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 use super::*;
+use crate::repo::RepoInstance;
 
 #[tokio::test]
 async fn startup_seed_waits_and_filters_delayed_snapshot() {
@@ -24,7 +25,7 @@ async fn startup_seed_waits_and_filters_delayed_snapshot() {
     let snapshot = wal.recover().await.unwrap();
     assert_eq!(snapshot.len(), 3);
     let guard = drainer.replaying.lock().await;
-    let seed = drainer.seed_startup(&repo, snapshot);
+    let seed = drainer.seed_startup(&repo.core, snapshot);
     tokio::pin!(seed);
     assert!(futures::poll!(&mut seed).is_pending());
     gate.mark_durable(1);

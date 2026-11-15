@@ -52,22 +52,22 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
     let later = panic_post_wal(&repo, &hook, later_tx).await;
     drop(later_snapshot);
     assert_eq!(gate.durable_watermark(), durable);
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 1);
     assert_eq!(gate.durable_watermark(), prefix);
     assert_eq!(
         b.get(prefix_rid).await.unwrap(),
         InnerValue::Str("prefix".into()),
     );
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(gate.durable_watermark(), prefix);
     assert!(gate.is_orphaned_post_wal(later));
     assert!(gate.is_orphaned_post_wal(version));
     assert!(repo.drainer().window_entry(version).is_some());
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 0);
 
     repo.add_table_for_test(TableConfig::new("a"));
     let restored = repo.get_table("a").await.unwrap();
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 2);
     assert_eq!(gate.durable_watermark(), later);
     assert!(!gate.is_orphaned_post_wal(version));
     assert_eq!(
@@ -83,7 +83,7 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
         Bytes::from_static(b"restored"),
     );
     assert_eq!(restored.counter().get().await.unwrap(), 1);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
 }
 
 // Counterfactuals: unconditional replay resurrects the deleted posting;
@@ -134,7 +134,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
     drop(snapshot);
     assert!(later > orphan);
     assert!(repo.drainer().window_entry(later).is_none());
-    assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_step(&repo.core).await.unwrap(), 1);
     assert_eq!(later_task.await.unwrap().unwrap().commit_version, later);
     assert_eq!(gate.durable_watermark(), orphan);
     assert_eq!(
@@ -150,7 +150,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
         b.info_store().get(key.clone().into()).await.unwrap(),
         Bytes::from_static(b"other-table"),
     );
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(gate.durable_watermark(), later);
     assert!(a.info_store().get(key.clone().into()).await.is_err());
     assert!(repo
@@ -167,7 +167,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
     tx.index_write_set.push((token, posting(&key, b"new")));
     let newest = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(gate.durable_watermark(), newest);
     assert_eq!(
         a.info_store().get(key.clone().into()).await.unwrap(),

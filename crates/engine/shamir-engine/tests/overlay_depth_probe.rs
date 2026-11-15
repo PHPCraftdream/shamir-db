@@ -105,7 +105,7 @@ async fn probe_steady_state_overlay_depth() {
     }
 
     let pre_drain = overlay_len(&repo).await;
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     let post_drain = overlay_len(&repo).await;
 
     eprintln!(
@@ -148,7 +148,7 @@ async fn probe_drain_lag_overlay_depth() {
     }
 
     let pre_drain = overlay_len(&repo).await;
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     let post_drain = overlay_len(&repo).await;
 
     eprintln!(
@@ -181,13 +181,13 @@ async fn probe_pinned_snapshot_overlay_depth() {
         drop(guard);
     }
 
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     let depth_with_pinned = overlay_len(&repo).await;
 
     drop(pinned_guard);
     // Another drain pass — gc_overlay_to fires at the tail with the now-
     // higher floor.
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     let depth_after_release = overlay_len(&repo).await;
 
     eprintln!(
@@ -235,7 +235,7 @@ async fn probe_drain_lag_overlay_depth_fjall() {
     }
 
     let pre_drain = overlay_len(&repo).await;
-    repo.drainer().drain_all(&repo).await.unwrap();
+    repo.drainer().drain_all(repo.core()).await.unwrap();
     let post_drain = overlay_len(&repo).await;
 
     eprintln!(

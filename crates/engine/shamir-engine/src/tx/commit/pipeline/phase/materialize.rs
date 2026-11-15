@@ -6,7 +6,7 @@ use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{RepoTxGate, TxContext, VectorDeltaAck};
 
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::maybe_crash;
 use crate::tx::commit_phases::{
     apply_data_batch, apply_index_batch, apply_vector_delta_phase, collect_data_batches,
@@ -58,7 +58,7 @@ pub(in crate::tx) static TEST_PRE_MATERIALIZE_REPO: std::sync::OnceLock<String> 
 /// visibility-bearing projection, so snapshots stay below that version.
 pub(in crate::tx) async fn materialize(
     tx: &mut TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     version_guard: shamir_tx::VersionGuard,
     prepared_journal: Option<(
         Arc<shamir_tx::ChangelogEvent>,
@@ -262,7 +262,7 @@ pub(in crate::tx) async fn materialize(
 /// Drainer derives events from available WAL evidence; only unknown/eventless
 /// entries or failed journal admission/persistence become GAPs.
 pub(in crate::tx) fn settle_visible(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     guard: shamir_tx::VersionGuard,
     prepared: Option<(
         Arc<shamir_tx::ChangelogEvent>,
@@ -281,7 +281,7 @@ pub(in crate::tx) fn settle_visible(
 
 pub(in crate::tx) async fn apply_tracked_counter_phase(
     tx: &TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     commit_version: u64,
 ) {
     let tx_id = tx.tx_id.0;
@@ -349,7 +349,7 @@ pub(in crate::tx) struct PostPublishState {
 /// They do not need serialisation against other committers.
 pub(in crate::tx) async fn post_publish_cleanup(
     state: PostPublishState,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &RepoTxGate,
 ) -> MaterializationState {
     let PostPublishState {
@@ -462,7 +462,7 @@ pub(crate) static FORCE_A5_UNSAFE: std::sync::atomic::AtomicBool =
 /// `Option<u64>` (the max id across the whole delta, or `None` if the delta
 /// was empty — trivially safe).
 pub(crate) async fn interner_delta_safe_to_truncate(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     interner_delta_max_id: Option<u64>,
 ) -> shamir_storage::error::DbResult<bool> {
     // CRIT-2 (#436) test-injection: force UNSAFE so the drainer's
@@ -505,7 +505,7 @@ pub(crate) async fn interner_delta_safe_to_truncate(
 /// delta-log — `restore_on_open::replay_delta` re-materializes it on the
 /// next open.
 pub(crate) async fn apply_vector_graph_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     token: u64,
     vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
     deleted: &[shamir_types::types::record_id::RecordId],
@@ -655,7 +655,7 @@ pub(crate) async fn apply_vector_graph_batch(
 /// (last-write-wins); a duplicate chunk on retry overwrites the same
 /// `next_delta_idx` key (`Store::set` is last-writer-wins).
 pub(crate) async fn apply_vector_delta_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     token: u64,
     vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
     deleted: &[shamir_types::types::record_id::RecordId],

@@ -94,7 +94,7 @@ async fn post_wal_panic_multi_table_values_counters_and_durability() {
     assert_eq!(a.counter().get().await.unwrap(), 0);
     assert_eq!(b.counter().get().await.unwrap(), 0);
 
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(
         a.get(a_rid).await.unwrap(),
         InnerValue::Str("orphan-a".into())
@@ -108,7 +108,7 @@ async fn post_wal_panic_multi_table_values_counters_and_durability() {
     assert_eq!(gate.last_committed(), version);
     assert_eq!(gate.durable_watermark(), version);
     assert!(!gate.is_orphaned_post_wal(version));
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(a.counter().get().await.unwrap(), 1);
     assert_eq!(b.counter().get().await.unwrap(), 1);
 }
@@ -138,7 +138,7 @@ async fn post_wal_panic_multi_table_counter_underflow_does_not_block_durability(
     let error = a.counter().increment(-1).await.unwrap_err();
     assert!(error.to_string().contains("cannot go below zero"));
 
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(
         a.get(a_rid).await.unwrap(),
         InnerValue::Str("counter-drift".into()),
@@ -152,7 +152,7 @@ async fn post_wal_panic_multi_table_counter_underflow_does_not_block_durability(
     assert_eq!(gate.last_committed(), version);
     assert_eq!(gate.durable_watermark(), version);
     assert!(!gate.is_orphaned_post_wal(version));
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(a.counter().get().await.unwrap(), 0);
     assert_eq!(b.counter().get().await.unwrap(), 1);
 }
@@ -178,7 +178,7 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
         .unwrap();
     repo.commit_tx(tx).await.unwrap();
     drop(snapshot);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     let durable_before = gate.durable_watermark();
 
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
@@ -229,7 +229,7 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
         later_posting,
     );
 
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 2);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 2);
     let outcome = task.await.unwrap().unwrap();
     assert_eq!(outcome.commit_version, later_version);
     assert_eq!(gate.durable_watermark(), outcome.commit_version);
@@ -244,7 +244,7 @@ async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
         later_posting,
         "draining an older orphan must not overwrite the later inline posting",
     );
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(
         table.get(rid).await.unwrap(),
         InnerValue::Str("later".into()),

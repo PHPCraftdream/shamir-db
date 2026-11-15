@@ -162,9 +162,9 @@ async fn journal_init_failure_retry_keeps_pending_minimum_at_publish() {
     // above must not poison the new feed with a gap for an aborted version.
     let handle = repo.changefeed().await.unwrap();
     assert_eq!(handle.feed.first_gap_version(), 0);
-    let _ = publish_journaled(&repo, later, p_later);
+    let _ = publish_journaled(&repo.core, later, p_later);
     assert_eq!(handle.feed.first_gap_version(), v_later);
-    let _ = publish_journaled(&repo, earlier, p_earlier);
+    let _ = publish_journaled(&repo.core, earlier, p_earlier);
     assert_eq!(handle.feed.first_gap_version(), v_earlier);
     assert_eq!(
         within(bounded(&repo, &handle, v_earlier)).await.gap_at,
@@ -191,8 +191,8 @@ async fn journal_pending_minimum_restored_and_persisted_on_retry() {
     let p_later = repo
         .prepare_journal_event(Some(event(later.version())))
         .await;
-    let _ = publish_journaled(&repo, later, p_later);
-    let _ = publish_journaled(&repo, earlier, p_first);
+    let _ = publish_journaled(&repo.core, later, p_later);
+    let _ = publish_journaled(&repo.core, earlier, p_first);
     let handle = repo.changefeed().await.unwrap();
     assert_eq!(handle.feed.first_gap_version(), first);
     let read = within(bounded(&repo, &handle, first)).await;
@@ -242,7 +242,7 @@ async fn journal_publish_returns_same_arc_for_live_broadcast() {
     let v = guard.version();
     let prepared = repo.prepare_journal_event(Some(event(v))).await.unwrap();
     let identity = prepared.0.clone();
-    let published = publish_journaled(&repo, guard, Some(prepared)).unwrap();
+    let published = publish_journaled(&repo.core, guard, Some(prepared)).unwrap();
     assert!(Arc::ptr_eq(&identity, &published));
     assert!(live.try_recv().is_err());
     repo.broadcast_changefeed_event(Some(published));
@@ -268,7 +268,7 @@ async fn journal_pending_gap_survives_oncecell_publication_after_snapshot() {
     within(hook.reached.notified()).await;
     // Init has already sampled pending=0, but OnceCell is still unpublished.
     // A store+get recheck alone misses this schedule; post-init handoff is needed.
-    let _ = publish_journaled(&repo, guard, prepared);
+    let _ = publish_journaled(&repo.core, guard, prepared);
     hook.resume.notify_one();
     let handle = within(init).await.unwrap().unwrap();
     assert_eq!(handle.feed.first_gap_version(), v);

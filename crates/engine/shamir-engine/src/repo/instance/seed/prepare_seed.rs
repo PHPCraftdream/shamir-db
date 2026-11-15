@@ -40,7 +40,7 @@ pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
     {
         return Err(DbError::Storage("seed version below certified gap".into()));
     }
-    repo.drainer().drain_all(repo).await?;
+    repo.drainer().drain_all(&repo.core).await?;
     repo.flush_all_history().await?;
     // snapshot_stream skips unrecognised history keys; seed export must instead
     // reject them. Timestamp entries are the documented 0x00 + u64 namespace.

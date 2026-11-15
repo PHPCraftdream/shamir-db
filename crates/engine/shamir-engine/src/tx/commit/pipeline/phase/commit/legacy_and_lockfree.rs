@@ -8,7 +8,7 @@ use super::entry::{
     commit_wal_durability, fire_async_index_tail_test_hook, fire_cancel_test_hook,
     fire_post_validate_pre_publish_test_hook, maybe_crash, wal_completion, TxError,
 };
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit_phases::{
     apply_data_phase, apply_vector_delta_phase, materialize_async_tail, promote_vectors,
 };
@@ -24,7 +24,7 @@ pub(super) async fn commit_tx_inner_legacy_async(
     mut tx: TxContext,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
 ) -> Result<TxOutcome, TxError> {
@@ -211,7 +211,7 @@ pub(super) async fn commit_tx_lockfree(
     mut tx: TxContext,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
 ) -> Result<TxOutcome, TxError> {
@@ -455,7 +455,7 @@ pub(super) async fn commit_tx_lockfree(
 /// txs (they never acquire locks), so this is a no-op for them — zero
 /// overhead on the non-Pessimistic commit paths. Each `(table_token, key)`
 /// is routed to the corresponding table's `MvccStore::release_locks`.
-pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstance) {
+pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoCore) {
     if tx.locked_keys.is_empty() {
         return;
     }

@@ -222,7 +222,7 @@ fn seeded_raw_fjall_image_reboots_atomic_batch_capable_and_applies() {
         repo.get_table("items").await.unwrap();
         let event = put_event("hello", RecordId([2u8; 16]), 74);
         let outcome = apply_replicated_batch(
-            &repo,
+            repo.core(),
             &[ReplicatedEvent {
                 event,
                 field_bindings: Vec::new(),

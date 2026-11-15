@@ -44,7 +44,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
     let name = "follower-gap-barrier";
     let repo = repo(name);
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -58,7 +58,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
     feed.feed.mark_gap(2);
     assert_eq!(feed.feed.first_gap_version(), 2);
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }
@@ -69,7 +69,7 @@ async fn persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged() {
         assert_eq!(load_clean_horizon(&info).await.unwrap(), Some(1));
     }
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(3, 3)], 2, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(3, 3)], 2, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 3 }
@@ -99,7 +99,7 @@ async fn pending_init_gap_advances_bookmark_without_certifying_horizon() {
     let repo = repo(name);
     repo.record_pending_changefeed_gap(1);
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(1, 1)], 0, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 1 }
@@ -112,7 +112,7 @@ async fn pending_init_gap_advances_bookmark_without_certifying_horizon() {
         assert_eq!(load_clean_horizon(&info).await.unwrap(), None);
     }
     assert_eq!(
-        apply_replicated_batch(&repo, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
+        apply_replicated_batch(&repo.core, &[replicated(2, 2)], 1, ApplyPolicy::Trusted)
             .await
             .unwrap(),
         ApplyOutcome::Applied { local_version: 2 }

@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::repo::repo_token;
 use crate::table::{table_manager::table_token_for, TableConfig};
+use crate::tx::commit_tx;
 use crate::tx::drainer::Drainer;
 
 use super::support::{make_repo, rid, seed_inflight_put};
@@ -25,7 +30,7 @@ async fn drain_step_gap_reseed_when_window_empty() {
     // Window is empty — drain_step must fall back via gap-reseed.
     assert_eq!(drainer.window_len(), 0);
 
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 1, "drain_step works via gap-reseed fallback");
     assert_eq!(gate.durable_watermark(), 1);
 
@@ -63,7 +68,7 @@ async fn drain_step_replays_visible_prefix_into_history() {
     assert!(tbl.get(rid(1)).await.is_err());
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 3, "all three visible-undurable versions drained");
     assert_eq!(drainer.drained_total(), 3);
 
@@ -102,7 +107,7 @@ async fn drain_step_noop_when_durable_at_visibility() {
     assert_eq!(gate.durable_watermark(), 5);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 0, "durable == visibility → no drain");
     assert_eq!(gate.durable_watermark(), 5, "watermark unchanged");
 }
@@ -121,11 +126,11 @@ async fn drain_step_is_idempotent() {
     gate.publish_committed_max(2);
 
     let drainer = Drainer::new();
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 2);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 2);
     assert_eq!(gate.durable_watermark(), 2);
 
     // Second pass: everything is already at/below the durable prefix.
-    let second = drainer.drain_step(&repo).await.unwrap();
+    let second = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(second, 0, "re-drain of drained state is a no-op");
     assert_eq!(gate.durable_watermark(), 2, "watermark unchanged");
     assert_eq!(drainer.drained_total(), 2, "no double-count");
@@ -148,11 +153,11 @@ async fn drain_all_flushes_then_stops() {
     gate.publish_committed_max(4);
 
     let drainer = Drainer::new();
-    let total = drainer.drain_all(&repo).await.unwrap();
+    let total = drainer.drain_all(&repo.core).await.unwrap();
     assert_eq!(total, 4);
     assert_eq!(gate.durable_watermark(), 4);
     // A follow-up drain_all is a clean no-op.
-    assert_eq!(drainer.drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_all(&repo.core).await.unwrap(), 0);
 }
 
 /// drain_step never drains a version ABOVE visibility: an entry committed in
@@ -172,7 +177,7 @@ async fn drain_step_respects_visibility_ceiling() {
     gate.publish_committed_max(1);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 1, "only the visible version is drained");
     assert_eq!(gate.durable_watermark(), 1);
 
@@ -228,7 +233,7 @@ async fn drain_step_a5_retains_marker_above_hwm() {
     gate.publish_committed_max(1);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
 
     // Data is durable in history despite the retained marker — the A5 gate
     // defers TRUNCATION, not DURABILITY.
@@ -250,7 +255,7 @@ async fn drain_step_a5_retains_marker_above_hwm() {
     );
 
     // Second pass: version 1 is now at the durable floor → no-op, no panic.
-    assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+    assert_eq!(drainer.drain_step(&repo.core).await.unwrap(), 0);
 }
 
 /// P0 group-1 fix (2026-08-14 review): a table's `per_table_mvcc`
@@ -293,7 +298,7 @@ async fn drain_step_recovers_data_for_table_missing_from_per_table_mvcc() {
     );
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
 
     assert_eq!(drained, 1, "the entry must still be drained (not stuck)");
     assert_eq!(gate.durable_watermark(), 1);
@@ -323,20 +328,13 @@ async fn drain_step_empty_window_no_recover_call() {
     assert_eq!(gate.durable_watermark(), 5);
 
     let drainer = Drainer::new();
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    let drained = drainer.drain_step(&repo.core).await.unwrap();
     assert_eq!(drained, 0, "dur >= vis → immediate return 0");
 }
 /// End-to-end: set hw=2, commit N=10 txs through the commit API, then
 /// drain_step. All 10 entries must be drained (gap-reseed recovers drops).
 #[tokio::test]
 async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-
-    use crate::tx::commit_tx;
-
     let repo = make_repo();
     repo.disable_background_drainer_for_test();
     repo.add_table_for_test(crate::table::TableConfig::new("t"));
@@ -354,7 +352,7 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
             Bytes::from(format!("v{i}")),
         );
         tx.write_set.insert(i, staging);
-        let _ = commit_tx(tx, &repo).await.unwrap();
+        let _ = commit_tx(tx, &repo.core).await.unwrap();
     }
 
     let dropped = drainer.offer_dropped_total();
@@ -374,7 +372,7 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
         .collect();
     assert_eq!(versions, (1..=10).collect::<Vec<_>>());
     let recover_before = drainer.recover_calls();
-    let drained = drainer.drain_all(&repo).await.unwrap();
+    let drained = drainer.drain_all(&repo.core).await.unwrap();
     assert!(drainer.recover_calls() > recover_before);
     assert_eq!(drained, 10, "all 10 entries must be drained despite drops");
 
@@ -418,7 +416,7 @@ async fn drain_step_window_gap_triggers_one_recover_reseed() {
     // contiguous prefix (the pass after v=1 drained and watermark moved
     // to 1, leaving the window with {3} and expected=2 mismatching k=3).
     let recover_before = drainer.recover_calls();
-    let drained = drainer.drain_all(&repo).await.unwrap();
+    let drained = drainer.drain_all(&repo.core).await.unwrap();
     let recover_after = drainer.recover_calls();
     assert_eq!(drained, 3, "gap-reseed recovers the missing entry");
     assert_eq!(
@@ -468,7 +466,7 @@ async fn drain_step_interior_abort_does_not_trigger_spurious_recover() {
     assert_eq!(drainer.window_keys(), vec![1, 3]);
 
     let recover_before = drainer.recover_calls();
-    let drained = drainer.drain_all(&repo).await.unwrap();
+    let drained = drainer.drain_all(&repo.core).await.unwrap();
     let recover_after = drainer.recover_calls();
 
     assert_eq!(drained, 2, "two committed entries drained (v=1, v=3)");

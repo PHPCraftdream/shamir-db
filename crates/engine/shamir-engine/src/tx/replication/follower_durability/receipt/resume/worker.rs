@@ -37,8 +37,8 @@ use std::sync::{Arc, Mutex};
 
 use super::super::apply::run_receipt_pipeline;
 use crate::repo::changelog_store::write_domain::RepoWriteReservation;
-use crate::repo::RepoInstance;
 use crate::tx::cold_reconcile::lifecycle::{WorkerExecutionState, WorkerLease};
+use crate::tx::commit::core::RepoCore;
 use crate::tx::{ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
@@ -48,7 +48,7 @@ use shamir_tx::{RepoTxGate, VersionGuard};
 /// is an owned clone: the job outlives any caller that drops its reply
 /// receiver. Payload + reply ONLY (`LifecycleJob` carries the reply).
 pub(crate) struct ReceiptApplyJob {
-    pub(crate) repo: RepoInstance,
+    pub(crate) repo: RepoCore,
     pub(crate) info: Arc<dyn Store>,
     pub(crate) events: Vec<ReplicatedEvent>,
     pub(crate) bookmark: u64,

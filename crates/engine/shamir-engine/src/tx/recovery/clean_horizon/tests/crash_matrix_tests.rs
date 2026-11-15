@@ -154,7 +154,7 @@ async fn crash_child(path: PathBuf, phase: &str) {
     rmp_serde::encode::write(&mut oracle, &journal.events).expect("encode events oracle");
     oracle.sync_all().expect("sync events oracle");
     if phase == "mid_checkpoint" {
-        test_seam::on_sample_w(&repo, || {
+        test_seam::on_sample_w(&repo.core, || {
             let marker =
                 std::env::var_os("SHAMIR_CLEAN_HORIZON_REACHED").expect("reached marker path");
             let mut file = std::fs::File::create(marker).expect("create checkpoint marker");
@@ -165,7 +165,7 @@ async fn crash_child(path: PathBuf, phase: &str) {
         });
     }
     Drainer::new()
-        .drain_all(&repo)
+        .drain_all(&repo.core)
         .await
         .expect("drain must reach crash seam");
     panic!("crash seam did not fire at {phase}");

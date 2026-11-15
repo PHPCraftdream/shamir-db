@@ -665,7 +665,7 @@ pub(super) async fn run_follower_loop_internal(
         // quiesce.
         let mut pending_stall: Option<PendingStall> = None;
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
-            &repo_instance,
+            repo_instance.core(),
             &events,
             bookmark,
             apply_policy,

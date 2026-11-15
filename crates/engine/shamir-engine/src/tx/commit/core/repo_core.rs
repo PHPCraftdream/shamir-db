@@ -11,13 +11,14 @@ use crate::tx::apply_replicated::follower_durability::receipt::{
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
+use crate::tx::commit::rename_fence::RenameFenceView;
 #[cfg(test)]
 use crate::tx::tests::journal_publish_order_tests::JournalPublishHook;
 use shamir_storage::error::DbResult;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
-pub(crate) struct RepoCore {
+pub struct RepoCore {
     pub(crate) name: String,
     pub(crate) repo: BoxRepo,
     /// Plain Arc-shared catalogue of this repo's tables; constructed below,
@@ -27,6 +28,11 @@ pub(crate) struct RepoCore {
     /// repo, owned by the repo layer; cloned shallowly like every field.
     pub(crate) durability_handle: DurabilityHandle,
     pub(crate) horizon: TxHorizon,
+    /// `Weak` of the shell's repo-liveness token (dead on background clones);
+    /// the drainer loop exits once no foreground clone holds the strong ref.
+    pub(crate) live_weak: Weak<()>,
+    /// Read-side view of the shell's rename fence (same `Arc`s as the shell's).
+    pub(crate) rename_fence: RenameFenceView,
     /// F-28 Step 4 (#831): cached per-repo reverse-FK map (parent table name
     /// → its reverse-FK entries) plus the child→parents reverse-reverse
     /// index, replacing the O(tables) `collect_fk_refs()` scan

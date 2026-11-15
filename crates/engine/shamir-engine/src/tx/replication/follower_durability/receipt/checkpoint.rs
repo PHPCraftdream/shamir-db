@@ -23,7 +23,7 @@ use crate::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, Bookm
 use crate::meta::repl::receipt::receipt_key;
 use crate::meta::repl::ReplicationReceipt;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 
 use super::{publish, stage};
 
@@ -173,10 +173,7 @@ const RECEIPT_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 /// Every receipt event must already be in the follower journal, byte-exact.
 /// The journal flush afterwards is THE durability boundary for the journal
 /// rows — it happens BEFORE any bookmark advance.
-pub(crate) async fn verify_journal(
-    repo: &RepoInstance,
-    receipt: &ReplicationReceipt,
-) -> DbResult<()> {
+pub(crate) async fn verify_journal(repo: &RepoCore, receipt: &ReplicationReceipt) -> DbResult<()> {
     let store = repo.follower_journal_store().await?;
     for (index, mapping) in receipt.mapping.iter().enumerate() {
         let expected = receipt.downstream_events.get(index).ok_or_else(|| {
@@ -203,7 +200,7 @@ pub(crate) async fn verify_journal(
 
 /// Confirm the journal feed through `local_end` so the clean horizon J may
 /// advance over the batch.
-pub(crate) async fn confirm_journal(repo: &RepoInstance, local_end: u64) -> DbResult<()> {
+pub(crate) async fn confirm_journal(repo: &RepoCore, local_end: u64) -> DbResult<()> {
     let handle = repo.changefeed().await?;
     let confirmed = handle
         .feed
@@ -233,7 +230,7 @@ fn local_end(receipt: &ReplicationReceipt) -> u64 {
 /// feed's first open gap; a J already certified above the gap never
 /// regresses.
 pub(crate) async fn certified_clean_through(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     old: &BookmarkV3,
     end: u64,
 ) -> DbResult<Option<u64>> {
@@ -250,7 +247,7 @@ pub(crate) async fn certified_clean_through(
 }
 
 async fn stage_checkpoint_batch(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     receipt: &ReplicationReceipt,
     old: &BookmarkV3,
@@ -289,7 +286,7 @@ async fn stage_checkpoint_batch(
 /// staging path — zero behavior change when the seam is unarmed.
 #[cfg(test)]
 async fn staged_checkpoint_outcome(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     receipt: &ReplicationReceipt,
     old: &BookmarkV3,
@@ -307,7 +304,7 @@ async fn staged_checkpoint_outcome(
 
 #[cfg(not(test))]
 async fn staged_checkpoint_outcome(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     receipt: &ReplicationReceipt,
     old: &BookmarkV3,
@@ -319,7 +316,7 @@ async fn staged_checkpoint_outcome(
 }
 
 async fn reconcile_uncertain(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,
@@ -367,7 +364,7 @@ pub(crate) struct PublicationCompletion<'a, F> {
 /// resolves, with no `.await` in between), and flush the info store
 /// afterwards.
 pub(crate) async fn checkpoint(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     permit: &RepoWritePermit,
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,

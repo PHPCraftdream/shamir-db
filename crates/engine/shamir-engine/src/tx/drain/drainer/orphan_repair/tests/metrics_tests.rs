@@ -15,9 +15,9 @@ async fn orphan_repair_metrics_count_repair_once_and_not_on_replay() {
     let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
 
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(repo.drainer().orphan_repair_metrics.snapshot(), (1, 0));
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 0);
     assert_eq!(repo.drainer().orphan_repair_metrics.snapshot(), (1, 0));
     assert!(repo.drainer().window_entry(version).is_none());
 }

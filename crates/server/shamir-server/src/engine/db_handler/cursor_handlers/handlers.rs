@@ -145,7 +145,7 @@ impl ShamirDbHandler {
         // of paying the overlay-merge cost on every call. If it fails, reads
         // remain correct (via the overlay-aware path above) but keep paying
         // that cost for the cursor's lifetime instead — logged, not fatal.
-        if let Err(e) = repo.drainer().drain_all(&repo).await {
+        if let Err(e) = repo.drainer().drain_all(repo.core()).await {
             tracing::warn!(?e, db = db_name, repo = %repo_name, "create_cursor: drain_all failed");
         }
 

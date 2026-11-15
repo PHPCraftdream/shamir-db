@@ -7,9 +7,10 @@ use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::visibility_metrics::{AckMode, AckResult, PendingKind};
 use shamir_tx::TxContext;
 
-use crate::repo::gate_visibility::observe_gate_with_budget;
-use crate::repo::visibility_observer::{query_ack_result, record_pending_kind};
-use crate::repo::RepoInstance;
+use crate::repo::gate_visibility::{
+    observe_gate_with_budget, query_ack_result, record_pending_kind,
+};
+use crate::tx::commit::core::RepoCore;
 use crate::tx::commit::{commit_tx_inner, release_pessimistic_locks, TxError};
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
@@ -20,7 +21,7 @@ use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 /// outcome cancellation drops only observation, not materialization or recovery.
 pub(crate) fn commit_tx_with_options(
     tx: TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     wait: VisibilityWait,
 ) -> impl Future<Output = Result<TxOutcome, TxError>> + '_ {
     commit_tx_with_kind(tx, repo, wait, PendingKind::ExplicitTx)
@@ -31,7 +32,7 @@ pub(crate) fn commit_tx_with_options(
 /// acknowledgement tail serves explicit and implicit commits alike).
 pub(crate) async fn commit_tx_with_kind(
     tx: TxContext,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     wait: VisibilityWait,
     kind: PendingKind,
 ) -> Result<TxOutcome, TxError> {
@@ -71,7 +72,7 @@ pub(crate) async fn commit_tx_with_kind(
         Err(_) => None,
     };
     if let Some(visibility) = visibility {
-        record_pending_kind(repo, visibility, kind);
+        record_pending_kind(repo.initialized_tx_gate(), visibility, kind);
     }
     acknowledged
 }
@@ -80,7 +81,7 @@ pub(crate) async fn commit_tx_with_kind(
 /// dropping an outcome's background handle detaches, never aborts its tail.
 pub(crate) async fn acknowledge_known_outcome(
     result: Result<TxOutcome, TxError>,
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     wait: VisibilityWait,
     high: u64,
@@ -284,7 +285,7 @@ fn settled_sample(gate: &shamir_tx::RepoTxGate, version: u64) -> VisibilityState
 /// Takes `high` as a parameter so tests can drive the state machine with a tiny
 /// artificial gap; production callers pass [`MAX_UNDRAINED_VERSIONS`].
 #[cfg(test)]
-pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
+pub(crate) async fn apply_backpressure(repo: &RepoCore, high: u64) {
     let Ok(gate) = repo.tx_gate().await else {
         // No gate (repo teardown / construction race) — nothing to brake on.
         return;
@@ -296,7 +297,7 @@ pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
 /// Soft backpressure, not hard memory admission. Pending skips this entirely.
 /// cancel-safe: yes — durable observation and drainer nudges mutate no commit state.
 pub(crate) async fn apply_backpressure_with_budget(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     high: u64,
     deadline: Option<tokio::time::Instant>,

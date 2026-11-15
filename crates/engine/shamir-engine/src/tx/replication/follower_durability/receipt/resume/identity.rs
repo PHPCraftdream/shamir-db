@@ -23,7 +23,7 @@ use super::match_offered;
 use crate::meta::repl::bookmark::load_fence_record;
 use crate::meta::repl::{ReceiptBinding, ReplicationReceipt};
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::repo::RepoInstance;
+use crate::tx::commit::core::RepoCore;
 use crate::tx::ApplyPolicy;
 use crate::tx::ReplicatedEvent;
 
@@ -50,7 +50,7 @@ use crate::tx::ReplicatedEvent;
 /// with one call. Every mismatch fails with `DbError::Storage` and the
 /// message below — the receipt remains outstanding and the pull is refused.
 pub(crate) async fn verify_identity(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     info: &Arc<dyn Store>,
     receipt: &ReplicationReceipt,
     offered: &[ReplicatedEvent],

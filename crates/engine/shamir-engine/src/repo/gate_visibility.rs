@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState};
 use shamir_storage::error::{DbError, DbResult};
+use shamir_tx::visibility_metrics::{AckResult, PendingKind, PendingReason};
 use shamir_tx::RepoTxGate;
 
 /// cancel-safe: yes — the timer drops the gate's RAII waiter, no tasks survive.
@@ -57,4 +58,41 @@ pub(crate) async fn observe_gate_with_budget(
             VisibilityPendingReason::Timeout
         },
     })
+}
+
+/// VIS-4c: record the Pending-kind counter at a kind-known call site. The
+/// shared acknowledgement tail serves both explicit and implicit commits,
+/// so attribution must happen where the write family is known. The gate is
+/// always initialized once a commit returned a known outcome; absence is
+/// silently ignored (pure telemetry).
+pub(crate) fn record_pending_kind(
+    gate: Option<&RepoTxGate>,
+    visibility: VisibilityState,
+    kind: PendingKind,
+) {
+    if let VisibilityState::Pending { reason, .. } = visibility {
+        if let Some(gate) = gate {
+            let reason = match reason {
+                VisibilityPendingReason::Timeout => PendingReason::Timeout,
+                VisibilityPendingReason::ReopenRequired => PendingReason::ReopenRequired,
+            };
+            gate.visibility().record_pending(reason, kind);
+        }
+    }
+}
+
+/// Metric label of a query-contract visibility observation (the tx layer
+/// keeps its own visibility types and its own `ack_result_of`).
+pub(crate) fn query_ack_result(state: VisibilityState) -> AckResult {
+    match state {
+        VisibilityState::Visible => AckResult::Visible,
+        VisibilityState::Pending {
+            reason: VisibilityPendingReason::Timeout,
+            ..
+        } => AckResult::PendingTimeout,
+        VisibilityState::Pending {
+            reason: VisibilityPendingReason::ReopenRequired,
+            ..
+        } => AckResult::PendingReopen,
+    }
 }

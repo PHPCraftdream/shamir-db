@@ -48,7 +48,7 @@ async fn apply(repo: &RepoInstance, event: &ChangelogEvent) -> ApplyOutcome {
     // DURABLE bookmark as well, so a replay of an already-checkpointed
     // leader version is a skip.
     apply_replicated_batch(
-        repo,
+        &repo.core,
         &[ReplicatedEvent {
             event: event.clone(),
             field_bindings: Vec::new(),

@@ -116,7 +116,7 @@ impl ShamirAdminExecutor {
             .get_db(&self.db_name)
             .and_then(|db| db.get_repo(&op.repo))
         {
-            if let Err(e) = repo.drainer().drain_all(&repo).await {
+            if let Err(e) = repo.drainer().drain_all(repo.core()).await {
                 log::warn!(
                     "handle_purge_history: drain_all {}/{}: {e}",
                     op.repo,

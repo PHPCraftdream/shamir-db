@@ -35,7 +35,7 @@ async fn legacy_entry_drains_as_certified_gap() {
     let entry = Arc::new(WalEntryV2::new(version, 0, Vec::new()).with_commit_version(version));
     repo.drainer().offer(entry);
     assert_eq!(gate.durable_watermark(), 0);
-    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert_eq!(repo.drainer().drain_all(&repo.core).await.unwrap(), 1);
     assert_eq!(gate.durable_watermark(), version);
     let handle = repo.changefeed().await.unwrap();
     handle
@@ -66,7 +66,7 @@ async fn eventless_entry_falls_back_without_consulting_writer() {
     let mut entry = entry_without_event(1);
     entry.event = Some(eventless_header());
     assert_eq!(
-        repair_event(&repo, &entry).await.unwrap(),
+        repair_event(&repo.core, &entry).await.unwrap(),
         Outcome::Gap(GapReason::UnknownWAL),
     );
 }
@@ -81,7 +81,9 @@ async fn legacy_entry_falls_back_without_consulting_writer() {
     .await
     .unwrap();
     assert_eq!(
-        repair_event(&repo, &entry_without_event(1)).await.unwrap(),
+        repair_event(&repo.core, &entry_without_event(1))
+            .await
+            .unwrap(),
         Outcome::Gap(GapReason::UnknownWAL),
     );
 }
@@ -113,7 +115,7 @@ async fn corrupt_existing_event_is_error_and_preserved() {
         .put(shamir_tx::changefeed::version_key(1), corrupt.clone())
         .await
         .unwrap();
-    let error = repair_event(&repo, &entry).await.unwrap_err();
+    let error = repair_event(&repo.core, &entry).await.unwrap_err();
     assert!(error.to_string().contains("decode"));
     assert_eq!(
         handle

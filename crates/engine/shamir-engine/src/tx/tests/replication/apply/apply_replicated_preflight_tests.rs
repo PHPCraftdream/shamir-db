@@ -51,7 +51,7 @@ async fn assert_refused(repo: &RepoInstance, event: &ChangelogEvent, reason: App
     let durable = gate.durable_watermark();
     let mut downstream = repo.subscribe_changelog().await.unwrap();
     let outcome = apply_replicated_batch(
-        repo,
+        &repo.core,
         &[ReplicatedEvent {
             event: event.clone(),
             field_bindings: Vec::new(),
