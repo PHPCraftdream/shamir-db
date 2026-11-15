@@ -275,3 +275,143 @@ What this settles:
 - Consequence for the options of section 5: lazily opening the catalogue tables or one keyspace with prefixes can save at
   most about 1.2 s per open on Windows, not the whole 6.4 s; parallel open of the 7 stores helps a server start but not a
   single system-store open. Do not pick an option before the second measurement.
+
+## 8. Second measurement: phases of a system-store open (BOOT-COST-2)
+
+Section 7 left about 5 s of the 6.4 s per system-store open on Windows unexplained. The test
+`crates/engine/shamir-db/src/shamir_db/tests/repo/boot_cost2_tests.rs` (`boot_cost2_system_store_open_phases`, fjall
+feature, plain test, no production change) replays the real open phase by phase and prints one line per phase:
+`BOOT-COST2 phase=<name> ms=<wall> persist_sync_all=<FJALL_PERSIST_SYNC_ALL_COUNT after the phase>`. The output of a
+passing test is hidden by nextest; the orchestrator reads it on a throwaway branch that fails at the end.
+
+### 8.1 The real call sequence (OBSERVED)
+
+`ShamirDb::init` -> `init_inner` (`crates/engine/shamir-db/src/shamir_db/shamir_db/core.rs:290`):
+
+1. `SystemStore::init_with_durability` (`system_store/store.rs:153`)
+   1. `DbInstance::new()` (`store.rs:157`)
+   2. `BoxRepoFactory::fjall(path)` and `RepoConfig` with 13 `add_table` (`store.rs:159-184`)
+   3. `DbInstance::add_repo_with_durability` (`store.rs:187`; `crates/engine/shamir-engine/src/db_instance/db_instance.rs:62`)
+      -> `RepoInstance::from_factory_with_durability`
+      (`crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs:51-80`):
+      `from_factory_unrecovered` (Database open + MemBuffer wrap, `lifecycle.rs:165`), `set_durability` (`:66`),
+      `tx_info_store` (opens `__tx__`, `:69`), `classify_follower_bookmark` (`:70`), `write_domain().admit()` (`:71`),
+      `repo_identity_admitted` (`:76`; `load_or_create` writes the identity on a fresh store), `recover_v2_inflight_admitted`
+      (`:77`; recovery and certification, may persist).
+   4. `rebuild_group_names` (`store.rs:212`) -> `load_groups` (opens the three `groups` stores).
+2. `WasmEngine::with_compile_cache` (or `new`), `FunctionRegistry::with_catalogue_builtins`, `GlobalVars::seed_env`,
+   `ValidatorRegistry::new` (`core.rs:305-324`).
+3. `load_databases`, `load_repositories`, `load_tables` (`core.rs:398-413`), re-attach of each persisted repo
+   (`add_repo_with_durability`, `core.rs:420-470`), `load_functions`, `load_validators`, `boot_compile_schemas`,
+   `refresh_resync_quarantine_cache` (`core.rs:470-600`).
+
+NOT separable without a production change: inside step 1.3 the engine steps are crate-private to `shamir-engine`
+(`from_factory_unrecovered`, `repo_identity_admitted`, `recover_v2_inflight_admitted`), and `rebuild_group_names` is
+private to `system_store`. The test times the smallest enclosing public call (B3 for 1.3; `load_groups` is read warm in C2
+and its first-touch cost is read in B4 `groups`). The persist counter after B3 still shows whether 1.3 persists.
+
+### 8.2 Test phases, hypotheses, what the numbers must show
+
+| Phase | Replays | Hypothesis | Confirmed if | Rejected if |
+|---|---|---|---|---|
+| A1 `raw_factory_create` | `BoxRepoFactory::fjall(..).create()`, separate dir | Database open is cheap (section 7: 20 ms) | about 20 ms on windows | tens of ms or more |
+| A2 `raw_16_keyspace_opens` | 16 `store_get` | about 1.2 s on windows (section 7) | 1.0-1.5 s on windows | far from 1.2 s: section 7 is not reproducible in this run |
+| B1, B2 | `DbInstance::new`, 13-table config | about 0 ms | under 5 ms | any visible cost |
+| B3 `add_repo_with_durability` | step 1.3 | Dominant part of the missing time: identity write plus recovery and certification persist with SyncAll on a fresh store, each SyncAll costing 100+ ms on Windows | ms large (seconds) on windows AND `persist_sync_all` after B3 is above 0 | `persist_sync_all` stays 0 and ms is about A1 plus 4 keyspace opens |
+| B4 `first_get_table_*` (4 lines) | boot readers touching the 4 catalogue tables | each about 3 keyspace opens (~130 ms on windows), plus index and table context load | 4 lines sum to about 0.5 s on windows | much larger: table creation does more than store opens |
+| B_sum | B1 to B4 | equals C1 plus the loads within noise | B_sum within 20% of C1 + C2..C5 | far off: the replay misses a real step |
+| C1 `system_store_init_whole` | real `SystemStore::init_with_durability` | this plus section 8 phase D is most of the 6.4 s | C1 on windows is 3 s or more | C1 is about 1.5 s: the rest is outside the open |
+| C2-C5 `load_*_warm` | readers on an open store | about 0 ms (stores already open) | under 10 ms | a warm read costs ms: read path itself is slow |
+| C6, C7 | `load_functions`, `load_validators` | first touch opens 3 stores each, ~130 ms on windows; not done by `SystemStore::init` itself | about 100-150 ms each | about 0 |
+| D1 `wasm_engine_with_compile_cache` | wasmtime engine plus private-directory verification of the cache dir | Possible unexplained cost on Windows (directory ACL verification, engine creation) | ms large on windows, small on linux | about the same as D2-D4 |
+| D2-D4 | registries, `seed_env` | about 0 ms | under 5 ms | any visible cost |
+| E1 `shamir_db_init_fresh_whole` | the public entry point, fresh dir | E1 is about C1 + D + the boot loads; cross-check of the sum | E1 within 20% of C1 + D1..D4 + C6 + C7 | E1 much larger: a step of `init_inner` step 3 not replayed (the load/compile steps) |
+| E2 `create_db_first_ddl` | first catalogue write | DDL persists with SyncAll per statement on a fresh store, creates catalogue tables | `persist_sync_all` rises and ms is large on windows | about 0 ms and no persist |
+| E3 `flush_all_waiting` | durable flush of all repos | one or a few SyncAll | ms large on windows | about 0 ms |
+| E4 `drop` | close | cheap; lock release is lazy | under 20 ms | seconds |
+| F1 `shamir_db_init_reopen_whole` | quiet reopen of the same directory | much cheaper than E1 (no identity write, no creation); `attempts` above 1 means the lock was still held and its wait is included | F1 well below E1, persist count unchanged from E4 | F1 about E1: the cost is not on the fresh-store work |
+| G `tempdir_removal_all` | recursive delete of 5 trees | section 7: about 14 ms per tree | tens of ms | seconds: the close-and-delete part of the 6.4 s |
+
+Reading the result: the 5 missing seconds are located by the largest of B3, C6+C7, D1, E2 and G on windows-latest, and by
+the persist counter moving or not. If B3 and E1 are both small, section 7's 6.4 s is not the open itself but the test
+fixtures around it (server boot, data-dir lock, other stores), and the next measurement must be at server launch
+(`launch.rs`), not in the system store.
+
+### 8.3 Measured on CI (run 43732153719, `workflow_dispatch` of `shamir-db`, branch with a deliberate final failure)
+
+One run per OS, inside the normal lib-test run of `shamir-db` (565 tests on ubuntu and macOS, 549 on windows, executed in
+parallel, one process per test). The numbers are indicative, not statistics, and they include the load of the other
+tests running at the same time. The `persist_sync_all` counter is per test process.
+
+| Phase | ubuntu ms | macOS ms | windows ms | `persist_sync_all` after (all OS) |
+|---|---|---|---|---|
+| A1 `raw_factory_create` | 5 | 10 | 60 | 0 |
+| A2 `raw_16_keyspace_opens` | 133 | 499 | 3320 | 0 |
+| B1 `db_instance_new`, B2 `repo_config_13_tables` | 0 | 0 | 0 | 0 |
+| B3 `add_repo_with_durability` | 44 | 99 | 282 | 2 |
+| B4 first `get_table` `groups` / `databases` / `repositories` / `tables` | 22 / 33 / 24 / 34 | 66 / 74 / 65 / 80 | 111 / 109 / 344 / 811 | 2 |
+| B_sum | 159 | 386 | 1659 | |
+| C1 `system_store_init_whole` | 81 | 166 | 1197 | 4 |
+| C2 `load_groups` | 0 | 0 | 0 | 4 |
+| C3 / C4 / C5 `load_databases` / `load_repositories` / `load_tables` | 18 / 13 / 18 | 67 / 68 / 73 | 347 / 479 / 396 | 4 |
+| C6 `load_functions` / C7 `load_validators` | 23 / 11 | 84 / 70 | 151 / 582 | 4 |
+| D1 `wasm_engine_with_compile_cache` | 3 | 5 | 3 | 4 |
+| D2, D3, D4 | 0 | 0 | 0 | 4 |
+| E1 `shamir_db_init_fresh_whole` | 132 | 456 | 1741 | 6 |
+| E2 `create_db_first_ddl` | 5 | 7 | 19 | 8 |
+| E3 `flush_all_waiting` | 2 | 4 | 3 | 11 |
+| E4 `drop` | 1 | 3 | 0 | 11 |
+| F1 `shamir_db_init_reopen_whole` (`attempts=1`) | 131 | 155 | 141 | 13 |
+| G `tempdir_removal_all` (5 trees) | 45 | 88 | 75 | 13 |
+
+Verdicts against the hypotheses of 8.2:
+
+- **A1, A2.** Section 7 is not reproduced exactly: 16 keyspace opens took 3320 ms on windows (1217 ms in section 7), 133 ms
+  on ubuntu (43 ms), 499 ms on macOS (411 ms). The raw open cost on Windows varies by a factor of about 2.7 between runs
+  and loads; a single-run figure must not be treated as a constant.
+- **B3 rejected as the dominant cost.** `persist_sync_all` does reach 2 after B3 (the identity write and the recovery
+  certification do persist on a fresh store), but the whole step costs 282 ms on windows, including its keyspace opens.
+- **E2, E3 reject "a SyncAll costs 100+ ms on Windows".** The first DDL adds two `SyncAll` in 19 ms and the flush adds
+  three in 3 ms: a `SyncAll` on this runner costs at most about 10 ms.
+- **B4 rejected (hypothesis 0.5 s).** The four first touches sum to 1375 ms on windows, with `tables` alone 811 ms
+  against 34 ms on ubuntu: first use of a catalogue table (its keyspaces and index context) is the expensive step, not the
+  `Database` open.
+- **C3-C5 were mislabelled "warm" in 8.2.** `SystemStore::init` opens only the `groups` stores, so these three are first
+  touches too: on windows C3 + C4 + C5 = 1222 ms against B4 `databases` + `repositories` + `tables` = 1264 ms.
+- **C1 is 1197 ms on windows, not 3 s.** That is 0.8 s more than its replay (B3 + B4 `groups` = 393 ms), a gap present
+  only on windows (ubuntu 81 against 66 ms, macOS 166 against 165 ms). Which call of `init_with_durability` outside the
+  replay costs it is not known; the engine calls are crate-private, see 8.1.
+- **D1 rejected.** The wasm engine with its compile cache takes 3 ms on windows; D2-D4 are 0.
+- **E1 confirms there is no hidden step in `init_inner`:** 1741 ms on windows against C1 + D1..D4 + C6 + C7 = 1933 ms
+  (-10%). Phase sums of the standalone replays are not strictly additive on Windows (C1 + C3..C5 = 2419 ms against
+  B_sum = 1659 ms), so E1 is the authoritative figure and the rest is a decomposition with that error.
+- **F1 confirms the cost is creation, not opening.** Reopening the same directory takes 141 ms on windows against 1741 ms
+  for the fresh init: 12 times less (macOS 2.9 times, ubuntu 1.0 time). The file system was warm (the tree had just been
+  written), so a cold restart will cost more than 141 ms.
+- **E4, G rejected.** Close is 0-3 ms, removal of five trees 45-88 ms: not the "close-and-delete" part of the 6.4 s.
+
+What this settles:
+
+1. One fresh `ShamirDb::init` on windows-latest is about 1.7 s in this run (macOS 0.46 s, ubuntu 0.13 s). The 6.4 s per
+   disk-backed test of `win-test-runtime.md` is therefore NOT the system-store open: that open is about a quarter of it.
+   About 4.7 s per such test lies outside the system-store open, and was not measured here.
+2. The expensive part of the open on Windows is creating the 13 catalogue keyspaces and their files and touching them for
+   the first time (C3-C7 alone are 1955 ms of first touches in the standalone replay), not `persist(SyncAll)`, not the
+   wasm cache, not the close and not the removal. A restart of an existing store is cheap (141 ms warm).
+3. Product consequence: nothing in this data justifies a production change to the open path; the Windows penalty is paid
+   once per new data directory. The earlier suspicion of a periodic `SyncAll` on an idle store (section 4) stays rejected.
+4. Candidates that this data supports, none chosen yet: creating the catalogue stores lazily, for example
+   `functions` and `validators` (C6 + C7 = 733 ms on windows) which most boots never write; a prepared template
+   directory copied for each disk-backed test instead of a fresh creation (a copy has not been timed); more tests on the
+   in-memory fixture (50 already moved).
+5. The other ~4.7 s per disk-backed test are not measured, and the series stops here (owner review, 2026-11-15): after the
+   move of 50 tests to the in-memory fixture only 7 disk-backed `schema_ddl` tests remain, about 45 s of Windows test
+   time in total, and the product open path needs no change. A third measurement is warranted only if disk-backed tests
+   grow again; it would put time marks inside one of those tests (repositories and tables created in the test, writes,
+   commits, the second open) and run it alone through a nextest filter.
+
+`boot_cost2_system_store_open_phases` (`shamir-db`) is `#[ignore]`d: it asserts nothing and costs about 10 s of Windows test
+time per run of the crate. To measure again, run it with nextest's `--run-ignored only`, or on a throwaway branch remove
+the `#[ignore]` and add a final failure so that the log shows the output. `boot_cost_of_one_fjall_open` (`shamir-storage`,
+about 1.5 s) stays a plain test: it is the only integration test of that crate, and an integration row with no test to
+run fails the CI gate (`--no-tests=fail`).
