@@ -35,7 +35,9 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<Box<dyn AtomicBatch>> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         self.repo.begin_atomic_batch().await
     }
 }

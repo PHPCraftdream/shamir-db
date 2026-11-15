@@ -30,6 +30,7 @@ pub use fk_reverse_cache::{
     build_reverse_fk_entries, FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry,
 };
 pub use instance::repo_instance;
+pub(crate) use journal::backend::durability_handle::DurabilityHandle;
 pub use journal::bounded_journal_read::BoundedJournalRead;
 pub use repo_config::RepoConfig;
 pub use repo_instance::catalog::RenamePersistOutcome;

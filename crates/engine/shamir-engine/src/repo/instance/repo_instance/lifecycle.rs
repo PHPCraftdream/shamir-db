@@ -60,7 +60,7 @@ impl RepoInstance {
     /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
     /// field doc on [`marker_write_mutex`](Self) for why this exists.
     pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
-        &self.marker_write_mutex
+        &self.durability_handle.marker_write_mutex
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
@@ -174,7 +174,7 @@ impl RepoInstance {
     /// S5c-X PR6b-2a: this repository's write-admission domain (one per
     /// repository instance, shared by every clone).
     pub fn write_domain(&self) -> &Arc<RepoWriteDomain> {
-        &self.write_domain
+        &self.durability_handle.write_domain
     }
 
     /// Repository name.
@@ -295,6 +295,7 @@ impl RepoInstance {
     /// Returns the count of recovered entries.
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         let permit = self
+            .durability_handle
             .write_domain
             .admit()
             .await
@@ -308,7 +309,9 @@ impl RepoInstance {
         &self,
         permit: &crate::repo::RepoWritePermit,
     ) -> DbResult<usize> {
-        self.write_domain.debug_check_permit(permit);
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
         // Round-11 (stack layout): see `recover_v2_inflight`.
         Box::pin(crate::tx::recovery::recover_inflight_v2(self, permit)).await
     }
@@ -372,7 +375,8 @@ impl RepoInstance {
     /// caller cannot strand `leader_busy`).
     pub async fn synced_flush(&self) -> DbResult<()> {
         let repo = self.clone();
-        self.group_commit
+        self.durability_handle
+            .group_commit
             .clone()
             .run(move || {
                 let repo = repo.clone();

@@ -3,6 +3,8 @@ use shamir_storage::error::DbResult;
 #[cfg(feature = "fjall")]
 use shamir_storage::types::Repo;
 use shamir_storage::types::Store;
+
+use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use std::sync::Arc;
 
 use super::super::RepoInstance;
@@ -33,25 +35,17 @@ impl RepoInstance {
         &self.clean_horizon_test_state
     }
 
-    pub(crate) fn wal_retention_gate(
-        &self,
-    ) -> &Arc<crate::tx::clean_horizon::retention_gate::RetentionGate> {
-        &self.wal_retention_gate
-    }
-
-    pub(crate) fn journal_dropped_total(&self) -> u64 {
-        self.changefeed
-            .get()
-            .map_or(0, |handle| handle.feed.journal_dropped())
+    pub(crate) fn wal_retention_gate(&self) -> &Arc<RetentionGate> {
+        self.durability_handle.wal_retention_gate()
     }
 
     #[inline]
     pub(crate) fn wal_retention_refuse_writes(&self) -> bool {
-        self.wal_retention_gate.refuse_writes()
+        self.durability_handle.wal_retention_refuse_writes()
     }
 
     pub fn wal_retention_metrics(&self) -> [u64; 5] {
-        self.wal_retention_gate.snapshot()
+        self.durability_handle.wal_retention_metrics()
     }
 
     pub(crate) async fn reserve_recovery_floor(
@@ -59,12 +53,8 @@ impl RepoInstance {
         info: &Arc<dyn Store>,
         minimum: u64,
     ) -> DbResult<u64> {
-        let _guard = self.marker_write_mutex().lock().await;
-        let current = crate::meta::recovery_marker::load_last_committed(info)
-            .await?
-            .unwrap_or(0);
-        let floor = current.max(minimum);
-        crate::meta::recovery_marker::save_last_committed_flushed(info, floor).await?;
-        Ok(floor)
+        self.durability_handle
+            .reserve_recovery_floor(info, minimum)
+            .await
     }
 }

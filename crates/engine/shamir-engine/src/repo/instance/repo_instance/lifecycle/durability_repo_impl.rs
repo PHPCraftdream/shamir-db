@@ -86,41 +86,19 @@ impl RepoInstance {
     }
 
     pub(crate) fn initialized_mem_wal(&self) -> bool {
-        self.wal_group
-            .get()
-            .is_some_and(|group| group.is_mem_sink())
-    }
-
-    /// PR1 Chunk B, amendment B2: this repo's durability SHARED cell.
-    /// Read with `.load()` (one atomic load — the commit seam does exactly
-    /// one per commit).
-    pub(crate) fn durability(&self) -> &Arc<arc_swap::ArcSwap<DurabilityPolicy>> {
-        &self.durability
+        self.durability_handle.initialized_mem_wal()
     }
 
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
     #[must_use]
     pub fn durability_metrics_snapshot(&self) -> DurabilityMetricsSnapshot {
-        let mut snapshot = self.durability_metrics.snapshot(
-            &self.durability.load(),
-            self.wal_group.get().map(Arc::as_ref),
-        );
-        let retention = self.wal_retention_metrics();
-        snapshot.journal = [
-            retention[0],
-            retention[1],
-            retention[2],
-            retention[3],
-            retention[4],
-            self.journal_dropped_total(),
-        ];
-        snapshot
+        self.durability_handle.durability_metrics_snapshot()
     }
 
     /// Snapshot read of the shared policy; pins the value against concurrent stores.
     #[must_use]
     pub fn durability_policy(&self) -> arc_swap::Guard<Arc<DurabilityPolicy>> {
-        self.durability.load()
+        self.durability_handle.durability_policy()
     }
 
     /// Check whether an already-initialized transaction gate requires repo
@@ -159,8 +137,8 @@ impl RepoInstance {
         // here (durable mem repos are relied on by tests and legal at the
         // engine layer); durable-ephemeral publication-time validation lives
         // server-side.
-        let policy = resolved.for_wal_backend(self.wal_dir.is_some());
-        self.durability.store(Arc::new(policy));
+        let policy = resolved.for_wal_backend(self.durability_handle.wal_dir.is_some());
+        self.durability_handle.durability.store(Arc::new(policy));
         Ok(())
     }
 
@@ -169,7 +147,8 @@ impl RepoInstance {
     /// Also exposes the recoverability watermark to embedded callers.
     pub async fn wal_group(&self) -> DbResult<Arc<shamir_wal::WalGroupCommit>> {
         self.repo_wal().await?;
-        self.wal_group
+        self.durability_handle
+            .wal_group
             .get()
             .cloned()
             .ok_or_else(|| DbError::Internal("wal group not initialized".to_string()))
@@ -203,12 +182,16 @@ impl RepoInstance {
         if mode == ReplicationServe::CompletedReseed {
             self.ensure_replication_armed().await?;
         }
+        let first = self
+            .read_changelog_bounded_impl(from_version, limit, false, None)
+            .await?;
+        let group = self.wal_group().await?;
         crate::repo::durability_policy::read_replication_page(
-            self,
-            from_version,
-            limit,
+            first,
+            &group,
             mode,
-            &self.durability_metrics,
+            &self.durability_handle.durability_metrics,
+            |clamp| self.read_changelog_bounded_impl(from_version, limit, false, clamp),
         )
         .await
     }
@@ -295,7 +278,7 @@ impl RepoInstance {
             return Ok(());
         }
         self.bump_history_epoch_admitted(permit).await?;
-        self.durability_metrics.note_epoch_bump();
+        self.durability_handle.durability_metrics.note_epoch_bump();
         Ok(())
     }
 }
