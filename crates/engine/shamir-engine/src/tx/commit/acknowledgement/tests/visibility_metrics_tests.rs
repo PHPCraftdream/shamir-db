@@ -199,7 +199,9 @@ async fn implicit_batch_pending_is_attributed_by_commit_implicit() {
         .insert_tx(&InnerValue::Str("implicit".into()), Some(&mut tx))
         .await
         .unwrap();
-    let info = commit_implicit(&repo, tx, "a", BOUNDED_ZERO).await.unwrap();
+    let info = commit_implicit(&repo.core, tx, "a", BOUNDED_ZERO)
+        .await
+        .unwrap();
     assert!(matches!(
         info.visibility,
         Some(VisibilityState::Pending { .. })

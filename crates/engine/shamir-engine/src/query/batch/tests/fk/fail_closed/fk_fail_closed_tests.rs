@@ -71,7 +71,7 @@ use crate::query::batch::{
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{RepoConfig, RepoInstance};
+use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 
@@ -114,7 +114,7 @@ impl TableResolver for FailureInjectingResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for FailureInjectingResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         let n = self.resolve_repo_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if n >= self.fail_at_or_after {
             return Err(DbError::NotFound(format!(
@@ -122,12 +122,15 @@ impl BatchResolver for FailureInjectingResolver {
                 self.fail_at_or_after
             )));
         }
-        self.db.get_repo(&self.repo).ok_or_else(|| {
-            DbError::NotFound(format!(
-                "F-40 test: backing repo '{}' not found on call #{n}",
-                self.repo
-            ))
-        })
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "F-40 test: backing repo '{}' not found on call #{n}",
+                    self.repo
+                ))
+            })
     }
 }
 

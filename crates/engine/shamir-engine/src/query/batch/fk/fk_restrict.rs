@@ -173,7 +173,7 @@ pub(crate) async fn check_fk_restrict(
 /// `parent_table` with `on_delete = Restrict`.
 ///
 /// F-28 Step 4 (#831): reads through the repo's cached reverse-FK map
-/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// (`RepoCore::fk_reverse_cache`) instead of re-running the O(tables)
 /// `collect_fk_refs()` scan on every call — a cache miss (never built, or
 /// invalidated by a schema mutation since the last build) pays that scan
 /// exactly once and seeds every parent table's entry in the repo, not just

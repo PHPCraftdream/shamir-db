@@ -28,7 +28,7 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     .await
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -280,7 +280,7 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
 
     // BEGIN — mint the interactive tx + its snapshot guard (the server would
     // park both in its registry; here the test holds them).
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -344,7 +344,7 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
     assert!(r2.transaction.is_none(), "tx still open after EXECUTE #2");
 
     // COMMIT — both calls' writes land together at one commit version.
-    let outcome = commit_interactive_tx(&repo, tx).await.unwrap();
+    let outcome = commit_interactive_tx(&repo.core, tx).await.unwrap();
     assert!(outcome.commit_version > 0, "commit assigns a version");
     // The snapshot guard is released only AFTER commit returned.
     drop(guard);
@@ -376,7 +376,7 @@ async fn interactive_tx_rollback_discards_staged_writes() {
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
 
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -461,12 +461,14 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     tbl.insert(&mk_row("bob")).await.unwrap();
 
     // BEGIN two interactive Serializable txs.
-    let (mut tx_a, guard_a) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Serializable)
-        .await
-        .unwrap();
-    let (mut tx_b, guard_b) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Serializable)
-        .await
-        .unwrap();
+    let (mut tx_a, guard_a) =
+        open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Serializable)
+            .await
+            .unwrap();
+    let (mut tx_b, guard_b) =
+        open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Serializable)
+            .await
+            .unwrap();
 
     // Call #1 on EACH tx: SELECT every users row -> recorded into that tx's
     // read_set via the tx-aware read path.
@@ -558,7 +560,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     .unwrap();
 
     // COMMIT tx_a first — succeeds.
-    let oa = commit_interactive_tx(&repo, tx_a).await;
+    let oa = commit_interactive_tx(&repo.core, tx_a).await;
     assert!(
         oa.is_ok(),
         "tx_a must commit cleanly; got {:?}",
@@ -567,7 +569,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     drop(guard_a);
 
     // COMMIT tx_b — MUST abort with SsiConflict.
-    let ob = commit_interactive_tx(&repo, tx_b).await;
+    let ob = commit_interactive_tx(&repo.core, tx_b).await;
     match ob {
         Err(crate::tx::CommitError::SsiConflict { .. }) => {}
         other => panic!(
@@ -621,10 +623,10 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     );
 
     // BEGIN two interactive SI txs.
-    let (mut tx_a, guard_a) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx_a, guard_a) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
-    let (mut tx_b, guard_b) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx_b, guard_b) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -690,9 +692,9 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     .unwrap();
 
     // tx_a commits first → version V_a. tx_b commits second → version V_b > V_a.
-    let o_a = commit_interactive_tx(&repo, tx_a).await.unwrap();
+    let o_a = commit_interactive_tx(&repo.core, tx_a).await.unwrap();
     drop(guard_a);
-    let o_b = commit_interactive_tx(&repo, tx_b).await.unwrap();
+    let o_b = commit_interactive_tx(&repo.core, tx_b).await.unwrap();
     drop(guard_b);
     assert!(
         o_b.commit_version > o_a.commit_version,
@@ -732,7 +734,7 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         );
         let resolver = TxTestResolver { repo: repo.clone() };
 
-        let (mut tx, _guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        let (mut tx, _guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
 
@@ -847,7 +849,7 @@ async fn execute_in_open_tx_rejects_deeply_nested_filter() {
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
 
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 

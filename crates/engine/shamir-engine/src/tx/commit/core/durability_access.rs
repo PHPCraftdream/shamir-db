@@ -6,7 +6,55 @@ use crate::repo::journal::backend::durability_handle::retention_gate::RetentionG
 use crate::repo::RepoWritePermit;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo as _, Store};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Shutdown-stage timing threshold: stages slower than this are logged.
+const STAGE_WARN_THRESHOLD: Duration = Duration::from_secs(1);
+
+/// Logs `repo`/`stage` when it ran longer than `STAGE_WARN_THRESHOLD` —
+/// from `Drop`, so a stage that is CANCELLED by an enclosing deadline (the
+/// very stall being diagnosed) is reported too. Shutdown paths only.
+/// (R2d: moved with `flush_buffers` from the `RepoInstance` shell.)
+struct StageTimer<'a> {
+    repo: &'a str,
+    stage: &'a str,
+    start: tokio::time::Instant,
+    finished: bool,
+}
+
+impl Drop for StageTimer<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        if elapsed >= STAGE_WARN_THRESHOLD {
+            let how = if self.finished {
+                "took"
+            } else {
+                "was cancelled or still running after"
+            };
+            log::warn!(
+                "shutdown stage slow: repo '{}' stage '{}' {} {:?}",
+                self.repo,
+                self.stage,
+                how,
+                elapsed
+            );
+        }
+    }
+}
+
+async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
+    let mut timer = StageTimer {
+        repo,
+        stage,
+        start: tokio::time::Instant::now(),
+        finished: false,
+    };
+    let out = fut.await;
+    timer.finished = true;
+    out
+}
 
 impl RepoCore {
     /// S5c-X PR6b-2a: this repository's write-admission domain (one per
@@ -274,5 +322,178 @@ impl RepoCore {
         let _guard = self.durability_handle.marker_write_mutex.lock().await;
         let store = self.tx_info_store().await?;
         RepoIdentity::bump(&store, None).await
+    }
+
+    /// Durability flush for a `synced` commit, batched via group-commit so
+    /// concurrent synced commits on this repo share one flush+fsync.
+    /// (R2d: moved from the `RepoInstance` shell — the closure captures a
+    /// cloned `RepoCore`, cheap since every field is `Arc`-shared, so it is
+    /// `'static + Send` and can be moved into the detached leader task
+    /// `GroupCommit::run` spawns.)
+    pub(crate) async fn synced_flush(&self) -> DbResult<()> {
+        let core = self.clone();
+        self.durability_handle
+            .group_commit
+            .clone()
+            .run(move || {
+                let core = core.clone();
+                async move { core.flush_buffers().await }
+            })
+            .await
+    }
+
+    /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
+    /// In-memory repos have no file WAL — this is a no-op there. The
+    /// test-only fault-injection seam stays on the shell delegate.
+    pub(crate) async fn sync_wal(&self) -> DbResult<()> {
+        let wal = self.repo_wal().await?;
+        if self.initialized_mem_wal() {
+            return Ok(());
+        }
+        wal.sync_wal().await
+    }
+
+    /// Flush this repo's in-memory buffers to their durable backing.
+    /// (R2d: moved verbatim from the shell's `flush_buffers`; only
+    /// `self.core.X` references were flattened to `self.X`.)
+    ///
+    /// Drains the `__tx__` store and every table's data + info stores, then
+    /// issues ONE backend persist (`Repo::persist_once`) — the old per-store
+    /// `flush()` loop fsynced fjall's single per-Database journal once per
+    /// store (~N identical full-database fsyncs per shutdown).
+    /// In-memory stores are no-ops. Best-effort: individual errors are
+    /// logged and skipped; returns the first error encountered (if any)
+    /// after attempting all stores.
+    pub(crate) async fn flush_buffers(&self) -> DbResult<()> {
+        let mut first_err: Option<DbError> = None;
+
+        // Drain the inflight WAL tail into `history` before flushing durable stores.
+        // Post-cutover the ack-path writes only the in-memory overlay; the value
+        // is durable in `history` only after the drainer replays the WAL entry.
+        // Graceful shutdown drains first so the committed-but-not-yet-drained
+        // tail lands durably (and WAL markers truncate). Without a spawned
+        // drainer (no commit), this is a cheap no-op. A drain error is returned
+        // after subsequent stores are still flushed; recovery on next open can
+        // then converge from WAL.
+        if let Err(e) = timed_stage(self.name(), "drain_all", self.drainer().drain_all(self)).await
+        {
+            log::warn!("flush_buffers: drain_all {}: {}", self.name(), e);
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+
+        match timed_stage(self.name(), "tx_info_store_open", self.tx_info_store()).await {
+            Ok(store) => {
+                if let Err(e) = timed_stage(self.name(), "tx_info_store", store.flush_drain()).await
+                {
+                    log::warn!("flush_buffers: tx_info_store {}: {}", self.name(), e);
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        for table_name in self.list_table_names() {
+            // Only tables that are already open own buffered stores. A dormant
+            // table has nothing to drain, and instantiating it here would pay
+            // a full table open (keyspaces, indexes, validators) per table
+            // inside the shutdown budget and register it for MVCC routing. The
+            // map guard is dropped before any await.
+            let Some(table) = self
+                .catalog
+                .tables
+                .get(&table_name)
+                .and_then(|cell| cell.get().cloned())
+            else {
+                continue;
+            };
+            if let Err(e) = timed_stage(
+                self.name(),
+                &format!("data_store {table_name}"),
+                table.data_store().flush_drain(),
+            )
+            .await
+            {
+                log::warn!(
+                    "flush_buffers: data_store {}/{}: {}",
+                    self.name(),
+                    table_name,
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            if let Err(e) = timed_stage(
+                self.name(),
+                &format!("info_store {table_name}"),
+                table.info_store().flush_drain(),
+            )
+            .await
+            {
+                log::warn!(
+                    "flush_buffers: info_store {}/{}: {}",
+                    self.name(),
+                    table_name,
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        // Stage I: persist the single per-repo interner ONCE on graceful
+        // shutdown. Previously persistence ran per table; the shared manager
+        // now owns the repo-wide namespace, so one persist covers every table.
+        // WAL entries whose deltas cover these ids can be truncated on next boot.
+        match timed_stage(self.name(), "interner_open", self.repo_interner()).await {
+            Ok(repo_interner) => {
+                if let Err(e) =
+                    timed_stage(self.name(), "interner_persist", repo_interner.persist()).await
+                {
+                    log::warn!(
+                        "flush_buffers: repo interner persist {}: {}",
+                        self.name(),
+                        e
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        // ONE durability barrier for every store drained above. The old
+        // per-store `flush()` loop fsynced fjall's single per-Database
+        // journal once per store (~N identical full-database fsyncs per
+        // shutdown — the Windows flush-stall multiplier). `flush_drain`
+        // leaves every store's data in the backend's write path; this single
+        // `persist(SyncAll)` makes ALL of it durable, byte-for-byte the same
+        // end state as the loop. Non-fjall backends: default no-op — their
+        // per-store `flush()` semantics are unchanged.
+        if let Err(e) = timed_stage(self.name(), "persist_once", self.repo.persist_once()).await {
+            log::warn!("flush_buffers: persist_once {}: {}", self.name(), e);
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }

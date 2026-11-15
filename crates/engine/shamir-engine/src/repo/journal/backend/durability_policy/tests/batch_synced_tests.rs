@@ -29,8 +29,8 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _: &str) -> DbResult<RepoInstance> {
-        Ok(self.0.clone())
+    async fn resolve_repo(&self, _: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.0.core.clone())
     }
 }
 

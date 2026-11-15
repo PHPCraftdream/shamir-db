@@ -59,8 +59,8 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 

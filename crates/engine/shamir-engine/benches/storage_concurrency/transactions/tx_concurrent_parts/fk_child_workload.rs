@@ -125,8 +125,8 @@ pub(in super::super) fn run(h: &mut Harness) {
         async fn resolve_repo(
             &self,
             _repo_name: &str,
-        ) -> shamir_storage::error::DbResult<RepoInstance> {
-            Ok(self.repo.clone())
+        ) -> shamir_storage::error::DbResult<shamir_engine::tx::RepoCore> {
+            Ok(self.repo.core().clone())
         }
     }
 

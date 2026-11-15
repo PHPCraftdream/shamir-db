@@ -102,10 +102,13 @@ impl TableResolver for CountingResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for CountingResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 
@@ -128,8 +131,8 @@ impl TableResolver for CountingTxResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for CountingTxResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 

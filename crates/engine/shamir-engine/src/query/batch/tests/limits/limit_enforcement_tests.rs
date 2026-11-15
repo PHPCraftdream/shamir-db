@@ -29,8 +29,8 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -58,7 +58,7 @@ async fn run(
     let auth = Authorized::unchecked(&request, Actor::System, "test").with_policy(policy);
     if mode == 2 {
         let (mut tx, _guard) =
-            open_interactive_tx(&resolver.repo, shamir_tx::IsolationLevel::Snapshot)
+            open_interactive_tx(&resolver.repo.core, shamir_tx::IsolationLevel::Snapshot)
                 .await
                 .unwrap();
         execute_in_open_tx(auth, resolver, None, None, &mut tx).await

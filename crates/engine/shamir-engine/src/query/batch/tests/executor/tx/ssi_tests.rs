@@ -68,8 +68,8 @@ impl TableResolver for GateBarrierResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for GateBarrierResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 

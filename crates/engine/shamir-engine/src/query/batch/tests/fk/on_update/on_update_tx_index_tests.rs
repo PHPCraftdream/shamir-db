@@ -592,7 +592,7 @@ impl BatchResolver for ResolveCountingResolver {
     async fn resolve_repo(
         &self,
         repo_name: &str,
-    ) -> shamir_storage::error::DbResult<crate::repo::RepoInstance> {
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
         self.inner.resolve_repo(repo_name).await
     }
 }

@@ -62,7 +62,7 @@ pub(super) fn null_out_field(
 /// `parent_table`.
 ///
 /// F-28 Step 4 (#831): reads through the repo's cached reverse-FK map
-/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// (`RepoCore::fk_reverse_cache`) instead of re-running the O(tables)
 /// `collect_fk_refs()` scan on every call/cascade-recursion-level — a cache
 /// miss (never built, or invalidated by a schema mutation since the last
 /// build) pays that scan exactly once and seeds every parent table's entry

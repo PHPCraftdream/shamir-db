@@ -41,9 +41,9 @@ use shamir_types::access::Actor;
 ///
 /// The returned `SnapshotGuard` MUST be parked alongside the `TxContext` and
 /// held until commit/rollback — dropping it early lets GC reclaim versions
-/// the open tx still needs (see [`crate::repo::RepoInstance::begin_tx`]).
+/// the open tx still needs (see `RepoCore::begin_tx`).
 pub async fn open_interactive_tx(
-    repo: &crate::repo::RepoInstance,
+    repo: &crate::tx::RepoCore,
     iso: shamir_tx::IsolationLevel,
 ) -> shamir_storage::error::DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
     repo.begin_tx(iso).await
@@ -171,8 +171,8 @@ pub(crate) async fn execute_in_open_tx_unchecked(
 /// caller only AFTER this returns — the snapshot must stay alive through
 /// commit so SSI read-set validation and history reads remain correct.
 pub async fn commit_interactive_tx(
-    repo: &crate::repo::RepoInstance,
+    repo: &crate::tx::RepoCore,
     tx: shamir_tx::TxContext,
 ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
-    repo.commit_tx(tx).await
+    crate::tx::commit::commit_tx_with_options(tx, repo, repo.commit_visibility_wait()).await
 }

@@ -11,7 +11,7 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{RepoConfig, RepoInstance};
+use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 
 struct Resolver {
@@ -27,9 +27,10 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         self.db
             .get_repo("default")
+            .map(|repo| repo.core.clone())
             .ok_or_else(|| DbError::NotFound("default repo".into()))
     }
 }

@@ -1,5 +1,4 @@
 use crate::query::batch::BatchError;
-use crate::repo::version_provider::repo_token;
 use shamir_engine_query::query::write::WriteResult;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::DbResult;
@@ -56,18 +55,25 @@ impl RepoInstance {
     /// recovery replays by the monotonically-floored `commit_version`, so
     /// even a repeated txn_id after a crash carries no ordering ambiguity
     /// or data loss; the floor is a belt-and-braces anti-collision guard.
+    /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
+    /// cancellation occurs during init, the cell remains uninitialised
+    /// and the next caller retries. Returned Arc clone is in-memory.
+    ///
+    /// Returns the per-repo WAL manager, lazily initialising it on first
+    /// call. Shares the `"__tx__"` info store with `tx_gate`.
+    ///
+    /// The `next_txn_id` counter is seeded from
+    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`. The floor is
+    /// computed from `recover()` (segment/Mem replay) — empty on a fresh
+    /// in-memory instance (safeguard inert), the durable entries on a disk
+    /// repo. The append-only segment keys entries by frame position and
+    /// recovery replays by the monotonically-floored `commit_version`, so
+    /// even a repeated txn_id after a crash carries no ordering ambiguity
+    /// or data loss; the floor is a belt-and-braces anti-collision guard.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
         self.core.repo_wal().await
     }
 
-    /// cancel-safe: yes — bumps a tx-start counter (atomic), opens a
-    /// snapshot (single scc insert under the hood) and returns. If the
-    /// caller is dropped mid-await before receiving the guard, the
-    /// stack-local guard is dropped which removes the snapshot from the
-    /// active set. The only persistent footprint is an atomic counter
-    /// increment in `tx_metrics`; tx-ids/version-counters drift safely
-    /// (monotonic, no reuse).
-    ///
     /// Open a fresh transaction on this repo.
     ///
     /// Returns a `(TxContext, SnapshotGuard)` pair. The guard's lifetime
@@ -75,49 +81,19 @@ impl RepoInstance {
     /// removes the snapshot from the active set so GC can reclaim
     /// versions older than `min_alive`.
     ///
-    /// `repo_id` in the TxContext is populated via [`repo_token`].
+    /// `repo_id` in the TxContext is populated via `repo_token`. The body
+    /// lives on `RepoCore::begin_tx`.
     pub async fn begin_tx(
         &self,
         isolation: shamir_tx::IsolationLevel,
     ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
-        self.core.horizon.tx_metrics().on_tx_start();
-        let gate = self.tx_gate().await?;
-        // Open the snapshot BEFORE constructing TxContext so that any
-        // concurrent non-tx write sees active_serializable_count > 0 for
-        // the full lifetime of this tx's predicate window.
-        let guard = if isolation == shamir_tx::IsolationLevel::Serializable {
-            gate.open_snapshot_serializable().await
-        } else {
-            gate.open_snapshot().await
-        };
-        let snapshot_version = guard.version();
-        let tx_id = gate.fresh_tx_id();
-        let mut tx =
-            shamir_tx::TxContext::new(tx_id, repo_token(&self.name), snapshot_version, isolation);
-
-        // FG-7: attach the version provider UNCONDITIONALLY (every isolation
-        // level), not just Serializable. `pre_commit_locked_validate`'s new
-        // Phase CAS needs `version_of` for `expected_version` re-validation
-        // at commit regardless of isolation — a Snapshot tx with no CAS
-        // checks pays only a thin `Arc` construction + clone, no behavior
-        // change to Phase 2 (still gated on `isolation == Serializable`).
-        let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
-            per_table_mvcc: Arc::clone(&self.core.catalog.per_table_mvcc),
-        });
-        tx.set_version_provider(provider);
-
-        Ok((tx, guard))
+        self.core.begin_tx(isolation).await
     }
 
-    /// cancel-safe: partial — cancellation during prelock (including unique-lock
-    /// waits) is still a clean abort. AFTER prelock, cancellation only stops the
-    /// caller's wait: the exact suspended commit continues on the runtime, even
-    /// before WAL acceptance. Do not blindly retry an unobserved outcome.
-    /// Inline panics propagate; detached panics are logged, with VersionGuard
-    /// orphan recovery as the fallback. Stop admission and await
-    /// [`quiesce_commits`](Self::quiesce_commits) before stopping the runtime.
-    /// See [`crate::tx::commit_tx`] for the full contract.
-    ///
+    pub fn commit_visibility_wait(&self) -> VisibilityWait {
+        self.core.commit_visibility_wait()
+    }
+
     /// Commit a transaction via the 7-phase commit pipeline.
     ///
     /// Wrapper around [`crate::tx::commit_tx`]. The free function is
@@ -140,10 +116,6 @@ impl RepoInstance {
     pub fn with_commit_visibility_wait(mut self, wait: VisibilityWait) -> Self {
         self.core.horizon.set_commit_visibility_wait(wait);
         self
-    }
-
-    pub fn commit_visibility_wait(&self) -> VisibilityWait {
-        self.core.commit_visibility_wait()
     }
 
     /// Commit with an explicit acknowledgement policy, resolved before the pipeline.
@@ -197,7 +169,7 @@ impl RepoInstance {
         )
             -> Pin<Box<dyn Future<Output = DbResult<WriteResult>> + Send + 't>>,
     {
-        crate::query::batch::run_implicit_batch_tx(self, actor, alias, stage).await
+        crate::query::batch::run_implicit_batch_tx(&self.core, actor, alias, stage).await
     }
 
     /// Open the implicit Snapshot batch tx; the body lives in
@@ -207,7 +179,7 @@ impl RepoInstance {
         actor: Actor,
         alias: &str,
     ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
-        crate::query::batch::begin_implicit_batch_tx(self, actor, alias).await
+        crate::query::batch::begin_implicit_batch_tx(&self.core, actor, alias).await
     }
 
     /// Open an implicit batch tx with a caller-chosen isolation level; the
@@ -218,8 +190,10 @@ impl RepoInstance {
         alias: &str,
         isolation: shamir_tx::IsolationLevel,
     ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
-        crate::query::batch::begin_implicit_batch_tx_with_isolation(self, actor, alias, isolation)
-            .await
+        crate::query::batch::begin_implicit_batch_tx_with_isolation(
+            &self.core, actor, alias, isolation,
+        )
+        .await
     }
 
     /// Commit an implicit batch tx; the body lives in
@@ -229,6 +203,6 @@ impl RepoInstance {
         tx: shamir_tx::TxContext,
         alias: &str,
     ) -> Result<shamir_query_types::batch::TransactionInfo, BatchError> {
-        crate::query::batch::commit_implicit_batch_tx(self, tx, alias).await
+        crate::query::batch::commit_implicit_batch_tx(&self.core, tx, alias).await
     }
 }

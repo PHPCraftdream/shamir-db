@@ -34,8 +34,8 @@ impl BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -49,7 +49,7 @@ async fn fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes() {
     .await
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -96,7 +96,7 @@ async fn fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes() {
     );
 
     let (mut observer, observer_guard) =
-        open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
     let response = execute_in_open_tx(
@@ -118,7 +118,7 @@ async fn fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes() {
     drop(guard);
 
     let (mut observer, observer_guard) =
-        open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
     let response = execute_in_open_tx(
@@ -154,7 +154,7 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
     .await
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -229,7 +229,7 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
     drop(guard);
 
     let (mut observer, observer_guard) =
-        open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
     let response = execute_in_open_tx(

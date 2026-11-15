@@ -525,7 +525,7 @@ impl<'a> QueryRunner<'a> {
         // is idempotent / cheap when caught up; skipped for `Latest`.
         if !matches!(query.temporal, shamir_query_types::read::Temporal::Latest) {
             if let Ok(repo) = self.resolver.resolve_repo(&table_ref.repo).await {
-                if let Err(e) = repo.drainer().drain_all(&repo.core).await {
+                if let Err(e) = repo.drainer().drain_all(&repo).await {
                     log::warn!("temporal read: drain_all {}: {e}", table_ref.repo);
                 }
             }

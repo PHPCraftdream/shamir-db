@@ -36,10 +36,13 @@ impl BatchResolver for TestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<crate::repo::RepoInstance> {
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 

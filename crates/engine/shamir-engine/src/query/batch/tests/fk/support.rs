@@ -26,9 +26,12 @@ impl BatchResolver for FkTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<crate::repo::RepoInstance> {
-        self.db.get_repo(&self.repo).ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
-        })
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
+            })
     }
 }

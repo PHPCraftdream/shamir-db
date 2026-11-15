@@ -158,8 +158,8 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<shamir_engine::tx::RepoCore> {
+        Ok(self.repo.core().clone())
     }
 }
 

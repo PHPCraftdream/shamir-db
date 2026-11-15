@@ -64,9 +64,10 @@ impl TableResolver for WalkResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for WalkResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         self.db
             .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
             .ok_or_else(|| DbError::NotFound(format!("repo '{}' not found", self.repo)))
     }
 }

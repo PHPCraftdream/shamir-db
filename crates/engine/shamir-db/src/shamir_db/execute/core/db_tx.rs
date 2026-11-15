@@ -169,7 +169,7 @@ impl ShamirDb {
             }
         };
         let (mut tx, guard) =
-            open_interactive_tx(&repo, iso)
+            open_interactive_tx(repo.core(), iso)
                 .await
                 .map_err(|e| BatchError::QueryError {
                     alias: String::new(),

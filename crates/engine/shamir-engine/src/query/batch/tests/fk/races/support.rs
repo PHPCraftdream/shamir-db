@@ -123,8 +123,8 @@ impl BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<crate::repo::RepoInstance> {
-        Ok(self.repo.clone())
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -142,7 +142,7 @@ impl BatchResolver for RaceInjectingResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<crate::repo::RepoInstance> {
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
         let n = self.resolve_repo_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.inject_at {
             // Take the writer exactly once — idempotent under retry.
@@ -161,9 +161,12 @@ impl BatchResolver for RaceInjectingResolver {
                 );
             }
         }
-        self.db.get_repo(&self.repo).ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
-        })
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
+            })
     }
 }
 

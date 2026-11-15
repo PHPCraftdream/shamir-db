@@ -89,7 +89,7 @@ async fn run_concurrent_publish_during_commit_window_delete(
     // scan. No concurrent writer has touched the child table yet, so the
     // scan legitimately finds no reference (or plans against zero fan-out)
     // and records the RI barrier token.
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
     let mut del = Batch::new();
@@ -122,7 +122,7 @@ async fn run_concurrent_publish_during_commit_window_delete(
     // hook, STILL HOLDING `commit_lock`.
     let repo_for_parent = repo.clone();
     let parent_task =
-        tokio::spawn(async move { commit_interactive_tx(&repo_for_parent, tx).await });
+        tokio::spawn(async move { commit_interactive_tx(&repo_for_parent.core, tx).await });
 
     wait_for_hook_reached(&hook).await;
 
@@ -313,7 +313,7 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
         .set(Arc::clone(&hook))
         .expect("hook installed exactly once per test process (nextest: one process per test)");
 
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -348,7 +348,7 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
 
     let repo_for_parent = repo.clone();
     let parent_task =
-        tokio::spawn(async move { commit_interactive_tx(&repo_for_parent, tx).await });
+        tokio::spawn(async move { commit_interactive_tx(&repo_for_parent.core, tx).await });
 
     wait_for_hook_reached(&hook).await;
 

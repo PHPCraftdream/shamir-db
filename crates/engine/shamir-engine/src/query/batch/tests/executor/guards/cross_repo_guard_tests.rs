@@ -31,7 +31,7 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         Err(shamir_storage::error::DbError::NotFound(
             "TestResolver does not back transactional repo lookups".into(),
         ))

@@ -52,8 +52,8 @@ impl crate::query::batch::BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
-    ) -> shamir_storage::error::DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -111,7 +111,7 @@ async fn call_in_open_tx_rejected() {
     let (repo, resolver) = setup_repo().await;
 
     // Open an interactive tx (simulates an open transactional context).
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 

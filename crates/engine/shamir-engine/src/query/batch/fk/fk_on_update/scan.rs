@@ -26,7 +26,7 @@ use super::helpers::{
 /// references relevant to THIS update's `set_fields`.
 ///
 /// (#1181): reads through the repo's cached reverse-FK map
-/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// (`RepoCore::fk_reverse_cache`) instead of re-running the O(tables)
 /// `repo.list_table_names()` + `collect_fk_refs()` scan on every UPDATE —
 /// mirrors `fk_actions::discover_action_refs` / `fk_restrict::discover_restrict_refs`,
 /// sharing the SAME cache (and the same underlying scan): a cache miss (never

@@ -42,12 +42,15 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         // F4b-1: non-tx inserts route through an implicit Snapshot tx, so the
         // executor now resolves the repo even on the non-transactional path.
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 
@@ -73,8 +76,8 @@ impl TableResolver for TxTestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TxTestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 // ============================================================================
@@ -117,10 +120,13 @@ impl TableResolver for TestResolverWithScalars {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolverWithScalars {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 
@@ -629,7 +635,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
     };
 
     let (mut tx, guard) =
-        crate::query::batch::open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        crate::query::batch::open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
 
@@ -700,7 +706,7 @@ async fn tx_in_tx_rejected() {
     let resolver = TxTestResolver { repo: repo.clone() };
 
     // Open an interactive tx (simulates the outer transactional context).
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
