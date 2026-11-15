@@ -1,0 +1,966 @@
+base = "fc75d2314aef2ab2cf1e41ebe019a6db8974a5b8"
+
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WorkerStartError::source"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::WorkerStartError::source"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::worker"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::worker"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::insert"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::insert"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::set"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::set"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::set_no_flag"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::set_no_flag"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::get"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::get"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::iter_range_stream_reverse"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::iter_range_stream_reverse"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::transact"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::transact"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::supports_atomic_transact"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::supports_atomic_transact"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::supports_atomic_batch"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::supports_atomic_batch"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::flush"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::flush"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::flush_drain"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::flush_drain"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::get_many"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::get_many"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::remove"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::remove"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::remove_no_flag"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::remove_no_flag"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::iter_stream"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::iter_stream"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WorkerSpawn"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::WorkerSpawn"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallStore::scan_prefix_stream"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore::scan_prefix_stream"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WorkerStartError"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::WorkerStartError"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WorkerStartError::fmt"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::store::WorkerStartError::fmt"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteJob"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteJob"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteWorker"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteWorker::spawn"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker::spawn"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteWorker::sender"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker::sender"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteWorker::run"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker::run"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::WriteWorker::drop"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker::drop"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::exec_insert"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::exec_insert"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FJALL_PERSIST_SYNC_ALL_COUNT"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/persist.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::persist::FJALL_PERSIST_SYNC_ALL_COUNT"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::exec_transact"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::exec_transact"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::exec_atomic_commit"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::exec_atomic_commit"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::reset_persist_sync_all_count"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/persist.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::persist::reset_persist_sync_all_count"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallAtomicBatch"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallAtomicBatch"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::persist_sync_all"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/persist.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::persist::persist_sync_all"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallAtomicBatch::set"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallAtomicBatch::set"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallAtomicBatch::delete"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallAtomicBatch::delete"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallAtomicBatch::commit"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallAtomicBatch::commit"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::submit"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::worker::submit"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::new"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::new"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::store_get"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::store_get"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::store_delete"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::store_delete"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::stores_list"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::stores_list"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::supports_atomic_batch"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::supports_atomic_batch"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::begin_atomic_batch"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::begin_atomic_batch"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::FjallRepo::persist_once"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::FjallRepo::persist_once"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::validate_store_name"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/repo.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::repo::validate_store_name"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::min_alive_probe"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::min_alive_probe"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::SnapshotGuard"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::SnapshotGuard"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::SnapshotGuard::version"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::SnapshotGuard::version"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::SnapshotGuard::drop"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::SnapshotGuard::drop"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::TableWriteFootprint"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/footprint.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::footprint::TableWriteFootprint"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::OpeningBarrier"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::OpeningBarrier"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::OpeningBarrier::new"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::OpeningBarrier::new"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::OpeningBarrier::drop"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::OpeningBarrier::drop"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::VisibleOutcome"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::VisibleOutcome"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::new"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::new"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::fresh"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::fresh"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::last_committed"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::last_committed"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::version_allocation_high_water_mark"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::version_allocation_high_water_mark"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::open_snapshot"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::open_snapshot"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::open_snapshot_at"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::open_snapshot_at"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::CommitWriteRecord"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/footprint.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::footprint::CommitWriteRecord"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::open_snapshot_serializable"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::open_snapshot_serializable"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::register_snapshot"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::register_snapshot"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::bump_refcount"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::bump_refcount"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::CommitWriteRecord::is_empty"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/footprint.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::footprint::CommitWriteRecord::is_empty"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::test_set_drop_hook"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::test_set_drop_hook"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::snapshot_min_index_contains"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::snapshot_min_index_contains"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::Unresolved"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/footprint.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::footprint::Unresolved"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::commit_lock"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::commit_lock"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::try_commit_lock"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::try_commit_lock"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::assign_next_version"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::assign_next_version"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::assign_next_version_guarded"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::assign_next_version_guarded"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::orphaned_post_wal_versions"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::orphaned_post_wal_versions"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::orphan_entry"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::orphan_entry"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::unresolved_wal_versions"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::unresolved_wal_versions"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::unresolved_wal"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::unresolved_wal"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::register_written_orphan"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::register_written_orphan"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::take_unresolved"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::take_unresolved"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::abort_unwritten"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::abort_unwritten"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::set_requires_reopen"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::set_requires_reopen"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::requires_reopen"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::requires_reopen"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::fence_writes"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::fence_writes"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::writes_fenced"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::writes_fenced"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::orphan_max"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::orphan_max"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::is_active_post_wal"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::is_active_post_wal"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::is_orphaned_post_wal"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::is_orphaned_post_wal"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::complete_orphaned_post_wal"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::complete_orphaned_post_wal"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::forget_orphaned_post_wal"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/orphan.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::orphan::RepoTxGate::forget_orphaned_post_wal"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::publish_committed"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::publish_committed"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::set_published_for_fixture"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::set_published_for_fixture"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::publish_committed_max"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::publish_committed_max"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::raise_published"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::raise_published"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::sync_last_committed_from_watermark"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::sync_last_committed_from_watermark"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::min_alive"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::min_alive"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::active_snapshots_empty"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::active_snapshots_empty"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::snapshots_opening"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::snapshots_opening"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::test_hold_opening_barrier"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::snapshot::RepoTxGate::test_hold_opening_barrier"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::active_serializable_count"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::active_serializable_count"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate::peek_next_tx_id"
+to_path = "crates/storage/shamir-tx/src/gate/repo_tx_gate/core.rs"
+to_item = "shamir-tx::lib::gate::repo_tx_gate::core::RepoTxGate::peek_next_tx_id"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::persist"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::repo"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::store"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::worker"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::core"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::footprint"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::orphan"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[added]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::snapshot"
+reason = "FILE-HEADROOM-a: new module of the file split"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::owner_decision_tests"
+reason = "FILE-HEADROOM-a: declaration follows the split (re-export, #[path] depth or doc link)"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::write_worker_test_seam"
+reason = "FILE-HEADROOM-a: declaration follows the split (re-export, #[path] depth or doc link)"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam"
+reason = "FILE-HEADROOM-a: declaration follows the split (re-export, #[path] depth or doc link)"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-tx/src/gate/repo_tx_gate.rs"
+item = "shamir-tx::lib::gate::repo_tx_gate::RepoTxGate"
+reason = "FILE-HEADROOM-a: declaration follows the split (re-export, #[path] depth or doc link)"
+owner = "<wave-file-split-a>"
+
+[[allow_widen]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+item = "FAIL_BEFORE_COMMIT"
+reason = "FILE-HEADROOM-a: test seam item keeps its pub visibility in the new file-backed module"
+owner = "<wave-file-split-a>"
+
+[[allow_widen]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+item = "FAIL_AFTER_COMMIT"
+reason = "FILE-HEADROOM-a: test seam item keeps its pub visibility in the new file-backed module"
+owner = "<wave-file-split-a>"
+
+[[allow_widen]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+item = "reset"
+reason = "FILE-HEADROOM-a: test seam item keeps its pub visibility in the new file-backed module"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::FAIL_BEFORE_COMMIT"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::FAIL_BEFORE_COMMIT"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::FAIL_AFTER_COMMIT"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::FAIL_AFTER_COMMIT"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::reset"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/atomic_batch_test_seam.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam::reset"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::owner_decision_tests"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::owner_decision_tests"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::write_worker_test_seam"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::write_worker_test_seam"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[moved]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall.rs"
+item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam"
+to_path = "crates/storage/shamir-storage/src/stores/storage_fjall/mod.rs"
+to_item = "shamir-storage::lib::stores::storage_fjall::atomic_batch_test_seam"
+reason = "FILE-HEADROOM-a: moved with its impl block or module into the split file"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/store.rs"
+item = "shamir-storage::lib::stores::storage_fjall::store::FjallStore"
+reason = "FILE-HEADROOM-a: the struct or its fields became pub(super) so the sibling files of the split module can build and use it"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+item = "shamir-storage::lib::stores::storage_fjall::worker::WriteJob"
+reason = "FILE-HEADROOM-a: the struct or its fields became pub(super) so the sibling files of the split module can build and use it"
+owner = "<wave-file-split-a>"
+
+[[changed]]
+path = "crates/storage/shamir-storage/src/stores/storage_fjall/worker.rs"
+item = "shamir-storage::lib::stores::storage_fjall::worker::WriteWorker"
+reason = "FILE-HEADROOM-a: the struct or its fields became pub(super) so the sibling files of the split module can build and use it"
+owner = "<wave-file-split-a>"
