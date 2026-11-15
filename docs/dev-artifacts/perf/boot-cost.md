@@ -335,4 +335,75 @@ and its first-touch cost is read in B4 `groups`). The persist counter after B3 s
 Reading the result: the 5 missing seconds are located by the largest of B3, C6+C7, D1, E2 and G on windows-latest, and by
 the persist counter moving or not. If B3 and E1 are both small, section 7's 6.4 s is not the open itself but the test
 fixtures around it (server boot, data-dir lock, other stores), and the next measurement must be at server launch
-(`launch.rs`), not in the system store. Numbers are filled in here after the CI run.
+(`launch.rs`), not in the system store.
+
+### 8.3 Measured on CI (run 43732153719, `workflow_dispatch` of `shamir-db`, branch with a deliberate final failure)
+
+One run per OS, inside the normal lib-test run of `shamir-db` (565 tests on ubuntu and macOS, 549 on windows, executed in
+parallel, one process per test). The numbers are indicative, not statistics, and they include the load of the other
+tests running at the same time. The `persist_sync_all` counter is per test process.
+
+| Phase | ubuntu ms | macOS ms | windows ms | `persist_sync_all` after (all OS) |
+|---|---|---|---|---|
+| A1 `raw_factory_create` | 5 | 10 | 60 | 0 |
+| A2 `raw_16_keyspace_opens` | 133 | 499 | 3320 | 0 |
+| B1 `db_instance_new`, B2 `repo_config_13_tables` | 0 | 0 | 0 | 0 |
+| B3 `add_repo_with_durability` | 44 | 99 | 282 | 2 |
+| B4 first `get_table` `groups` / `databases` / `repositories` / `tables` | 22 / 33 / 24 / 34 | 66 / 74 / 65 / 80 | 111 / 109 / 344 / 811 | 2 |
+| B_sum | 159 | 386 | 1659 | |
+| C1 `system_store_init_whole` | 81 | 166 | 1197 | 4 |
+| C2 `load_groups` | 0 | 0 | 0 | 4 |
+| C3 / C4 / C5 `load_databases` / `load_repositories` / `load_tables` | 18 / 13 / 18 | 67 / 68 / 73 | 347 / 479 / 396 | 4 |
+| C6 `load_functions` / C7 `load_validators` | 23 / 11 | 84 / 70 | 151 / 582 | 4 |
+| D1 `wasm_engine_with_compile_cache` | 3 | 5 | 3 | 4 |
+| D2, D3, D4 | 0 | 0 | 0 | 4 |
+| E1 `shamir_db_init_fresh_whole` | 132 | 456 | 1741 | 6 |
+| E2 `create_db_first_ddl` | 5 | 7 | 19 | 8 |
+| E3 `flush_all_waiting` | 2 | 4 | 3 | 11 |
+| E4 `drop` | 1 | 3 | 0 | 11 |
+| F1 `shamir_db_init_reopen_whole` (`attempts=1`) | 131 | 155 | 141 | 13 |
+| G `tempdir_removal_all` (5 trees) | 45 | 88 | 75 | 13 |
+
+Verdicts against the hypotheses of 8.2:
+
+- **A1, A2.** Section 7 is not reproduced exactly: 16 keyspace opens took 3320 ms on windows (1217 ms in section 7), 133 ms
+  on ubuntu (43 ms), 499 ms on macOS (411 ms). The raw open cost on Windows varies by a factor of about 2.7 between runs
+  and loads; a single-run figure must not be treated as a constant.
+- **B3 rejected as the dominant cost.** `persist_sync_all` does reach 2 after B3 (the identity write and the recovery
+  certification do persist on a fresh store), but the whole step costs 282 ms on windows, including its keyspace opens.
+- **E2, E3 reject "a SyncAll costs 100+ ms on Windows".** The first DDL adds two `SyncAll` in 19 ms and the flush adds
+  three in 3 ms: a `SyncAll` on this runner costs at most about 10 ms.
+- **B4 rejected (hypothesis 0.5 s).** The four first touches sum to 1375 ms on windows, with `tables` alone 811 ms
+  against 34 ms on ubuntu: first use of a catalogue table (its keyspaces and index context) is the expensive step, not the
+  `Database` open.
+- **C3-C5 were mislabelled "warm" in 8.2.** `SystemStore::init` opens only the `groups` stores, so these three are first
+  touches too: on windows C3 + C4 + C5 = 1222 ms against B4 `databases` + `repositories` + `tables` = 1264 ms.
+- **C1 is 1197 ms on windows, not 3 s.** That is 0.8 s more than its replay (B3 + B4 `groups` = 393 ms), a gap present
+  only on windows (ubuntu 81 against 66 ms, macOS 166 against 165 ms). Which call of `init_with_durability` outside the
+  replay costs it is not known; the engine calls are crate-private, see 8.1.
+- **D1 rejected.** The wasm engine with its compile cache takes 3 ms on windows; D2-D4 are 0.
+- **E1 confirms there is no hidden step in `init_inner`:** 1741 ms on windows against C1 + D1..D4 + C6 + C7 = 1933 ms
+  (-10%). Phase sums of the standalone replays are not strictly additive on Windows (C1 + C3..C5 = 2419 ms against
+  B_sum = 1659 ms), so E1 is the authoritative figure and the rest is a decomposition with that error.
+- **F1 confirms the cost is creation, not opening.** Reopening the same directory takes 141 ms on windows against 1741 ms
+  for the fresh init: 12 times less (macOS 2.9 times, ubuntu 1.0 time). The file system was warm (the tree had just been
+  written), so a cold restart will cost more than 141 ms.
+- **E4, G rejected.** Close is 0-3 ms, removal of five trees 45-88 ms: not the "close-and-delete" part of the 6.4 s.
+
+What this settles:
+
+1. One fresh `ShamirDb::init` on windows-latest is about 1.7 s in this run (macOS 0.46 s, ubuntu 0.13 s). The 6.4 s per
+   disk-backed test of `win-test-runtime.md` is therefore NOT the system-store open: that open is about a quarter of it.
+   About 4.7 s per such test lies outside the system-store open, and was not measured here.
+2. The expensive part of the open on Windows is creating the 13 catalogue keyspaces and their files and touching them for
+   the first time (C3-C7 alone are 1955 ms of first touches in the standalone replay), not `persist(SyncAll)`, not the
+   wasm cache, not the close and not the removal. A restart of an existing store is cheap (141 ms warm).
+3. Product consequence: nothing in this data justifies a production change to the open path; the Windows penalty is paid
+   once per new data directory. The earlier suspicion of a periodic `SyncAll` on an idle store (section 4) stays rejected.
+4. Candidates that this data supports, none chosen yet: creating the catalogue stores lazily, for example
+   `functions` and `validators` (C6 + C7 = 733 ms on windows) which most boots never write; a prepared template
+   directory copied for each disk-backed test instead of a fresh creation (a copy has not been timed); more tests on the
+   in-memory fixture (50 already moved).
+5. The next measurement must go where the other ~4.7 s are: time marks inside one of the 7 kept disk-backed `schema_ddl`
+   tests (what the test does after the open: repositories and tables created in the test, writes, commits, the second
+   open), run alone through a nextest filter so that the share of parallel load can be separated from the work itself.
