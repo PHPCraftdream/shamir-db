@@ -153,6 +153,19 @@ Engine group lands at exactly **7** crates (cap 7; today 4: `shamir-engine`, `sh
 - **batch-as-own-crate does NOT pay — rejected cut.** Batch sits one level under the facade. Measured recompile volume for a batch-only change is identical (10.2k batch + 6.5k rest split vs 16.7k combined facade) and reruns are identical (28.2k + 2.2k vs 30.5k facade tests, within rounding). Batch therefore folds into the facade.
 - **The validator fold is not a new crate** — it is a module move that (together with the R1 import rewrites) zeroes the six R1 acceptance pairs (§7.1).
 
+### 4.1.1 Correction of the payoff arithmetic (2026-11-15, from CI timing artifacts)
+
+The bullets above count test LINES and ignore the dependency direction. `tx` depends on `table` (`WriterDrainGuard`,
+`table_token_for`, `RecordCounter`), so a `table` change still reruns the `tx` tests; only `repo` (about 8% of the
+engine tests) is saved there. A `tx` change saves `repo` and `table`; a facade change saves all three. Measured on one
+full run that touched the engine: the lib tests of `shamir-engine` take 114 s of summed test time on Linux and 415 s on
+Windows (`tx` 254 s, `table` 75, `repo` 50, `query` 36 on Windows), which is not the critical path of a full run.
+The critical path is the integration job on Windows (see `docs/dev-artifacts/perf/ci-timing-baseline.md`). What the
+split really buys: the single unit `shamir_engine lib (test)` compiles in 279 to 292 s (one rustc frontend over about
+190k lines) and becomes three or four units compiled in parallel; local and fast-tier checks stop rebuilding the lower
+layers (today `clippy -p shamir-engine` takes 3 to 7 minutes per edit); and test selection gets finer for `tx` and
+facade changes. It does NOT shorten the full-run critical path; that is the CI-CRIT-PATH task.
+
 **Explicitly rejected cuts:** batch extraction; a separate engine-bound-validator crate (fold instead); any extraction of `db_instance` (1.4k lines, top layer, stays in facade); moving benches/examples/integration tests out of the facade (they exercise facade APIs).
 
 ## 5. Breaking every backward edge
@@ -539,3 +552,67 @@ Hard evidence collected (read-only) on this worktree that adjusts the rendered d
 **A.5 — R3 is not fully file-independent of R1.** The design states "nothing in R3 depends on R1/R2 file-wise". `read_only_views.rs` is in R1's file set (leaf-shadow + validator edges) AND is touched by R3's migration-module move (its `crate::migration::MigrationCoordinator::load_state` reference, :175). Constraint adopted: R3's migration chunk lands after R1 merges (§7.3, §7.5).
 
 **A.6 — verified non-deviations (recorded for completeness).** (1) `shamir-engine-query/Cargo.toml` has no `shamir-engine` dependency (deps: shamir-types, shamir-collections, shamir-storage, shamir-query-types, shamir-funclib, shamir-tx, shamir-index) — table→engine-query is acyclic. (2) `shamir-engine-validator/Cargo.toml` likewise has no engine dep. (3) `engine_bound` HAS a `tests/` dir — moves with the fold (§5.5). (4) Seed files call only shell methods (`flush_seed_metadata`) — no R2b dependency for R3 (§5.14). (5) `repo/mod.rs:13` and `:35`, `lib.rs:27/29/39-41`, `query/mod.rs:435-453` match the quoted re-export claims. (6) Design-doc naming in `docs/dev-artifacts/design/` is kebab-case (`*-decision.md`, `*-adr.md`, `*-plan.md` suffixes common); this file follows the mandated name `engine-layering.md` with a status/date/scope header.
+
+## 11. As built (status of waves R1 to R2b, 2026-11-15)
+
+This section records what landed and where it deviates from sections 5 to 7. The tool that checks the layering counts
+re-export shadows against the module where an item really lives (see 11.4).
+
+### 11.1 Landed
+
+* **R1** (#551): `table` imports `shamir_engine_query` directly. `TableResolver` is split: the table-scoped trait is
+  `table/support/table_resolver.rs` (not `table/support/model/`: that folder is at the 7-entry limit), the repo-scoped
+  `resolve_repo` is carried by the port `BatchResolver: TableResolver` in `query/batch/exec/executor_traits.rs`.
+  `validator/engine_bound` folded into `table/support/validator_bound` (not `table/validator_bound`: `table/` is at the
+  limit); the `validator` layer stays in `layers.toml` because `validator/mod.rs` remains as a re-export facade.
+  `observe_gate_with_budget` went to `repo/gate_visibility.rs`, not into `table` (its caller in the instance layer would
+  have created a new `instance -> table` pair; `repo` is downward-legal for all three callers).
+  `RowByteMeter::value_size` is a copy of the batch formula in the leaf crate (open debt: BYTE-METER-DEDUP).
+* **R3** (#550): seed orchestration moved up to `repo/instance/seed`; `new_table_store_id` / `validate_table_store_name`
+  down to `table/support/model/names.rs`; `MigrationFreezeError` is table-local; the facade wrappers returning
+  `CommitError` live in `repo/instance/repo_instance/catalog/rename_freeze.rs` as `impl TableManager` (open debt:
+  FOREIGN-IMPL, blocks R4).
+* **R3b** (#552): `db_instance/migration` moved to `table/table_manager/migration` (not `table/migration`: slot limit).
+* **R2a** (#553): `TableCatalog` in `table/support/storage/catalog.rs`. DEVIATION from 6.1: `rename_fence` and
+  `rename_fence_len` stayed on `RepoInstance` (their value types and `RenameFreeze::await_visible` take `&RepoInstance`;
+  moving the fields would create a `table -> instance` pair). `get_table*`, `table_by_token{,_admitted}`, `add_table`,
+  `remove_table` stayed on the shell because they need repo-wide state (write domain, `BoxRepo`, tx gate, interner).
+* **R2b** (#554): `DurabilityHandle` in `repo/journal/backend/durability_handle.rs` with `changefeed.rs`
+  (`ChangefeedHandle`) and `retention_gate.rs` (`RetentionGate`, moved down from `tx/recovery/clean_horizon/` so that
+  `repo` does not depend on `tx`). Stayed on the shell: `changefeed()` (init needs `BoxRepo` and a test hook),
+  `prepare_journal_event`, `mark_changefeed_gap`, the `read_changelog_*` wrappers, `follower_journal_store`,
+  `changelog_store_for_cold_reconcile`, `settle_unwritten_version`, `note_unclean_open_bump`,
+  `ensure_replication_armed`, `finish_clean_shutdown`, `validate_durability_change`. `commit_wal_durability` remains
+  reachable through the `#[path]` mount in `tx` (its core is `wal_durability_for(&DurabilityHandle)`).
+
+### 11.2 Counts per the gate (not per the first measurement)
+
+`.rust-guard/layers_baseline.toml` after R2b: `repo -> instance` 3, `tx -> instance` 35, `query -> instance` 11.
+The 11 `query/batch` files include the fk files (`fk/fk_actions/{helpers,plan}.rs`, `fk/fk_on_update/scan.rs`,
+`fk/fk_restrict.rs`, `runner/query_runner/fk_isolation.rs`), not only the three named in 5.6/5.7.
+
+### 11.3 What R2c needs (census of the shell methods that `tx` and `query/batch` call)
+
+`tx` calls 45 distinct `RepoInstance` methods. Still on the shell and needed by `tx`: `table_by_token` (11 calls),
+`get_table_admitted` (8), `table_by_token_admitted`, `get_table`, `tx_info_store` (10), `changefeed` (10),
+`begin_repo_atomic_batch`, `flush_all_history`, `settle_unwritten_version`, `prepare_journal_event`,
+`mark_changefeed_gap`, `certify_cold_start` / `certify_legacy_cold_start`, `follower_journal_store`,
+`changelog_store_for_cold_reconcile`, `submit_receipt_job`, `storage_supports_atomic_batch`, `initialized_mem_wal`,
+`note_unclean_open_bump`, and the test hooks. Therefore `RepoCore` (tx layer) must carry the `BoxRepo` and take over
+these methods; the shell keeps delegating wrappers. `query/batch` calls only 4: `fk_reverse_cache` (5), `begin_tx`,
+`commit_tx`, `list_table_names`; the rest of its 11 files only name the type in signatures. The layer of the type
+behind `fk_reverse_cache` (today `repo/instance/support`) must be decided before R2c1/R2d.
+The sweep of the 35 `tx` files is ONE sequential stage (callees before callers), not three parallel ones: a function
+taking `&RepoCore` cannot call a function that still takes `&RepoInstance`, and the `tx` directories call each other
+(`preparation -> commit` 6 files, `drain -> commit` 2, `drain -> recovery` 2, plus calls through the re-exports of
+`tx/mod.rs`).
+
+### 11.4 Gate semantics learned while landing (for writers of deltas and briefs)
+
+* The conservation delta is filled from the gate's findings, not written by hand: a hand-derived 232-entry delta
+  mismatched in hundreds of places. Item ids for benches are `shamir-engine::bench::...` (hyphen), the discovery delta
+  uses the nextest binary id `shamir-engine` and needs a `base` line, test moves must be declared in BOTH deltas, a
+  moved item whose body changed also needs a `[[changed]]` entry at its head location, and `[[allow_widen]]` items
+  use the short name (`Type::member`).
+* The structure gate flags every function-local `use` in a changed file, also old ones.
+* `cfg(unix)` / `cfg(feature)` code is not compiled by a Windows clippy run: unused imports there surface only in CI.
