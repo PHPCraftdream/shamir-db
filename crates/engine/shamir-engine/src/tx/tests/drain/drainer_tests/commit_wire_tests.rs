@@ -1,6 +1,12 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+
 use crate::table::TableConfig;
+use crate::tx::commit_tx;
 use crate::tx::drainer::Drainer;
 
 use super::support::{make_repo, rid, seed_inflight_put};
@@ -12,13 +18,6 @@ use super::support::{make_repo, rid, seed_inflight_put};
 /// matching the commit_versions.
 #[tokio::test]
 async fn commit_offers_entry_to_drainer_window() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-
-    use crate::tx::commit_tx;
-
     let repo = make_repo();
 
     let mut versions = Vec::new();
@@ -52,13 +51,6 @@ async fn commit_offers_entry_to_drainer_window() {
 /// entry recovered from the WAL (same txn_id and commit_version).
 #[tokio::test]
 async fn commit_offered_entries_match_wal() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-
-    use crate::tx::commit_tx;
-
     let repo = make_repo();
 
     let mut tx = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
@@ -100,13 +92,6 @@ async fn commit_offered_entries_match_wal() {
 /// offer wired (drain_step uses window in Stage 3).
 #[tokio::test]
 async fn drain_step_still_drains_correctly_with_offer_wired() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-
-    use crate::tx::commit_tx;
-
     let repo = make_repo();
     repo.disable_background_drainer_for_test();
     repo.add_table_for_test(crate::table::TableConfig::new("t"));

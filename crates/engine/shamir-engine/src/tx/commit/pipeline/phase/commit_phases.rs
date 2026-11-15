@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::sync::atomic::Ordering::SeqCst;
+
 use shamir_collections::TFxMap;
 use shamir_collections::THasher;
 use shamir_storage::error::DbError;
@@ -633,7 +636,6 @@ pub(crate) async fn apply_data_batch(
     // `FAIL_PHASE_5A_TABLE_TOKEN`.
     #[cfg(test)]
     {
-        use std::sync::atomic::Ordering::SeqCst;
         let armed_tx = FAIL_PHASE_5A_TX_ID.load(SeqCst);
         let armed_token = FAIL_PHASE_5A_TABLE_TOKEN.load(SeqCst);
         if _tx_id != 0 && armed_tx == _tx_id && armed_token == table_id {
@@ -649,7 +651,6 @@ pub(crate) async fn apply_data_batch(
     // recovers (not just defers) with the borrowed `&[KvOp]` signature.
     #[cfg(test)]
     {
-        use std::sync::atomic::Ordering::SeqCst;
         if _tx_id != 0 && FAIL_PHASE_5A_TRANSIENT_TX_ID.load(SeqCst) == _tx_id {
             let decremented = FAIL_PHASE_5A_TRANSIENT_REMAINING.fetch_update(SeqCst, SeqCst, |r| {
                 if r > 0 {

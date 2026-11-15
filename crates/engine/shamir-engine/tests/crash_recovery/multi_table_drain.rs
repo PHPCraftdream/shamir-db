@@ -1,6 +1,8 @@
 //! Split out of `tests/crash_recovery.rs` (layout sweep Q2); bodies moved verbatim,
 //! root harness items reached via `super::`.
 
+use std::io::Write;
+
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -113,7 +115,6 @@ async fn run_child_scenario_trunc(path: PathBuf) {
     // unique per call (carries the counter) so a concurrent abort cannot
     // strand a half-written temp that a later call would clobber.
     let write_sidecar = |n: usize| {
-        use std::io::Write;
         let tmp = sidecar.with_extension(format!("tmp.{n}"));
         let mut f = std::fs::File::create(&tmp).expect("create sidecar temp");
         write!(f, "{n}").expect("write sidecar temp");

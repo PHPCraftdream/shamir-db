@@ -3,8 +3,11 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
-use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+use shamir_storage::types::{RecordKey, Store};
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId, VersionProvider};
+use shamir_types::access::Actor;
+use shamir_types::types::record_id::RecordId;
+use shamir_wal::WalOpV2;
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -223,7 +226,6 @@ async fn commit_empty_write_set_still_succeeds() {
 
 #[tokio::test]
 async fn commit_serializable_with_empty_read_set_succeeds() {
-    use shamir_tx::{IsolationLevel, TxContext, TxId};
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(500), 0, 0, IsolationLevel::Serializable);
     // empty read_set + zero provider → passes Phase 2, then the empty
@@ -239,7 +241,6 @@ async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
     // uses `|_, _| 0`. A tx with a non-empty read_set but NO writes still
     // passes Phase 2 (0 ≤ version_seen trivially), then takes the C6
     // read-only fast-path (read_set is not gated by `is_empty`).
-    use shamir_tx::{IsolationLevel, TxContext, TxId};
     let repo = make_repo();
     let mut tx = TxContext::new(TxId::new(501), 0, 0, IsolationLevel::Serializable);
     tx.record_read(7, Bytes::from_static(b"key"), 5);
@@ -250,10 +251,6 @@ async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
 
 #[tokio::test]
 async fn commit_serializable_real_provider_detects_conflict() {
-    use bytes::Bytes;
-    use shamir_tx::{IsolationLevel, TxContext, TxId, VersionProvider};
-    use std::sync::Arc;
-
     struct ConflictProvider;
     impl VersionProvider for ConflictProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
@@ -278,10 +275,6 @@ async fn commit_serializable_real_provider_detects_conflict() {
 
 #[tokio::test]
 async fn commit_serializable_real_provider_no_conflict_succeeds() {
-    use bytes::Bytes;
-    use shamir_tx::{IsolationLevel, TxContext, TxId, VersionProvider};
-    use std::sync::Arc;
-
     struct OkProvider;
     impl VersionProvider for OkProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
@@ -334,7 +327,6 @@ async fn commit_with_non_empty_overlay_proceeds_with_warning() {
     // Until Stage 5 wires LayeredInterner, a non-empty overlay
     // triggers the warning path but commit still succeeds with an
     // empty remap (overlay entries are ignored).
-    use shamir_tx::{IsolationLevel, TxContext, TxId};
 
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(900), 0, 0, IsolationLevel::Snapshot);
@@ -347,13 +339,6 @@ async fn commit_with_non_empty_overlay_proceeds_with_warning() {
 
 #[tokio::test]
 async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-    use shamir_types::types::record_id::RecordId;
-    use shamir_wal::WalOpV2;
-
     let mut tx = TxContext::new(TxId::new(801), 0, 0, IsolationLevel::Snapshot);
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(data);
@@ -402,9 +387,6 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
 // snapshot version (not a hardcoded 0).
 #[tokio::test]
 async fn ssi_no_conflict_when_only_non_tx_writes_predate_snapshot() {
-    use crate::table::TableConfig;
-    use shamir_tx::IsolationLevel;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
@@ -636,8 +618,6 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
 /// write and pins `commit_version` to the snapshot version.
 #[tokio::test]
 async fn read_only_serializable_no_conflict_fast_paths() {
-    use shamir_tx::VersionProvider;
-
     struct OkProvider;
     impl VersionProvider for OkProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
@@ -671,8 +651,6 @@ async fn read_only_serializable_no_conflict_fast_paths() {
 /// proving the fast-path sits AFTER Phase 2 validation, not before it.
 #[tokio::test]
 async fn read_only_serializable_with_conflict_still_aborts() {
-    use shamir_tx::VersionProvider;
-
     struct ConflictProvider;
     impl VersionProvider for ConflictProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
@@ -793,8 +771,6 @@ async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
 /// entirely (the is_empty guard in commit.rs avoids the `.await` point).
 #[tokio::test]
 async fn wal_ops_empty_overlay_produces_no_interner_merge_op() {
-    use shamir_wal::WalOpV2;
-
     let tx = TxContext::new(TxId::new(10_001), 0, 0, IsolationLevel::Snapshot);
     assert!(
         tx.interner_overlay.is_empty(),
@@ -815,8 +791,6 @@ async fn wal_ops_empty_overlay_produces_no_interner_merge_op() {
 /// produce an `InternerOverlayMerge` op carrying the overlay entries.
 #[tokio::test]
 async fn wal_ops_non_empty_overlay_produces_interner_merge_op() {
-    use shamir_wal::WalOpV2;
-
     let tx = TxContext::new(TxId::new(10_002), 0, 0, IsolationLevel::Snapshot);
     let _ = tx.interner_overlay.insert_sync("field_a".to_string(), 42);
     let _ = tx.interner_overlay.insert_sync("field_b".to_string(), 43);
@@ -849,9 +823,6 @@ async fn wal_ops_non_empty_overlay_produces_interner_merge_op() {
 /// monotonicity rule, not equality).
 #[tokio::test]
 async fn live_entry_derives_the_projected_event_for_random_write_sets() {
-    use shamir_storage::types::RecordKey;
-    use shamir_types::access::Actor;
-
     struct Rng(u64);
     impl Rng {
         fn next(&mut self) -> u64 {

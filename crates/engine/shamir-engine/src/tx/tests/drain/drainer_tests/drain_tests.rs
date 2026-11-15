@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::repo::repo_token;
 use crate::table::{table_manager::table_token_for, TableConfig};
+use crate::tx::commit_tx;
 use crate::tx::drainer::Drainer;
 
 use super::support::{make_repo, rid, seed_inflight_put};
@@ -330,13 +335,6 @@ async fn drain_step_empty_window_no_recover_call() {
 /// drain_step. All 10 entries must be drained (gap-reseed recovers drops).
 #[tokio::test]
 async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
-
-    use crate::tx::commit_tx;
-
     let repo = make_repo();
     repo.disable_background_drainer_for_test();
     repo.add_table_for_test(crate::table::TableConfig::new("t"));

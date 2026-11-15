@@ -12,8 +12,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{Repo, Store};
-use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -376,9 +377,6 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // `try_advance` then needs BOTH N and N+1 terminally marked to advance
     // past N+1. Before the fix N was unmarked, so the watermark was stuck at
     // N-1 = 0 even though M was correctly marked.
-    use bytes::Bytes;
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_tx::{StagingStore, TxContext};
     let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));

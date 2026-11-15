@@ -5,5 +5,4 @@
 
 [shamir-engine]
 "repo -> instance" = 5
-"tx -> instance" = 35
 "query -> instance" = 11

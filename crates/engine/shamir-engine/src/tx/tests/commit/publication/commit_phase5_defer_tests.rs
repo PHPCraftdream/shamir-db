@@ -36,6 +36,7 @@ use crate::tx::commit_phases::{
 use crate::tx::tests::commit::visibility::materialized_means_visible_tests::spawn_deferred_commit;
 use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::fixture;
 use crate::tx::tx_outcome::MaterializationState;
+use crate::tx::CommitError;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -183,8 +184,6 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
 /// abort) and leaves NOTHING durable — no inflight WAL marker.
 #[tokio::test]
 async fn pre_commit_failure_aborts_and_leaves_nothing() {
-    use crate::tx::CommitError;
-
     struct ConflictProvider;
     impl VersionProvider for ConflictProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {

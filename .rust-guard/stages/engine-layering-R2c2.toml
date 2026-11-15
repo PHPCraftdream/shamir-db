@@ -1,1 +1,2441 @@
 base = "05fdcaa52556a34823c84627a84c36b41f133165"
+
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_in_doubt.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_in_doubt::RenameFenceEntry"
+to_path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/fence_entry.rs"
+to_item = "shamir-engine::lib::tx::commit::rename_fence::fence_entry::RenameFenceEntry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
+owner = "<wave-R2c2>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_fence::fence_pair"
+to_path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+to_item = "shamir-engine::lib::tx::commit::rename_fence::view::fence_pair"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
+owner = "<wave-R2c2>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_fence::rename_conflict"
+to_path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+to_item = "shamir-engine::lib::tx::commit::rename_fence::view::rename_conflict"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
+owner = "<wave-R2c2>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_in_doubt.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_in_doubt::RenameInDoubt"
+to_path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/in_doubt.rs"
+to_item = "shamir-engine::lib::tx::commit::rename_fence::in_doubt::RenameInDoubt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: moved with its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/benches/durability/drain_cost_vs_depth.rs"
+item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::main"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_in_doubt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::clean_horizon_test_state"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/clean_horizon_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::clean_horizon_repo_impl::RepoInstance::reserve_recovery_floor"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::settle_unwritten_version"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::mark_changefeed_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::fire_post_publish_pre_broadcast_test_hook"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::certify_legacy_cold_start"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::clone_for_background"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::storage_supports_atomic_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/follower_durability.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::follower_durability::RepoInstance::begin_repo_atomic_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::receipt_worker_installed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::submit_receipt_job"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::maybe_crash"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::maybe_crash"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::staged_checkpoint_outcome"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::staged_checkpoint_outcome"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item left its module"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::core"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/catalog_access.rs"
+item = "shamir-engine::lib::tx::commit::core::catalog_access::RepoCore::get_table_admitted"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/catalog_access.rs"
+item = "shamir-engine::lib::tx::commit::core::catalog_access::RepoCore::get_table"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/journal_access.rs"
+item = "shamir-engine::lib::tx::commit::core::journal_access::RepoCore::receipt_worker_installed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/journal_access.rs"
+item = "shamir-engine::lib::tx::commit::core::journal_access::RepoCore::submit_receipt_job"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/journal_access.rs"
+item = "shamir-engine::lib::tx::commit::core::journal_access::RepoCore::certify_cold_start"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_access.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_access::RepoCore::clone_for_background"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_access.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_access::RepoCore::drainer"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/mod.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::maybe_crash"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::maybe_crash"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/mod.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::fence_entry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/mod.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::in_doubt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/mod.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::retained_freeze"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/mod.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::view"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::retained_freeze::RetainedFreeze::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::retained_freeze::RetainedFreeze::into_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::retained_freeze::RetainedFreeze::as_ref"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::retained_freeze::RetainedFreeze"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::view::RenameFenceView::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::view::RenameFenceView::check_table_rename_fence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::view::RenameFenceView::check_rename_pair"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "shamir-engine::lib::tx::commit::rename_fence::view::RenameFenceView"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::staged_checkpoint_outcome"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::staged_checkpoint_outcome"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: new item of the wave"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/visibility_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::visibility_impl::record_pending_kind"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::durability_completion::commit_wal_durability"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tail::commit_tx_with_options"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tail::apply_backpressure"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tail::apply_backpressure_with_budget"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tail::commit_tx_with_kind"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tail::acknowledge_known_outcome"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/driver/commit_driver.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::driver::commit_driver::LockSnapshot::capture"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/driver/commit_driver.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::driver::commit_driver::CommitDriver::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::fire_post_wal_pre_publish_test_hook"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::fire_cancel_test_hook"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::fire_async_index_tail_test_hook"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::commit_tx"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::commit_tx_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::legacy_and_lockfree::commit_tx_lockfree"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::legacy_and_lockfree::commit_tx_inner_legacy_async"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::legacy_and_lockfree::release_pessimistic_locks"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::apply_data_phase"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::apply_vector_delta_phase"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::materialize_async_tail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::promote_vectors"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::apply_data_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::apply_index_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit_phases.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit_phases::persist_markers"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/finalize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::finalize::finalize_sync_post_publish"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::settle_visible"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::materialize"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::apply_tracked_counter_phase"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::post_publish_cleanup"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::interner_delta_safe_to_truncate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::apply_vector_graph_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/materialize.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::materialize::apply_vector_delta_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/publish_journaled.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::publish_journaled::publish_journaled"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/drain_step.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::drain_step::Drainer::drain_step"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/drain_step.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::drain_step::apply_interner_delta"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/missing_evidence.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::missing_evidence::settle_missing_evidence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/repair.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::repair::repair_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/settle.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::settle::settle_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/truncate.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::truncate::Drainer::seed_startup"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/truncate.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::truncate::Drainer::drain_all"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/truncate.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::truncate::Drainer::spawn"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/truncate.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::truncate::Drainer::settle_and_truncate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/base_index.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::base_index::rederive_base_index_ops_post_stage"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/claims.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::claims::claim_write_set"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/index2.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::index2::rederive_index2_ops_post_stage"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/locked.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::locked::pre_commit_locked"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/locked.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::locked::pre_commit_locked_validate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/prelock.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::prelock::pre_commit_prelock"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/prelock.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::prelock::validate_staging_table_identities"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/stale_value.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::stale_value::rederive_stale_value_ops_post_stage"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::record"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::on_sample_w"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::take_order"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::checkpoint_before_truncate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::with_state"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::bypass"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam::should_fail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/recovery_floor.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::recovery_floor::reserve_recovery_floor"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/repair_pending_drain.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::repair_pending_drain::drain_repair_pending"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/retention.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::retention::enforce_retention"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/algorithm.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::algorithm::reconcile_cold_start"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/algorithm.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::algorithm::reconcile_with_hook"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/receipt_recovery.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::receipt_recovery::complete_outstanding_receipt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::recover_inflight_v2"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_op"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_entry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_entry_admitted"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_entry_admitted_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::seed_version_cache_for_entry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_op_admitted"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/v2.rs"
+item = "shamir-engine::lib::tx::recovery::v2::replay_v2_op_admitted_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/apply_replicated.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::prepare_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/apply_replicated.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::apply_replicated_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::admission_error"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::apply_fresh"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::try_chunk"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::apply_batch_receipt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::run_chunk_tail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::durable_tail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::apply::run_receipt_pipeline"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::verify_journal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::confirm_journal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::certified_clean_through"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::stage_checkpoint_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::reconcile_uncertain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/checkpoint.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::checkpoint::checkpoint"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/publish.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::publish::adopt_counters"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/publish.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::publish::mvcc_for"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/publish.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::publish::publication_from_plan"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/publish.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::publish::publication_from_receipt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/resume/activation.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::resume::activation::admit_follower"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/resume/identity.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::resume::identity::verify_identity"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/resume/lookup.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::resume::lookup::lookup"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::build_plan"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::stage_prepared_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::load_last_committed_marker"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::load_next_tx_id_marker"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::commit_prepared"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::compute_counters"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::materialize_from_plan"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::materialize_from_prepared_receipt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::stage_materialized_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::table_rows"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/stage.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::stage::commit_materialized_work"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/durability/replication_apply.rs"
+item = "shamir-engine::bench::apply"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/commit.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::commit::commit_implicit_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_transactional_impl"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_read_arm"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_attempt.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_attempt::RenameAttempt::fence_retained"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_attempt.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_attempt::RenameAttempt::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_fence::RepoInstance::check_rename_pair"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_fence::RepoInstance::raise_rename_fence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_fence::RepoInstance::check_table_rename_fence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_admitted"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::recover_table_rename_with"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_transition"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/journal.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::journal::RepoInstance::changefeed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::RepoInstance::flush_buffers"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/cold_reconcile_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::cold_reconcile_repo_impl::RepoInstance::certify_cold_start"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::recover_v2_inflight_admitted"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::drainer"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::from_box_repo_with_wal_dir"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions/receipt_worker_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::receipt_worker_impl::RepoInstance::receipt_worker_wait_idle"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::commit_tx_with_options"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/seed/prepare_seed.rs"
+item = "shamir-engine::lib::repo::instance::seed::prepare_seed::prepare_seed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/rename/m5_tests.rs"
+item = "shamir-engine::lib::repo::tests::rename::m5_tests::staged_tx_is_rejected_after_successful_rename"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/rename/m5_tests.rs"
+item = "shamir-engine::lib::repo::tests::rename::m5_tests::staged_tx_is_rejected_after_drop_and_recreate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/rename/m5_tests.rs"
+item = "shamir-engine::lib::repo::tests::rename::m5_tests::staged_tx_for_current_incarnation_commits"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/rename/m5_tests.rs"
+item = "shamir-engine::lib::repo::tests::rename::m5_tests::staged_tx_for_dropped_table_is_rejected"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tests/visibility_metrics_tests.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tests::visibility_metrics_tests::reopen_records_the_reopen_result_without_a_wait"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tests/visibility_metrics_tests.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tests::visibility_metrics_tests::strict_fast_path_records_only_the_counter"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tests/visibility_metrics_tests.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tests::visibility_metrics_tests::bounded_timeout_records_counter_and_one_observation"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "shamir-engine::lib::tx::commit::core::repo_core::RepoCore"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/adversarial_store_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::adversarial_store_tests::repeated_repair_event_put_is_idempotent"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/adversarial_store_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::adversarial_store_tests::retry_case"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/adversarial_store_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::adversarial_store_tests::full_journal_channel_defers_orphan_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/durability_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::durability_tests::crash_child"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/metrics_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::metrics_tests::orphan_repair_metrics_count_repair_once_and_not_on_replay"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/missing_evidence_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::missing_evidence_tests::missing_evidence_does_not_settle_non_contiguous_orphan"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/missing_evidence_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::missing_evidence_tests::missing_evidence_gap_init_failure_is_counted_and_retry_clears_error"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/missing_evidence_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::missing_evidence_tests::absent_gate_and_window_evidence_recovers_then_certifies_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/missing_evidence_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::missing_evidence_tests::missing_evidence_does_not_settle_version_present_in_window"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::missing_table_orphan_remains_retryable"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::orphan_is_repaired_and_bounded_pull_has_no_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::closed_writer_fallback_records_gap_after_gap_admission"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::later_queued_event_cannot_be_served_before_repaired_orphan"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::existing_mismatch_is_error_and_orphan_is_preserved"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/repair_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::repair_tests::double_repair_leaves_one_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/unknown_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::unknown_tests::legacy_entry_drains_as_certified_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/unknown_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::unknown_tests::eventless_entry_falls_back_without_consulting_writer"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/unknown_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::unknown_tests::legacy_entry_falls_back_without_consulting_writer"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/orphan_repair/tests/unknown_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::orphan_repair::tests::unknown_tests::corrupt_existing_event_is_error_and_preserved"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/checkpoint.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::checkpoint::test_seam"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/checkpoint_seam_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::checkpoint_seam_tests::checkpoint_samples_w_before_changefeed_pending_gap_recheck"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/checkpoint_seam_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::checkpoint_seam_tests::checkpoint_failure_prevents_unlink_then_retry_catches_up"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/checkpoint_seam_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::checkpoint_seam_tests::checkpoint_order_and_unprotected_negative_control"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/crash_matrix_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::crash_matrix_tests::crash_child"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/recovery_floor_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::recovery_floor_tests::recovery_floor_waits_for_marker_mutex_and_preserves_higher_floor"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::drain_until_empty"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::repair_until_empty"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::retention_gate_holds_segment_until_checkpointed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::legacy_entry_declares_minimal_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::double_repair_produces_one_put"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::mismatching_event_is_loud_error"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::persistent_retention_gate_holds_until_checkpointed_reopens"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/repair_pending_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::repair_pending_tests::persistent_negative_control_unclamped_truncation_yields_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_mem_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_mem_tests::memory_wal_bypasses_retention_gate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::declare_gap_persists_floor_and_unlinks_safe_retained_wal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::refuse_writes_gate_clears_after_safe_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::dead_writer_declare_gap_refuses_without_unlinking"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::refused_admission_does_not_publish_and_drain_allows_retry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::hybrid_wal_bypasses_retention_gate_and_checkpoint"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::successful_truncate_remeasures_retention_and_clears_gate"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/retention/retention_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::retention::retention_tests::declare_gap_never_unlinks_history_unsafe_segments"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/follower_cold_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::follower_cold_tests::legacy_bookmark_refuses_reopen_before_replay"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/follower_cold_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::follower_cold_tests::follower_batch_crash_points_certify_only_the_in_flight_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/receipt_recovery_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::receipt_recovery_tests::cold_reopen_completes_outstanding_receipt"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/receipt_recovery_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::receipt_recovery_tests::cold_reopen_materialized_receipt_does_not_recommit"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/reconcile_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::reconcile_tests::reconcile_crash_child_entrypoint"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/cold_reconcile/tests/reconcile_tests.rs"
+item = "shamir-engine::lib::tx::recovery::cold_reconcile::tests::reconcile_tests::retention_checkpoint_protects_wal_and_bypass_control_exposes_loss"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/resume/worker.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::resume::worker::ReceiptApplyJob"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::assert_legacy_bookmark_refusal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::floor_without_bookmark_refuses_follower_apply_repeatedly"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::valid_v3_record_including_zero_bookmark_applies"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::v3_native_follower_applies_and_checkpoints_the_bookmark"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::legacy_floor_refusal_holds_across_reopen"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::admit_follower_fresh_and_native_verdicts"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::admit_follower_refuses_conflicting_seed_install_state"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/activation_routing_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::activation_routing_tests::admit_follower_refuses_floor_without_bookmark"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::cancellation_tests::crash_at_phase"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::cancellation_tests::assert_settled"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::cancellation_tests::panic_after_materialized_requires_reopen_without_advancing_floors"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::cancellation_tests::drop_during_checkpoint_commit_still_completes_and_publishes"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::cancellation_tests::drop_during_uncertain_readback_still_completes_and_publishes"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::assert_settled"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::materialization_batch_failure_preserves_prepared_receipt_and_retry_allocation"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::repeated_uncertainty_also_fail_stops_without_advancing_floors"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::unresolved_uncertainty_retry_storage_failure_fail_stops_and_shutdown_fails"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::uncertain_checkpoint_reconciles_and_survives_reopens"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::no_reconcile_counter_without_uncertain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::negative_control_without_reconcile_state_is_not_reconciled"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::uncertain_without_commit_is_reconciled_when_enabled"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::multichunk_materialization_failure_resumes_same_receipt_without_extra_allocations"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/checkpoint_uncertain_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::checkpoint_uncertain_tests::post_checkpoint_flush_failure_with_open_gap_is_done"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/crash_subprocess_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::crash_subprocess_tests::receipt_crash_child_scenario"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/crash_subprocess_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::crash_subprocess_tests::run_point"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/ddl_interlock_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::ddl_interlock_tests::paused_reservation_rejects_ordinary_admission_resume_uses_it"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/ddl_interlock_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::ddl_interlock_tests::parked_apply_blocks_ddl_via_the_write_domain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::crashed_prepared"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::fresh_apply_writes_receipt_pipeline_atomically"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::crash_prepared_resumes_with_identical_allocation"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::changed_pull_boundary_converges"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::identity_rejection_is_fail_closed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::uncertain_materialization_reconciles_by_read_back"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::receipt_path_writes_absolute_counters"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::periodic_persist_cannot_overwrite_committed_counter"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::materialized_pause_hits_injected_failure_replays_recorded_counters"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::non_retryable_error_parks_guards"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::upstream_bookmark_does_not_skip_unpublished_local_chunk"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::paused_reservation_survives_a_failed_resume"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::fenced_multi_chunk_apply_keeps_v3_invariant_across_reopen"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::post_checkpoint_flush_failure_fresh_chunk_is_done"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/receipt/tests/receipt_apply_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::receipt::tests::receipt_apply_tests::post_checkpoint_flush_failure_resumed_chunk_is_done"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/tests/gap_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::tests::gap_tests::persisted_gap_allows_batch_and_keeps_clean_horizon_unchanged"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/replication/follower_durability/tests/gap_tests.rs"
+item = "shamir-engine::lib::tx::replication::apply_replicated::follower_durability::tests::gap_tests::pending_init_gap_advances_bookmark_without_certifying_horizon"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/backpressure_gc_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::backpressure_gc_tests::overlay_bounded_across_rounds"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/backpressure_gc_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::backpressure_gc_tests::backpressure_fast_path_returns_immediately"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/backpressure_gc_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::backpressure_gc_tests::backpressure_engages_then_releases_on_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/backpressure_gc_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::backpressure_gc_tests::backpressure_abandons_when_drain_stuck"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/backpressure_gc_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::backpressure_gc_tests::overlay_gc_collapses_after_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::reopen_keeps_deferred_marker_and_visible_wins_over_reopen"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::settlement_at_expiry_wins_and_backpressure_has_no_fresh_budget"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::visible_backpressure_uses_only_remaining_budget"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::strict_visible_keeps_five_second_soft_brake_ceiling"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::strict_empty_commit_keeps_soft_backpressure"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::no_allocation_and_immediate_visible_need_no_waiter"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::published_warning_preserves_pending_and_abort_classification"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::timeout_skips_backpressure_and_reconciles_without_changing_materialization"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_budget_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_budget_tests::strict_waits_then_returns_visible"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_pipeline_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_pipeline_tests::construction_policy_applies_to_commit_and_explicit_strict_overrides_it"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_pipeline_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_pipeline_tests::cancellation_releases_waiter_without_aborting_async_tail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_pipeline_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_pipeline_tests::real_abort_and_indeterminate_entry_keep_no_commit_metadata"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/detach/commit_detach_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::detach::commit_detach_tests::level3_tail"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/detach/commit_detach_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::detach::commit_detach_tests::cancelled_post_wal_tail_keeps_unique_lock_changefeed_and_postings"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_phase5_defer_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_phase5_defer_tests::deferred_materialization_increments_metric"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_phase5_defer_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_phase5_defer_tests::multi_table_partial_deferral_is_reconciled_by_recovery"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_phase5_defer_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_phase5_defer_tests::post_commit_phase5_failure_is_committed_then_recovered"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_phase5_applies_write_set_to_base_store"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_applies_multiple_tables_atomically"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_empty_write_set_still_succeeds"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_serializable_with_empty_read_set_succeeds"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_serializable_with_read_set_passes_zero_provider_scaffold"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_serializable_real_provider_detects_conflict"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_empty_tx_succeeds"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_serializable_real_provider_no_conflict_succeeds"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_with_non_empty_overlay_proceeds_with_warning"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_advances_last_committed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::empty_tx_fast_path_assigns_no_version_and_no_wal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::read_only_serializable_no_conflict_fast_paths"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::read_only_serializable_with_conflict_still_aborts"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_writes_wal_entry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::p2c_disjoint_table_commits_run_in_parallel"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::p2c_same_table_snapshot_both_succeed_last_writer_wins"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::commit_two_txs_monotonic_versions"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/commit_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::commit_tests::committed_wal_entry_carries_a_derivable_event"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/cutover_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::cutover_tests::commit_then_drain_all_makes_value_durable_in_history"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/cutover_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::cutover_tests::async_index_tail_must_not_truncate_drainer_converges"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/cutover_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::publication::cutover_tests::durable_lags_visibility_but_overlay_serves_read"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_init_failure_retry_keeps_pending_minimum_at_publish"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_pending_minimum_restored_and_persisted_on_retry"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_publish_returns_same_arc_for_live_broadcast"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/publication/journal_publish_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::journal_publish_order_tests::journal_pending_gap_survives_oncecell_publication_after_snapshot"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/visibility/materialized_means_visible_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::visibility::materialized_means_visible_tests::failed_projection_waits_for_replay"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/oracle_stress_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::oracle_stress_tests::oracle_stress_same_table_snapshot_all_succeed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/oracle_stress_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::oracle_stress_tests::oracle_stress_same_table_serializable_posthoc_readset_staleness"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/repo_diagnostics_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::repo_diagnostics_tests::orphan_gap_init_failure_is_observed_and_retry_clears_error"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/repo_diagnostics_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::repo_diagnostics_tests::parked_tail_missing_table_failures_and_successful_retry_are_observed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/diagnostics/repo_diagnostics_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::diagnostics::repo_diagnostics_tests::orphan_phase_b_failure_is_counted_once_and_retry_resets_streak"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/general/durable_watermark_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::general::durable_watermark_tests::mixed_tx_and_nontx_durable_equals_visibility_at_end"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/general/durable_watermark_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::general::durable_watermark_tests::durable_never_exceeds_visibility_under_load"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/general/durable_watermark_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::general::durable_watermark_tests::single_tx_commit_durable_equals_visibility"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/general/durable_watermark_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::general::durable_watermark_tests::many_tx_commits_durable_tracks_visibility"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/general/post_wal_cancel_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::general::post_wal_cancel_tests::post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_control"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/interner/a8_interner_delta_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::interner::a8_interner_delta_tests::rv_engine_905a1f59_mixed_raw_and_captured_rows_persist_raw_id_in_wal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/interner/a8_interner_delta_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::interner::a8_interner_delta_tests::a8_fast_path_first_interner_still_recorded"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/interner/a8_interner_delta_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::interner::a8_interner_delta_tests::a8_no_spurious_delta_for_persisted_ids"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/cross_protocol/interner/a8_interner_delta_tests.rs"
+item = "shamir-engine::lib::tx::tests::cross_protocol::interner::a8_interner_delta_tests::a8_referenced_id_above_hwm_recorded_in_delta"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/commit_wire_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::commit_wire_tests::commit_offers_entry_to_drainer_window"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/commit_wire_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::commit_wire_tests::drain_step_uses_window_not_recover_in_steady_state"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/commit_wire_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::commit_wire_tests::commit_offered_entries_match_wal"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/commit_wire_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::commit_wire_tests::drain_step_still_drains_correctly_with_offer_wired"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_is_idempotent"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_gap_reseed_when_window_empty"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_all_flushes_then_stops"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_respects_visibility_ceiling"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_a5_retains_marker_above_hwm"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_recovers_data_for_table_missing_from_per_table_mvcc"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_empty_window_no_recover_call"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_recovers_dropped_entries_via_gap_reseed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_window_gap_triggers_one_recover_reseed"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_replays_visible_prefix_into_history"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_interior_abort_does_not_trigger_spurious_recover"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/drain_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::drain_tests::drain_step_noop_when_durable_at_visibility"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/index_batch_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::index_batch_tests::drain_step_batches_multiple_index_postings_across_tables"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/index_batch_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::index_batch_tests::drain_step_index_batch_failure_surfaces_and_blocks_only_that_table"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/index_batch_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::index_batch_tests::drain_step_batches_index_postings_across_multiple_entries_same_table"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::ticket_written_and_acked_replay_data_and_mark_lazy_pull_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::ticket_unknown_halts_at_predecessor_and_rejects_commit_before_allocation"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::ticket_failed_resolution_advances_both_watermarks"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::synced_write_then_sync_failure_publishes_data_before_typed_commit_error"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::ticket_pending_blocks_later_orphan_without_recover"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/ticket_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::ticket_tests::ticket_pending_and_unknown_block_reseed_of_missing_published_prefix"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/window_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::window_tests::window_depth_atomic_mirror_matches_tree_across_mutations"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/post_wal_orphan_ordering_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::post_wal_panic_multi_table_counter_underflow_does_not_block_durability"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/post_wal_orphan_ordering_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::post_wal_panic_same_record_later_writer_posting_survives_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/post_wal_orphan_ordering_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::post_wal_panic_multi_table_values_counters_and_durability"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/post_wal_orphan_replay_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::post_wal_orphan_replay_tests::missing_orphan_table_stops_and_restored_registration_retries"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/post_wal_orphan_replay_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::post_wal_orphan_replay_tests::orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/snapshot_orphan_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::snapshot_orphan_tests::orphan_below_commit_blocks_ack_until_replay_then_snapshot_sees_both"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/orphans/snapshot_orphan_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::orphans::snapshot_orphan_tests::unknown_ticket_below_waiting_commit_returns_deferred_without_settling_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/startup_seed_tests.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::truncate::startup_seed_tests::startup_seed_waits_and_filters_delayed_snapshot"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/truncation/truncation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::truncation::truncation_tests::truncate_only_when_truncatable_not_per_commit"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/truncation/truncation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::truncation::truncation_tests::wal_segment_count_bounded_under_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/truncation/truncation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::truncation::truncation_tests::reopen_after_truncation_recovers_all"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/truncation/truncation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::truncation::truncation_tests::truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/truncation/truncation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::truncation::truncation_tests::truncation_collapses_wal_after_drain"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/recovery/snapshot_gc/snapshot_stress_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery::snapshot_gc::snapshot_stress_tests::seeded_writers_and_parked_commits_preserve_repeated_snapshot_reads"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/recovery/wal_recovery/recovery_gate_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery::wal_recovery::recovery_gate_tests::persist_markers_writes_monotonic_max_not_raw_version"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/recovery/wal_recovery/recovery_gate_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery::wal_recovery::recovery_gate_tests::persist_markers_never_regresses_the_on_disk_marker"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_counter_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_counter_tests::apply"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_journal_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_journal_order_tests::follower_materialized_failure_emits_no_journal_event_or_gap"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_journal_order_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_journal_order_tests::follower_journal_contains_a_and_b_while_a_broadcast_is_parked"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_preflight_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_preflight_tests::assert_refused"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_tests::apply_one"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/apply_replicated_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::apply_replicated_tests::a12_success_path_completion_watermark_advances_past_replicated_version"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/interner_durability/follower_durability_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::interner_durability::follower_durability_tests::normal_commit_tail_preserves_reserved_floor_and_transaction_id"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/interner_durability/follower_durability_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::interner_durability::follower_durability_tests::corrupt_marker_fails_the_receipt_apply_without_writes"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/interner_durability/replication_interner_persistence_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::interner_durability::replication_interner_persistence_tests::apply_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/interner_durability/replication_interner_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::interner_durability::replication_interner_tests::apply_batch"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
+item = "shamir-engine::test::multi_table_drain::run_child_scenario_multi_table"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/crash_recovery/multi_table_drain.rs"
+item = "shamir-engine::test::multi_table_drain::run_child_scenario_trunc"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/crash_recovery.rs"
+item = "shamir-engine::test::run_child_scenario"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/overlay_depth_probe.rs"
+item = "shamir-engine::test::probe_drain_lag_overlay_depth"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/overlay_depth_probe.rs"
+item = "shamir-engine::test::probe_pinned_snapshot_overlay_depth"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/overlay_depth_probe.rs"
+item = "shamir-engine::test::probe_drain_lag_overlay_depth_fjall"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/tests/overlay_depth_probe.rs"
+item = "shamir-engine::test::probe_steady_state_overlay_depth"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/repo_core.rs"
+item = "RepoCore"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "RetainedFreeze::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "RetainedFreeze::into_inner"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "RetainedFreeze::as_ref"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/retained_freeze.rs"
+item = "RetainedFreeze"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "RenameFenceView::new"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "RenameFenceView::check_table_rename_fence"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "RenameFenceView::check_rename_pair"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/rename_fence/view.rs"
+item = "RenameFenceView"
+reason = "R2c2: the tx layer takes RepoCore instead of RepoInstance: item crosses a module or layer boundary"
+owner = "<wave-R2c2>"
+
