@@ -695,6 +695,11 @@ from another instance as its own justification.
    `shamir-engine/src/table/in_flight_create_guard.rs`'s
    `InFlightCreateSet::ids`. Each carries its own "DDL op, contention is
    nil" inline comment — that is the enforcement mechanism, not this list.
+   These DDL guard mutexes recover from lock poisoning: every lock site goes
+   through `IndexManager`'s and `SortedIndexManager`'s `lock_ddl_guard`
+   helpers in `crates/index/shamir-index`, which unwrap with
+   `PoisonError::into_inner` because each critical section is a single
+   insert/remove/snapshot that cannot leave the guarded set half-updated.
 
 3. **First-touch-only population, never on the read-hot path.**
    `Interner::reverse_write_lock: std::sync::Mutex<()>`

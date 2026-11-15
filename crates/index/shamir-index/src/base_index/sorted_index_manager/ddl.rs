@@ -56,7 +56,7 @@ impl super::inner::SortedIndexManager {
     /// `save_dropping_regular`.
     pub(super) async fn save_dropping_sorted(&self) -> DbResult<()> {
         let snapshot: Vec<u64> = {
-            let set = self.dropping_sorted.lock().unwrap();
+            let set = Self::lock_ddl_guard(&self.dropping_sorted);
             set.iter().copied().collect()
         };
         let key = RecordId::system("sidx_drop").to_bytes();
@@ -102,13 +102,13 @@ impl super::inner::SortedIndexManager {
     /// `add_to_dropping`.
     pub(super) async fn add_to_dropping_sorted(&self, name_interned: u64) -> DbResult<()> {
         {
-            let mut set = self.dropping_sorted.lock().unwrap();
+            let mut set = Self::lock_ddl_guard(&self.dropping_sorted);
             set.insert(name_interned);
         }
         let result = self.save_dropping_sorted().await;
         if result.is_err() {
             // Roll back the in-memory set so the guard stays consistent.
-            let mut set = self.dropping_sorted.lock().unwrap();
+            let mut set = Self::lock_ddl_guard(&self.dropping_sorted);
             set.remove(&name_interned);
         }
         result
@@ -129,7 +129,7 @@ impl super::inner::SortedIndexManager {
     pub(super) async fn clear_from_dropping_sorted(&self, name_interned: u64) -> DbResult<()> {
         // Compute the snapshot without the entry (do NOT modify in-memory yet).
         let snapshot: Vec<u64> = {
-            let set = self.dropping_sorted.lock().unwrap();
+            let set = Self::lock_ddl_guard(&self.dropping_sorted);
             set.iter()
                 .filter(|&&k| k != name_interned)
                 .copied()
@@ -142,7 +142,7 @@ impl super::inner::SortedIndexManager {
         self.info_store.set(key.into(), Bytes::from(bytes)).await?;
         // Only now update in-memory.
         {
-            let mut set = self.dropping_sorted.lock().unwrap();
+            let mut set = Self::lock_ddl_guard(&self.dropping_sorted);
             set.remove(&name_interned);
         }
         Ok(())
@@ -536,7 +536,7 @@ impl super::inner::SortedIndexManager {
     /// `save_dropping_sorted`.
     pub(super) async fn save_renaming_sorted(&self) -> DbResult<()> {
         let snapshot: Vec<(u64, u64)> = {
-            let map = self.renaming_sorted.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.renaming_sorted);
             map.iter().map(|(&o, &n)| (o, n)).collect()
         };
         let key = RecordId::system("sidx_ren").to_bytes();
@@ -579,13 +579,13 @@ impl super::inner::SortedIndexManager {
     /// Mirrors #972's `add_to_dropping_sorted`.
     pub(super) async fn add_to_renaming_sorted(&self, old_id: u64, new_id: u64) -> DbResult<()> {
         {
-            let mut map = self.renaming_sorted.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(&self.renaming_sorted);
             map.insert(old_id, new_id);
         }
         let result = self.save_renaming_sorted().await;
         if result.is_err() {
             // Roll back the in-memory map so the state stays consistent.
-            let mut map = self.renaming_sorted.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(&self.renaming_sorted);
             map.remove(&old_id);
         }
         result
@@ -605,7 +605,7 @@ impl super::inner::SortedIndexManager {
     pub(super) async fn clear_from_renaming_sorted(&self, old_id: u64) -> DbResult<()> {
         // Compute the snapshot without the entry (do NOT modify in-memory yet).
         let snapshot: Vec<(u64, u64)> = {
-            let map = self.renaming_sorted.lock().unwrap();
+            let map = Self::lock_ddl_guard(&self.renaming_sorted);
             map.iter()
                 .filter(|(&o, _)| o != old_id)
                 .map(|(&o, &n)| (o, n))
@@ -618,7 +618,7 @@ impl super::inner::SortedIndexManager {
         self.info_store.set(key.into(), Bytes::from(bytes)).await?;
         // Only now update in-memory.
         {
-            let mut map = self.renaming_sorted.lock().unwrap();
+            let mut map = Self::lock_ddl_guard(&self.renaming_sorted);
             map.remove(&old_id);
         }
         Ok(())

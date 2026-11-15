@@ -1,0 +1,219 @@
+base = "d1fac363f52a2a66527c74cef22ef5ace5e0d205"
+
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/index_manager/inner.rs"
+item = "shamir-index::lib::base_index::index_manager::inner::IndexManager::lock_ddl_guard"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/inner.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::inner::SortedIndexManager::lock_ddl_guard"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/tests/ddl_poison_tests.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::tests::ddl_poison_tests::poison_guard"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/tests/ddl_poison_tests.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::tests::ddl_poison_tests::create_manager"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/tests/mod.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::tests::ddl_poison_tests"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/tests/ddl/ddl_poison_recovery_tests.rs"
+item = "shamir-index::lib::base_index::tests::ddl::ddl_poison_recovery_tests::poison_guard"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/tests/ddl/ddl_poison_recovery_tests.rs"
+item = "shamir-index::lib::base_index::tests::ddl::ddl_poison_recovery_tests::create_manager"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/tests/ddl/ddl_poison_recovery_tests.rs"
+item = "shamir-index::lib::base_index::tests::ddl::ddl_poison_recovery_tests::test_value"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[added]]
+path = "crates/index/shamir-index/src/base_index/tests/ddl/mod.rs"
+item = "shamir-index::lib::base_index::tests::ddl::ddl_poison_recovery_tests"
+reason = "DDL-GUARD-POISON: new lock_ddl_guard helper or poison-recovery test support"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/create.rs"
+item = "shamir-index::lib::base_index::index_manager::create::IndexManager::create_index_from_records"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/create.rs"
+item = "shamir-index::lib::base_index::index_manager::create::IndexManager::create_index"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/create.rs"
+item = "shamir-index::lib::base_index::index_manager::create::IndexManager::create_index_from_stream"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::add_to_dropping"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::clear_from_dropping"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::clear_build_in_flight"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::drain_dirty_set"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::get_or_create_dirty_set"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::save_renaming_regular"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::save_renaming_unique"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::add_to_renaming"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::clear_from_renaming"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::clear_all_renaming"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::save_dropping_regular"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/flags.rs"
+item = "shamir-index::lib::base_index::index_manager::flags::IndexManager::save_dropping_unique"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/lookup.rs"
+item = "shamir-index::lib::base_index::index_manager::lookup::IndexManager::plan_records_created_batch"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/lookup.rs"
+item = "shamir-index::lib::base_index::index_manager::lookup::IndexManager::plan_record_updated"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/lookup.rs"
+item = "shamir-index::lib::base_index::index_manager::lookup::IndexManager::plan_record_deleted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager/lookup.rs"
+item = "shamir-index::lib::base_index::index_manager::lookup::IndexManager::plan_record_created"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/index_manager_unique/create.rs"
+item = "shamir-index::lib::base_index::index_manager_unique::create::IndexManager::create_unique_index_from_records_borrowed"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::clear_from_dropping_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::save_dropping_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::save_renaming_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::add_to_renaming_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::clear_from_renaming_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/ddl.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::ddl::SortedIndexManager::add_to_dropping_sorted"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+
+[[changed]]
+path = "crates/index/shamir-index/src/base_index/sorted_index_manager/inner.rs"
+item = "shamir-index::lib::base_index::sorted_index_manager::inner::SortedIndexManager::register"
+reason = "DDL-GUARD-POISON: the lock site now goes through lock_ddl_guard (poison recovery)"
+owner = "<wave-ddl-poison>"
+

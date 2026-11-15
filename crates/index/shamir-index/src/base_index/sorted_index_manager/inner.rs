@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::SortedIndexDefinition;
 use crate::base_index::sorted_index_definition::{
@@ -261,6 +261,16 @@ impl Clone for SortedIndexManager {
 }
 
 impl SortedIndexManager {
+    /// Poison recovery for the DDL guard sets: every critical section on
+    /// these sets is ONE insert/remove/clear/snapshot, so a panic while
+    /// holding the lock cannot leave the guarded structure half-updated —
+    /// recover the data and continue instead of cascading the panic.
+    pub(super) fn lock_ddl_guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Construct empty; caller must `load()` to hydrate.
     pub async fn new(info_store: Arc<dyn Store>) -> DbResult<Self> {
         let m = Self {
@@ -592,12 +602,7 @@ impl SortedIndexManager {
         // postings swept; a fresh create would inherit orphan ghost postings
         // keyed by the same `name_interned`. Mirrors #959's guard in
         // `create_index[_from_records][_from_stream]`.
-        if self
-            .dropping_sorted
-            .lock()
-            .unwrap()
-            .contains(&def.name_interned)
-        {
+        if Self::lock_ddl_guard(&self.dropping_sorted).contains(&def.name_interned) {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create sorted index '{}': \
                  a DROP INDEX for this name is still in progress",

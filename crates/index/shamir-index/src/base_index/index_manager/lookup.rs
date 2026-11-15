@@ -66,7 +66,7 @@ impl IndexManager {
                 if in_flight {
                     // Capture to dirty-set — no SetPosting for this def.
                     if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
-                        let mut set = dirty_set.lock().unwrap();
+                        let mut set = Self::lock_ddl_guard(&dirty_set);
                         set.insert(*record_id);
                     }
                 } else {
@@ -139,7 +139,7 @@ impl IndexManager {
                 {
                     if in_flight {
                         if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
-                            dirty_set.lock().unwrap().insert(*rid);
+                            Self::lock_ddl_guard(&dirty_set).insert(*rid);
                         }
                         continue;
                     }
@@ -219,7 +219,7 @@ impl IndexManager {
                 let touches_index = old_key.is_some() || new_key.is_some();
                 if touches_index {
                     if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
-                        let mut set = dirty_set.lock().unwrap();
+                        let mut set = Self::lock_ddl_guard(&dirty_set);
                         set.insert(*record_id);
                     }
                 }
@@ -324,7 +324,7 @@ impl IndexManager {
                 if in_flight {
                     // Capture to dirty-set — no RemovePosting for this def.
                     if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
-                        let mut set = dirty_set.lock().unwrap();
+                        let mut set = Self::lock_ddl_guard(&dirty_set);
                         set.insert(*record_id);
                     }
                 } else {

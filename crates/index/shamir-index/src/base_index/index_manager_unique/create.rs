@@ -123,12 +123,7 @@ impl IndexManager {
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
         // still in flight — mirrors `create_index`'s regular-family guard.
-        if self
-            .dropping_unique
-            .lock()
-            .unwrap()
-            .contains_key(&name_interned)
-        {
+        if IndexManager::lock_ddl_guard(&self.dropping_unique).contains_key(&name_interned) {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create unique index '{name_interned}': \
                  a DROP INDEX for this name is still in progress"

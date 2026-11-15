@@ -45,12 +45,7 @@ impl IndexManager {
         // is still in flight — a tombstoned name has had (or is having) its
         // postings swept; a fresh create would inherit orphan ghost postings
         // keyed by the same `name_interned`.
-        if self
-            .dropping_regular
-            .lock()
-            .unwrap()
-            .contains_key(&name_interned)
-        {
+        if Self::lock_ddl_guard(&self.dropping_regular).contains_key(&name_interned) {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
                  a DROP INDEX for this name is still in progress"
@@ -236,12 +231,7 @@ impl IndexManager {
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
         // still in flight (see `create_index`'s matching guard).
-        if self
-            .dropping_regular
-            .lock()
-            .unwrap()
-            .contains_key(&name_interned)
-        {
+        if Self::lock_ddl_guard(&self.dropping_regular).contains_key(&name_interned) {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
                  a DROP INDEX for this name is still in progress"
@@ -459,12 +449,7 @@ impl IndexManager {
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
         // still in flight (see `create_index`'s matching guard).
-        if self
-            .dropping_regular
-            .lock()
-            .unwrap()
-            .contains_key(&name_interned)
-        {
+        if Self::lock_ddl_guard(&self.dropping_regular).contains_key(&name_interned) {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
                  a DROP INDEX for this name is still in progress"
