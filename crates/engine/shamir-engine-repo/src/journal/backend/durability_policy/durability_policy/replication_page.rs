@@ -25,7 +25,7 @@ where
     RF: Future<Output = DbResult<BoundedJournalRead>>,
 {
     // Negative control removes the complete page clamp, metadata included.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     if super::super::replication_bound::SKIP_S_CLAMP_FOR_TEST
         .load(std::sync::atomic::Ordering::Acquire)
     {

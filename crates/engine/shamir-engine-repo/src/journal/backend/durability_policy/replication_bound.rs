@@ -75,11 +75,11 @@ async fn replication_bound_impl(
     max_wait: Duration,
     metrics: Option<&DurabilityMetrics>,
 ) -> u64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     if SKIP_S_CLAMP_FOR_TEST.load(std::sync::atomic::Ordering::Acquire) {
         return bound;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     let max_wait = match BOUND_WAIT_MS_FOR_TEST.load(std::sync::atomic::Ordering::Acquire) {
         0 => max_wait,
         ms => Duration::from_millis(ms),

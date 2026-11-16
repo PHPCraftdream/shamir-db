@@ -69,9 +69,9 @@ impl RepoIdentity {
             .checked_add(1)
             .ok_or_else(|| DbError::Storage("repository history epoch overflow".into()))?;
         // Negative-control seam (see `SKIP_BUMP_FLUSH_FOR_TEST`): constant-true
-        // in production, branch elided under cfg!(test) when unset.
-        let flush =
-            !(cfg!(test) && SKIP_BUMP_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+        // in production, branch elided unless `test`/`test-util` is on.
+        let flush = !(cfg!(any(test, feature = "test-util"))
+            && SKIP_BUMP_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
         Self::save_record_inner(store, identity, operation.or(receipt), flush).await?;
         Ok(identity)
     }
@@ -265,9 +265,9 @@ pub async fn ensure_armed(store: &Arc<dyn Store>) -> DbResult<()> {
         return Ok(());
     }
     // Negative-control seam (see `SKIP_ARMING_FLUSH_FOR_TEST`): constant-true
-    // in production, branch elided under cfg!(test) when unset.
-    let flush =
-        !(cfg!(test) && SKIP_ARMING_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+    // in production, branch elided unless `test`/`test-util` is on.
+    let flush = !(cfg!(any(test, feature = "test-util"))
+        && SKIP_ARMING_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
     save_lifecycle_record_inner(store, LifecycleState::Armed, flush).await
 }
 
@@ -276,9 +276,9 @@ pub async fn ensure_armed(store: &Arc<dyn Store>) -> DbResult<()> {
 #[doc(hidden)]
 pub async fn mark_clean(store: &Arc<dyn Store>) -> DbResult<()> {
     // Negative-control seam (see `SKIP_CLEAN_FLUSH_FOR_TEST`): constant-true
-    // in production, branch elided under cfg!(test) when unset.
-    let flush =
-        !(cfg!(test) && SKIP_CLEAN_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
+    // in production, branch elided unless `test`/`test-util` is on.
+    let flush = !(cfg!(any(test, feature = "test-util"))
+        && SKIP_CLEAN_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
     save_lifecycle_record_inner(store, LifecycleState::Clean, flush).await
 }
 
