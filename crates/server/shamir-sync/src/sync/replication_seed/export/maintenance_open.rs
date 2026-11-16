@@ -3,6 +3,7 @@ use std::path::Path;
 
 use shamir_db::{ShamirDb, SystemStoreConfig};
 
+use crate::format_stamp::{inspect_gate, EpochPolicy};
 use crate::replication_seed::error::invalid;
 use crate::replication_seed::SeedError;
 
@@ -18,6 +19,8 @@ pub struct MaintenanceOpen {
 impl MaintenanceOpen {
     pub async fn open(data_dir: &Path) -> Result<Self, SeedError> {
         let lock = crate::maintenance_lock::acquire(data_dir)?;
+        // Format-stamp gate (design 3.3: Inspect — export never stamps).
+        inspect_gate(data_dir, &EpochPolicy::compiled()).map_err(|e| invalid(e.to_string()))?;
         let meta = data_dir.join("shamir_db_meta.redb");
         if !meta.is_dir() {
             return Err(invalid("source catalogue does not exist"));

@@ -66,6 +66,7 @@ use shamir_db::ShamirDb;
 use thiserror::Error;
 
 use crate::backup::{self, copy_dir_recursive, BackupError};
+use crate::format_stamp::{restore_snapshot_gate, EpochPolicy};
 use crate::meta_port::MetaError;
 use crate::user_directory::FjallUserDirectory;
 
@@ -85,6 +86,8 @@ pub enum RestoreError {
     ProbeFailed(PathBuf, MetaError),
     #[error("snapshot manifest verification failed: {0}")]
     ManifestVerification(#[from] BackupError),
+    #[error("snapshot format stamp refused: {0}")]
+    FormatStamp(#[from] crate::format_stamp::StampError),
     #[error(
         "atomic swap partially failed: pre-restore backup at {pre_restore_backup} \
          and NEW data at {temp_dir} both exist, but {data_dir} could not be \
@@ -169,6 +172,12 @@ where
     // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
     // data_dir at all. ----
     backup::verify_manifest(from)?;
+
+    // ---- Step 2b: verify the SOURCE snapshot's format stamp (design 3.5).
+    // Newer, corrupt or newer-layout refuses; absent or older is allowed
+    // (rollback must work). The copy brings its own stamp; nothing is
+    // written here. ----
+    restore_snapshot_gate(from, &EpochPolicy::compiled())?;
 
     // ---- Step 3: copy to a temporary sibling directory ----
     let stamp = restore_timestamp();

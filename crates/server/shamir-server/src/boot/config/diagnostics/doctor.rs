@@ -15,6 +15,7 @@ use shamir_db::engine::index2::IndexState;
 use shamir_db::engine::table::doctor::{Index2Health, IndexHealth, RepairReport, VerifyReport};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
+use shamir_sync::format_stamp::{check_data_dir, inspect_gate, EpochPolicy, IgnoreSet, StampMode};
 
 use crate::config::Config;
 use crate::tables_registry::TablesRegistry;
@@ -212,6 +213,19 @@ struct DoctorReportJson {
 /// specific table and got silence.
 pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorReport> {
     let meta_path = config.data_dir.join("shamir_db_meta.redb");
+
+    // Format-stamp gate (design 3.3): read-only doctor must not leave a
+    // stamp behind; `--apply` writes, so it runs in Writer mode.
+    if args.apply {
+        check_data_dir(
+            &config.data_dir,
+            StampMode::Writer,
+            &IgnoreSet::none(),
+            &EpochPolicy::compiled(),
+        )?;
+    } else {
+        inspect_gate(&config.data_dir, &EpochPolicy::compiled())?;
+    }
 
     // redb is single-writer: retry briefly before failing with a clear
     // "is the server stopped?" error (mirrors access_tree.rs pattern).

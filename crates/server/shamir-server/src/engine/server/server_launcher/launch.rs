@@ -1,6 +1,7 @@
 //! [`ServerLauncher`]: builds the server runtime from a
 //! [`Config`](crate::config::Config) + bootstrap policy in `launch()`.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -15,6 +16,7 @@ use shamir_connect::server::lockout::{
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
+use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
 
 use shamir_tunables::runtime::RuntimeTunables;
 
@@ -116,6 +118,30 @@ impl ServerLauncher {
         // from opening the same data_dir and corrupting/contending the
         // redb stores.
         let data_dir_lock = crate::maintenance_lock::acquire_server(&config.data_dir)?;
+
+        // Format-stamp gate (design 3.2): between the single-instance lock
+        // and the first store open, so a refusal leaves every store closed.
+        // The configured log file counts as data only when it lives in the
+        // data directory itself (design 3.1).
+        let format_stamp_ignore = config
+            .logging
+            .file
+            .as_ref()
+            .and_then(|log| {
+                let log = Path::new(log);
+                if log.parent() != Some(config.data_dir.as_path()) {
+                    return None;
+                }
+                log.file_name()
+                    .map(|name| IgnoreSet::with_log_file(name.to_string_lossy()))
+            })
+            .unwrap_or_else(IgnoreSet::none);
+        let format_stamp = check_data_dir(
+            &config.data_dir,
+            StampMode::Writer,
+            &format_stamp_ignore,
+            &EpochPolicy::compiled(),
+        )?;
 
         let meta = Arc::new(
             ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
@@ -862,6 +888,7 @@ impl ServerLauncher {
             shamir,
             data_dir: config.data_dir.clone(),
             conn_tasks: conn_tasks.clone(),
+            format_stamp,
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
         })

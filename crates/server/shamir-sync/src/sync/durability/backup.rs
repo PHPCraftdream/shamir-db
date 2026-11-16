@@ -42,6 +42,7 @@ use thiserror::Error;
 
 use shamir_collections::new_fx_set_wc;
 
+use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation};
 use crate::restore::fsync_dir;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
@@ -145,6 +146,9 @@ pub struct BackupReport {
     pub files_copied: u64,
     /// Path to the `manifest.json` written into `dest_dir`.
     pub manifest_path: PathBuf,
+    /// Read-only observation of the source stamp, taken before the copy
+    /// (design 3.5). Backup never refuses and never stamps.
+    pub format_stamp: BackupStampObservation,
 }
 
 /// One entry in `manifest.json`'s `files` array.
@@ -220,6 +224,10 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     }
     reject_destination_inside_source(from, to)?;
 
+    // Observe the stamp before the copy (design 3.5). Read-only; the byte
+    // copy below brings the stamp itself along.
+    let format_stamp = observe_stamp_for_backup(from);
+
     let stamp = utc_timestamp();
     let dest_dir = to.join(stamp);
     if dest_dir.exists() {
@@ -246,6 +254,7 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
         bytes_copied: bytes,
         files_copied: files,
         manifest_path,
+        format_stamp,
     })
 }
 
