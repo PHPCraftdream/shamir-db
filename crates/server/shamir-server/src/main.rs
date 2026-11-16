@@ -205,6 +205,8 @@ enum Subcmd {
         #[command(subcommand)]
         action: shamir_server::tokens::cli::TokenAction,
     },
+    /// Offline format migration of a stopped server data directory.
+    FormatMigrate(shamir_server::migrate::FormatMigrateArgs),
 
     /// Verify and optionally repair table integrity. **Offline only** — the
     /// server for this `data_dir` must be stopped first (opens the data
@@ -278,6 +280,24 @@ fn main() -> std::process::ExitCode {
 
 fn run_main() -> anyhow::Result<u8> {
     let cli = Cli::parse();
+
+    if let Some(Subcmd::FormatMigrate(args)) = cli.command.as_ref() {
+        let mut config = Config::from_file(&cli.config)?;
+        config.validate()?;
+        if let Some(ref log_file) = config.logging.file {
+            let path = std::path::Path::new(log_file);
+            if !path.is_absolute() {
+                config.logging.file = Some(
+                    shamir_server::service::absolute(path)?
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("log file path is not valid UTF-8"))?
+                        .to_owned(),
+                );
+            }
+        }
+        shamir_server::migrate::run(&config, args)?;
+        return Ok(0);
+    }
 
     // Windows SCM dispatcher: the SCM starts the process with `--service`
     // and expects a blocking `StartServiceCtrlDispatcher` call on the main
@@ -453,6 +473,9 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             };
             shamir_server::doctor::run(&config, &args).await?;
             return Ok(0);
+        }
+        Some(Subcmd::FormatMigrate(_)) => {
+            anyhow::bail!("format-migrate dispatch must occur before logging initialization")
         }
         Some(Subcmd::Run { .. }) | None => {}
     }

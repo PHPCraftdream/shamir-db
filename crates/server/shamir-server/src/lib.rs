@@ -17,6 +17,7 @@
 mod boot;
 pub mod durability;
 mod engine;
+pub mod migrate;
 pub(crate) use shamir_server_security as security;
 pub(crate) use shamir_sync as sync;
 
