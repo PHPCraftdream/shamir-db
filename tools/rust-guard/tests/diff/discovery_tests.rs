@@ -723,3 +723,54 @@ fn discovery_flag_leaves_no_suggestion_fixture_output_unchanged() {
         "no file when nothing is suggested"
     );
 }
+
+/// Delta with one `[[moved]]` entry carrying a raw `platform_gated` flag
+/// (the string-only `delta` helper cannot write a boolean).
+fn gated_delta(flag: bool) -> String {
+    format!(
+        "base = \"0\"\n\n[[moved]]\npath = \"bin_a\"\nitem = \"unix_only\"\n\
+         to_path = \"bin_b\"\nto_item = \"unix_only\"\n\
+         reason = \"test is compiled out of some cells\"\nowner = \"@rust-guard\"\n\
+         platform_gated = {flag}\n"
+    )
+}
+
+#[test]
+fn platform_gated_entry_absent_on_both_sides_is_clean() {
+    let out = run(
+        Some(&lines("bin_a", &["other"])),
+        Some(&lines("bin_a", &["other"])),
+        Some(&gated_delta(true)),
+    );
+    assert_clean(&out);
+}
+
+#[test]
+fn ungated_entry_absent_on_both_sides_is_unused_allowance() {
+    let out = run(
+        Some(&lines("bin_a", &["other"])),
+        Some(&lines("bin_a", &["other"])),
+        Some(&gated_delta(false)),
+    );
+    assert_finding(&out, "UNUSED_ALLOWANCE");
+}
+
+#[test]
+fn platform_gated_entry_still_pairs_when_the_test_exists() {
+    let out = run(
+        Some(&lines("bin_a", &["unix_only"])),
+        Some(&lines("bin_b", &["unix_only"])),
+        Some(&gated_delta(true)),
+    );
+    assert_clean(&out);
+}
+
+#[test]
+fn platform_gated_entry_does_not_hide_a_lost_test() {
+    let out = run(
+        Some(&lines("bin_a", &["unix_only"])),
+        Some(&lines("bin_a", &["other"])),
+        Some(&gated_delta(true)),
+    );
+    assert_finding(&out, "TEST_LOST");
+}
