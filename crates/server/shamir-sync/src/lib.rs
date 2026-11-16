@@ -1,5 +1,6 @@
 mod sync;
 
+pub mod format_stamp;
 pub mod meta_port;
 
 pub mod config_error;
