@@ -52,8 +52,11 @@ def tree_text(engine_features):
         lines.append('%s feature "default"' % package)
         if "test-util" in engine_features:
             lines.append('%s feature "test-util"' % package)
-    # The repo crate has no `default` feature: only fjall/test-util lines.
+    # The repo crate has no `default` feature of its own, but the dependency
+    # edge enables default features, so `cargo tree` lists `default`; the
+    # facade forwards fjall/test-util.
     lines.append("shamir-engine-repo v0.1.0")
+    lines.append('shamir-engine-repo feature "default"')
     if "fjall" in engine_features:
         lines.append('shamir-engine-repo feature "fjall"')
     if "test-util" in engine_features:

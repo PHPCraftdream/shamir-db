@@ -1,1 +1,817 @@
 base = "3123245d6200e61a2ffbc59849eb121c7795f427"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::batch_synced_tests::request_synced_makes_its_write_immediately_servable"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::batch_synced_tests::request_synced_makes_its_write_immediately_servable"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_independent_tests::buffered_commit_completes_on_default_runtime_mem_wal"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_independent_tests::buffered_commit_completes_on_default_runtime_mem_wal"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_independent_tests::completed_reseed_resolves_through_server_default_and_override"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_independent_tests::completed_reseed_resolves_through_server_default_and_override"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_independent_tests::public_policy_setter_rejects_invalid_modes_without_changing_clones"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_independent_tests::public_policy_setter_rejects_invalid_modes_without_changing_clones"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_independent_tests::resolve_defaults_and_override_win_and_floor"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_independent_tests::resolve_defaults_and_override_win_and_floor"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_tests::buffered_commit_completes_on_default_runtime_file_wal"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_tests::buffered_commit_completes_on_default_runtime_file_wal"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_tests::buffered_request_does_not_weaken_synced_server_policy"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_tests::buffered_request_does_not_weaken_synced_server_policy"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_tests::policy_store_through_one_clone_is_visible_through_another"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_tests::policy_store_through_one_clone_is_visible_through_another"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_tests::synced_policy_commit_leaves_s_at_the_commit_version"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::commit_policy_tests::synced_policy_commit_leaves_s_at_the_commit_version"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::repo_override_commit_tests::resolved_synced_override_commit_is_fsynced_before_ack"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::repo_override_commit_tests::resolved_synced_override_commit_is_fsynced_before_ack"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::commit_policy_tests::repo_override_commit_tests::server_default_buffered_negative_control_does_not_sync_on_commit"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::commit_policy_tests::repo_override_commit_tests::server_default_buffered_negative_control_does_not_sync_on_commit"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::mem::mem_sink_hybrid_tests::hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::mem::mem_sink_hybrid_tests::hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::mem::mem_sink_tests::durability_metrics_are_shared_by_clones_and_isolated_between_repos"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::mem::mem_sink_tests::durability_metrics_are_shared_by_clones_and_isolated_between_repos"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::mem::mem_sink_tests::mem_sink_keeps_r_equal_w_regardless_of_policy"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::mem::mem_sink_tests::mem_sink_keeps_r_equal_w_regardless_of_policy"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::mem::mem_sink_tests::set_durability_downgrades_synced_to_buffered_on_mem_backend"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::mem::mem_sink_tests::set_durability_downgrades_synced_to_buffered_on_mem_backend"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::bookmark_tests::follower_bookmark_observed_before_loss_is_within_surviving_horizon"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::bookmark_tests::follower_bookmark_observed_before_loss_is_within_surviving_horizon"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::bookmark_tests::negative_control_pre_loss_bookmark_exceeds_surviving_wal"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::bookmark_tests::negative_control_pre_loss_bookmark_exceeds_surviving_wal"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::completed_reseed_seam_suppresses_unclean_epoch_bump"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::completed_reseed_seam_suppresses_unclean_epoch_bump"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::completed_reseed_speculative_tail_loss_bumps_epoch_and_fences_old_bookmark"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::completed_reseed_speculative_tail_loss_bumps_epoch_and_fences_old_bookmark"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::durable_reopen_after_fast_period_loss_bumps_epoch_armed_survives_config_change"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::durable_reopen_after_fast_period_loss_bumps_epoch_armed_survives_config_change"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::live_first_touch_does_not_certify_replayed_page_cache"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::live_first_touch_does_not_certify_replayed_page_cache"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::power_loss_real_reopen_bounds_survivors_and_next_synced_commit"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::power_loss_real_reopen_bounds_survivors_and_next_synced_commit"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::reopened_all_aborted_wal_less_checkpoint_allows_next_commit"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::reopened_all_aborted_wal_less_checkpoint_allows_next_commit"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::reopened_checkpointed_truncated_history_allows_next_commit"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::reopened_checkpointed_truncated_history_allows_next_commit"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::power_loss_bound_tests::reopen_tests::reopened_sparse_wal_settles_historical_abort_hole"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::power_loss_bound_tests::reopen_tests::reopened_sparse_wal_settles_historical_abort_hole"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::abort_hole_wakes_waiter_without_another_sync"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::abort_hole_wakes_waiter_without_another_sync"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::appended_five_before_four_stays_below_hole_after_real_sync"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::appended_five_before_four_stays_below_hole_after_real_sync"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::completed_reseed_policy_keeps_other_accessors_unchanged"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::completed_reseed_policy_keeps_other_accessors_unchanged"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::completed_reseed_serves_past_recoverable_prefix"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::completed_reseed_serves_past_recoverable_prefix"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::concurrent_held_back_pulls_coalesce_into_one_sync"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::concurrent_held_back_pulls_coalesce_into_one_sync"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::durable_limited_page_issues_no_tail_sync"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::durable_limited_page_issues_no_tail_sync"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::durable_mode_still_clamps_to_recoverable_prefix"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::durable_mode_still_clamps_to_recoverable_prefix"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::exact_coverage_preserves_holes_and_capture_boundary"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::exact_coverage_preserves_holes_and_capture_boundary"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::pull_deadline_does_not_cancel_shared_sync"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::pull_deadline_does_not_cancel_shared_sync"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::durability_policy::tests::replication_s_bound_tests::pull_holds_back_versions_above_s_until_they_are_synced"
+to_path = "shamir-engine"
+to_item = "repo::durability_tests::replication_s_bound_tests::pull_holds_back_versions_above_s_until_they_are_synced"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::group_commit::tests::group_commit_tests::batches_concurrent_flushes"
+to_path = "shamir-engine-repo"
+to_item = "journal::backend::group_commit::tests::group_commit_tests::batches_concurrent_flushes"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::group_commit::tests::group_commit_tests::propagates_flush_error"
+to_path = "shamir-engine-repo"
+to_item = "journal::backend::group_commit::tests::group_commit_tests::propagates_flush_error"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::group_commit::tests::group_commit_tests::single_caller_flushes_once"
+to_path = "shamir-engine-repo"
+to_item = "journal::backend::group_commit::tests::group_commit_tests::single_caller_flushes_once"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::group_commit::tests::leader_cancel_tests::leader_cancellation_does_not_strand_subsequent_calls"
+to_path = "shamir-engine-repo"
+to_item = "journal::backend::group_commit::tests::leader_cancel_tests::leader_cancellation_does_not_strand_subsequent_calls"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::backend::group_commit::tests::panicking_flush_tests::panicking_flush_does_not_strand_subsequent_calls"
+to_path = "shamir-engine-repo"
+to_item = "journal::backend::group_commit::tests::panicking_flush_tests::panicking_flush_does_not_strand_subsequent_calls"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::admit_rejects_while_reservation_outstanding"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::admit_rejects_while_reservation_outstanding"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::admit_returns_identity_stamped_permit"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::admit_returns_identity_stamped_permit"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::admit_serializes"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::admit_serializes"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::reservation_drop_clears_flag"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::reservation_drop_clears_flag"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::reservation_holder_can_admit_and_foreign_domain_is_rejected"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::reservation_holder_can_admit_and_foreign_domain_is_rejected"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::journal::changelog_store::tests::write_domain_tests::reservation_is_single_slot"
+to_path = "shamir-engine-repo"
+to_item = "journal::changelog_store::tests::write_domain_tests::reservation_is_single_slot"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::adoption_never_overwrites_a_refused_record"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::adoption_never_overwrites_a_refused_record"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::adoption_preserves_bookmark_clean_horizon_and_receipt"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::adoption_preserves_bookmark_clean_horizon_and_receipt"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::floor_without_bookmark_classifies_and_refuses_adoption"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::floor_without_bookmark_classifies_and_refuses_adoption"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::fresh_store_classifies_fresh_and_adopts_v3_baseline"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::fresh_store_classifies_fresh_and_adopts_v3_baseline"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::legacy_records_refuse_every_loader_with_legacy_format"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::legacy_records_refuse_every_loader_with_legacy_format"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::truncated_and_unknown_version_records_refuse_as_malformed"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::truncated_and_unknown_version_records_refuse_as_malformed"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_refusal_tests::truncated_v3_record_refuses_as_malformed"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_refusal_tests::truncated_v3_record_refuses_as_malformed"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::absent_key_loads_none"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::absent_key_loads_none"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::corrupt_bytes_fail_closed"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::corrupt_bytes_fail_closed"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::projections_read_v3_records"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::projections_read_v3_records"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::unknown_version_fails_closed"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::unknown_version_fails_closed"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::v3_consistency_check_rejects_mismatched_fence"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::v3_consistency_check_rejects_mismatched_fence"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::v3_record_round_trips"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::v3_record_round_trips"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::bookmark_v3_tests::v3_rejects_trailing_bytes"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::bookmark_v3_tests::v3_rejects_trailing_bytes"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_garbage_and_truncation"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_garbage_and_truncation"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_oversized_receipt"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_oversized_receipt"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_trailing_bytes"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_trailing_bytes"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_unknown_version"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_unknown_version"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_v1_tagged_receipt"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_v1_tagged_receipt"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::decode_rejects_wrong_id"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::decode_rejects_wrong_id"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::receipt_id_is_deterministic_and_separating"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::receipt_id_is_deterministic_and_separating"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::receipt_round_trips_all_fields"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::receipt_round_trips_all_fields"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::receipt_with_invalid_range_rejected"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::receipt_with_invalid_range_rejected"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::receipt_with_mismatched_ops_per_event_rejected"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::receipt_with_mismatched_ops_per_event_rejected"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::repl::tests::receipt_tests::size_bound_constants_are_sane"
+to_path = "shamir-engine-repo"
+to_item = "meta::repl::tests::receipt_tests::size_bound_constants_are_sane"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::envelope_tests::bad_magic_rejected"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::envelope_tests::bad_magic_rejected"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::envelope_tests::round_trip"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::envelope_tests::round_trip"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::envelope_tests::version_mismatch_rejected"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::envelope_tests::version_mismatch_rejected"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::follower_durability_tests::fence_write_preserves_bookmark_horizon_and_receipt"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::follower_durability_tests::fence_write_preserves_bookmark_horizon_and_receipt"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::follower_durability_tests::fresh_v3_aware_identity_fence_uses_absent_bookmark_cursor"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::follower_durability_tests::fresh_v3_aware_identity_fence_uses_absent_bookmark_cursor"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::follower_durability_tests::versioned_record_keeps_upstream_bookmark_and_local_j_distinct"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::follower_durability_tests::versioned_record_keeps_upstream_bookmark_and_local_j_distinct"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::armed_is_idempotent_and_survives_reload"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::armed_is_idempotent_and_survives_reload"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::arming_flush_is_load_bearing_negative_control"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::arming_flush_is_load_bearing_negative_control"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::clean_flush_is_load_bearing_negative_control"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::clean_flush_is_load_bearing_negative_control"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::clean_then_rearm"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::clean_then_rearm"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::crash_during_bump_flush_skipped_converges"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::crash_during_bump_flush_skipped_converges"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::armed_survives_mode_switch_and_unclean_durable_reopen_bumps"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::disk_crash::armed_survives_mode_switch_and_unclean_durable_reopen_bumps"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::crash_after_arm_before_first_serve_bumps_per_reopen"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::disk_crash::crash_after_arm_before_first_serve_bumps_per_reopen"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::disk_crash::crash_after_clean_certificate_does_not_bump"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::disk_crash::crash_after_clean_certificate_does_not_bump"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::epoch_bump_is_atomic_single_key"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::epoch_bump_is_atomic_single_key"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::repo_level_arm_and_unclean_bump"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::repo_level_arm_and_unclean_bump"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::lifecycle_record_tests::requires_unclean_bump_truth_table"
+to_path = "shamir-engine"
+to_item = "repo::tests::lifecycle::lifecycle_record_tests::requires_unclean_bump_truth_table"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::recovery_marker_tests::last_committed_overwrites"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::lifecycle::recovery_marker_tests::last_committed_overwrites"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::recovery_marker_tests::last_committed_round_trip"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::lifecycle::recovery_marker_tests::last_committed_round_trip"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::recovery_marker_tests::load_missing_returns_none"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::lifecycle::recovery_marker_tests::load_missing_returns_none"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::recovery_marker_tests::markers_dont_collide"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::lifecycle::recovery_marker_tests::markers_dont_collide"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::lifecycle::recovery_marker_tests::next_tx_id_round_trip"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::lifecycle::recovery_marker_tests::next_tx_id_round_trip"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::namespace_tests::record_id_is_system"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::namespace_tests::record_id_is_system"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::namespace_tests::record_ids_are_distinct"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::namespace_tests::record_ids_are_distinct"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::namespace_tests::tags_match_legacy_literal_encoding"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::namespace_tests::tags_match_legacy_literal_encoding"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::repl_bookmark_tests::bookmark_does_not_collide_with_other_markers"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::repl_bookmark_tests::bookmark_does_not_collide_with_other_markers"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::repl_bookmark_tests::bookmark_overwrites"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::repl_bookmark_tests::bookmark_overwrites"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::repl_bookmark_tests::bookmark_round_trip"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::repl_bookmark_tests::bookmark_round_trip"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::meta::tests::repl_bookmark_tests::load_missing_returns_zero"
+to_path = "shamir-engine-repo"
+to_item = "meta::tests::repl_bookmark_tests::load_missing_returns_zero"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::disk_tests::disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor"
+to_path = "shamir-engine"
+to_item = "repo::tests::seed::disk_tests::disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+to_path = "shamir-engine"
+to_item = "repo::tests::seed::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+reason = "R4a: tests move with their module into the new crate or the facade test folder"
+owner = "<wave-R4a>"
