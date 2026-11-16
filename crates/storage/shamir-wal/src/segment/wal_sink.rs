@@ -433,4 +433,41 @@ impl WalSink {
             Self::Mem(_) => Ok(0),
         }
     }
+
+    // ---- Sync scrape accessors for the §2.4 WAL gauges (never on the
+    // append path). `Mem` reports 0: `shamir_wal_backend_mem` already tells
+    // the operator the backend, and the in-RAM sink has no on-disk size.
+
+    /// Retained segment FILES (sealed + active).
+    pub(crate) fn segment_count(&self) -> u64 {
+        match self {
+            Self::File(segset) => segset.segment_count(),
+            Self::Mem(_) => 0,
+        }
+    }
+
+    /// Approximate on-disk WAL size (active + sealed).
+    pub(crate) fn wal_size_bytes(&self) -> u64 {
+        match self {
+            Self::File(segset) => segset.approx_size_bytes(),
+            Self::Mem(_) => 0,
+        }
+    }
+
+    /// Cumulative WAL payload bytes appended.
+    pub(crate) fn bytes_written_total(&self) -> u64 {
+        match self {
+            Self::File(segset) => segset.bytes_written_total(),
+            Self::Mem(_) => 0,
+        }
+    }
+
+    /// Distance from `durable_version` to the oldest reclaimable-but-retained
+    /// sealed segment boundary (0 when nothing is truncatable).
+    pub(crate) fn truncation_lag_versions(&self, durable_version: u64) -> u64 {
+        match self {
+            Self::File(segset) => segset.truncation_lag_versions(durable_version),
+            Self::Mem(_) => 0,
+        }
+    }
 }

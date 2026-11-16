@@ -61,6 +61,7 @@ use crate::byte_budget::ByteBudget;
 pub mod logging;
 
 mod durability_export;
+mod export;
 mod login_histogram;
 mod visibility_export;
 
@@ -68,6 +69,7 @@ mod visibility_export;
 mod tests;
 
 use durability_export::{record_durability_metrics, register_durability_metrics};
+use export::{record_storage_metrics, register_storage_metrics};
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
 /// Live state shared between the HTTP handlers and the boot path.
@@ -454,6 +456,8 @@ pub async fn spawn_with_byte_budget(
     register_visibility_metrics();
     // Amendment B2: WAL sync lag / sync_now / replication held-back family.
     register_durability_metrics();
+    // R4a-2 §2.4: WAL size/segments/truncation lag/waiters + fsync histogram.
+    register_storage_metrics();
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -704,7 +708,10 @@ pub(crate) fn sample_gate_metrics(db: &shamir_db::ShamirDb) {
         record_gate_metrics(&db_name, &repo, &snapshot, visibility.as_ref());
         if let Some(instance) = db.get_db(&db_name) {
             if let Some(handle) = instance.get_repo(&repo) {
-                record_durability_metrics(&db_name, &repo, &handle.durability_metrics_snapshot());
+                // One snapshot feeds both durability and storage exporters.
+                let snapshot = handle.durability_metrics_snapshot();
+                record_durability_metrics(&db_name, &repo, &snapshot);
+                record_storage_metrics(&db_name, &repo, &snapshot);
             }
         }
     }

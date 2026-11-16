@@ -479,6 +479,35 @@ impl WalGroupCommit {
         self.sink.sealed_retained_bytes().await
     }
 
+    /// `shamir_wal_segments` source: retained segment FILES (sealed + active).
+    pub fn segment_count(&self) -> u64 {
+        self.sink.segment_count()
+    }
+
+    /// `shamir_wal_size_bytes` source: approximate on-disk WAL size
+    /// (active + sealed; Mem reports 0).
+    pub fn wal_size_bytes(&self) -> u64 {
+        self.sink.wal_size_bytes()
+    }
+
+    /// `shamir_wal_bytes_total` source: cumulative WAL payload bytes appended.
+    pub fn bytes_written_total(&self) -> u64 {
+        self.sink.bytes_written_total()
+    }
+
+    /// `shamir_wal_truncation_lag_versions` source: distance from
+    /// `durable_version` to the oldest reclaimable-but-retained sealed
+    /// segment boundary (0 when nothing is truncatable).
+    pub fn truncation_lag_versions(&self, durable_version: u64) -> u64 {
+        self.sink.truncation_lag_versions(durable_version)
+    }
+
+    /// `shamir_wal_fsync_seconds` source: torn-free snapshot of the
+    /// sync-worker round histogram (snapshot replay + sink sync, `ns`).
+    pub fn fsync_histogram_snapshot(&self) -> shamir_metrics::HistogramSnapshot {
+        self.sync.fsync_histogram_snapshot()
+    }
+
     // `sync_now` (coalesced) lives in
     // `wal_group_commit/recoverable_through.rs`, alongside the `R` prefix it
     // publishes.

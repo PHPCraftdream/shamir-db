@@ -744,6 +744,47 @@ Prometheus text format. Метрики:
 || `shamir_visibility_reconciliation_wait_seconds_bucket{result,le}` | gauge | Reconciliation wait durations |
 || `shamir_visibility_ack_waiters{db,repo}` | gauge | Acknowledgements currently parked (reuses the completion tracker's waiter registration) |
 || `shamir_gate_*` | gauge | REPO-DIAGNOSTICS per-repo gate snapshot (allocation high water, visible floor, oldest blocker, …) |
+|| `shamir_wal_size_bytes{db,repo}` | gauge | Приблизительный размер WAL на диске: активный сегмент + запечатанные удержанные (Mem-бэкенд пишет 0) |
+|| `shamir_wal_segments{db,repo}` | gauge | Удержанные файлы сегментов WAL: запечатанные + один активный (Mem-бэкенд пишет 0) |
+|| `shamir_wal_truncation_lag_versions{db,repo}` | gauge | Отставание truncate: max committed version минус старейшая усекаемая версия |
+|| `shamir_group_commit_waiters{db,repo}` | gauge | Участники группового коммита, ожидающие покрытия WAL fsync |
+|| `shamir_wal_bytes_total{db,repo}` | counter | Байты полезной нагрузки WAL с момента создания каталога WAL |
+|| `shamir_wal_fsync_seconds{db,repo}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность раунда sync-worker: replay снапшота + fsync приёмника (тот же интервал, что `shamir_wal_sync_duration_ns`); `le` и `_sum` — в секундах |
+
+Серии WAL/storage (R4a-2) — снапшоты за scrape, метки только `db`/`repo`
+(у bucket-серий дополнительно `le`):
+
+`shamir_wal_size_bytes` — приблизительный размер WAL на диске в байтах
+(активный сегмент + запечатанные удержанные; Mem-бэкенд пишет 0). Норма —
+ограничена конфигурацией retention; рост сверх неё — проверить удержание
+сегментов.
+
+`shamir_wal_segments` — число удержанных файлов сегментов (запечатанные +
+один активный), безразмерное. Норма — от единиц до десятков; непрерывный рост
+означает, что truncate не успевает за seal.
+
+`shamir_wal_truncation_lag_versions` — отставание truncate в версиях (0, когда
+усекать нечего), безразмерное. Норма — небольшая; устойчивый рост — накопился
+backlog на truncate, проверить фоновую очистку сегментов.
+
+`shamir_group_commit_waiters` — число участников группового коммита,
+приостановленных в ожидании покрытия WAL fsync, безразмерное. Норма — меньше
+параллелизма коммитов; устойчивый рост указывает на узкое место fsync.
+
+`shamir_wal_bytes_total` — кумулятивный счётчик байтов полезной нагрузки,
+добавленных в WAL с момента создания каталога WAL. Растёт пропорционально
+скорости записи; по нему оценивают интенсивность записи (rate()).
+
+`shamir_wal_fsync_seconds` — гистограмма длительности раунда sync-worker
+(replay снапшота + fsync приёмника — тот же интервал, что
+`shamir_wal_sync_duration_ns`) в секундах: кумулятивные `_bucket` с меткой
+`le` (`+Inf` последней), `_count`, `_sum` — сумма в секундах (внутренние
+ячейки — наносекунды). Норма на локальном диске — суб-миллисекундная. Серии
+не экспортируются, пока WAL не инициализирован (`fsync == None`); «рваный»
+снапшот (`torn`) отбрасывается вместо блокировки scrape.
+
+Версии, ожидающие GC, уже экспортируются как `shamir_gate_pending_versions` —
+отдельная серия `shamir_gc_pending_versions` не создаётся.
 
 `process_*` опрашиваются каждые 5 секунд (crate `metrics-process`).
 

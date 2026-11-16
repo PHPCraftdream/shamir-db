@@ -17,8 +17,9 @@
 //! [`crate::WalGroupCommit`] (see `shamir-engine`'s repo-instance
 //! transaction bootstrap).
 
-use std::fs::remove_file;
+use std::fs::{metadata, remove_file};
 pub(super) use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 
 pub(super) use shamir_storage::error::{DbError, DbResult};
@@ -39,6 +40,9 @@ pub(super) struct SealedMeta {
     /// Any zero-version record pins the whole segment.
     pub(super) pinned: bool,
     pub(super) synced: bool,
+    /// In-memory on-disk length of the sealed file — size-mirror only,
+    /// never persisted (the sidecar format is untouched).
+    pub(super) bytes: u64,
 }
 
 /// Mutable state guarded by the single coarse `Mutex`. Sealed-list mutation
@@ -78,6 +82,13 @@ pub struct SegmentSet {
     truncate_pause: Mutex<Option<TruncatePause>>,
     // Cold sync/rotation exclusion only; ordinary appends never acquire it.
     pub(crate) sync_gate: Arc<tokio::sync::Mutex<()>>,
+    // O(1) scrape mirrors (design §2.4): Relaxed RMWs only, never a lock.
+    // `Arc`-wrapped so the blocking truncate job can decrement under the
+    // sealed-list lock it already holds (precedent: `WalGroupCommit::flushing`).
+    /// Mirror of retained segment FILES (sealed + the one active segment).
+    segment_count: Arc<AtomicUsize>,
+    /// Cumulative WAL payload bytes appended (one relaxed RMW per window).
+    bytes_written_total: Arc<AtomicU64>,
     #[cfg(test)]
     pub(crate) sync_test: super::sync_test_seam::SyncTestSeam,
     #[cfg(test)]
@@ -153,10 +164,15 @@ impl SegmentSet {
             let active_seq = 0u64;
             let active_path = dir.join(seg_file_name(active_seq));
             let active = Arc::new(WalSegment::open(active_path).await?);
+            // Mirror seed (design §2.4): one retained segment FILE, zero
+            // payload bytes in a freshly created segment.
+            let active_bytes = active.approx_len_bytes();
             return Ok(Self {
                 dir,
                 max_bytes,
                 sync_gate: Arc::new(tokio::sync::Mutex::new(())),
+                segment_count: Arc::new(AtomicUsize::new(1)),
+                bytes_written_total: Arc::new(AtomicU64::new(active_bytes)),
                 #[cfg(test)]
                 sync_test: super::sync_test_seam::SyncTestSeam::default(),
                 #[cfg(test)]
@@ -185,11 +201,15 @@ impl SegmentSet {
             // means absent OR corrupt/torn (both fall back identically — a
             // corrupt sidecar is never trusted, and never fatal); only a hard
             // I/O error surfaces.
-            let meta_probe = {
+            let (meta_probe, bytes) = {
                 let probe_path = path.clone();
-                spawn_blocking(move || crate::segment_meta::read_blocking(&probe_path))
-                    .await
-                    .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
+                spawn_blocking(move || {
+                    // Cold open-time probe: on-disk length for the size mirror.
+                    let bytes = metadata(&probe_path).map(|meta| meta.len()).unwrap_or(0);
+                    crate::segment_meta::read_blocking(&probe_path).map(|probe| (probe, bytes))
+                })
+                .await
+                .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
             };
             let (max_version, pinned) = match meta_probe {
                 Some((mv, Some(pinned))) => (mv, pinned),
@@ -205,6 +225,7 @@ impl SegmentSet {
                 max_version,
                 pinned,
                 synced: false,
+                bytes,
             });
         }
         // RV-WAL-A025886E — rule: "a segment that has a sidecar never changes."
@@ -214,11 +235,15 @@ impl SegmentSet {
         // (legacy) sidecar reads as absent here, so the replay fallback runs
         // and a stale WMT1 value can never drive truncation.
         let mut active_path = dir.join(seg_file_name(active_seq));
-        let highest_meta = {
+        let (highest_meta, highest_bytes) = {
             let probe_path = active_path.clone();
-            spawn_blocking(move || crate::segment_meta::read_blocking(&probe_path))
-                .await
-                .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
+            spawn_blocking(move || {
+                // Same cold probe as the sealed loop above.
+                let bytes = metadata(&probe_path).map(|meta| meta.len()).unwrap_or(0);
+                crate::segment_meta::read_blocking(&probe_path).map(|probe| (probe, bytes))
+            })
+            .await
+            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
         };
         if let Some((cached_max, cached_pin)) = highest_meta {
             let (max_version, pinned) = match cached_pin {
@@ -235,6 +260,7 @@ impl SegmentSet {
                 max_version,
                 pinned,
                 synced: true,
+                bytes: highest_bytes,
             });
             active_seq += 1;
             active_path = dir.join(seg_file_name(active_seq));
@@ -250,6 +276,10 @@ impl SegmentSet {
         let active_entries = active.replay_at_startup().await?;
         let (active_max, active_pin) = retention_summary(&active_entries);
         active.restore_retention(active_max, active_pin);
+        // Mirror seed (design §2.4): retained FILES = sealed + 1; cumulative
+        // bytes = recorded sealed lengths + the active segment's length.
+        let sealed_bytes = sealed.iter().map(|m| m.bytes).sum::<u64>();
+        let active_bytes = active.approx_len_bytes();
 
         // Cleanup only (RV-WAL-A025886E): with the sidecar-never-changes rule
         // the active segment can no longer carry a VALID sidecar (a highest
@@ -270,6 +300,8 @@ impl SegmentSet {
             dir,
             max_bytes,
             sync_gate: Arc::new(tokio::sync::Mutex::new(())),
+            segment_count: Arc::new(AtomicUsize::new(sealed.len() + 1)),
+            bytes_written_total: Arc::new(AtomicU64::new(sealed_bytes + active_bytes)),
             #[cfg(test)]
             sync_test: super::sync_test_seam::SyncTestSeam::default(),
             #[cfg(test)]
@@ -346,11 +378,15 @@ impl SegmentSet {
         // of the batch on every append (the common, non-retry case pays only
         // one Arc::new, no data copy at all).
         let payloads = Arc::new(payloads);
+        // One relaxed RMW per window: cumulative WAL payload bytes (§2.4).
+        let batch_bytes = payloads.iter().map(|p| p.len()).sum::<usize>() as u64;
         match active
             .append_batch(Arc::clone(&payloads), max_version)
             .await
         {
             Ok(last_seq) => {
+                self.bytes_written_total
+                    .fetch_add(batch_bytes, Ordering::Relaxed);
                 // Rotate iff this segment crossed the threshold. Read len
                 // without holding the lock across the await above.
                 if active.approx_len_bytes() >= self.max_bytes {
@@ -383,6 +419,10 @@ impl SegmentSet {
                 let last_seq = active.append_batch(payloads, max_version).await?;
                 // The freshly-rotated segment is brand new and small — no
                 // size-based rotation check needed here.
+                // The first attempt failed and added nothing: this add counts
+                // the batch exactly once.
+                self.bytes_written_total
+                    .fetch_add(batch_bytes, Ordering::Relaxed);
                 Ok(last_seq)
             }
         }
@@ -401,12 +441,13 @@ impl SegmentSet {
     /// tail, if any, was already truncated by `WalSegment::append_batch`'s
     /// rollback (or will be healed by `repair_torn_tail` on next open).
     async fn rotate_after_poison(&self) -> DbResult<()> {
-        let (sealed_seq, sealed_max, sealed_pin, next_seq) = {
+        let (sealed_seq, sealed_max, sealed_pin, sealed_bytes, next_seq) = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             (
                 g.active_seq,
                 g.active.max_committed(),
                 g.active.retention_pinned(),
+                g.active.approx_len_bytes(),
                 g.active_seq + 1,
             )
         };
@@ -444,6 +485,7 @@ impl SegmentSet {
             max_version: sealed_max,
             pinned: sealed_pin,
             synced: false,
+            bytes: sealed_bytes,
         });
         g.active = new_active;
         g.active_seq = next_seq;
@@ -466,7 +508,7 @@ impl SegmentSet {
     /// on disk (cancellation/append hazard — see the inline comment).
     async fn seal_and_rotate(&self) -> DbResult<()> {
         // Snapshot the segment to seal under the lock.
-        let (sealed_seq, sealed_path, sealed_max, sealed_pin, next_seq, sealing) = {
+        let (sealed_seq, sealed_path, sealed_max, sealed_pin, next_seq, sealing, sealed_bytes) = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             // Guard against double-rotation: only the leader that still sees
             // an over-threshold active rotates it.
@@ -480,6 +522,7 @@ impl SegmentSet {
                 g.active.retention_pinned(),
                 g.active_seq + 1,
                 Arc::clone(&g.active),
+                g.active.approx_len_bytes(),
             )
         };
 
@@ -523,6 +566,7 @@ impl SegmentSet {
                 max_version: sealed_max,
                 pinned: sealed_pin,
                 synced: true,
+                bytes: sealed_bytes,
             });
             // RV-WAL-A025886E binding order: the active-pointer swap happens BEFORE
             // the sidecar write. A sidecar means "this segment is sealed and its
@@ -591,6 +635,9 @@ impl SegmentSet {
         // The blocking job owns the gate, even if its caller is cancelled.
         let gate = Arc::clone(&self.truncate_gate).lock_owned().await;
         let inner = Arc::clone(&self.inner);
+        // The mirror decrements inside the job, under the same lock as the
+        // sealed-list removal (both the removed and the NotFound paths leave).
+        let segment_count = Arc::clone(&self.segment_count);
         #[cfg(test)]
         let fail_seq = self.truncate_fail_seq.lock().unwrap().take();
         #[cfg(test)]
@@ -642,6 +689,7 @@ impl SegmentSet {
                 {
                     let mut g = inner.lock().expect("SegmentSet inner mutex poisoned");
                     g.sealed.retain(|m| m.seq != meta.seq);
+                    segment_count.fetch_sub(1, Ordering::Relaxed);
                 }
                 crate::segment_meta::remove_blocking(
                     &meta.path,
@@ -682,6 +730,42 @@ impl SegmentSet {
         g.sealed
             .iter()
             .any(|m| !m.pinned && m.max_version > 0 && m.max_version <= durable_version)
+    }
+
+    // ---- Sync scrape accessors (design §2.4; called by `WalSink` only,
+    // never on the append path) ----
+
+    /// Retained segment FILES (sealed + the one active segment): relaxed
+    /// load of the mirror.
+    pub(crate) fn segment_count(&self) -> u64 {
+        self.segment_count.load(Ordering::Relaxed) as u64
+    }
+
+    /// Cumulative WAL payload bytes appended: relaxed load of the mirror.
+    pub(crate) fn bytes_written_total(&self) -> u64 {
+        self.bytes_written_total.load(Ordering::Relaxed)
+    }
+
+    /// Approximate on-disk WAL size: the active segment's length plus the
+    /// recorded on-disk length of every sealed segment, under the same
+    /// sanctioned lock `has_truncatable` takes (scrape-only cold path).
+    pub(crate) fn approx_size_bytes(&self) -> u64 {
+        let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+        g.sealed.iter().map(|m| m.bytes).sum::<u64>() + g.active.approx_len_bytes()
+    }
+
+    /// Truncation lag in versions: how far `durable_version` has advanced
+    /// past the OLDEST reclaimable-but-retained sealed segment boundary;
+    /// 0 when none is truncatable. Same lock and eligibility predicate as
+    /// `has_truncatable` (`!pinned && 0 < max_version <= durable_version`).
+    pub(crate) fn truncation_lag_versions(&self, durable_version: u64) -> u64 {
+        let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+        g.sealed
+            .iter()
+            .filter(|m| !m.pinned && m.max_version > 0 && m.max_version <= durable_version)
+            .map(|m| m.max_version)
+            .min()
+            .map_or(0, |oldest| durable_version.saturating_sub(oldest))
     }
 
     pub(super) async fn lock_truncation(&self) -> tokio::sync::OwnedMutexGuard<()> {
