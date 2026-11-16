@@ -1,6 +1,6 @@
 mod fn_error;
-pub(crate) mod metrics;
 mod gate;
+pub(crate) mod metrics;
 
 pub use fn_error::verify_wasm_module;
 pub(in crate::wasm) use gate::run_gated_compile;

@@ -55,6 +55,7 @@ use shamir_query_types::wire::repl::{
     ReplRepoInfo, ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER, REPL_CAP_IDENTITY_FENCE,
 };
 use shamir_query_types::ReplicationServe;
+use shamir_sync::replication::LeaderStreamMetrics;
 
 use crate::replication::in_process::MAX_PULL_EVENTS;
 use crate::replication::source::{authorized_publications, live_schema};
@@ -322,6 +323,9 @@ impl ShamirDbHandler {
                 message: format!("repository '{db}/{repo}' not found"),
             };
         };
+        // The authorized, existing repo is now known; only now register its
+        // leader-stream metrics so denied or unknown keys never enter the registry.
+        let stream_metrics = LeaderStreamMetrics::new(db, repo);
         // Serve order (fail closed earliest-first): authorisation (denied_repo)
         // → unknown_repo → downstream_resync_required → legacy_follower_refused
         // → serve.
@@ -513,6 +517,10 @@ impl ShamirDbHandler {
                 ),
             };
         }
+        // The reported bookmark is durable progress, not the last event in this
+        // response. The first reported bookmark establishes a baseline; only later
+        // advances update the receipt observation timestamp.
+        stream_metrics.observe_pull(current_version, from_version.saturating_sub(1));
         ReplResponse::Pull {
             schema_digest: Some(schema_digest),
             leader_epoch: self.leader_epoch,

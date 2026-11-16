@@ -31,6 +31,10 @@ pub(crate) struct DiskCacheStore {
     /// Test-only: number of cache frames actually read from disk (`read_exact`).
     #[cfg(test)]
     frames_read: AtomicU64,
+    /// Test-only mirror of misses on this store, incremented alongside the
+    /// process-wide exporter counter in the real `CacheStore::get` path.
+    #[cfg(test)]
+    misses: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -68,6 +72,8 @@ impl DiskCacheStore {
             hits: AtomicU64::new(0),
             #[cfg(test)]
             frames_read: AtomicU64::new(0),
+            #[cfg(test)]
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -180,6 +186,11 @@ impl DiskCacheStore {
     #[cfg(test)]
     pub(crate) fn frames_read(&self) -> u64 {
         self.frames_read.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     /// Test-only `(bytes, count)` snapshot of the shared index accounting.
@@ -329,6 +340,8 @@ impl CacheStore for DiskCacheStore {
     fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
         let result = self.get_cached(key);
         if result.is_none() {
+            #[cfg(test)]
+            self.misses.fetch_add(1, Ordering::Relaxed);
             note_miss();
         }
         result

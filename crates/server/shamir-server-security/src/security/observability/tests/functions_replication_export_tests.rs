@@ -10,7 +10,8 @@ use shamir_db::engine::function::{call_metrics_snapshot, ADMISSION_REJECTION_REA
 
 use super::super::export::functions::{record_function_snapshot, register_functions_metrics};
 use super::super::export::replication::{
-    record_replication_metrics, register_replication_metrics, ReplicationSnapshot,
+    record_replication_metrics, record_replication_snapshot, register_replication_metrics,
+    ReplicationSnapshot,
 };
 use super::super::{
     install_replication_metrics_source, metrics_handler, AppState, ObservabilityState, StreamState,
@@ -345,4 +346,107 @@ fn torn_function_duration_does_not_hide_fuel_or_depth() {
         !rendered.contains("shamir_function_duration_seconds_sum{"),
         "torn duration sum must be omitted: {rendered}"
     );
+}
+
+#[test]
+fn replication_export_renders_latest_snapshot_values() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let labels = ["db=\"(other)\"", "repo=\"(other)\""];
+
+    metrics::with_local_recorder(&recorder, || {
+        register_replication_metrics();
+        record_replication_snapshot(
+            ReplicationSnapshot {
+                db: "(other)".to_string(),
+                repo: "(other)".to_string(),
+                lag_versions: 10,
+                last_receipt_ns: 3_000_000_000,
+                state_code: StreamState::Streaming.code(),
+                reconnects: 0,
+            },
+            5_000_000_000,
+        );
+    });
+    let first_render = handle.render();
+    let first_lag = find_sample(&first_render, "shamir_replication_lag_versions", &labels);
+    assert!(first_lag.ends_with(" 10"), "wrong lag: {first_lag}");
+    let age = find_sample(&first_render, "shamir_replication_lag_seconds", &labels);
+    assert!(age.ends_with(" 2"), "wrong receipt age: {age}");
+    let streaming = find_sample(
+        &first_render,
+        "shamir_replication_stream_state",
+        &[labels[0], labels[1], "state=\"streaming\""],
+    );
+    assert!(
+        streaming.ends_with(" 1"),
+        "streaming state not set: {streaming}"
+    );
+
+    metrics::with_local_recorder(&recorder, || {
+        record_replication_snapshot(
+            ReplicationSnapshot {
+                db: "(other)".to_string(),
+                repo: "(other)".to_string(),
+                lag_versions: 0,
+                last_receipt_ns: 0,
+                state_code: StreamState::Stopped.code(),
+                reconnects: 0,
+            },
+            5_000_000_000,
+        );
+    });
+    let second_render = handle.render();
+    let second_lag = find_sample(&second_render, "shamir_replication_lag_versions", &labels);
+    assert!(
+        second_lag.ends_with(" 0"),
+        "stale lag retained: {second_lag}"
+    );
+    let second_age = find_sample(&second_render, "shamir_replication_lag_seconds", &labels);
+    assert!(
+        second_age.ends_with(" 0"),
+        "no-receipt age is not zero: {second_age}"
+    );
+    let stopped = find_sample(
+        &second_render,
+        "shamir_replication_stream_state",
+        &[labels[0], labels[1], "state=\"stopped\""],
+    );
+    assert!(stopped.ends_with(" 1"), "stopped state not set: {stopped}");
+    let streaming = find_sample(
+        &second_render,
+        "shamir_replication_stream_state",
+        &[labels[0], labels[1], "state=\"streaming\""],
+    );
+    assert!(
+        streaming.ends_with(" 0"),
+        "streaming state retained: {streaming}"
+    );
+}
+
+#[test]
+fn replication_export_sets_lag_seconds_to_zero_without_a_receipt() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        register_replication_metrics();
+        record_replication_snapshot(
+            ReplicationSnapshot {
+                db: "(other)".to_string(),
+                repo: "(other)".to_string(),
+                lag_versions: 0,
+                last_receipt_ns: 0,
+                state_code: StreamState::Stopped.code(),
+                reconnects: 0,
+            },
+            5_000_000_000,
+        );
+    });
+    let rendered = handle.render();
+    let age = find_sample(
+        &rendered,
+        "shamir_replication_lag_seconds",
+        &["db=\"(other)\"", "repo=\"(other)\""],
+    );
+    assert!(age.ends_with(" 0"), "no-receipt age is not zero: {age}");
 }

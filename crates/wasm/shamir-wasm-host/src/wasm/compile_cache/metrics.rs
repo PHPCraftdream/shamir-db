@@ -20,17 +20,18 @@ pub struct CompileCacheMetrics {
 
 pub fn compile_cache_metrics() -> CompileCacheMetrics {
     let indexes = INDEXES.load();
-    let (bytes, entries) = indexes.iter().filter_map(Weak::upgrade).fold(
-        (0u64, 0u64),
-        |(bytes, entries), index| {
-            (
-                bytes.saturating_add(index.bytes.load(Ordering::Relaxed)),
-                entries.saturating_add(
-                    u64::try_from(index.count.load(Ordering::Relaxed)).unwrap_or(u64::MAX),
-                ),
-            )
-        },
-    );
+    let (bytes, entries) =
+        indexes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .fold((0u64, 0u64), |(bytes, entries), index| {
+                (
+                    bytes.saturating_add(index.bytes.load(Ordering::Relaxed)),
+                    entries.saturating_add(
+                        u64::try_from(index.count.load(Ordering::Relaxed)).unwrap_or(u64::MAX),
+                    ),
+                )
+            });
     CompileCacheMetrics {
         hits: HITS.load(Ordering::Relaxed),
         misses: MISSES.load(Ordering::Relaxed),

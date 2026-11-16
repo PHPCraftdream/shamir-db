@@ -1,8 +1,8 @@
 #[cfg(test)]
 use super::linker::build_linker;
-use super::metrics::CallMetricsEntry;
 #[cfg(test)]
 use super::metrics::resolve;
+use super::metrics::CallMetricsEntry;
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::net_gateway::NetGateway;
 use crate::runtime::context::{BatchContext, GlobalVars};

@@ -44,12 +44,12 @@ pub use runtime::{
     StoredCallResolver,
 };
 pub use wasm::{
-    admit_module, admission_rejection_totals, call_metrics_snapshot, check_module,
-    check_shamir_source, compile_cache_metrics, create_shamir_source,
-    verify_wasm_module, ADMISSION_REJECTION_REASONS, AdmissionError, AdmissionLimits,
-    AdmissionPolicy, CallMetricsSnapshot, CompileCacheMetrics, ModuleHash, ModuleReport, Tier,
-    TierMode, TierOptions, TierReport, TierStats, UpgradeState, WasmEngine, WasmEngineOptions,
-    WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS,
+    admission_rejection_totals, admit_module, call_metrics_snapshot, check_module,
+    check_shamir_source, compile_cache_metrics, create_shamir_source, verify_wasm_module,
+    AdmissionError, AdmissionLimits, AdmissionPolicy, CallMetricsSnapshot, CompileCacheMetrics,
+    ModuleHash, ModuleReport, Tier, TierMode, TierOptions, TierReport, TierStats, UpgradeState,
+    WasmEngine, WasmEngineOptions, WasmFunction, WasmLimits, ADMISSION_REJECTION_REASONS,
+    SANCTIONED_HOST_IMPORTS,
 };
 // Re-export so consumers of `create_shamir_source`/`check_shamir_source` can
 // name `CompileOptions` without a direct dependency on the compiler crate.

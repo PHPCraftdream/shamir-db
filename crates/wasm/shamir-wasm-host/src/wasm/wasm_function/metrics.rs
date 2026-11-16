@@ -83,10 +83,9 @@ impl CallMetricsRegistry {
     fn resolve(&self, db: Option<&str>, repo: &str) -> Arc<CallMetricsEntry> {
         let db = db.unwrap_or("");
         let entries = self.entries.load();
-        if let Some(entry) = entries
-            .iter()
-            .find(|entry| !Arc::ptr_eq(entry, &self.aggregate) && entry.db == db && entry.repo == repo)
-        {
+        if let Some(entry) = entries.iter().find(|entry| {
+            !Arc::ptr_eq(entry, &self.aggregate) && entry.db == db && entry.repo == repo
+        }) {
             return Arc::clone(entry);
         }
 
@@ -98,10 +97,7 @@ impl CallMetricsRegistry {
             return Arc::clone(&self.aggregate);
         }
 
-        let candidate = Arc::new(CallMetricsEntry::new(
-            db.to_string(),
-            repo.to_string(),
-        ));
+        let candidate = Arc::new(CallMetricsEntry::new(db.to_string(), repo.to_string()));
         self.entries.rcu(|current| {
             if current.iter().any(|entry| {
                 !Arc::ptr_eq(entry, &self.aggregate) && entry.db == db && entry.repo == repo
@@ -122,7 +118,9 @@ impl CallMetricsRegistry {
         let entries = self.entries.load();
         entries
             .iter()
-            .find(|entry| !Arc::ptr_eq(entry, &self.aggregate) && entry.db == db && entry.repo == repo)
+            .find(|entry| {
+                !Arc::ptr_eq(entry, &self.aggregate) && entry.db == db && entry.repo == repo
+            })
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&self.aggregate))
     }

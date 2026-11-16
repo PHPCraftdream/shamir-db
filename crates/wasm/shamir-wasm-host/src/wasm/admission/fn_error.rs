@@ -1,7 +1,7 @@
 //! The admission-error → host-error boundary.
 
-use crate::runtime::error::{FnResult, FunctionError};
 use super::metrics::{classify, note_rejected};
+use crate::runtime::error::{FnResult, FunctionError};
 use shamir_wasm_admission::AdmissionError;
 
 impl From<AdmissionError> for FunctionError {

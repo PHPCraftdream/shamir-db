@@ -1,10 +1,11 @@
 //! Real-call regression coverage for the wasm-host telemetry mirrors.
 
-use crate::wasm::wasm_function::metrics::local_registry_capacity_totals;
+use crate::wasm::compile_cache::DiskCacheStore;
+use crate::wasm::local_registry_capacity_totals;
 use crate::{
-    admission_rejection_totals, call_metrics_snapshot, compile_cache_metrics, verify_wasm_module,
-    ADMISSION_REJECTION_REASONS, FnBatch, FnCtx, FuelObserver, FunctionError, FunctionRegistry,
-    Params, ShamirFunction, WasmEngine, WasmFunction, WasmLimits,
+    admission_rejection_totals, call_metrics_snapshot, verify_wasm_module, FnBatch, FnCtx,
+    FuelObserver, FunctionError, FunctionRegistry, Params, ShamirFunction, WasmEngine,
+    WasmFunction, WasmLimits, ADMISSION_REJECTION_REASONS,
 };
 use shamir_metrics::{Histogram, LATENCY_NS_BOUNDS};
 use shamir_types::types::value::QueryValue;
@@ -12,6 +13,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
+use wasmtime::CacheStore;
 
 const IDENTITY_WAT: &str = r#"
 (module
@@ -38,9 +40,15 @@ fn metrics_for(db: &str) -> crate::CallMetricsSnapshot {
 fn assert_one_root_call(db: &str, fuel: u64, depth: u64) {
     let snapshot = metrics_for(db);
     assert_eq!(snapshot.duration.count, 1, "one depth-0 call is observed");
-    assert!(snapshot.duration.sum > 0, "elapsed call duration is recorded");
+    assert!(
+        snapshot.duration.sum > 0,
+        "elapsed call duration is recorded"
+    );
     assert_eq!(snapshot.duration.bounds, LATENCY_NS_BOUNDS);
-    assert_eq!(snapshot.fuel_total, fuel, "fuel comes from real Store consumption");
+    assert_eq!(
+        snapshot.fuel_total, fuel,
+        "fuel comes from real Store consumption"
+    );
     assert_eq!(snapshot.depth_high_water, depth);
 }
 
@@ -67,23 +75,47 @@ fn registry_caps_named_entries_and_aggregates_overflow_in_isolation() {
 fn rejections_classify_by_reason() {
     assert_eq!(
         ADMISSION_REJECTION_REASONS,
-        ["parse", "validation", "import", "operator", "abi", "interface", "limits"]
+        [
+            "parse",
+            "validation",
+            "import",
+            "operator",
+            "abi",
+            "interface",
+            "limits"
+        ]
     );
     let parse_before = admission_rejection_totals()[0].1;
     let result = verify_wasm_module(b"definitely not wasm");
     assert!(result.is_err(), "garbage bytes must be refused");
     let after = admission_rejection_totals();
     assert_eq!(after[0].0, "parse");
-    assert!(after[0].1 > parse_before, "parse rejection counter must increase");
+    assert!(
+        after[0].1 > parse_before,
+        "parse rejection counter must increase"
+    );
 }
 
 #[test]
-fn cache_misses_track_uncached_compiles_without_global_exact_delta() {
-    let engine = WasmEngine::new().unwrap();
-    let before = compile_cache_metrics();
-    engine.compile_optimized(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]).unwrap();
-    let after = compile_cache_metrics();
-    assert!(after.misses >= before.misses + 1);
+fn cache_miss_counter_is_local_to_owned_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DiskCacheStore::new(dir.path().to_path_buf()));
+    let mut config = wasmtime::Config::new();
+    config
+        .enable_incremental_compilation(store.clone())
+        .unwrap();
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    store.bind(&engine).unwrap();
+
+    assert_eq!(store.misses(), 0, "a new store has no cache misses");
+    let missing_key = [0; 32];
+    assert!(store.get(&missing_key).is_none());
+    assert_eq!(store.misses(), 1, "one missing key is one local miss");
+
+    let warm_key = [1; 32];
+    assert!(store.insert(&warm_key, vec![7, 8, 9]));
+    assert_eq!(store.get(&warm_key).unwrap().as_ref(), &[7, 8, 9]);
+    assert_eq!(store.misses(), 1, "a warm hit does not add a miss");
 }
 
 #[tokio::test]
@@ -108,7 +140,10 @@ async fn wasm_call_success_records_duration_fuel_and_depth_from_store() {
         expected
     );
     let burned = observer.burned();
-    assert!(burned > 0, "the observer independently sees actual fuel use");
+    assert!(
+        burned > 0,
+        "the observer independently sees actual fuel use"
+    );
     assert_one_root_call(db, burned, 0);
 }
 
@@ -164,8 +199,11 @@ async fn nested_wasm_calls_count_duration_once_and_raise_depth_high_water() {
       (i64.extend_i32_u (local.get $len)))))
 "#;
     let engine = Arc::new(WasmEngine::new().unwrap());
-    let parent = Arc::new(WasmFunction::from_wat(engine.clone(), parent_wat, WasmLimits::default()).unwrap());
-    let child = Arc::new(WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default()).unwrap());
+    let parent = Arc::new(
+        WasmFunction::from_wat(engine.clone(), parent_wat, WasmLimits::default()).unwrap(),
+    );
+    let child =
+        Arc::new(WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default()).unwrap());
     let registry = Arc::new(FunctionRegistry::new());
     registry.register("parent", parent).unwrap();
     registry.register("child", child).unwrap();
@@ -272,7 +310,10 @@ async fn cancelled_wasm_call_records_duration_and_settled_fuel() {
             break;
         }
     }
-    assert!(reached_gateway, "call never reached the pending db_get gateway");
+    assert!(
+        reached_gateway,
+        "call never reached the pending db_get gateway"
+    );
     drop(call);
 
     let burned = observer.burned();

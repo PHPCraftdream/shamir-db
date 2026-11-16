@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use shamir_collections::THasher;
+use shamir_collections::{TFxSet, THasher};
 use shamir_db::ShamirDb;
 use tracing::{debug, info, warn};
 
@@ -32,6 +32,9 @@ pub struct SubscriptionSupervisor {
     /// on exit (round 5, A1) — `scc::HashMap` is not `Clone` for a
     /// non-`Clone` value (`JoinHandle`).
     pub(super) registry: std::sync::Arc<scc::HashMap<String, SubHandle, THasher>>,
+    /// Names whose source factory has been invoked at least once during the
+    /// subscription's current catalogue lifetime.
+    pub(super) source_starts: scc::HashMap<String, (), THasher>,
     /// Iteration cap forwarded to each loop; `None` in prod (run forever),
     /// `Some(n)` in tests to bound the loop without relying on cancellation.
     pub(super) max_iterations: Option<usize>,
@@ -68,6 +71,7 @@ impl SubscriptionSupervisor {
             factory,
             node_id: node_id.into(),
             registry: std::sync::Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            source_starts: scc::HashMap::with_hasher(THasher::default()),
             max_iterations: None,
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
@@ -215,6 +219,20 @@ impl SubscriptionSupervisor {
             }
         };
         drop(control);
+
+        // Keep source lifecycle history only for subscriptions still present
+        // in the catalogue; paused and failed subscriptions retain it.
+        let current_names: TFxSet<&str> = subs.iter().map(|sub| sub.name.as_str()).collect();
+        let mut removed_names = Vec::new();
+        self.source_starts.iter_sync(|name, _| {
+            if !current_names.contains(name.as_str()) {
+                removed_names.push(name.clone());
+            }
+            true
+        });
+        for name in removed_names {
+            self.source_starts.remove_sync(&name);
+        }
 
         // 1. Stop loops that should no longer run (removed / paused /
         // rebound / replaced binding) or whose handle went STALE (round 5,

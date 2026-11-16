@@ -55,7 +55,7 @@ pub struct FollowerLoopConfig {
     pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
     /// Test-only isolated registry; production loops always use the process registry.
     #[cfg(test)]
-    metrics_registry: Option<Arc<super::metrics::ReplicationRegistry>>,
+    pub(super) metrics_registry: Option<Arc<super::metrics::ReplicationRegistry>>,
 }
 
 impl std::fmt::Debug for FollowerLoopConfig {
@@ -136,7 +136,7 @@ impl FollowerLoopConfig {
 
     /// Use a per-test owner registry rather than shared process telemetry.
     #[cfg(test)]
-    pub(crate) fn with_metrics_registry(
+    pub(super) fn with_metrics_registry(
         mut self,
         registry: Arc<super::metrics::ReplicationRegistry>,
     ) -> Self {

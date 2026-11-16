@@ -66,22 +66,22 @@ pub(crate) fn register_replication_metrics() {
     metrics::describe_gauge!(
         "shamir_replication_lag_versions",
         metrics::Unit::Count,
-        "Leader-advertised version minus the follower's durable bookmark"
+        "Leader current version minus the follower-reported durable bookmark (from_version - 1); aggregated across leader Pull requests and follower subscriptions by db/repo"
     );
     metrics::describe_gauge!(
         "shamir_replication_lag_seconds",
         metrics::Unit::Seconds,
-        "Seconds since the last durably applied receipt; absent until the first receipt"
+        "Seconds since the last observed durable-bookmark advance on the leader or receipt application on the follower; zero until a receipt is observed"
     );
     metrics::describe_gauge!(
         "shamir_replication_stream_state",
         metrics::Unit::Count,
-        "Follower stream state, one-hot over the closed state set"
+        "Role-aggregated replication state, one-hot over the closed state set; active states rank backing_off, starting, streaming, then stopped"
     );
     metrics::describe_counter!(
         "shamir_replication_reconnects_total",
         metrics::Unit::Count,
-        "Follower transport retry attempts after an established stream fails"
+        "Source recreations at the supervisor factory boundary after the first creation; excludes request retries"
     );
 }
 
@@ -98,36 +98,43 @@ pub(crate) fn record_replication_metrics() {
         });
 
     for snapshot in snapshots {
-        metrics::gauge!(
-            "shamir_replication_lag_versions",
-            "db" => snapshot.db.clone(),
-            "repo" => snapshot.repo.clone()
-        )
-        .set(snapshot.lag_versions as f64);
-        if snapshot.last_receipt_ns != 0 {
-            let age_ns = now_ns.saturating_sub(snapshot.last_receipt_ns);
-            metrics::gauge!(
-                "shamir_replication_lag_seconds",
-                "db" => snapshot.db.clone(),
-                "repo" => snapshot.repo.clone()
-            )
-            .set(age_ns as f64 / 1_000_000_000.0);
-        }
-        for state in STREAM_STATES {
-            let value = u8::from(snapshot.state_code == state.code());
-            metrics::gauge!(
-                "shamir_replication_stream_state",
-                "db" => snapshot.db.clone(),
-                "repo" => snapshot.repo.clone(),
-                "state" => state.label()
-            )
-            .set(f64::from(value));
-        }
-        metrics::counter!(
-            "shamir_replication_reconnects_total",
-            "db" => snapshot.db,
-            "repo" => snapshot.repo
-        )
-        .absolute(snapshot.reconnects);
+        record_replication_snapshot(snapshot, now_ns);
     }
+}
+
+/// Record one owned replication snapshot using the scrape-time clock value.
+pub(crate) fn record_replication_snapshot(snapshot: ReplicationSnapshot, now_ns: u64) {
+    metrics::gauge!(
+        "shamir_replication_lag_versions",
+        "db" => snapshot.db.clone(),
+        "repo" => snapshot.repo.clone()
+    )
+    .set(snapshot.lag_versions as f64);
+    let age_ns = if snapshot.last_receipt_ns == 0 {
+        0
+    } else {
+        now_ns.saturating_sub(snapshot.last_receipt_ns)
+    };
+    metrics::gauge!(
+        "shamir_replication_lag_seconds",
+        "db" => snapshot.db.clone(),
+        "repo" => snapshot.repo.clone()
+    )
+    .set(age_ns as f64 / 1_000_000_000.0);
+    for state in STREAM_STATES {
+        let value = u8::from(snapshot.state_code == state.code());
+        metrics::gauge!(
+            "shamir_replication_stream_state",
+            "db" => snapshot.db.clone(),
+            "repo" => snapshot.repo.clone(),
+            "state" => state.label()
+        )
+        .set(f64::from(value));
+    }
+    metrics::counter!(
+        "shamir_replication_reconnects_total",
+        "db" => snapshot.db,
+        "repo" => snapshot.repo
+    )
+    .absolute(snapshot.reconnects);
 }

@@ -145,7 +145,7 @@ pub(super) async fn run_follower_loop_internal(
         #[cfg(test)]
         apply_park,
         #[cfg(test)]
-        exit_hook: _,
+            exit_hook: _,
         #[cfg(test)]
         metrics_registry,
     } = cfg;
@@ -187,7 +187,6 @@ pub(super) async fn run_follower_loop_internal(
         )
         .await?;
     }
-    let mut retry_after_transport_failure = false;
     // S5c-X round 4: lease-based start gate. The loop holds the lease the
     // supervisor took under the control lock; it never starts when the lease
     // was already superseded (DROP / PAUSE / rebind ran their quiesce before
@@ -245,7 +244,6 @@ pub(super) async fn run_follower_loop_internal(
         | Err(e @ ReplError::UpstreamKeyMismatch { .. })
         | Err(e @ ReplError::IdentityMismatch { .. }) => return Err(e),
         Err(e) => {
-            retry_after_transport_failure = matches!(&e, ReplError::Transport(_));
             warn!(
                 node_id = %node_id,
                 error = %e,
@@ -271,9 +269,6 @@ pub(super) async fn run_follower_loop_internal(
     let mut consecutive_failures: usize = 0;
     let mut prev_bookmark: Option<u64> = None;
     let mut stall_reported = false;
-    // A reconnect is counted only when starting a retry after a transport
-    // failure; an initial successful Hello/pull is not a reconnect.
-    let mut retry_after_transport_failure = retry_after_transport_failure;
 
     loop {
         // Cancellation check — cheap and race-free (CancellationToken).
@@ -399,10 +394,6 @@ pub(super) async fn run_follower_loop_internal(
         let from_version = bookmark
             .checked_add(1)
             .ok_or(shamir_db::SeedRefusal::BookmarkOverflow)?;
-        if retry_after_transport_failure {
-            stream_metrics.note_reconnect_attempt();
-            retry_after_transport_failure = false;
-        }
         let resp = match source
             .pull(
                 &db_name,
@@ -413,17 +404,13 @@ pub(super) async fn run_follower_loop_internal(
             )
             .await
         {
-            Ok(r) => {
-                retry_after_transport_failure = false;
-                r
-            }
+            Ok(r) => r,
             Err(e @ ReplError::StaleLeaderEpoch { .. })
             | Err(e @ ReplError::ReopenRequired { .. })
             | Err(e @ ReplError::UpstreamKeyMismatch { .. })
             | Err(e @ ReplError::IdentityMismatch { .. })
             | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {
-                retry_after_transport_failure = matches!(&e, ReplError::Transport(_));
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
                 consecutive_failures += 1;
                 note_swallowed_failure(
