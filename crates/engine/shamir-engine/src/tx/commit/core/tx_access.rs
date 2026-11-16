@@ -1,8 +1,10 @@
 use super::repo_core::RepoCore;
 use crate::meta::recovery_marker;
 use crate::meta::repl::gate_provenance::with_follower_provenance as provenance_gate;
+use crate::repo::meta::repo_identity::repo_token;
 use crate::repo::RepoWritePermit;
 use crate::table::interner_manager::InternerManager;
+use crate::tx::preparation::repo_version_provider::RepoVersionProvider;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, Repo as _, Store};
 use shamir_types::types::common::THasher;
@@ -125,6 +127,55 @@ impl RepoCore {
     /// field doc on `RepoInstance::marker_write_mutex` for why this exists.
     pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
         &self.durability_handle.marker_write_mutex
+    }
+
+    /// cancel-safe: yes — bumps a tx-start counter (atomic), opens a
+    /// snapshot (single scc insert under the hood) and returns. If the
+    /// caller is dropped mid-await before receiving the guard, the
+    /// stack-local guard is dropped which removes the snapshot from the
+    /// active set. The only persistent footprint is an atomic counter
+    /// increment in `tx_metrics`; tx-ids/version-counters drift safely
+    /// (monotonic, no reuse).
+    ///
+    /// Open a fresh transaction on this repo.
+    ///
+    /// Returns a `(TxContext, SnapshotGuard)` pair. The guard's lifetime
+    /// must extend at least until commit (or drop = rollback) — drop
+    /// removes the snapshot from the active set so GC can reclaim
+    /// versions older than `min_alive`.
+    ///
+    /// `repo_id` in the TxContext is populated via `repo_token`.
+    pub(crate) async fn begin_tx(
+        &self,
+        isolation: shamir_tx::IsolationLevel,
+    ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
+        self.horizon.tx_metrics().on_tx_start();
+        let gate = self.tx_gate().await?;
+        // Open the snapshot BEFORE constructing TxContext so that any
+        // concurrent non-tx write sees active_serializable_count > 0 for
+        // the full lifetime of this tx's predicate window.
+        let guard = if isolation == shamir_tx::IsolationLevel::Serializable {
+            gate.open_snapshot_serializable().await
+        } else {
+            gate.open_snapshot().await
+        };
+        let snapshot_version = guard.version();
+        let tx_id = gate.fresh_tx_id();
+        let mut tx =
+            shamir_tx::TxContext::new(tx_id, repo_token(&self.name), snapshot_version, isolation);
+
+        // FG-7: attach the version provider UNCONDITIONALLY (every isolation
+        // level), not just Serializable. `pre_commit_locked_validate`'s new
+        // Phase CAS needs `version_of` for `expected_version` re-validation
+        // at commit regardless of isolation — a Snapshot tx with no CAS
+        // checks pays only a thin `Arc` construction + clone, no behavior
+        // change to Phase 2 (still gated on `isolation == Serializable`).
+        let provider = std::sync::Arc::new(RepoVersionProvider {
+            per_table_mvcc: Arc::clone(&self.catalog.per_table_mvcc),
+        });
+        tx.set_version_provider(provider);
+
+        Ok((tx, guard))
     }
 
     /// Begin a repository-wide atomic batch over named stores (PR6b-2).

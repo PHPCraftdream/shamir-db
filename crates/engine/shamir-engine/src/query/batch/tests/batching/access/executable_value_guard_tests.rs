@@ -14,7 +14,7 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{RepoConfig, RepoInstance};
+use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
 
@@ -31,10 +31,13 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 

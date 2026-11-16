@@ -17,6 +17,7 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::repo::meta::{MetaEnvelope, MetaKey};
@@ -273,6 +274,20 @@ pub(crate) async fn mark_clean(store: &Arc<dyn Store>) -> DbResult<()> {
     let flush =
         !(cfg!(test) && SKIP_CLEAN_FLUSH_FOR_TEST.load(std::sync::atomic::Ordering::Acquire));
     save_lifecycle_record_inner(store, LifecycleState::Clean, flush).await
+}
+
+/// Deterministic u64 token for a repository name.
+///
+/// Stage 4: `DefaultHasher(name)` placeholder.
+/// Stage 5: real repo-level interner ID.
+///
+/// (ENGINE-LAYERING R2d: moved here from `repo::instance::version_provider`
+/// — a pure name-hash fn belongs to the repo layer, and the instance module
+/// re-exports it so every historical path keeps resolving.)
+pub fn repo_token(name: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
 }
 
 /// Read the current state; `None` if no record was ever written.

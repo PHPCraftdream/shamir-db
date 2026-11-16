@@ -1,0 +1,804 @@
+base = "d06bda61dd3ba739e7b89111712cc8248d6d746f"
+
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::STAGE_WARN_THRESHOLD"
+to_path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+to_item = "shamir-engine::lib::tx::commit::core::durability_access::STAGE_WARN_THRESHOLD"
+reason = "R2d: the shutdown-stage timer lives once in the tx core; the shell imports it"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::StageTimer"
+to_path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+to_item = "shamir-engine::lib::tx::commit::core::durability_access::StageTimer"
+reason = "R2d: the shutdown-stage timer lives once in the tx core; the shell imports it"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::StageTimer::drop"
+to_path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+to_item = "shamir-engine::lib::tx::commit::core::durability_access::StageTimer::drop"
+reason = "R2d: the shutdown-stage timer lives once in the tx core; the shell imports it"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::timed_stage"
+to_path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+to_item = "shamir-engine::lib::tx::commit::core::durability_access::timed_stage"
+reason = "R2d: the shutdown-stage timer lives once in the tx core; the shell imports it"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::build_reverse_fk_entries"
+to_path = "crates/engine/shamir-engine/src/query/batch/fk/reverse_fk_scan.rs"
+to_item = "shamir-engine::lib::query::batch::fk::reverse_fk_scan::build_reverse_fk_entries"
+reason = "R2d: the reverse FK scan takes a BatchResolver, so it moves to the query layer; the instance file re-exports it"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/version_provider.rs"
+item = "shamir-engine::lib::repo::instance::version_provider::RepoVersionProvider"
+to_path = "crates/engine/shamir-engine/src/tx/preparation/repo_version_provider.rs"
+to_item = "shamir-engine::lib::tx::preparation::repo_version_provider::RepoVersionProvider"
+reason = "R2d: begin_tx on RepoCore attaches it, so it moves down to the tx layer"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/version_provider.rs"
+item = "shamir-engine::lib::repo::instance::version_provider::RepoVersionProvider::version_of"
+to_path = "crates/engine/shamir-engine/src/tx/preparation/repo_version_provider.rs"
+to_item = "shamir-engine::lib::tx::preparation::repo_version_provider::RepoVersionProvider::version_of"
+reason = "R2d: begin_tx on RepoCore attaches it, so it moves down to the tx layer"
+owner = "<wave-R2d>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/version_provider.rs"
+item = "shamir-engine::lib::repo::instance::version_provider::repo_token"
+to_path = "crates/engine/shamir-engine/src/repo/meta/repo_identity.rs"
+to_item = "shamir-engine::lib::repo::meta::repo_identity::repo_token"
+reason = "R2d: a pure repository token, moved down to the repo layer; version_provider re-exports it"
+owner = "<wave-R2d>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::durability_repo_impl::RepoInstance::initialized_mem_wal"
+reason = "R2d: dead shell delegate removed; its only caller uses RepoCore"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/mod.rs"
+item = "shamir-engine::lib::query::batch::fk::reverse_fk_scan"
+reason = "R2d: new module holding the reverse FK scan moved from the instance layer"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/catalog_access.rs"
+item = "shamir-engine::lib::tx::commit::core::catalog_access::RepoCore::fk_reverse_cache"
+reason = "R2d: the batch layer reads the FK cache through RepoCore; the shell delegate stays"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+item = "shamir-engine::lib::tx::commit::core::durability_access::RepoCore::synced_flush"
+reason = "R2d: the body moves from the shell to RepoCore so the batch layer need not name RepoInstance; the shell delegate stays"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+item = "shamir-engine::lib::tx::commit::core::durability_access::RepoCore::sync_wal"
+reason = "R2d: the body moves from the shell to RepoCore so the batch layer need not name RepoInstance; the shell delegate stays"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+item = "shamir-engine::lib::tx::commit::core::durability_access::RepoCore::flush_buffers"
+reason = "R2d: the body moves from the shell to RepoCore so the batch layer need not name RepoInstance; the shell delegate stays"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/tx_access.rs"
+item = "shamir-engine::lib::tx::commit::core::tx_access::RepoCore::begin_tx"
+reason = "R2d: the body moves from the shell to RepoCore so the batch layer need not name RepoInstance; the shell delegate stays"
+owner = "<wave-R2d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/preparation/mod.rs"
+item = "shamir-engine::lib::tx::preparation::repo_version_provider"
+reason = "R2d: new module holding RepoVersionProvider moved down from the instance layer"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/query_writes/constraints/fk_cascade_index.rs"
+item = "shamir-engine::bench::FkBenchResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/implicit.rs"
+item = "shamir-engine::lib::query::batch::control::implicit::begin_implicit_batch_tx_with_isolation"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/implicit.rs"
+item = "shamir-engine::lib::query::batch::control::implicit::commit_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/implicit.rs"
+item = "shamir-engine::lib::query::batch::control::implicit::run_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/implicit.rs"
+item = "shamir-engine::lib::query::batch::control::implicit::begin_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/commit.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::commit::commit_implicit"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/commit.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::commit::commit_implicit_inner"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/tests/batch_tests.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::tests::batch_tests::BoundedResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/tests/batch_tests.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::tests::batch_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/tests/batch_tests.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::tests::batch_tests::BoundedDefaultResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::BatchResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/interactive_tx.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx::commit_interactive_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/interactive_tx.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx::open_interactive_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/access/authorized_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::access::authorized_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/access/executable_value_guard_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::access::executable_value_guard_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/access/filter_guard_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::access::filter_guard_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/for_each_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::for_each_gate_tests::CountingResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/for_each_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::for_each_gate_tests::CountingTxResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::TestResolverWithScalars::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TestResolverWithScalars::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/support.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::support::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/serializer/index_visibility_parity_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::serializer::index_visibility_parity_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/common.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::common::TestResolverWithScalars::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/common.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::common::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/common.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::common::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/guards/cross_repo_guard_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::guards::cross_repo_guard_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/guards/subscribe_guard_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::guards::subscribe_guard_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/ops/aggregate_expression_execution_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::ops::aggregate_expression_execution_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/ops/select_refs_params_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::ops::select_refs_params_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/call_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::call_tx_tests::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_deadline_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_deadline_tests::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/ssi_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::ssi_tests::GateBarrierResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/actions/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::actions::support::FkTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::RaceInjectingResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::support::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/fail_closed/fk_discovery_fail_closed_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::fail_closed::fk_discovery_fail_closed_tests::PoisoningResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/fail_closed/fk_fail_closed_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::fail_closed::fk_fail_closed_tests::FailureInjectingResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/on_update/on_update_tx_index_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::on_update_tx_index_tests::ResolveCountingResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/on_update/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::on_update::support::FkTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/races/fk_reverse_cache_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::fk_reverse_cache_tests::FkTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::support::TxTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/races/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::races::support::RaceInjectingResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/support.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::support::FkTestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/budgets/rowwise_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets::rowwise_byte_budget_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/budgets/runtime_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets::runtime_byte_budget_tests::RepoResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/budgets/runtime_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets::runtime_byte_budget_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::SlowResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::OpPathSlowResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::RepoResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/limit_enforcement_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::limit_enforcement_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/runtime_work_counter_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::runtime_work_counter_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/watchdog_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::watchdog_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/tests/batch_synced_tests.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::tests::batch_synced_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/tests/commit_policy_tests/commit_policy_tests.rs"
+item = "shamir-engine::lib::repo::journal::backend::durability_policy::tests::commit_policy_tests::commit_policy_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/tests/rename/walk_tests.rs"
+item = "shamir-engine::lib::repo::tests::rename::walk_tests::WalkResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestResolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/read/filtering/select_aggregate_context_tests.rs"
+item = "shamir-engine::lib::table::tests::read::filtering::select_aggregate_context_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/read/filtering/select_remaining_paths_tests.rs"
+item = "shamir-engine::lib::table::tests::read::filtering::select_remaining_paths_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/ack/commit_ack_pipeline_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::ack::commit_ack_pipeline_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/recovery/wal_recovery/wal_outcome_indeterminate_tests.rs"
+item = "shamir-engine::lib::tx::tests::recovery::wal_recovery::wal_outcome_indeterminate_tests::Resolver::resolve_repo"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent_parts/fk_child_workload.rs"
+item = "shamir-engine::bench::tx_concurrent_parts::fk_child_workload::run"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_transactional_impl"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::BatchResolver"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_read_arm"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_insert_arm"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_update_arm"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_delete_arm"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_write.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_write::QueryRunner::run_set_arm"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::FkParentOpKind"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::implicit_tx_isolation_for_fk_parent"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::FK_SERIALIZABLE_RETRY_ATTEMPTS"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::require_footprint_if_fk_child"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::sub_batch_partial_writes_roll_back_on_later_top_level_failure"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::tx_in_tx_rejected"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/guards/abort_on_skip_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::guards::abort_on_skip_tests::interactive_transaction_refuses_abort_on_skip_before_staging_writes"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/call_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::call_tx_tests::call_in_open_tx_rejected"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_deadline_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_deadline_tests::expired_interactive_deadline_returns_timeout_and_allows_caller_rollback"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_deadline_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_deadline_tests::fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_overlay_having_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_overlay_having_tests::interactive_overlay_having_then_projection_filter_and_totals"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::interactive_tx_read_resolves_overlay_interned_field_names"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::interactive_tx_accumulates_writes_across_calls_then_commits"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::interactive_tx_rollback_discards_staged_writes"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::interactive_ssi_write_skew_across_calls_one_aborts"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::two_interactive_si_txs_race_last_commit_wins"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::crash_mid_interactive_tx_leaves_no_durable_footprint"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/interactive_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::interactive_tx_tests::execute_in_open_tx_rejects_deeply_nested_filter"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_publish_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_publish_tests::run_concurrent_publish_during_commit_window_on_update"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_publish_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_publish_tests::run_concurrent_publish_during_commit_window_delete"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::quiescent_explicit_snapshot_restrict_delete_does_not_spuriously_abort"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::explicit_snapshot_restrict_race_closed_via_ri_barrier"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::run_explicit_snapshot_delete_race"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::explicit_snapshot_on_update_race_closed_via_ri_barrier"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::quiescent_explicit_snapshot_cascade_delete_does_not_spuriously_abort"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::quiescent_explicit_snapshot_set_null_delete_does_not_spuriously_abort"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/fk/barriers/fk_ri_barrier_snapshot_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::fk::barriers::fk_ri_barrier_snapshot_tests::quiescent_explicit_snapshot_on_update_does_not_spuriously_abort"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/limit_enforcement_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::limit_enforcement_tests::run"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/runtime_work_counter_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::runtime_work_counter_tests::skipped_entries_are_not_charged_in_either_stage_loop"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/runtime_work_counter_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::runtime_work_counter_tests::interactive_commit_does_not_charge_or_check_execution_budget"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::RepoInstance::flush_buffers"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::fk_reverse_cache"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::synced_flush"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::sync_wal"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::run_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::begin_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::begin_implicit_batch_tx_with_isolation"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::commit_implicit_batch_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::begin_tx"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/acknowledgement/tests/visibility_metrics_tests.rs"
+item = "shamir-engine::lib::tx::commit::acknowledgement::tests::visibility_metrics_tests::implicit_batch_pending_is_attributed_by_commit_implicit"
+reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::scalar_to_query_value"
+reason = "R2d: the function-local import of ScalarRef moves to the file header, as the structure gate requires for touched files"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+item = "shamir-engine::lib::tx::commit::core::durability_access::StageTimer"
+reason = "R2d: the moved shutdown-stage timer carries a doc line naming the move"
+owner = "<wave-R2d>"

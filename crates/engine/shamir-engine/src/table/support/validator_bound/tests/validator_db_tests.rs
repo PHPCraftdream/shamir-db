@@ -22,7 +22,7 @@ use shamir_query_builder::write::{doc, insert};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
 use shamir_tx::IsolationLevel;
-use shamir_types::record_view::RecordRef;
+use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -59,8 +59,8 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -139,7 +139,6 @@ impl RecordValidator for DbReadingValidator {
 
 /// Convert a `ScalarRef` to a comparable `QueryValue`.
 fn scalar_to_query_value(scalar: &shamir_types::record_view::ScalarRef<'_>) -> QueryValue {
-    use shamir_types::record_view::ScalarRef;
     match scalar {
         ScalarRef::Null => QueryValue::Null,
         ScalarRef::Bool(b) => QueryValue::Bool(*b),

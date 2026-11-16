@@ -2,3 +2,4 @@
 // and re-exports only.
 pub(crate) mod pre_commit;
 pub mod predicate_range;
+pub mod repo_version_provider;

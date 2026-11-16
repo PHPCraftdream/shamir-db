@@ -23,12 +23,13 @@ pub use crate::table::TableResolver;
 /// coordinator without dragging the table-side contract along.
 #[async_trait::async_trait]
 pub trait BatchResolver: TableResolver {
-    /// Resolve a repository by name to its [`crate::repo::RepoInstance`].
+    /// Resolve a repository by name to its [`crate::tx::RepoCore`] — the
+    /// tx-layer aggregate (gate, WAL, commit lifecycle), a cheap `Clone`.
     ///
-    /// Used by tx-aware paths to obtain the per-repo coordinator
-    /// (gate, WAL, commit lifecycle). Cross-repo guard upstream
-    /// guarantees `repo_name` is well-defined for transactional batches.
-    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::repo::RepoInstance>;
+    /// Used by tx-aware paths to obtain the per-repo coordinator.
+    /// Cross-repo guard upstream guarantees `repo_name` is well-defined
+    /// for transactional batches.
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore>;
 }
 
 /// Trait for executing admin (DDL) operations.

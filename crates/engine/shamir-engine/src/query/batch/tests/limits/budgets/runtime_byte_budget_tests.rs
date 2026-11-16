@@ -40,7 +40,7 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
         Err(shamir_storage::error::DbError::NotFound("no repos".into()))
     }
 }
@@ -245,8 +245,8 @@ impl TableResolver for RepoResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for RepoResolver {
-    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
-        Ok(self.0.clone())
+    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.0.core.clone())
     }
 }
 

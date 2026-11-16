@@ -25,12 +25,11 @@ use shamir_query_types::admin::FkAction;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::fk_on_update::discover_on_update_refs;
-use crate::query::batch::{BatchResolver, TableResolver};
+use crate::query::batch::{build_reverse_fk_entries, BatchResolver, TableResolver};
 use crate::query::TableRef;
-use crate::repo::build_reverse_fk_entries;
 use crate::repo::fk_reverse_cache::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::{RepoConfig, RepoInstance};
+use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 
@@ -63,9 +62,10 @@ impl TableResolver for PoisoningResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for PoisoningResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         self.db
             .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
             .ok_or_else(|| DbError::NotFound(format!("repo '{}' not found", self.repo)))
     }
 }

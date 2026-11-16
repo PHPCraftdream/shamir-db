@@ -4,7 +4,7 @@ use std::task::Poll;
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::TableRef;
-use crate::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
+use crate::repo::{BoxRepoFactory, RepoConfig};
 use crate::table::{TableConfig, TableManager};
 use crate::tx::commit::TEST_SYNCED_WAL_REPO;
 use shamir_query_builder::batch::Batch;
@@ -29,9 +29,10 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, name: &str) -> DbResult<crate::tx::RepoCore> {
         self.0
             .get_repo(name)
+            .map(|repo| repo.core.clone())
             .ok_or_else(|| DbError::NotFound(name.into()))
     }
 }
@@ -324,12 +325,10 @@ impl TableResolver for BoundedResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for BoundedResolver {
-    async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
-        Ok(self
-            .0
-            .resolve_repo(name)
-            .await?
-            .with_commit_visibility_wait(STATUS))
+    async fn resolve_repo(&self, name: &str) -> DbResult<crate::tx::RepoCore> {
+        let mut core = self.0.resolve_repo(name).await?;
+        core.horizon.set_commit_visibility_wait(STATUS);
+        Ok(core)
     }
 }
 
@@ -407,13 +406,12 @@ impl TableResolver for BoundedDefaultResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for BoundedDefaultResolver {
-    async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
-        let repo = self.0.resolve_repo(name).await?;
-        Ok(if name == "default" {
-            repo.with_commit_visibility_wait(STATUS)
-        } else {
-            repo
-        })
+    async fn resolve_repo(&self, name: &str) -> DbResult<crate::tx::RepoCore> {
+        let mut repo = self.0.resolve_repo(name).await?;
+        if name == "default" {
+            repo.horizon.set_commit_visibility_wait(STATUS);
+        }
+        Ok(repo)
     }
 }
 

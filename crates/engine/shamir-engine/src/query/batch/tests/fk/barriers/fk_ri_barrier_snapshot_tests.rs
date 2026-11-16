@@ -52,7 +52,7 @@ async fn explicit_snapshot_restrict_race_closed_via_ri_barrier() {
     // Open an EXPLICIT Snapshot transaction. This is the gap F-40 describes:
     // the client-chosen isolation is fixed here, BEFORE query_runner sees any
     // op, so the implicit-only Serializable upgrade never fires.
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn explicit_snapshot_restrict_race_closed_via_ri_barrier() {
     // Commit the explicit tx. Under the RI barrier, Phase 2-bis now fires for
     // the Snapshot tx (widened guard) and detects the writer's footprint on
     // the child table → PhantomConflict.
-    let outcome = commit_interactive_tx(&repo, tx).await;
+    let outcome = commit_interactive_tx(&repo.core, tx).await;
     drop(guard);
 
     match outcome {
@@ -146,7 +146,7 @@ async fn quiescent_explicit_snapshot_restrict_delete_does_not_spuriously_abort()
             .unwrap();
 
         // No writer armed — the resolver's resolve_repo hook is a no-op.
-        let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
         resolver.reset_counter();
@@ -173,7 +173,7 @@ async fn quiescent_explicit_snapshot_restrict_delete_does_not_spuriously_abort()
             "trial {trial}: RESTRICT scan should pass (no child), got: {exec_resp:?}"
         );
 
-        let outcome = commit_interactive_tx(&repo, tx).await;
+        let outcome = commit_interactive_tx(&repo.core, tx).await;
         drop(guard);
         if outcome.is_err() {
             spurious_aborts += 1;
@@ -258,7 +258,7 @@ async fn run_explicit_snapshot_delete_race(action: FkAction, writer_parent_id: i
         resolver: TxTestResolver { repo: repo.clone() },
     });
 
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
     resolver.reset_counter();
@@ -289,7 +289,7 @@ async fn run_explicit_snapshot_delete_race(action: FkAction, writer_parent_id: i
         "injected writer must have been consumed (race window must have fired)"
     );
 
-    let outcome = commit_interactive_tx(&repo, tx).await;
+    let outcome = commit_interactive_tx(&repo.core, tx).await;
     drop(guard);
 
     match outcome {
@@ -400,7 +400,7 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
         resolver: TxTestResolver { repo: repo.clone() },
     });
 
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
     resolver.reset_counter();
@@ -437,7 +437,7 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
         "injected writer must have been consumed (race window must have fired)"
     );
 
-    let outcome = commit_interactive_tx(&repo, tx).await;
+    let outcome = commit_interactive_tx(&repo.core, tx).await;
     drop(guard);
 
     match outcome {
@@ -491,7 +491,7 @@ async fn quiescent_explicit_snapshot_cascade_delete_does_not_spuriously_abort() 
             .await
             .unwrap();
 
-        let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
         resolver.reset_counter();
@@ -518,7 +518,7 @@ async fn quiescent_explicit_snapshot_cascade_delete_does_not_spuriously_abort() 
             "trial {trial}: CASCADE scan should pass (no child), got: {exec_resp:?}"
         );
 
-        let outcome = commit_interactive_tx(&repo, tx).await;
+        let outcome = commit_interactive_tx(&repo.core, tx).await;
         drop(guard);
         if outcome.is_err() {
             spurious_aborts += 1;
@@ -547,7 +547,7 @@ async fn quiescent_explicit_snapshot_set_null_delete_does_not_spuriously_abort()
             .await
             .unwrap();
 
-        let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
         resolver.reset_counter();
@@ -574,7 +574,7 @@ async fn quiescent_explicit_snapshot_set_null_delete_does_not_spuriously_abort()
             "trial {trial}: SET NULL scan should pass (no child), got: {exec_resp:?}"
         );
 
-        let outcome = commit_interactive_tx(&repo, tx).await;
+        let outcome = commit_interactive_tx(&repo.core, tx).await;
         drop(guard);
         if outcome.is_err() {
             spurious_aborts += 1;
@@ -603,7 +603,7 @@ async fn quiescent_explicit_snapshot_on_update_does_not_spuriously_abort() {
             .await
             .unwrap();
 
-        let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
             .await
             .unwrap();
         resolver.reset_counter();
@@ -634,7 +634,7 @@ async fn quiescent_explicit_snapshot_on_update_does_not_spuriously_abort() {
             "trial {trial}: on-update scan should pass (no child), got: {exec_resp:?}"
         );
 
-        let outcome = commit_interactive_tx(&repo, tx).await;
+        let outcome = commit_interactive_tx(&repo.core, tx).await;
         drop(guard);
         if outcome.is_err() {
             spurious_aborts += 1;

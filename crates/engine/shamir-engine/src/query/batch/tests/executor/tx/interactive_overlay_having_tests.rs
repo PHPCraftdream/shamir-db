@@ -22,7 +22,7 @@ async fn interactive_overlay_having_then_projection_filter_and_totals() {
     .await
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 

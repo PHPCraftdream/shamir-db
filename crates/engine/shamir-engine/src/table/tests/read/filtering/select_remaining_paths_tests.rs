@@ -16,7 +16,6 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::read::QueryResult;
 use crate::query::TableRef;
-use crate::repo::RepoInstance;
 use crate::table::TableManager;
 
 /// The legacy wrapper has no batch bindings, even for nested SELECT arguments.
@@ -109,7 +108,7 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         // Read-only batches use the standalone table's MVCC store, not a repo drainer.
         Err(DbError::NotFound("standalone fixture has no repo".into()))
     }

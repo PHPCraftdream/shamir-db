@@ -4,6 +4,7 @@
 
 use super::repo_core::RepoCore;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
+use crate::repo::fk_reverse_cache::FkReverseCache;
 use crate::table::table_manager::table_token_for;
 use crate::table::{table_store_names, TableManager};
 use shamir_storage::error::{DbError, DbResult};
@@ -372,5 +373,14 @@ impl RepoCore {
     /// Catalogue read; see `TableCatalog`.
     pub(crate) fn mapped_table_store_names(&self, name: &str) -> Option<(String, String, String)> {
         self.catalog.mapped_table_store_names(name)
+    }
+
+    /// F-28 Step 4 (#831): this repo's cached reverse-FK map. See
+    /// `FkReverseCache` for the cache-aside population + invalidation
+    /// contract. Used by `query::batch`'s FK discovery functions (via
+    /// `BatchResolver::resolve_repo`) and by the shell's
+    /// `RepoInstance::fk_reverse_cache` delegate.
+    pub(crate) fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
+        &self.fk_reverse_cache
     }
 }

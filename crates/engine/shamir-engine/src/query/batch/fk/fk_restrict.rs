@@ -65,10 +65,10 @@ use shamir_query_types::filter::Filter;
 use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use super::reverse_fk_scan::build_reverse_fk_entries;
 use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
-use crate::repo::build_reverse_fk_entries;
 use crate::repo::fk_reverse_cache::ReverseFkEntry;
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
@@ -173,7 +173,7 @@ pub(crate) async fn check_fk_restrict(
 /// `parent_table` with `on_delete = Restrict`.
 ///
 /// F-28 Step 4 (#831): reads through the repo's cached reverse-FK map
-/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// (`RepoCore::fk_reverse_cache`) instead of re-running the O(tables)
 /// `collect_fk_refs()` scan on every call — a cache miss (never built, or
 /// invalidated by a schema mutation since the last build) pays that scan
 /// exactly once and seeds every parent table's entry in the repo, not just

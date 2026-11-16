@@ -21,9 +21,16 @@ pub(super) use commit::pipeline::phase::{finalize, materialize};
 pub use drain::drainer;
 pub(super) use preparation::pre_commit;
 pub use preparation::predicate_range;
+pub use preparation::repo_version_provider::RepoVersionProvider;
 pub(crate) use replication::follower_durability;
 
 pub use apply_replicated::{apply_replicated_batch, ApplyOutcome, ApplyPolicy};
+/// The tx-layer aggregate of a repository's shared state: the public face
+/// `query::batch` code resolves through `BatchResolver::resolve_repo` and
+/// holds (cheap `Clone`) instead of the `RepoInstance` shell. Construction
+/// and crate-internal access stay behind the shell (fields are
+/// `pub(crate)`); this re-export only widens the type's naming path.
+pub use commit::core::repo_core::RepoCore;
 pub(crate) use commit::pipeline::driver::commit_driver::CommitDriver;
 pub(crate) use commit::pipeline::driver::commit_tail_barrier::CommitTailBarrier;
 pub use commit::pipeline::driver::tx_outcome;

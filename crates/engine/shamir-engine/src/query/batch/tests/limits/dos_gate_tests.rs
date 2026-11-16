@@ -57,10 +57,13 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        self.db.get_repo("default").ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
-        })
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo("default")
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+            })
     }
 }
 
@@ -103,7 +106,7 @@ impl<R: TableResolver + Send + Sync> TableResolver for SlowResolver<R> {
 
 #[async_trait::async_trait]
 impl<R: BatchResolver> BatchResolver for SlowResolver<R> {
-    async fn resolve_repo(&self, repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         self.inner.resolve_repo(repo_name).await
     }
 }
@@ -141,7 +144,7 @@ impl<R: TableResolver + Send + Sync> TableResolver for OpPathSlowResolver<R> {
 
 #[async_trait::async_trait]
 impl<R: BatchResolver> BatchResolver for OpPathSlowResolver<R> {
-    async fn resolve_repo(&self, repo_name: &str) -> DbResult<RepoInstance> {
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         self.inner.resolve_repo(repo_name).await
     }
 }
@@ -161,8 +164,8 @@ impl TableResolver for RepoResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for RepoResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 

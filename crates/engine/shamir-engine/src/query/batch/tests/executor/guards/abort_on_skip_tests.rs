@@ -224,7 +224,7 @@ async fn interactive_transaction_refuses_abort_on_skip_before_staging_writes() {
     .await
     .unwrap();
     let resolver = TxTestResolver { repo: repo.clone() };
-    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+    let (mut tx, guard) = open_interactive_tx(&repo.core, shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
 

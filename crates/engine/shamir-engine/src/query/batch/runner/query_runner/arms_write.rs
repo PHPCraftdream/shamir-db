@@ -114,9 +114,9 @@ impl<'a> QueryRunner<'a> {
                 // causing every FK-constrained autocommit insert to
                 // be rejected regardless of whether the referenced
                 // row existed).
-                let (mut tx, _guard) = repo
-                    .begin_implicit_batch_tx(self.actor.clone(), alias)
-                    .await?;
+                let (mut tx, _guard) =
+                    crate::query::batch::begin_implicit_batch_tx(&repo, self.actor.clone(), alias)
+                        .await?;
                 // F-28 Step 5 (S3-C): child-side hook, implicit path —
                 // see the identical comment on the explicit-tx arm
                 // above.
@@ -300,8 +300,9 @@ impl<'a> QueryRunner<'a> {
                 )
                 .await;
                 return retry_on_tx_conflict(|| async {
-                    let (mut tx, _guard) = repo
-                        .begin_implicit_batch_tx_with_isolation(
+                    let (mut tx, _guard) =
+                        crate::query::batch::begin_implicit_batch_tx_with_isolation(
+                            &repo,
                             self.actor.clone(),
                             alias,
                             isolation,
@@ -487,8 +488,9 @@ impl<'a> QueryRunner<'a> {
                 )
                 .await;
                 return retry_on_tx_conflict(|| async {
-                    let (mut tx, _guard) = repo
-                        .begin_implicit_batch_tx_with_isolation(
+                    let (mut tx, _guard) =
+                        crate::query::batch::begin_implicit_batch_tx_with_isolation(
+                            &repo,
                             self.actor.clone(),
                             alias,
                             isolation,
@@ -639,9 +641,9 @@ impl<'a> QueryRunner<'a> {
                         message: format!("resolve_repo({}): {}", table_ref.repo, e),
                         code: None,
                     })?;
-                let (mut tx, _guard) = repo
-                    .begin_implicit_batch_tx(self.actor.clone(), alias)
-                    .await?;
+                let (mut tx, _guard) =
+                    crate::query::batch::begin_implicit_batch_tx(&repo, self.actor.clone(), alias)
+                        .await?;
                 // F-28 Step 5 (S3-C): child-side hook, implicit path.
                 require_footprint_if_fk_child(
                     self.resolver,

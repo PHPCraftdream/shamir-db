@@ -38,10 +38,10 @@ use crate::repo::repo_token;
 use crate::repo::repo_types::BoxRepo;
 #[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
-use crate::repo::RepoVersionProvider;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit_tx;
+use crate::tx::RepoVersionProvider;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());

@@ -35,8 +35,8 @@ impl TableResolver for Resolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for Resolver {
-    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -305,7 +305,7 @@ async fn skipped_entries_are_not_charged_in_either_stage_loop() {
                 .unwrap();
         let results = if transactional {
             let (mut tx, guard) =
-                open_interactive_tx(&resolver.repo, shamir_tx::IsolationLevel::Snapshot)
+                open_interactive_tx(&resolver.repo.core, shamir_tx::IsolationLevel::Snapshot)
                     .await
                     .unwrap();
             let results = execute_plan_tx(
@@ -383,9 +383,10 @@ async fn interactive_commit_does_not_charge_or_check_execution_budget() {
     let scope = ExecScope::root(&request.limits);
     let mut plan =
         shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits).unwrap();
-    let (mut tx, guard) = open_interactive_tx(&resolver.repo, shamir_tx::IsolationLevel::Snapshot)
-        .await
-        .unwrap();
+    let (mut tx, guard) =
+        open_interactive_tx(&resolver.repo.core, shamir_tx::IsolationLevel::Snapshot)
+            .await
+            .unwrap();
     execute_plan_tx(
         &mut plan,
         &request.queries,
@@ -404,7 +405,9 @@ async fn interactive_commit_does_not_charge_or_check_execution_budget() {
     // Exhaust the EXECUTE scope after staging. TxCommit is a separate operation
     // and must complete regardless; there is no budget inside its commit future.
     assert_eq!(scope.charge_work(1).unwrap_err(), work_error(2, 1));
-    let outcome = commit_interactive_tx(&resolver.repo, tx).await.unwrap();
+    let outcome = commit_interactive_tx(&resolver.repo.core, tx)
+        .await
+        .unwrap();
     drop(guard);
     assert!(outcome.commit_version > 0);
     assert_eq!(scope.work(), 2);

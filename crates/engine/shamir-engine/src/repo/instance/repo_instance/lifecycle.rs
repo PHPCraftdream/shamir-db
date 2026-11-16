@@ -172,7 +172,7 @@ impl RepoInstance {
     /// discovery functions (via `TableResolver::resolve_repo`) and by
     /// `ShamirDb::compile_table_schema`'s invalidation call.
     pub fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
-        &self.core.fk_reverse_cache
+        self.core.fk_reverse_cache()
     }
     /// Atomic transaction telemetry counters.
     pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
@@ -294,22 +294,14 @@ impl RepoInstance {
     /// Durability flush for a `synced` commit, batched via group-commit so
     /// concurrent synced commits on this repo share one flush+fsync.
     ///
-    /// The closure captures a CLONED `RepoInstance` (cheap — every field is
-    /// `Arc`-shared) so it is `'static + Send` and can be moved into the
-    /// detached leader task `GroupCommit::run` spawns (audit §2.1: the leader
-    /// loop must not be tied to the caller's task lifetime, so a cancelled
-    /// caller cannot strand `leader_busy`).
+    /// The body lives on `RepoCore::synced_flush`; its closure captures a
+    /// CLONED `RepoCore` (cheap — every field is `Arc`-shared) so it is
+    /// `'static + Send` and can be moved into the detached leader task
+    /// `GroupCommit::run` spawns (audit §2.1: the leader loop must not be
+    /// tied to the caller's task lifetime, so a cancelled caller cannot
+    /// strand `leader_busy`).
     pub async fn synced_flush(&self) -> DbResult<()> {
-        let repo = self.clone();
-        self.core
-            .durability_handle
-            .group_commit
-            .clone()
-            .run(move || {
-                let repo = repo.clone();
-                async move { repo.flush_buffers().await }
-            })
-            .await
+        self.core.synced_flush().await
     }
 
     /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
@@ -325,11 +317,7 @@ impl RepoInstance {
                 }
             }
         }
-        let wal = self.repo_wal().await?;
-        if self.initialized_mem_wal() {
-            return Ok(());
-        }
-        wal.sync_wal().await
+        self.core.sync_wal().await
     }
 
     /// Spawn a background task that runs GC periodically.

@@ -1,11 +1,12 @@
-//! Implicit single-op batch transactions over `&RepoInstance`.
+//! Implicit single-op batch transactions over `&RepoCore`.
 //!
-//! The bodies of `RepoInstance`'s implicit-batch convenience methods live
-//! here as free functions; the shell methods are one-line delegates. The
+//! The bodies of the repo shell's implicit-batch convenience methods live
+//! here as free functions over `RepoCore`; the shell methods are one-line
+//! delegates that pass `&self.core`. The
 //! `Box::pin` discipline documented on `run_implicit_batch_tx` is preserved.
 
 use crate::query::batch::BatchError;
-use crate::repo::RepoInstance;
+use crate::tx::RepoCore;
 use shamir_engine_query::query::write::WriteResult;
 use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::DbResult;
@@ -63,7 +64,7 @@ use std::pin::Pin;
 /// pre-refactor size — verified by reproducing the failure/fix with the
 /// delegation form isolated in a scratch worktree before landing this.
 pub(crate) async fn run_implicit_batch_tx<F>(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     actor: Actor,
     alias: &str,
     stage: F,
@@ -97,7 +98,7 @@ where
 /// hits between this call and `commit_implicit_batch_tx`, exactly as
 /// `run_implicit_batch_tx`'s internal `tx`/`_guard` did.
 pub(crate) async fn begin_implicit_batch_tx(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     actor: Actor,
     alias: &str,
 ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
@@ -120,7 +121,7 @@ pub(crate) async fn begin_implicit_batch_tx(
 /// `begin_implicit_batch_tx`, which delegates here with `Snapshot` —
 /// byte-identical behavior, unchanged.
 pub(crate) async fn begin_implicit_batch_tx_with_isolation(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     actor: Actor,
     alias: &str,
     isolation: shamir_tx::IsolationLevel,
@@ -147,7 +148,7 @@ pub(crate) async fn begin_implicit_batch_tx_with_isolation(
 /// commit-error handling (UniqueViolation -> "unique_violation",
 /// CasConflict -> "version_conflict" per FG-7). See F-28 Step 1 (#828).
 pub(crate) async fn commit_implicit_batch_tx(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     tx: shamir_tx::TxContext,
     alias: &str,
 ) -> Result<shamir_query_types::batch::TransactionInfo, BatchError> {

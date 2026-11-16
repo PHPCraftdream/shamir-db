@@ -26,14 +26,17 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
         // F4b-1: non-tx writes now route through an implicit Snapshot tx, so the
         // executor calls `resolve_repo` even on the non-transactional path. Back
         // it with the real in-memory repo so insert tests exercise the implicit
         // commit pipeline end-to-end.
-        self.db.get_repo(&self.repo).ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
-        })
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
+            })
     }
 }
 
@@ -63,8 +66,8 @@ impl TableResolver for TxTestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TxTestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
-        Ok(self.repo.clone())
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
     }
 }
 
@@ -118,10 +121,13 @@ impl TableResolver for TestResolverWithScalars {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolverWithScalars {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
-        self.db.get_repo(&self.repo).ok_or_else(|| {
-            shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
-        })
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
+            })
     }
 }
 

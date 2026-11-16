@@ -8,10 +8,10 @@ use shamir_query_types::filter::Filter;
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use crate::query::batch::fk::reverse_fk_scan::build_reverse_fk_entries;
 use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
-use crate::repo::build_reverse_fk_entries;
 use crate::table::TableManager;
 
 use super::helpers::{
@@ -26,7 +26,7 @@ use super::helpers::{
 /// references relevant to THIS update's `set_fields`.
 ///
 /// (#1181): reads through the repo's cached reverse-FK map
-/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// (`RepoCore::fk_reverse_cache`) instead of re-running the O(tables)
 /// `repo.list_table_names()` + `collect_fk_refs()` scan on every UPDATE —
 /// mirrors `fk_actions::discover_action_refs` / `fk_restrict::discover_restrict_refs`,
 /// sharing the SAME cache (and the same underlying scan): a cache miss (never

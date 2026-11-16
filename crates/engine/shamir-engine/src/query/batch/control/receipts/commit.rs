@@ -2,9 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::query::batch::BatchError;
-use crate::repo::RepoInstance;
 use crate::tx::ack::commit_tx_with_kind;
 use crate::tx::CommitError;
+use crate::tx::RepoCore;
 use shamir_query_types::batch::{TransactionInfo, VisibilityWait};
 use shamir_tx::visibility_metrics::PendingKind;
 
@@ -15,7 +15,7 @@ use shamir_tx::visibility_metrics::PendingKind;
 /// from four write arms of the per-op runner, which recurses through nested
 /// batches; inlining it would multiply the runner's stack footprint.
 pub(crate) fn commit_implicit<'a>(
-    repo: &'a RepoInstance,
+    repo: &'a RepoCore,
     tx: shamir_tx::TxContext,
     alias: &'a str,
     wait: VisibilityWait,
@@ -50,14 +50,14 @@ pub(crate) fn receipt_error_code(error: &CommitError) -> Option<&'static str> {
 }
 
 async fn commit_implicit_inner(
-    repo: &RepoInstance,
+    repo: &RepoCore,
     tx: shamir_tx::TxContext,
     alias: &str,
     wait: VisibilityWait,
 ) -> Result<TransactionInfo, BatchError> {
     let tx_id = tx.tx_id.0;
     let snapshot = tx.snapshot_version;
-    match commit_tx_with_kind(tx, &repo.core, wait, PendingKind::ImplicitBatch).await {
+    match commit_tx_with_kind(tx, repo, wait, PendingKind::ImplicitBatch).await {
         Ok(outcome) => Ok(TransactionInfo::committed(
             outcome.tx_id,
             outcome.snapshot_version,

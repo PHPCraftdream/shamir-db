@@ -53,7 +53,7 @@ pub(crate) static TEST_CHILD_PRE_ROLE_DECISION_HOOK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// F-28 Step 5 (S3-C) — child-side hook: if `table_ref`'s table is flagged
-/// (via `RepoInstance::fk_reverse_cache`) as an FK child (it references some
+/// (via `RepoCore::fk_reverse_cache`) as an FK child (it references some
 /// OTHER table via a foreign key), require this tx's commit footprint to be
 /// published for it, regardless of the tx's own isolation level.
 ///
@@ -118,7 +118,7 @@ pub(crate) async fn require_footprint_if_fk_child(
         .get_or_build_snapshot(|| {
             // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
-            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
+            async move { crate::query::batch::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {
@@ -152,7 +152,7 @@ pub(crate) async fn require_footprint_if_fk_child(
 /// `table_ref`'s table.
 ///
 /// Returns [`IsolationLevel::Serializable`](shamir_tx::IsolationLevel::Serializable)
-/// iff `table_ref`'s table is flagged (via `RepoInstance::fk_reverse_cache`)
+/// iff `table_ref`'s table is flagged (via `RepoCore::fk_reverse_cache`)
 /// as an FK parent with at least one non-`NoAction` action for the
 /// operation kind `op` selects — `FkParentOpKind::Delete` consults
 /// `FkSnapshot::is_parent_with_delete_action` (the `on_delete`
@@ -217,7 +217,7 @@ pub(crate) async fn implicit_tx_isolation_for_fk_parent(
         .get_or_build_snapshot(|| {
             // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
-            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
+            async move { crate::query::batch::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {
@@ -256,7 +256,7 @@ pub(crate) async fn implicit_tx_isolation_for_fk_parent(
 ///
 /// Upgrading to Serializable means the implicit tx CAN now abort with
 /// `CommitError::PhantomConflict`/`SsiConflict` (surfaced as the coded
-/// `"tx_conflict"` — see `RepoInstance::commit_implicit_batch_tx`) in cases
+/// `"tx_conflict"` — see `commit_implicit_batch_tx`) in cases
 /// that used to always succeed under plain Snapshot (Snapshot never
 /// aborts). A genuine, persistent write-write race SHOULD abort and reach
 /// the caller — but an already-resolved race (the conflicting concurrent
@@ -278,7 +278,7 @@ const FK_SERIALIZABLE_RETRY_ATTEMPTS: u32 = 3;
 
 /// Run `attempt` up to [`FK_SERIALIZABLE_RETRY_ATTEMPTS`] times, retrying
 /// only on a coded `"tx_conflict"` `BatchError` (the SSI/phantom/wound-wait
-/// abort family — see `RepoInstance::commit_implicit_batch_tx`'s mapping).
+/// abort family — see `commit_implicit_batch_tx`'s mapping).
 /// Any other error, or the final attempt's error once the budget is
 /// exhausted, is returned as-is — never swallowed.
 ///

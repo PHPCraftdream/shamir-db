@@ -79,10 +79,6 @@ impl RepoInstance {
         Ok(instance)
     }
 
-    pub(crate) fn initialized_mem_wal(&self) -> bool {
-        self.core.initialized_mem_wal()
-    }
-
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
     #[must_use]
     pub fn durability_metrics_snapshot(&self) -> DurabilityMetricsSnapshot {
