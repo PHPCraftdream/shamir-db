@@ -8,7 +8,8 @@ use crate::format_stamp::io::{inspect, write_stamp, IgnoreSet, StampState};
 use crate::format_stamp::model::{FormatStamp, StampError, CURRENT_FORMAT_EPOCH};
 
 use crate::format_stamp::tests::support::stamp_fixture::{
-    add_data, add_leftover_tmp, add_lock, temp_dir, write_stamp_with_epoch, DirSnapshot,
+    add_data, add_leftover_tmp, add_lock, temp_dir, write_same_version_stamp_with_epoch,
+    write_stamp_with_epoch, DirSnapshot,
 };
 
 fn stamp(version: &str) -> FormatStamp {
@@ -53,7 +54,7 @@ fn atomic_write_replace_after_reader_closed_handle() {
 #[test]
 fn interrupted_replacement_keeps_old_stamp() {
     let dir = temp_dir();
-    write_stamp_with_epoch(dir.path(), 1);
+    write_same_version_stamp_with_epoch(dir.path(), 1);
     // A complete tmp, no rename: the old stamp is the one trusted.
     add_leftover_tmp(dir.path());
     match inspect(dir.path()) {

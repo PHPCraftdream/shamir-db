@@ -35,6 +35,13 @@ pub fn write_stamp_with_epoch(dir: &Path, epoch: u64) {
     crate::format_stamp::io::write_stamp(dir, &stamp).expect("write fixture stamp");
 }
 
+/// Write a valid stamp with `epoch` created by this crate's own version, so a
+/// Writer check finds nothing to rewrite (D6: rewritten only on a version change).
+pub fn write_same_version_stamp_with_epoch(dir: &Path, epoch: u64) {
+    let stamp = FormatStamp::with_epoch(epoch, env!("CARGO_PKG_VERSION"), FIXTURE_UNIX_MS);
+    crate::format_stamp::io::write_stamp(dir, &stamp).expect("write fixture stamp");
+}
+
 /// Write raw bytes as `format.stamp` (bypasses the encoder).
 pub fn write_raw_stamp(dir: &Path, bytes: &[u8]) {
     fs::write(dir.join(STAMP_FILE_NAME), bytes).expect("write raw stamp");

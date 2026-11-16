@@ -5,7 +5,8 @@ use crate::format_stamp::io::IgnoreSet;
 use crate::format_stamp::model::{StampError, BASE_FORMAT_EPOCH};
 
 use crate::format_stamp::tests::support::stamp_fixture::{
-    add_data, add_leftover_tmp, add_lock, policy, temp_dir, write_stamp_with_epoch, DirSnapshot,
+    add_data, add_leftover_tmp, add_lock, policy, temp_dir, write_same_version_stamp_with_epoch,
+    write_stamp_with_epoch, DirSnapshot,
 };
 
 fn assert_refused(dir: &std::path::Path, current: u64) -> StampError {
@@ -25,7 +26,7 @@ fn assert_refused(dir: &std::path::Path, current: u64) -> StampError {
 fn table_row7_present_empty_equal_ok() {
     let dir = temp_dir();
     add_lock(dir.path());
-    write_stamp_with_epoch(dir.path(), 1);
+    write_same_version_stamp_with_epoch(dir.path(), 1);
     let outcome = check_data_dir(
         dir.path(),
         StampMode::Writer,
@@ -79,7 +80,7 @@ fn table_row10_present_data_equal_ok() {
     let dir = temp_dir();
     add_lock(dir.path());
     add_data(dir.path());
-    write_stamp_with_epoch(dir.path(), 1);
+    write_same_version_stamp_with_epoch(dir.path(), 1);
     let outcome = check_data_dir(
         dir.path(),
         StampMode::Writer,
@@ -182,7 +183,7 @@ fn table_row20_newer_layout_equal_epoch_refuses() {
 fn table_row21_present_leftover_tmp_deletes_then_applies() {
     let dir = temp_dir();
     add_lock(dir.path());
-    write_stamp_with_epoch(dir.path(), BASE_FORMAT_EPOCH);
+    write_same_version_stamp_with_epoch(dir.path(), BASE_FORMAT_EPOCH);
     add_leftover_tmp(dir.path());
     let outcome = check_data_dir(
         dir.path(),
