@@ -1,3 +1,5 @@
+pub(in crate::sync::replication_seed) mod canonical;
+pub(in crate::sync::replication_seed) mod canonical_lengths;
 pub(in crate::sync::replication_seed) mod codec;
 pub(in crate::sync::replication_seed) mod encode_bounded;
 pub(in crate::sync::replication_seed) mod record_shape;

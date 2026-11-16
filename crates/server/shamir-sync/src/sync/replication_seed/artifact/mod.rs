@@ -1,5 +1,6 @@
 pub(super) mod artifact_writer;
 pub(super) mod file_record;
+pub(super) mod logical_dump;
 pub(super) mod manifest;
 pub(super) mod table_record;
 
