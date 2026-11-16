@@ -217,14 +217,12 @@ impl HybridRepoComposite {
     /// but O(1) amortized per disk name via a `TFxSet` built once up
     /// front, instead of an O(names) scan per disk name (O(names × stores)
     /// overall — schema-sized, so it grows with the number of
-    /// tables/stores in the repo). `pub` behind `test-util` so the facade
-    /// `repo::tests` can unit-test the merge logic directly against edge cases (empty
+    /// tables/stores in the repo). `pub` so the facade `repo::tests`
+    /// (another crate since the repo layer became its own crate) can
+    /// unit-test the merge logic directly against edge cases (empty
     /// input, duplicate disk names, disk names already in `names`)
     /// without needing to coax genuine duplicates out of a real
     /// `FjallRepo::stores_list()`.
-    // Test-only seam: the facade's hybrid-repo tests compose the names
-    // directly; exported when the engine forwards its `test-util` feature.
-    #[cfg(any(test, feature = "test-util"))]
     pub fn merge_store_names(mut names: Vec<String>, disk_names: Vec<String>) -> Vec<String> {
         let mut seen: TFxSet<String> = names.iter().cloned().collect();
         for disk_name in disk_names {
