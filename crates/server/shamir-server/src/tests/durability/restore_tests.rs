@@ -18,10 +18,11 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
+use shamir_sync::format_stamp::{decode, FormatStamp, STAMP_FILE_NAME};
 use shamir_test_diag::FlakeGuard;
 
 use crate::backup::backup;
-use crate::restore::{restore, RestoreError};
+use crate::restore::{restore, restore_with_probe, RestoreError};
 
 /// Build a well-formed `backup::backup` snapshot (with a valid manifest) at
 /// a fresh temp dir, containing one small file — enough for `restore()`'s
@@ -712,5 +713,128 @@ fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
     assert_eq!(
         original, "ORIGINAL PRE-RESTORE DATA",
         "data_dir content must be byte-identical to its pre-restore state"
+    );
+}
+
+/// Recursive listing (relative path, size) of `dir`, for the
+/// unchanged-on-refusal assertions below.
+fn stamp_test_listing(dir: &Path) -> Vec<(String, u64)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, u64)>) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let meta = entry.metadata().unwrap();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            out.push((rel, if meta.is_dir() { 0 } else { meta.len() }));
+            if meta.is_dir() {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Snapshot whose source dir carries a stamp with `epoch` (`None` = no
+/// stamp), built through `backup` so the manifest verifies.
+fn stamp_test_snapshot(root: &Path, epoch: Option<u64>) -> std::path::PathBuf {
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    if let Some(epoch) = epoch {
+        let stamp = FormatStamp::with_epoch(epoch, "1.0.0", 1_700_000_000_000);
+        shamir_sync::format_stamp::write_stamp(&src, &stamp).unwrap();
+    }
+    fs::write(src.join("a.txt"), b"hello").unwrap();
+    let dst = root.join("snapshot_dest");
+    fs::create_dir_all(&dst).unwrap();
+    backup(&src, &dst).expect("backup ok").dest_dir
+}
+
+/// Snapshot whose source dir carries `bytes` as `format.stamp` (not a valid
+/// stamp), built through `backup` so the manifest lists the file.
+fn stamp_test_snapshot_raw(root: &Path, bytes: &[u8]) -> std::path::PathBuf {
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join(STAMP_FILE_NAME), bytes).unwrap();
+    fs::write(src.join("a.txt"), b"hello").unwrap();
+    let dst = root.join("snapshot_dest");
+    fs::create_dir_all(&dst).unwrap();
+    backup(&src, &dst).expect("backup ok").dest_dir
+}
+
+#[test]
+fn restore_newer_snapshot_refused_before_touching_data_dir() {
+    let root = TempDir::new().unwrap();
+    let snapshot = stamp_test_snapshot(root.path(), Some(u64::MAX));
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("live.txt"), b"live").unwrap();
+    let before = stamp_test_listing(&data_dir);
+
+    let err = restore_with_probe(&snapshot, &data_dir, true, |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(err, RestoreError::FormatStamp(_)),
+        "expected a format-stamp refusal, got {err:?}"
+    );
+    assert_eq!(before, stamp_test_listing(&data_dir), "data_dir unchanged");
+    let leftover = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".restore_tmp_"));
+    assert!(!leftover, "no staging dir — refused before step 3");
+}
+
+#[test]
+fn restore_corrupt_snapshot_refused_before_touching_data_dir() {
+    let root = TempDir::new().unwrap();
+    let snapshot = stamp_test_snapshot_raw(root.path(), b"junk");
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("live.txt"), b"live").unwrap();
+    let before = stamp_test_listing(&data_dir);
+
+    let err = restore_with_probe(&snapshot, &data_dir, true, |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(err, RestoreError::FormatStamp(_)),
+        "expected a format-stamp refusal, got {err:?}"
+    );
+    assert_eq!(before, stamp_test_listing(&data_dir), "data_dir unchanged");
+}
+
+#[test]
+fn restore_older_snapshot_allowed_stamp_preserved() {
+    let root = TempDir::new().unwrap();
+    let snapshot = stamp_test_snapshot(root.path(), Some(1));
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("live.txt"), b"live").unwrap();
+
+    // Rollback must work: an older snapshot restores; the next serve then
+    // applies the epoch rule (design 3.5). Restore writes no stamp.
+    restore_with_probe(&snapshot, &data_dir, true, |_| Ok(())).expect("restore ok");
+    let bytes = fs::read(data_dir.join(STAMP_FILE_NAME)).unwrap();
+    let stamp = decode(&bytes, &data_dir).expect("stamp decodes");
+    assert_eq!(stamp.format_epoch(), 1, "source stamp preserved");
+    assert_eq!(fs::read(data_dir.join("a.txt")).unwrap(), b"hello");
+}
+
+#[test]
+fn restore_pre_stamp_snapshot_leaves_dir_stampless() {
+    let root = TempDir::new().unwrap();
+    let snapshot = stamp_test_snapshot(root.path(), None);
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    restore_with_probe(&snapshot, &data_dir, true, |_| Ok(())).expect("restore ok");
+    assert!(
+        !data_dir
+            .join(shamir_sync::format_stamp::STAMP_FILE_NAME)
+            .exists(),
+        "no stamp written by restore"
     );
 }

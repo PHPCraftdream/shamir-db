@@ -376,6 +376,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
                 report.bytes_copied,
                 report.dest_dir.display()
             );
+            println!("format stamp: {}", report.format_stamp);
             return Ok(0);
         }
         Some(Subcmd::Restore { from, force }) => {

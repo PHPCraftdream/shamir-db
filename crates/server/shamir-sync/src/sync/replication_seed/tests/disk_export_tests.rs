@@ -345,3 +345,25 @@ fn disk_export_refuses_resync_quarantined_repo() {
     });
     drop(rt);
 }
+
+#[test]
+fn seed_export_inspect_does_not_create_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime();
+    let (_version, _expected, _event) = rt.block_on(fixture(dir.path(), true));
+    drop(rt);
+    assert!(
+        !dir.path().join("format.stamp").exists(),
+        "fixture is stampless"
+    );
+    let rt = runtime();
+    rt.block_on(async {
+        let _source = MaintenanceOpen::open(dir.path()).await.unwrap();
+    });
+    drop(rt);
+    // Inspect mode: the export open must not leave a stamp behind.
+    assert!(
+        !dir.path().join("format.stamp").exists(),
+        "seed export must not create a stamp"
+    );
+}

@@ -15,6 +15,7 @@ use shamir_connect::server::{
     token::{TokenChannels, TokenMode},
     TokenSessionStore,
 };
+use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 /// I/O seam for tests and the process entry point.
@@ -177,6 +178,14 @@ pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
     std::fs::create_dir_all(&c.data_dir)?;
     let g = maintenance_lock::acquire(&c.data_dir)
         .map_err(|_| anyhow::anyhow!("offline token command requires a stopped server"))?;
+    // Format-stamp gate (design 3.3: Writer — this command creates
+    // server_meta in an empty directory).
+    check_data_dir(
+        &c.data_dir,
+        StampMode::Writer,
+        &IgnoreSet::none(),
+        &EpochPolicy::compiled(),
+    )?;
     let m = ServerMetaStore::open_or_init(c.data_dir.join("server_meta"))?;
     let key = m.audit_chain_key()?;
     let log = FjallAuditAppender::read_log_for_verify(&c.data_dir)?;

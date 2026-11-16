@@ -4,6 +4,7 @@ use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::engine::repo::{SeedImageWriter, SeedReceipt, SeedTable};
 use shamir_db::{ShamirDb, SystemStoreConfig};
 
+use crate::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
 use crate::replication_seed::codec::{decode, digest, METADATA_LIMIT};
 use crate::replication_seed::error::invalid;
 use crate::replication_seed::{verify, Manifest, SeedError};
@@ -113,6 +114,14 @@ async fn install_inner(
     std::fs::create_dir_all(data_dir)?;
     let data_dir = std::fs::canonicalize(data_dir)?;
     let _lock = crate::maintenance_lock::acquire(&data_dir)?;
+    // Format-stamp gate (design 3.3: Writer — the install writes the target).
+    check_data_dir(
+        &data_dir,
+        StampMode::Writer,
+        &IgnoreSet::none(),
+        &EpochPolicy::compiled(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
     let target = staging::destination(&data_dir, db, repo);
     let completed = staging::find_complete(&target, &receipt).await?;
     let home = ShamirDb::init_seed(SystemStoreConfig::Fjall(

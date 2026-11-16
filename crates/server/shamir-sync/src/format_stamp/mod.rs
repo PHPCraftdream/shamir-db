@@ -12,9 +12,12 @@ pub mod model;
 mod tests;
 
 pub use change_log::{FormatChange, FORMAT_CHANGES};
-pub use check::{check_data_dir, StampMode, StampOutcome};
-pub use codec::{decode, encode, read_header};
-pub use io::{data_present, inspect, write_stamp, IgnoreSet, StampState};
+pub use check::{check_data_dir, inspect_gate, StampMode, StampOutcome};
+pub use codec::{decode, encode, read_header, STAMP_FILE_NAME, STAMP_TMP_NAME};
+pub use io::{
+    data_present, inspect, observe_stamp_for_backup, restore_snapshot_gate, write_stamp,
+    BackupStampObservation, IgnoreSet, StampState,
+};
 pub use model::{
     now_unix_ms, CorruptKind, EpochPolicy, FormatStamp, LastFormatMigration, StampActor,
     StampError, BASE_FORMAT_EPOCH, CURRENT_FORMAT_EPOCH,

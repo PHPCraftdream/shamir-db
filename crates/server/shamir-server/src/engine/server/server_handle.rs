@@ -118,6 +118,10 @@ pub struct ServerHandle {
     /// task (told to end through `shutdown_token`) has dropped its handler
     /// context and, with it, its references to the stores.
     pub(super) conn_tasks: crate::connection::ConnTasks,
+    /// Outcome of the boot-time format-stamp check (release-1 R1a,
+    /// design 3.2): what the check did to `data_dir` before any store
+    /// opened (created / adopted / unchanged / version-updated).
+    pub(super) format_stamp: shamir_sync::format_stamp::StampOutcome,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -165,6 +169,11 @@ pub(crate) async fn drain_connections(
 }
 
 impl ServerHandle {
+    /// What the boot-time format-stamp check did to `data_dir`.
+    pub fn format_stamp(&self) -> shamir_sync::format_stamp::StampOutcome {
+        self.format_stamp
+    }
+
     /// Stop accepting new connections, then drain the scheduler + audit log.
     /// Returns repository-level checkpoint failures; ignored reports preserve
     /// the existing caller behaviour. Connection drain remains bounded.

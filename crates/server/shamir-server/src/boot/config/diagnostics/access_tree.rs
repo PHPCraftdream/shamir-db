@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 use shamir_client::{Client, ConnectOptions};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
+use shamir_sync::format_stamp::{inspect_gate, EpochPolicy};
 use shamir_types::types::value::QueryValue;
 
 use crate::config::Config;
@@ -146,6 +147,9 @@ pub fn format_pretty(v: &QueryValue, indent: usize) -> String {
 /// Offline: open the durable system store and assemble the tree directly.
 async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<QueryValue> {
     let meta_path = config.data_dir.join("shamir_db_meta.redb");
+
+    // Format-stamp gate (design 3.3: Inspect — access-tree never stamps).
+    inspect_gate(&config.data_dir, &EpochPolicy::compiled())?;
 
     // redb is single-writer: a fresh open fails while the file lock is still
     // held. In normal use the server is stopped (separate process exited) and

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub enum BootError {
     #[error("config: {0}")]
     Config(#[from] crate::config::ConfigError),
+    #[error("format stamp: {0}")]
+    FormatStamp(#[from] shamir_sync::format_stamp::StampError),
     #[error("server_meta: {0}")]
     ServerMeta(String),
     #[error("user_directory: {0}")]

@@ -3,6 +3,10 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
+use shamir_sync::format_stamp::{
+    BackupStampObservation, FormatStamp, CURRENT_FORMAT_EPOCH, STAMP_FILE_NAME,
+};
+
 use crate::backup::{
     backup, utc_timestamp, verify_manifest, BackupError, Manifest, ManifestFileEntry,
     MANIFEST_FILE_NAME, MANIFEST_FORMAT_VERSION,
@@ -467,4 +471,58 @@ fn backup_manifest_hash_matches_streamed_large_file() {
     let verify_report = verify_manifest(&report.dest_dir).expect("snapshot must verify");
     assert_eq!(verify_report.files_checked, 1);
     assert_eq!(verify_report.total_bytes, big_len as u64);
+}
+
+#[test]
+fn backup_copies_stamp_byte_for_byte_and_reports_observation() {
+    let src = TempDir::new().unwrap();
+    let stamp = FormatStamp::with_epoch(CURRENT_FORMAT_EPOCH, "1.0.0", 1_700_000_000_000);
+    shamir_sync::format_stamp::write_stamp(src.path(), &stamp).unwrap();
+    fs::write(src.path().join("a.txt"), b"hello").unwrap();
+    let dst = TempDir::new().unwrap();
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    assert_eq!(
+        report.format_stamp,
+        BackupStampObservation::Epoch(CURRENT_FORMAT_EPOCH)
+    );
+    assert_eq!(
+        fs::read(report.dest_dir.join(STAMP_FILE_NAME)).unwrap(),
+        fs::read(src.path().join(STAMP_FILE_NAME)).unwrap(),
+        "stamp copied byte for byte"
+    );
+}
+
+#[test]
+fn backup_older_epoch_dir_is_allowed() {
+    let src = TempDir::new().unwrap();
+    let stamp = FormatStamp::with_epoch(1, "0.9.0", 1_700_000_000_000);
+    shamir_sync::format_stamp::write_stamp(src.path(), &stamp).unwrap();
+    fs::write(src.path().join("a.txt"), b"hello").unwrap();
+    let dst = TempDir::new().unwrap();
+
+    // Backup never refuses and never stamps: the older stamp is observed
+    // and copied as is (design 3.5).
+    let report = backup(src.path(), dst.path()).unwrap();
+    assert_eq!(report.format_stamp, BackupStampObservation::Epoch(1));
+    assert_eq!(
+        fs::read(report.dest_dir.join(STAMP_FILE_NAME)).unwrap(),
+        fs::read(src.path().join(STAMP_FILE_NAME)).unwrap()
+    );
+}
+
+#[test]
+fn backup_corrupt_stamp_is_copied_as_is_and_reported() {
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join(STAMP_FILE_NAME), b"not a stamp").unwrap();
+    fs::write(src.path().join("a.txt"), b"hello").unwrap();
+    let dst = TempDir::new().unwrap();
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    assert_eq!(report.format_stamp, BackupStampObservation::Unreadable);
+    assert_eq!(
+        fs::read(report.dest_dir.join(STAMP_FILE_NAME)).unwrap(),
+        b"not a stamp",
+        "corrupt stamp copied as is"
+    );
 }
