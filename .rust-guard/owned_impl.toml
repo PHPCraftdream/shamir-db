@@ -11,14 +11,16 @@ module = "crate::repo::instance::repo_instance"
 
 [[owned_impl]]
 # owner: <foreign-impl> — impl blocks are deliberately split across the table
-# layer (read/, write/, admission/, table_manager/); layer-root ownership.
+# layer (read/, write/, admission/, table_manager/); since R4b the layer is the
+# crate shamir-engine-table, so the layer root is its crate root.
 type = "TableManager"
-module = "crate::table"
+module = "crate"
 
 [[owned_impl]]
-# owner: <foreign-impl> — declared and implemented in table/support/storage/catalog.
+# owner: <foreign-impl> — declared and implemented in support/storage/catalog
+# of shamir-engine-table.
 type = "TableCatalog"
-module = "crate::table::support::storage::catalog"
+module = "crate::support::storage::catalog"
 
 [[owned_impl]]
 # owner: <foreign-impl> — declared and implemented in the journal backend's
@@ -39,7 +41,7 @@ module = "crate::journal::backend::durability_handle::retention_gate"
 [[owned_impl]]
 # owner: <foreign-impl> — declared in the migration coordinator submodule.
 type = "MigrationCoordinator"
-module = "crate::table::table_manager::migration::coordinator"
+module = "crate::table_manager::migration::coordinator"
 
 [[owned_impl]]
 # owner: <engine-layering-R2c1b> — the tx-layer aggregate; every inherent
