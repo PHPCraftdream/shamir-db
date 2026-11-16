@@ -2,10 +2,10 @@
 //! mode, D6 rewrite rule and the epoch/change-log invariants (design
 //! 3.4, 4.1, 6.2).
 
-use crate::format_stamp::change_log::FORMAT_CHANGES;
 use crate::format_stamp::check::{check_data_dir, StampMode, StampOutcome};
 use crate::format_stamp::codec::{decode, STAMP_FILE_NAME};
 use crate::format_stamp::io::{write_stamp, IgnoreSet};
+use crate::format_stamp::migration::FORMAT_CHANGES;
 use crate::format_stamp::model::{
     CorruptKind, EpochPolicy, FormatStamp, StampError, BASE_FORMAT_EPOCH, CURRENT_FORMAT_EPOCH,
 };

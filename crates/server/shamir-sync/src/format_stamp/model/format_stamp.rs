@@ -81,6 +81,12 @@ impl FormatStamp {
         self
     }
 
+    /// Design 4.5: set by the format-migration runner, stamp written last.
+    pub fn with_last_format_migration(mut self, migration: LastFormatMigration) -> Self {
+        self.last_format_migration = Some(migration);
+        self
+    }
+
     pub fn format_epoch(&self) -> u64 {
         self.format_epoch
     }
