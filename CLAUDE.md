@@ -561,12 +561,12 @@ and `#[ignore]` changes are never declarable**.
 * `rustdoc` (full tier; mirrored in the fast tier when `shamir-engine` is
   affected) — `cargo doc -p shamir-engine --no-deps --document-private-items
   --locked` with broken/private intra-doc links promoted to errors, once with
-  default features and once with `--no-default-features`; also documents `shamir-engine-query` and `shamir-engine-validator` with and without `test-util`. Docs are code.
+  default features and once with `--no-default-features`; also documents `shamir-engine-query`, `shamir-engine-validator` and `shamir-engine-repo` with and without `test-util`. Docs are code.
 * `engine-features` / `engine-features-fast` — isolated `-p shamir-engine`
   feature cells (check + clippy per cell), each asserting via
   `scripts/ci/gates/features_matrix_check.py` that the ENABLED feature set
   matches the cell exactly, so "no defaults" is proven, not just labelled.
-  The full matrix also checks isolated query- and validator-crate features. Fast tier runs cells 1 and 5 on ubuntu, drafts only.
+  The full matrix also checks isolated query-, validator- and repo-crate features. Fast tier runs cells 1 and 5 on ubuntu, drafts only.
 * `loom-model` discovery — fails before running when
   `cargo nextest list -E 'test(loom_model)'` finds zero tests (plus
   `--no-tests=fail` at run time), so a renamed/gated-away model cannot
