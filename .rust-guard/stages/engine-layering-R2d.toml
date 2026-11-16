@@ -791,3 +791,14 @@ item = "shamir-engine::lib::tx::commit::acknowledgement::tests::visibility_metri
 reason = "R2d: the batch layer takes RepoCore instead of RepoInstance: imports, bounds or signature follow the move"
 owner = "<wave-R2d>"
 
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::scalar_to_query_value"
+reason = "R2d: the function-local import of ScalarRef moves to the file header, as the structure gate requires for touched files"
+owner = "<wave-R2d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/core/durability_access.rs"
+item = "shamir-engine::lib::tx::commit::core::durability_access::StageTimer"
+reason = "R2d: the moved shutdown-stage timer carries a doc line naming the move"
+owner = "<wave-R2d>"
