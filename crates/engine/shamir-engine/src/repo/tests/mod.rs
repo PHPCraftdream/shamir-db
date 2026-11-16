@@ -3,6 +3,7 @@ pub mod identity;
 pub mod journal;
 pub mod lifecycle;
 pub mod rename;
+pub mod seed;
 
 // Keep the historical module paths consumed outside this folder.
 #[path = "journal/recovery_gap_marker_tests.rs"]
