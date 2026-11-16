@@ -3599,6 +3599,7 @@ dependencies = [
  "shamir-bench-utils",
  "shamir-collections",
  "shamir-engine-query",
+ "shamir-engine-repo",
  "shamir-engine-validator",
  "shamir-funclib",
  "shamir-index",
@@ -3638,6 +3639,35 @@ dependencies = [
  "shamir-tx",
  "shamir-types",
  "smallvec",
+ "tokio",
+]
+
+[[package]]
+name = "shamir-engine-repo"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bincode",
+ "bytes",
+ "dashmap",
+ "futures",
+ "log",
+ "rand 0.9.4",
+ "rmp-serde",
+ "rustc-hash 2.1.2",
+ "scc",
+ "serde",
+ "shamir-collections",
+ "shamir-index",
+ "shamir-query-types",
+ "shamir-storage",
+ "shamir-tunables",
+ "shamir-tx",
+ "shamir-types",
+ "shamir-wal",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

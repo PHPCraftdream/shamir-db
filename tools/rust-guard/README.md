@@ -332,7 +332,12 @@ Atomic associated-function calls such as `AtomicUsize::load(&value, Ordering::Se
   both body-fingerprint and signature drift on one item (consumed once).
   Each consumed entry disappears; whatever remains when the comparison
   ends is `UNUSED_ALLOWANCE`. Tests are outside the allowance system:
-  removing or newly ignoring a test can never be declared. Delta files
+  removing or newly ignoring a test can never be declared. `discovery`
+  alone accepts an optional `platform_gated = true` on an entry whose test
+  is compiled out of some CI cells (OS, feature or `cfg` gated): in a cell
+  whose lists carry neither the base nor the head identity the entry is not
+  an `UNUSED_ALLOWANCE`; an entry with only one side absent, or whose test
+  is lost, is still reported. Delta files
   are referenced from the campaign entries
 in `.rust-guard/stages.toml` (written by the CI wiring chunk).
 

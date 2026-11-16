@@ -69,6 +69,11 @@ pub struct Entry {
     pub to_item: Option<String>,
     pub reason: String,
     pub owner: String,
+    /// `discovery` only: the test is compiled out of some cells (OS,
+    /// feature or cfg gated). In a cell whose lists carry neither the base
+    /// nor the head identity the entry is not an `UNUSED_ALLOWANCE`.
+    #[serde(default)]
+    pub platform_gated: bool,
 }
 
 /// Parsed delta file.

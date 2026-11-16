@@ -241,8 +241,13 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
         );
     }
 
-    // Whatever the pairing could not consume is an unused allowance.
+    // Whatever the pairing could not consume is an unused allowance,
+    // except a `platform_gated` entry whose two identities are both absent
+    // from this cell's lists: that test is compiled out here.
     for entry in d.all() {
+        if entry.platform_gated && compiled_out(entry, &base, &head) {
+            continue;
+        }
         report.add(
             &args.base_list,
             1,
@@ -266,6 +271,21 @@ fn execute(args: DiscoveryArgs) -> Result<u8, String> {
         suggest::write(path, base, &suggestions)?;
     }
     Ok(exit_code(&report))
+}
+
+/// True when neither the base identity (`path` + `item`) nor the head
+/// identity (`to_path` + `to_item`) of the entry is in its list. An entry
+/// without a head side never qualifies.
+fn compiled_out(entry: &delta::Entry, base: &TestList, head: &TestList) -> bool {
+    let (Some(to_path), Some(to_item)) = (&entry.to_path, &entry.to_item) else {
+        return false;
+    };
+    !base
+        .counts
+        .contains_key(&(entry.path.clone(), entry.item.clone()))
+        && !head
+            .counts
+            .contains_key(&(to_path.clone(), to_item.clone()))
 }
 
 /// Locates the first `[[moved]]`/`[[renamed]]` entry whose base side
