@@ -125,8 +125,8 @@ fn dir_fsync_error_propagates() {
     let dir = temp_dir();
     let path = dir.path().to_path_buf();
     drop(dir);
-    let err =
-        crate::format_stamp::io::fsync_dir(&path).expect_err("fsync of a removed directory fails");
+    let err = crate::format_stamp::io::atomic_write::fsync_dir(&path)
+        .expect_err("fsync of a removed directory fails");
     assert!(err.kind() == std::io::ErrorKind::NotFound, "got {err:?}");
 }
 
