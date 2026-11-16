@@ -755,6 +755,18 @@ fn stamp_test_snapshot(root: &Path, epoch: Option<u64>) -> std::path::PathBuf {
     backup(&src, &dst).expect("backup ok").dest_dir
 }
 
+/// Snapshot whose source dir carries `bytes` as `format.stamp` (not a valid
+/// stamp), built through `backup` so the manifest lists the file.
+fn stamp_test_snapshot_raw(root: &Path, bytes: &[u8]) -> std::path::PathBuf {
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join(STAMP_FILE_NAME), bytes).unwrap();
+    fs::write(src.join("a.txt"), b"hello").unwrap();
+    let dst = root.join("snapshot_dest");
+    fs::create_dir_all(&dst).unwrap();
+    backup(&src, &dst).expect("backup ok").dest_dir
+}
+
 #[test]
 fn restore_newer_snapshot_refused_before_touching_data_dir() {
     let root = TempDir::new().unwrap();
@@ -780,8 +792,7 @@ fn restore_newer_snapshot_refused_before_touching_data_dir() {
 #[test]
 fn restore_corrupt_snapshot_refused_before_touching_data_dir() {
     let root = TempDir::new().unwrap();
-    let snapshot = stamp_test_snapshot(root.path(), None);
-    fs::write(snapshot.join(STAMP_FILE_NAME), b"junk").unwrap();
+    let snapshot = stamp_test_snapshot_raw(root.path(), b"junk");
     let data_dir = root.path().join("data_dir");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(data_dir.join("live.txt"), b"live").unwrap();

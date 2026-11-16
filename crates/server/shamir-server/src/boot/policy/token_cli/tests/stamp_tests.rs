@@ -40,7 +40,11 @@ async fn token_cli_stamps_empty_dir_before_server_meta() {
     });
     {
         let mut io = streams(&mut o, &mut e);
-        run_with_io(&c, a, &mut io).await.expect("create");
+        // The user does not exist: the command fails after the data directory
+        // was opened, which is exactly where the stamp must already be written.
+        run_with_io(&c, a, &mut io)
+            .await
+            .expect_err("unknown user is refused once the directory is open");
     }
     assert!(
         c.data_dir.join(STAMP_FILE_NAME).is_file(),
