@@ -24,17 +24,17 @@ module = "crate::table::support::storage::catalog"
 # owner: <foreign-impl> — declared and implemented in the journal backend's
 # durability_handle module.
 type = "DurabilityHandle"
-module = "crate::repo::journal::backend::durability_handle"
+module = "crate::journal::backend::durability_handle"
 
 [[owned_impl]]
 # owner: <foreign-impl> — declared in the changefeed submodule.
 type = "ChangefeedHandle"
-module = "crate::repo::journal::backend::durability_handle::changefeed"
+module = "crate::journal::backend::durability_handle::changefeed"
 
 [[owned_impl]]
 # owner: <foreign-impl> — declared in the retention_gate submodule.
 type = "RetentionGate"
-module = "crate::repo::journal::backend::durability_handle::retention_gate"
+module = "crate::journal::backend::durability_handle::retention_gate"
 
 [[owned_impl]]
 # owner: <foreign-impl> — declared in the migration coordinator submodule.
