@@ -4,6 +4,7 @@
 use super::{TierOptions, TierStats};
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::admission::AdmissionLimits;
+use crate::wasm::compile_cache::metrics::note_miss;
 use crate::wasm::compile_cache::DiskCacheStore;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -136,8 +137,7 @@ pub struct WasmEngine {
     /// Test-only fault-injection switches (see [`TierFaults`]).
     #[cfg(test)]
     faults: Arc<TierFaults>,
-    /// Test-only handle to observe cache hits through the public constructor.
-    #[cfg(test)]
+    /// Disk cache handle used to determine whether optimized compilation can hit it.
     store: Option<Arc<DiskCacheStore>>,
 }
 
@@ -304,7 +304,6 @@ impl WasmEngine {
             uncached_optimized: Arc::new(OnceLock::new()),
             #[cfg(test)]
             faults: Arc::new(TierFaults::default()),
-            #[cfg(test)]
             store,
         })
     }
@@ -572,6 +571,10 @@ impl WasmEngine {
 
     /// Compiles sanitized Wasm bytes on the optimized (Cranelift) engine.
     pub fn compile_optimized(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
+        // Without an active disk cache, every compile is a cache miss.
+        if self.store.as_ref().is_none_or(|store| !store.is_bound()) {
+            note_miss();
+        }
         Module::from_binary(&self.optimized, wasm)
     }
 
@@ -586,7 +589,10 @@ impl WasmEngine {
             return Err(wasmtime::Error::msg("injected fast-tier compile failure"));
         }
         match &self.fast {
-            Some(engine) => Module::from_binary(engine, wasm),
+            Some(engine) => {
+                note_miss();
+                Module::from_binary(engine, wasm)
+            }
             None => Err(wasmtime::Error::msg(
                 "fast tier unavailable: the fast engine failed to initialize",
             )),

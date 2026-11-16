@@ -110,6 +110,7 @@ fn host_call_inner(
         let actor;
         let db_gateway;
         let repo;
+        let db_name;
         let net_gateway;
         let secret_grants;
         let stored_call_resolver;
@@ -143,6 +144,7 @@ fn host_call_inner(
             actor = state.actor.clone();
             db_gateway = state.db.clone();
             repo = state.repo.clone();
+            db_name = state.db_name.clone();
             net_gateway = state.net.clone();
             secret_grants = state.secret_grants.clone();
             stored_call_resolver = state.stored_call_resolver.clone();
@@ -163,6 +165,9 @@ fn host_call_inner(
         caller
             .set_fuel(0)
             .map_err(|e| wasmtime::Error::msg(format!("call: suspend parent fuel: {e}")))?;
+        // Charge the suspended segment only after revocation succeeds; if the
+        // revoke fails, AccountedStore remains responsible for settling it.
+        caller.data().metrics.add_fuel(parent_spent);
         {
             let state = caller.data();
             state.fuel_baseline.store(0, Ordering::Relaxed);
@@ -213,6 +218,9 @@ fn host_call_inner(
         }
         if let Some(db) = db_gateway {
             parent_ctx = parent_ctx.with_db(db, repo);
+        }
+        if let Some(name) = db_name {
+            parent_ctx = parent_ctx.with_db_name(name);
         }
         if let Some(net) = net_gateway {
             parent_ctx = parent_ctx.with_net(net);

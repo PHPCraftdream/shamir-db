@@ -4305,6 +4305,7 @@ dependencies = [
  "shamir-collections",
  "shamir-funclib",
  "shamir-lang",
+ "shamir-metrics",
  "shamir-private-dir",
  "shamir-proc-tree",
  "shamir-query-builder",

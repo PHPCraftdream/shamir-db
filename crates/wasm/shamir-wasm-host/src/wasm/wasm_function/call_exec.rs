@@ -9,10 +9,12 @@ use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use wasmtime::{Store, StoreLimitsBuilder};
 
 use super::function::WasmFunction;
 use super::guest_io::encode_params;
+use super::metrics::{resolve, CallMetricsEntry};
 use super::state::HostState;
 #[cfg(test)]
 use crate::wasm::fuel::FuelObserver;
@@ -28,6 +30,11 @@ impl ShamirFunction for WasmFunction {
         self.shared.module_hash().into()
     }
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
+        let depth = ctx.depth();
+        let metrics = resolve(ctx.db_name(), ctx.repo());
+        metrics.raise_depth(depth);
+        // Start at entry so encoding/lease errors and cancellation are observed.
+        let _duration = DurationGuard::new(depth == 0, Arc::clone(&metrics));
         maybe_schedule_upgrade(&self.shared);
         let input = encode_params(params)?;
 
@@ -40,7 +47,6 @@ impl ShamirFunction for WasmFunction {
         let stored_call_resolver = ctx.stored_call_resolver().cloned();
         let active_call_path = ctx.active_call_path().clone();
         let definer_owner = ctx.definer_owner().cloned();
-        let depth = ctx.depth();
         let depth_limit = ctx.depth_limit();
         // RI-7: the invocation's actor travels from FnCtx → HostState so
         // host_call.rs can rebuild the child FnCtx with the SAME actor for a
@@ -101,6 +107,8 @@ impl ShamirFunction for WasmFunction {
             actor,
             db,
             repo,
+            db_name: ctx.db_name().map(str::to_owned),
+            metrics,
             net,
             secret_grants,
             fuel_pool: fuel_pool.clone(),
@@ -282,6 +290,8 @@ impl AccountedStore {
             let baseline = store.data().fuel_baseline.load(Ordering::Relaxed);
             let remaining = store.get_fuel().unwrap_or(0);
             let spent = baseline.saturating_sub(remaining);
+            // Fuel consumed by this Store's final segment (suspend spends are recorded at the suspend site).
+            store.data().metrics.add_fuel(spent);
             let _ = store.set_fuel(0);
             // Settlement owns this Store's closing bookkeeping: reset the
             // segment baseline to 0 and charge the final segment against
@@ -308,6 +318,31 @@ impl AccountedStore {
 impl Drop for AccountedStore {
     fn drop(&mut self) {
         self.settle();
+    }
+}
+
+/// Observes the depth-0 wall-clock duration on drop — covers every
+/// exit path of `call`, including early errors and cancellation.
+struct DurationGuard {
+    started: Option<Instant>,
+    metrics: Arc<CallMetricsEntry>,
+}
+
+impl DurationGuard {
+    fn new(depth0: bool, metrics: Arc<CallMetricsEntry>) -> Self {
+        Self {
+            started: depth0.then(Instant::now),
+            metrics,
+        }
+    }
+}
+
+impl Drop for DurationGuard {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            self.metrics.observe_duration_ns(ns);
+        }
     }
 }
 

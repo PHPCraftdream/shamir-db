@@ -33,12 +33,18 @@
 
 mod config;
 mod loop_body;
+mod metrics;
 #[cfg(test)]
 mod test_hooks;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 
 pub use config::FollowerLoopConfig;
 pub use loop_body::run_follower_loop;
 pub(crate) use loop_body::STALL_VISIBILITY_THRESHOLD;
+pub(crate) use metrics::note_source_created;
+pub use metrics::{replication_metrics_snapshot, LeaderStreamMetrics};
 #[cfg(test)]
 pub(crate) use test_hooks::{
     run_follower_loop_with_identity_store, ApplyParkHook, IdentityStoreOverride,

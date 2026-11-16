@@ -1,5 +1,6 @@
 use super::entry_frame::{decode, encode, HEADER_LEN, MAX_PAYLOAD};
 use super::entry_index::{EntryIndex, EntryMeta};
+use super::metrics::{note_hit, note_miss, register_index};
 use super::namespace::namespace;
 use super::private_dir::prepare;
 use std::borrow::Cow;
@@ -30,18 +31,26 @@ pub(crate) struct DiskCacheStore {
     /// Test-only: number of cache frames actually read from disk (`read_exact`).
     #[cfg(test)]
     frames_read: AtomicU64,
+    /// Test-only mirror of misses on this store, incremented alongside the
+    /// process-wide exporter counter in the real `CacheStore::get` path.
+    #[cfg(test)]
+    misses: AtomicU64,
 }
 
 #[derive(Debug)]
 struct BoundStore {
     namespace: [u8; 32],
     directory: PathBuf,
-    index: EntryIndex,
+    index: Arc<EntryIndex>,
 }
 
 impl DiskCacheStore {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self::with_caps(root, MAX_BYTES, MAX_ENTRIES)
+    }
+
+    pub(crate) fn is_bound(&self) -> bool {
+        self.bound.get().is_some()
     }
 
     /// Test-only: a store with small caps so cap enforcement is observable.
@@ -63,6 +72,8 @@ impl DiskCacheStore {
             hits: AtomicU64::new(0),
             #[cfg(test)]
             frames_read: AtomicU64::new(0),
+            #[cfg(test)]
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -86,7 +97,7 @@ impl DiskCacheStore {
         }
         let directory = root.join(namespace_name(&ns));
         fs::create_dir_all(directory.join("tmp"))?;
-        let index = EntryIndex::new();
+        let index = Arc::new(EntryIndex::new());
         let mut found: Vec<([u8; 32], u64, u128)> = Vec::new();
         for shard in fs::read_dir(&directory)? {
             let shard = shard?;
@@ -157,7 +168,9 @@ impl DiskCacheStore {
         self.trim(&bound);
         self.bound
             .set(bound)
-            .map_err(|_| std::io::Error::other("cache store already bound"))
+            .map_err(|_| std::io::Error::other("cache store already bound"))?;
+        register_index(&self.bound.get().expect("cache store was just bound").index);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -173,6 +186,11 @@ impl DiskCacheStore {
     #[cfg(test)]
     pub(crate) fn frames_read(&self) -> u64 {
         self.frames_read.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     /// Test-only `(bytes, count)` snapshot of the shared index accounting.
@@ -274,8 +292,8 @@ impl DiskCacheStore {
     }
 }
 
-impl CacheStore for DiskCacheStore {
-    fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+impl DiskCacheStore {
+    fn get_cached(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
         let key: [u8; 32] = key.try_into().ok()?;
         let bound = self.bound.get()?;
         // Read what we need (len and a clone of the tick handle), then drop
@@ -306,6 +324,8 @@ impl CacheStore for DiskCacheStore {
                 // concurrently removed in between.
                 tick.store(self.tick.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
                 self.hits.fetch_add(1, Ordering::Relaxed);
+                // Global mirror for the metrics exporter.
+                note_hit();
                 Some(Cow::Owned(frame[HEADER_LEN..].to_vec()))
             }
             _ => {
@@ -313,6 +333,18 @@ impl CacheStore for DiskCacheStore {
                 None
             }
         }
+    }
+}
+
+impl CacheStore for DiskCacheStore {
+    fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+        let result = self.get_cached(key);
+        if result.is_none() {
+            #[cfg(test)]
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            note_miss();
+        }
+        result
     }
 
     fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {

@@ -183,6 +183,7 @@ pub struct FnCtx {
     depth_limit: u32,
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
+    db_name: Option<String>,
     net: Option<Arc<dyn NetGateway>>,
     secret_grants: Arc<TFxSet<String>>,
     actor: Actor,
@@ -213,6 +214,7 @@ impl FnCtx {
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
             repo: String::new(),
+            db_name: None,
             net: None,
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
@@ -234,6 +236,7 @@ impl FnCtx {
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
             repo: String::new(),
+            db_name: None,
             net: None,
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
@@ -374,6 +377,7 @@ impl FnCtx {
     pub fn without_target_capabilities(mut self) -> Self {
         self.db = None;
         self.repo.clear();
+        self.db_name = None;
         self.net = None;
         self.secret_grants = Arc::new(TFxSet::default());
         self.registry = None;
@@ -402,6 +406,13 @@ impl FnCtx {
     pub fn with_db(mut self, gateway: Arc<dyn DbGateway>, repo: String) -> Self {
         self.db = Some(gateway);
         self.repo = repo;
+        self
+    }
+
+    /// Builder: name the database scope for telemetry (the metrics `db`
+    /// label). Optional — absent for context-less invocations.
+    pub fn with_db_name(mut self, name: impl Into<String>) -> Self {
+        self.db_name = Some(name.into());
         self
     }
 
@@ -530,6 +541,11 @@ impl FnCtx {
     /// The default repository for DB operations.
     pub fn repo(&self) -> &str {
         &self.repo
+    }
+
+    /// Database scope name for telemetry, when the invocation has one.
+    pub fn db_name(&self) -> Option<&str> {
+        self.db_name.as_deref()
     }
 
     /// Atomic integer increment on a global variable.

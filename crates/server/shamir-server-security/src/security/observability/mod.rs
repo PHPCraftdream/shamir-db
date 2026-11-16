@@ -68,7 +68,13 @@ mod visibility_export;
 #[cfg(test)]
 mod tests;
 
+pub use export::replication::{
+    install_replication_metrics_source, ReplicationSnapshot, StreamState, STREAM_STATES,
+};
+
 use durability_export::{record_durability_metrics, register_durability_metrics};
+use export::functions::{record_functions_metrics, register_functions_metrics};
+use export::replication::{record_replication_metrics, register_replication_metrics};
 use export::{record_storage_metrics, register_storage_metrics};
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
@@ -458,6 +464,8 @@ pub async fn spawn_with_byte_budget(
     register_durability_metrics();
     // R4a-2 §2.4: WAL size/segments/truncation lag/waiters + fsync histogram.
     register_storage_metrics();
+    register_functions_metrics();
+    register_replication_metrics();
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -599,6 +607,8 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
             if let Some(db) = &s.db {
                 sample_gate_metrics(db);
             }
+            record_functions_metrics();
+            record_replication_metrics();
             (StatusCode::OK, h.render()).into_response()
         }
         None => (

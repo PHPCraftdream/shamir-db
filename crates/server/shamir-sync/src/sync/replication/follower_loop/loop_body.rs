@@ -16,6 +16,8 @@ use crate::replication::source::seed::terminal::{clear_stall, note_swallowed_fai
 use crate::replication::source::{leader_epoch_of, ReplSource};
 
 use super::config::FollowerLoopConfig;
+use super::metrics;
+use shamir_server_security::observability::StreamState;
 
 #[cfg(test)]
 use super::test_hooks::{ApplyParkHook, IdentityStoreOverride};
@@ -144,12 +146,22 @@ pub(super) async fn run_follower_loop_internal(
         apply_park,
         #[cfg(test)]
             exit_hook: _,
+        #[cfg(test)]
+        metrics_registry,
     } = cfg;
     let subscription = if subscription.is_empty() {
         None
     } else {
         Some(subscription.as_str())
     };
+    // Resolve the bounded owner cell once, before startup awaits. The guard's
+    // Drop publishes Stopped on every return or cancellation path.
+    let stream_metrics = metrics::StreamMetrics::start(
+        &db_name,
+        &repo,
+        #[cfg(test)]
+        metrics_registry.as_deref(),
+    );
     #[cfg(not(test))]
     let identity_fence = true;
     let apply_policy = if validate_replicated_payload {
@@ -232,11 +244,6 @@ pub(super) async fn run_follower_loop_internal(
         | Err(e @ ReplError::UpstreamKeyMismatch { .. })
         | Err(e @ ReplError::IdentityMismatch { .. }) => return Err(e),
         Err(e) => {
-            // A transient hello failure: we cannot seed the epoch, so treat
-            // it as a backoff-worthy transport error and let the loop's
-            // backoff machinery handle the retry. We seed the epoch at 0
-            // (the minimum) so the first real pull reply still fences on
-            // regression correctly.
             warn!(
                 node_id = %node_id,
                 error = %e,
@@ -321,7 +328,7 @@ pub(super) async fn run_follower_loop_internal(
                     &mut stall_reported,
                 )
                 .await;
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
         };
@@ -376,7 +383,7 @@ pub(super) async fn run_follower_loop_internal(
                     &mut stall_reported,
                 )
                 .await;
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
         };
@@ -416,7 +423,7 @@ pub(super) async fn run_follower_loop_internal(
                     &mut stall_reported,
                 )
                 .await;
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
         };
@@ -484,6 +491,8 @@ pub(super) async fn run_follower_loop_internal(
                 ..
             } => {
                 backoff_ms = INITIAL_BACKOFF_MS;
+                stream_metrics.set_state(StreamState::Streaming);
+                stream_metrics.set_lag(current_version.saturating_sub(bookmark));
                 (events, gap_at, current_version)
             }
             ReplResponse::Error { code, message, .. } => {
@@ -517,7 +526,7 @@ pub(super) async fn run_follower_loop_internal(
                     &mut stall_reported,
                 )
                 .await;
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
             ReplResponse::Hello { .. } => {
@@ -529,7 +538,7 @@ pub(super) async fn run_follower_loop_internal(
                     node_id = %node_id,
                     "follower_loop: expected Pull, got Hello; backing off"
                 );
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
         };
@@ -576,7 +585,7 @@ pub(super) async fn run_follower_loop_internal(
                     &mut stall_reported,
                 )
                 .await;
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
                 continue;
             }
         };
@@ -678,7 +687,12 @@ pub(super) async fn run_follower_loop_internal(
                     .await
                     .map_err(|error| ReplError::Bookmark(error.to_string()))?;
                 let advanced = post_apply_bookmark > bookmark;
+                stream_metrics.set_lag(current_version.saturating_sub(post_apply_bookmark));
                 if advanced {
+                    stream_metrics.note_durable_progress(
+                        current_version.saturating_sub(post_apply_bookmark),
+                        metrics::unix_now_ns(),
+                    );
                     consecutive_failures = 0;
                     if stall_reported {
                         pending_stall = Some(PendingStall::Clear(post_apply_bookmark));
@@ -745,7 +759,7 @@ pub(super) async fn run_follower_loop_internal(
                 consecutive_failures += 1;
                 // Guard-held: DEFERRED — persisted after the guard drop below.
                 pending_stall = Some(PendingStall::Note(e.to_string()));
-                sleep_backoff(&cancel, &mut backoff_ms).await;
+                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
             }
         }
         drop(_apply_guard);
@@ -788,7 +802,12 @@ pub(super) async fn run_follower_loop_internal(
 /// Exponential backoff sleep that is cancellation-aware. Doubles
 /// `backoff_ms` on each call (capped at `MAX_BACKOFF_MS`); leaves it
 /// untouched on cancellation (the loop is about to return anyway).
-async fn sleep_backoff(cancel: &CancellationToken, backoff_ms: &mut u64) {
+async fn sleep_backoff(
+    cancel: &CancellationToken,
+    backoff_ms: &mut u64,
+    stream_metrics: &metrics::StreamMetrics,
+) {
+    stream_metrics.set_state(StreamState::BackingOff);
     let this = *backoff_ms;
     tokio::select! {
         _ = cancel.cancelled() => {}

@@ -30,7 +30,9 @@ mod transport;
 pub use transport::{in_process, prod_factory, source, wire_source};
 
 pub use error::ReplError;
-pub use follower_loop::{run_follower_loop, FollowerLoopConfig};
+pub use follower_loop::{
+    replication_metrics_snapshot, run_follower_loop, FollowerLoopConfig, LeaderStreamMetrics,
+};
 pub use prod_factory::build_prod_factory;
 // Public so the seed-recovery follower harness (external test crate) can
 // construct it; the transport module itself stays private.

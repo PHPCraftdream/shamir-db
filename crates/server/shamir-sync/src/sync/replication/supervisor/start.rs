@@ -11,7 +11,9 @@ use super::handle::SubHandle;
 use super::machine::SubscriptionSupervisor;
 use super::Subscription;
 use crate::replication::error::ReplError;
-use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
+use crate::replication::follower_loop::{
+    note_source_created, run_follower_loop, FollowerLoopConfig,
+};
 use crate::replication::identity_fence;
 use crate::replication::source;
 use crate::replication::source::seed::terminal;
@@ -272,6 +274,18 @@ impl SubscriptionSupervisor {
                     }
                 }
             }
+        }
+        // A superseded lease must not claim a source creation that will not
+        // be invoked.
+        if !lease.valid.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let is_reconnect = self
+            .source_starts
+            .insert_sync(sub.name.clone(), ())
+            .is_err();
+        for (db, repo) in &pull_targets {
+            note_source_created(db, repo, is_reconnect);
         }
         let source = (self.factory)(sub);
         // T5 seam: awaited after admission and before spawn — the startup

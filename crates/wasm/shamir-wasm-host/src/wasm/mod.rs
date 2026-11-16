@@ -19,17 +19,22 @@ mod engine;
 mod fuel;
 mod wasm_function;
 
+pub use admission::metrics::{admission_rejection_totals, ADMISSION_REJECTION_REASONS};
 pub use admission::{
     admit_module, check_module, check_shamir_source, create_shamir_source, verify_wasm_module,
     AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleHash, ModuleReport,
     SANCTIONED_HOST_IMPORTS,
 };
+pub use compile_cache::metrics::{compile_cache_metrics, CompileCacheMetrics};
 pub use engine::{
     Tier, TierMode, TierOptions, TierReport, TierStats, UpgradeState, WasmEngine,
     WasmEngineOptions, WasmLimits,
 };
 #[cfg(test)]
 pub(crate) use wasm_function::encode_params;
+#[cfg(test)]
+pub(crate) use wasm_function::metrics::local_registry_capacity_totals;
+pub use wasm_function::metrics::{call_metrics_snapshot, CallMetricsSnapshot};
 pub use wasm_function::WasmFunction;
 
 /// Test-only re-export: lets

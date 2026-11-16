@@ -26,7 +26,9 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
+use shamir_query_builder::write::insert;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER};
+use shamir_server_security::observability::StreamState;
 
 use crate::db_handler::handler::ShamirDbHandler;
 
@@ -582,4 +584,153 @@ async fn pull_refused_with_downstream_resync_required() {
         }
         other => panic!("expected Error(downstream_resync_required), got {other:?}"),
     }
+}
+
+/// A successful leader Pull records only its authorized, existing repo in
+/// the production snapshot source, using the request's durable bookmark.
+#[tokio::test]
+async fn pull_records_leader_stream_metrics_for_authorized_repo() {
+    let db_name = "leader_metrics_bridge_db";
+    // RepoConfig's default write store is `main`; the unique db keeps the
+    // stream label isolated from other tests without a non-default repo name.
+    let repo_name = "main";
+    let owner = Actor::User(principal64([0xAB; 16]));
+    let shamir = ShamirDb::init_memory().await.expect("init db");
+    shamir
+        .create_db_as(db_name, owner.clone())
+        .await
+        .expect("create db");
+    let config = RepoConfig::new(repo_name, BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as(db_name, config, owner.clone())
+        .await
+        .expect("create repo");
+
+    let mut batch = Batch::named("metrics_bridge_insert");
+    batch.transactional();
+    batch.insert(
+        "insert_item",
+        insert("items").rows([doc! {
+            "id" => "metrics-bridge-item"
+        }]),
+    );
+    shamir
+        .execute_as(owner.clone(), db_name, &batch.build())
+        .await
+        .expect("commit fixture row");
+
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+
+    // A denied key must not be registered as a leader stream.
+    let denied = handler
+        .handle_repl(
+            &carol_replicator_session(),
+            ReplRequest::Pull {
+                db: db_name.into(),
+                repo: repo_name.into(),
+                from_version: 1,
+                limit: 10,
+                wait_ms: None,
+                capabilities: None,
+            },
+        )
+        .await;
+    assert!(matches!(denied, ReplResponse::Error { ref code, .. } if code == "denied_repo"));
+    assert!(shamir_sync::replication::replication_metrics_snapshot()
+        .iter()
+        .all(|snapshot| snapshot.db != db_name || snapshot.repo != repo_name));
+
+    // Long-poll through the production handler until committed events are
+    // durable. from_version=1 reports bookmark 0, so this Pull must not set
+    // a receipt timestamp even though it returns the latest event.
+    let first = handler
+        .handle_repl(
+            &alice_replicator_session(),
+            ReplRequest::Pull {
+                db: db_name.into(),
+                repo: repo_name.into(),
+                from_version: 1,
+                limit: 10,
+                wait_ms: Some(5_000),
+                capabilities: None,
+            },
+        )
+        .await;
+    let (current_version, events) = match first {
+        ReplResponse::Pull {
+            current_version,
+            events,
+            ..
+        } => (current_version, events),
+        other => panic!("expected Pull with durable events, got {other:?}"),
+    };
+    assert!(
+        current_version > 0,
+        "fixture commits should advance the version"
+    );
+    let pulled: Vec<shamir_db::engine::tx::ReplicatedEvent> =
+        rmp_serde::from_slice(&events).expect("decode Pull events");
+    assert!(
+        pulled
+            .iter()
+            .any(|event| event.event.commit_version == current_version),
+        "Pull served the latest event, whose receipt is still unacknowledged"
+    );
+
+    let snapshots = shamir_sync::replication::replication_metrics_snapshot();
+    let first_snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.db == db_name && snapshot.repo == repo_name)
+        .expect("authorized leader Pull registered its snapshot");
+    assert_eq!(first_snapshot.state_code, StreamState::Stopped.code());
+    assert_eq!(
+        first_snapshot.lag_versions, 0,
+        "completed request does not retain leader lag"
+    );
+    assert_eq!(
+        first_snapshot.last_receipt_ns, 0,
+        "bookmark zero is not receipt progress"
+    );
+
+    // Only the next request acknowledges the returned events. Its bookmark
+    // equals current_version, so it clears lag and starts the receipt clock.
+    let acknowledged = handler
+        .handle_repl(
+            &alice_replicator_session(),
+            ReplRequest::Pull {
+                db: db_name.into(),
+                repo: repo_name.into(),
+                from_version: current_version.saturating_add(1),
+                limit: 10,
+                wait_ms: None,
+                capabilities: None,
+            },
+        )
+        .await;
+    match acknowledged {
+        ReplResponse::Pull {
+            current_version: observed,
+            events,
+            ..
+        } => {
+            assert_eq!(observed, current_version);
+            let events: Vec<shamir_db::engine::tx::ReplicatedEvent> =
+                rmp_serde::from_slice(&events).expect("decode empty Pull");
+            assert!(events.is_empty(), "all events were acknowledged");
+        }
+        other => panic!("expected successful acknowledgment Pull, got {other:?}"),
+    }
+
+    let snapshots = shamir_sync::replication::replication_metrics_snapshot();
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.db == db_name && snapshot.repo == repo_name)
+        .expect("acknowledged leader Pull retained its snapshot");
+    assert_eq!(snapshot.state_code, StreamState::Stopped.code());
+    assert_eq!(snapshot.lag_versions, 0, "durable bookmark caught up");
+    assert_ne!(
+        snapshot.last_receipt_ns, 0,
+        "bookmark advance gets an observation timestamp"
+    );
 }

@@ -43,7 +43,7 @@ async fn pause_before_retry_page() {
 }
 
 use super::source::ReplSource;
-use crate::replication::error::ReplError;
+use crate::replication::{error::ReplError, LeaderStreamMetrics};
 pub const MAX_PULL_EVENTS: u32 = 1024;
 
 /// In-process [`ReplSource`] backed directly by a leader `Arc<ShamirDb>`.
@@ -174,6 +174,9 @@ impl ReplSource for InProcessReplSource {
                 message: format!("repository '{db}/{repo}' not found"),
             });
         };
+        // Resolve once after confirming the repo exists; all later updates use
+        // this handle rather than looking up the key again.
+        let stream_metrics = LeaderStreamMetrics::new(db, repo);
         // S5c-X PR8b: refuse to serve a quarantined repo — the same
         // serve-entry refusal the wire handler performs via
         // `has_resync_required_subscription_covering`.
@@ -314,6 +317,9 @@ impl ReplSource for InProcessReplSource {
             });
         }
 
+        // Mark only a successful Pull; the reported bookmark is the request's
+        // durable progress, not the final event in this returned page.
+        stream_metrics.observe_pull(current_version, from_version.saturating_sub(1));
         Ok(ReplResponse::Pull {
             leader_epoch: self.epoch(),
             schema_digest: Some(schema_digest),
