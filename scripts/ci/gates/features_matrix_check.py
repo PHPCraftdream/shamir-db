@@ -110,6 +110,13 @@ EXPECTED: dict[str, set[str]] = {
 }
 
 FORWARDED = {
+    # the repo crate has NO `default` feature: the facade forwards only
+    # `fjall` and `test-util` to it
+    "shamir-engine-repo": {
+        cell: ({"fjall"} if "fjall" in cell else set())
+        | ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
+        for cell in EXPECTED
+    },
     "shamir-engine-query": {
         cell: {"default"} | ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
         for cell in EXPECTED

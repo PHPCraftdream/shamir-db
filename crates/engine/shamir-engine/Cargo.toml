@@ -25,6 +25,9 @@ shamir-storage = { path = "../../storage/shamir-storage", default-features = fal
 shamir-query-types = { path = "../../query/shamir-query-types" }
 # Query evaluation leaf, re-exported by the engine facade.
 shamir-engine-query = { path = "../shamir-engine-query" }
+# Repo layer (journal / meta / seed), re-exported by the engine facade
+# at shamir_engine::repo::*.
+shamir-engine-repo = { path = "../shamir-engine-repo" }
 # Built-in scalar + aggregate function library. Dispatched from the
 # filter / set / group-by paths via the engine's shared registries.
 shamir-funclib = { path = "../../query/shamir-funclib" }
@@ -89,7 +92,7 @@ all-backends = ["fjall"]
 # it's gated to keep the default `cargo bench --bench fts_indexed` run
 # bounded.
 fts_indexed_long = []
-fjall  = ["shamir-storage/fjall"]
+fjall  = ["shamir-storage/fjall", "shamir-engine-repo/fjall"]
 # Also exposes query::auth::SessionPermissions.
 # Exposes test-only fault-injection seams (currently
 # `RepoInstance::install_table_for_test`) to downstream crates whose OWN
@@ -98,7 +101,7 @@ fjall  = ["shamir-storage/fjall"]
 # shamir-engine is pulled in as a normal dependency. Enabled by
 # `shamir-db`'s `[dev-dependencies]` (audit #540 regression test); never
 # enabled by default, so nothing ships in a production build.
-test-util = ["shamir-engine-query/test-util", "shamir-engine-validator/test-util"]
+test-util = ["shamir-engine-query/test-util", "shamir-engine-validator/test-util", "shamir-engine-repo/test-util"]
 # F-56 (#882): enables the loom model-checker module in
 # `writer_drain_barrier.rs`. The `build.rs` emits `cfg(loom)` ONLY for this
 # crate when this feature is on (NOT via a global rustflag), so the heavy
@@ -112,6 +115,9 @@ dhat = "0.3"
 
 [dev-dependencies]
 shamir-engine-query = { path = "../shamir-engine-query", features = ["test-util"] }
+# Facade durability/seed tests use the repo crate's test-only seams
+# (RecoverabilityCoverage, replication-bound test knobs).
+shamir-engine-repo = { path = "../shamir-engine-repo", features = ["test-util"] }
 tokio = { version = "1.49.0", features = ["test-util", "process", "io-util", "time", "rt"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3.10.1"

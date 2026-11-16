@@ -3,6 +3,10 @@
 # binds a layer name to its module path when the two differ.
 
 [[crate]]
+name = "shamir-engine-repo"
+layers = ["repo"]
+
+[[crate]]
 name = "shamir-engine"
 layers = ["repo", "table", "validator", "tx", "query", "instance", "db_instance"]
 

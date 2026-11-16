@@ -1,7 +1,7 @@
 use shamir_query_types::batch::TransactionInfo;
 use shamir_storage::error::DbError;
 use shamir_tx::TxContext;
-use shamir_wal::{WalAppendError, WalOpV2};
+use shamir_wal::WalOpV2;
 
 use super::legacy_and_lockfree::{
     commit_tx_inner_legacy_async, commit_tx_lockfree, release_pessimistic_locks,
@@ -439,7 +439,6 @@ impl From<TxError> for DbError {
     }
 }
 
-#[path = "../../../../../repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"]
 mod durability_completion;
 #[cfg(test)]
 pub(crate) use durability_completion::TEST_SYNCED_WAL_REPO;

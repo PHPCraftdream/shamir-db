@@ -52,6 +52,12 @@ def tree_text(engine_features):
         lines.append('%s feature "default"' % package)
         if "test-util" in engine_features:
             lines.append('%s feature "test-util"' % package)
+    # The repo crate has no `default` feature: only fjall/test-util lines.
+    lines.append("shamir-engine-repo v0.1.0")
+    if "fjall" in engine_features:
+        lines.append('shamir-engine-repo feature "fjall"')
+    if "test-util" in engine_features:
+        lines.append('shamir-engine-repo feature "test-util"')
     return "\n".join(lines) + "\n"
 
 
@@ -300,6 +306,16 @@ class ForwardedFeatureTests(unittest.TestCase):
         code, _, err = run_main(["--expected", "no-default"], tree=tree)
         self.assertEqual(code, 2)
         self.assertIn("shamir-engine-validator does not appear", err)
+
+    def test_missing_repo_package_exits_2(self):
+        tree = "".join(
+            line + "\n"
+            for line in tree_text([]).splitlines()
+            if not line.startswith("shamir-engine-repo")
+        )
+        code, _, err = run_main(["--expected", "no-default"], tree=tree)
+        self.assertEqual(code, 2)
+        self.assertIn("shamir-engine-repo does not appear", err)
 
     def test_validator_forwarded_mismatch_exits_1(self):
         tree = tree_text(["test-util"]).replace('shamir-engine-validator feature "test-util"\n', "")
