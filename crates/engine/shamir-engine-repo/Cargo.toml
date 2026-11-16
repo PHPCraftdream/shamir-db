@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 shamir-types = { path = "../../foundation/shamir-types" }
 shamir-collections = { path = "../../foundation/shamir-collections" }
+shamir-metrics = { path = "../../foundation/shamir-metrics" }
 shamir-storage = { path = "../../storage/shamir-storage", default-features = false }
 shamir-wal = { path = "../../storage/shamir-wal" }
 shamir-tx = { path = "../../storage/shamir-tx" }

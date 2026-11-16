@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use shamir_metrics::HistogramSnapshot;
 use shamir_query_types::{ReplicationServe, WalCommitTier};
 use shamir_wal::WalGroupCommit;
 
@@ -42,11 +43,30 @@ pub struct DurabilityMetrics {
 /// not a cardinality of sparse coverage entries. Age is a lower bound since
 /// first observation of R + 1, not commit allocation time. Independent WAL
 /// counters/watermarks are diagnostic samples, not a coverage certificate.
+///
+/// Versioned by position: legacy slots keep their documented meaning
+/// (`durability_export.rs` renders by index); the R4a PR-3 WAL rows land at
+/// the END of the arrays, at the index constants below — gauges 11..15 are
+/// WAL size bytes, segment files, truncation lag and group-commit waiters,
+/// counter 8 is cumulative WAL payload bytes. The u64 arrays cannot carry
+/// histogram buckets, so the sync-worker fsync histogram rides as the one
+/// trailing `fsync` field (`None` = WAL uninitialized).
 #[derive(Default)]
 pub struct DurabilityMetricsSnapshot {
-    pub gauges: [u64; 11],
-    pub counters: [u64; 8],
+    pub gauges: [u64; 15],
+    pub counters: [u64; 9],
     pub journal: [u64; 6],
+    /// Torn-free snapshot of the WAL's sync-worker fsync-round histogram.
+    pub fsync: Option<HistogramSnapshot>,
+}
+
+impl DurabilityMetricsSnapshot {
+    /// Single source of truth for the positional slots added in R4a PR-3.
+    pub const GAUGE_WAL_SIZE_BYTES: usize = 11;
+    pub const GAUGE_WAL_SEGMENTS: usize = 12;
+    pub const GAUGE_WAL_TRUNCATION_LAG_VERSIONS: usize = 13;
+    pub const GAUGE_GROUP_COMMIT_WAITERS: usize = 14;
+    pub const COUNTER_WAL_BYTES_TOTAL: usize = 8;
 }
 
 impl Default for DurabilityMetrics {
@@ -123,6 +143,18 @@ impl DurabilityMetrics {
                 g.instance_sync_duration_ns(),
             )
         });
+        // WAL scrape rows (§2.4): size, segment files, truncation lag (the
+        // durable argument is the sampled W above — a diagnostic sample like
+        // W/R), group-commit waiters and cumulative payload bytes.
+        let (wal_size, segments, lag, waiters, wal_bytes) = group.map_or((0, 0, 0, 0, 0), |g| {
+            (
+                g.wal_size_bytes(),
+                g.segment_count(),
+                g.truncation_lag_versions(w),
+                g.sync_waiters() as u64,
+                g.bytes_written_total(),
+            )
+        });
         DurabilityMetricsSnapshot {
             gauges: [
                 u64::from(policy.wal_commit() == WalCommitTier::Synced),
@@ -136,6 +168,10 @@ impl DurabilityMetrics {
                 span,
                 first,
                 age,
+                wal_size,
+                segments,
+                lag,
+                waiters,
             ],
             counters: [
                 calls,
@@ -146,8 +182,10 @@ impl DurabilityMetrics {
                 self.held_ns.load(Ordering::Relaxed),
                 self.held_count.load(Ordering::Relaxed),
                 self.epoch_bumps.load(Ordering::Relaxed),
+                wal_bytes,
             ],
             journal: [0; 6],
+            fsync: group.map(WalGroupCommit::fsync_histogram_snapshot),
         }
     }
 }

@@ -36,7 +36,11 @@ pub use replication_bound::{BOUND_WAIT_MS_FOR_TEST, SKIP_S_CLAMP_FOR_TEST};
 mod resolve;
 
 pub use durability_metrics::{DurabilityMetrics, DurabilityMetricsSnapshot};
+// The snapshot's `fsync` payload type: re-exported so positional readers
+// through the facade chain (`shamir_db::engine::repo::durability_policy`)
+// can name it.
 pub use durability_policy::effective_wal_segment_bytes;
+pub use shamir_metrics::HistogramSnapshot;
 // Test-only seam (the facade's durability tests need it): also exported
 // when the engine forwards its `test-util` feature.
 #[cfg(all(feature = "fjall", any(test, feature = "test-util")))]
@@ -48,6 +52,9 @@ pub use durability_policy::{DurabilityPolicy, DEFAULT_WAL_RETENTION_MAX_BYTES};
 pub(crate) use replication_bound::replication_bound_observed;
 pub use replication_bound::{replication_bound, REPLICATION_BOUND_WAIT};
 pub use resolve::resolve;
+
+#[cfg(test)]
+mod tests;
 
 // Amendments B2/B3: the typed enums moved to shamir-query-types
 // (wire-facing); re-exported so existing engine paths keep their import

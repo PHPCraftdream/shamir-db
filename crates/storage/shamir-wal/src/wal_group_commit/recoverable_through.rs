@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use shamir_metrics::{Histogram, HistogramSnapshot, LATENCY_NS_BOUNDS};
 use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::Notify;
 
@@ -46,6 +47,9 @@ pub struct SyncCoordinator {
     metric_coalesced: AtomicU64,
     metric_errors: AtomicU64,
     metric_duration_ns: AtomicU64,
+    /// `shamir_wal_fsync_seconds` source: the same round-`ns` sample the
+    /// duration counter already carries (snapshot replay + sink sync).
+    fsync: Histogram,
 }
 
 impl SyncCoordinator {
@@ -68,12 +72,19 @@ impl SyncCoordinator {
             metric_coalesced: AtomicU64::new(0),
             metric_errors: AtomicU64::new(0),
             metric_duration_ns: AtomicU64::new(0),
+            fsync: Histogram::new(LATENCY_NS_BOUNDS),
         }
     }
 
     fn covers(&self, target: u64) -> bool {
         self.has_success.load(Ordering::Acquire)
             && self.successful.load(Ordering::Acquire) >= target
+    }
+
+    /// Torn-free snapshot of the fsync-round histogram; scrape-side only,
+    /// surfaced through [`WalGroupCommit::fsync_histogram_snapshot`].
+    pub(crate) fn fsync_histogram_snapshot(&self) -> HistogramSnapshot {
+        self.fsync.snapshot()
     }
 
     fn start(self: &Arc<Self>) {
@@ -137,6 +148,8 @@ impl SyncCoordinator {
             let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
             self.rounds.fetch_add(1, Ordering::Relaxed);
             self.metric_duration_ns.fetch_add(ns, Ordering::Relaxed);
+            // Same round ns, no new clock read: failed rounds count too.
+            self.fsync.observe(ns);
             SYNC_LEADER_ROUNDS.fetch_add(1, Ordering::Relaxed);
             SYNC_NOW_DURATION_NS.fetch_add(ns, Ordering::Relaxed);
             if let Err(err) = result {
