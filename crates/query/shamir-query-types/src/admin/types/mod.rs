@@ -1,14 +1,15 @@
 //! Admin (DDL) operation types.
 
 pub mod changes_since_response;
-pub mod repo_ops;
+pub mod schema_migration;
 
 mod db;
 mod ddl;
 mod repl;
 
 pub use db::buffer_config;
-pub use db::db_ops;
+pub use db::catalogue::db_ops;
+pub use db::catalogue::repo_ops;
 pub use db::fk_action;
 pub use db::retention;
 pub use db::schema_ops;
@@ -49,6 +50,7 @@ pub use repo_ops::{
     AlterRepoOp, CreateRepoOp, DescribeRepoOp, DropRepoOp, RenameDbOp, RenameRepoOp,
 };
 pub use retention::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention, SetRetentionOp};
+pub use schema_migration::*;
 pub use schema_ops::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
     NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,

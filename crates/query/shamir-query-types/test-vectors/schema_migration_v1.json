@@ -1,0 +1,246 @@
+{
+  "version": 1,
+  "domain_separator_hex": "7368616d69722d646220736368656d61206d6967726174696f6e00",
+  "body": {
+    "id": "id",
+    "ordinal": 1,
+    "display_name": "n",
+    "dependencies": [],
+    "operations": [
+      {
+        "family": "table",
+        "variant": "create_table",
+        "fields": {
+          "create_table": "t",
+          "repo": "main",
+          "if_not_exists": false,
+          "retention": {
+            "max_age_secs": null,
+            "max_count": null,
+            "min_count": null
+          },
+          "schema": null
+        }
+      },
+      {
+        "family": "table",
+        "variant": "drop_table",
+        "fields": {
+          "drop_table": "t",
+          "repo": "main",
+          "if_exists": true,
+          "cascade": false
+        }
+      },
+      {
+        "family": "table",
+        "variant": "rename_table",
+        "fields": {
+          "rename_table": "t",
+          "to": "u",
+          "repo": "main"
+        }
+      },
+      {
+        "family": "index",
+        "variant": "create_index",
+        "fields": {
+          "create_index": "ix",
+          "table": "t",
+          "fields": [
+            [
+              "a"
+            ]
+          ],
+          "unique": false,
+          "sorted": false,
+          "repo": "main",
+          "index_type": "fts",
+          "fts_tokenizer": "whitespace",
+          "fts_language": null,
+          "functional_op": null,
+          "functional_args": null,
+          "vector_dim": null,
+          "vector_metric": null,
+          "vector_quantization": null,
+          "include": [],
+          "if_not_exists": false
+        }
+      },
+      {
+        "family": "index",
+        "variant": "drop_index",
+        "fields": {
+          "drop_index": "ix",
+          "repo": "main",
+          "table": "t",
+          "if_exists": true,
+          "request_id": null
+        }
+      },
+      {
+        "family": "index",
+        "variant": "rename_index",
+        "fields": {
+          "rename_index": "ix",
+          "to": "iy",
+          "table": "t",
+          "repo": "main",
+          "if_exists": false,
+          "request_id": null
+        }
+      },
+      {
+        "family": "schema",
+        "variant": "set_table_schema",
+        "fields": {
+          "set_table_schema": "t",
+          "repo": "main",
+          "schema": [],
+          "expected_version": null
+        }
+      },
+      {
+        "family": "schema",
+        "variant": "add_schema_rule",
+        "fields": {
+          "add_schema_rule": "t",
+          "repo": "main",
+          "rule": {
+            "path": [
+              "a"
+            ],
+            "type": "f64",
+            "min": 1.0,
+            "max": -0.0,
+            "default": null
+          }
+        }
+      },
+      {
+        "family": "schema",
+        "variant": "remove_schema_rule",
+        "fields": {
+          "remove_schema_rule": "t",
+          "repo": "main",
+          "path": [
+            "a"
+          ]
+        }
+      },
+      {
+        "family": "function",
+        "variant": "create_function",
+        "fields": {
+          "create_function": "f",
+          "source": "fn f() {}",
+          "wasm": null,
+          "replace": false,
+          "visibility": null,
+          "security": null,
+          "secret_grants": [],
+          "net_grants": [],
+          "lang": null,
+          "optimize": null
+        }
+      },
+      {
+        "family": "function",
+        "variant": "drop_function",
+        "fields": {
+          "drop_function": "f",
+          "if_exists": true
+        }
+      },
+      {
+        "family": "function",
+        "variant": "rename_function",
+        "fields": {
+          "rename_function": "f",
+          "to": "g"
+        }
+      },
+      {
+        "family": "function",
+        "variant": "check_function",
+        "fields": {
+          "check_function": {
+            "lang": null,
+            "wasm": null,
+            "source": "fn f() {}",
+            "optimize": null
+          }
+        }
+      },
+      {
+        "family": "function",
+        "variant": "alter_function",
+        "fields": {
+          "alter_function": "f",
+          "optimize": "never"
+        }
+      },
+      {
+        "family": "validator",
+        "variant": "create_validator",
+        "fields": {
+          "create_validator": "v",
+          "source": "fn validate() {}",
+          "wasm": null,
+          "replace": false,
+          "hmac": null
+        }
+      },
+      {
+        "family": "validator",
+        "variant": "drop_validator",
+        "fields": {
+          "drop_validator": "v",
+          "if_exists": true,
+          "hmac": null
+        }
+      },
+      {
+        "family": "validator",
+        "variant": "rename_validator",
+        "fields": {
+          "rename_validator": "v",
+          "to": "w"
+        }
+      },
+      {
+        "family": "validator",
+        "variant": "bind_validator",
+        "fields": {
+          "bind_validator": "v",
+          "db": "db",
+          "repo": "main",
+          "table": "t",
+          "ops": [
+            "insert",
+            "update"
+          ],
+          "priority": 1500
+        }
+      },
+      {
+        "family": "validator",
+        "variant": "unbind_validator",
+        "fields": {
+          "unbind_validator": "v",
+          "db": "db",
+          "repo": "main",
+          "table": "t"
+        }
+      }
+    ]
+  },
+  "vectors": [
+    {
+      "name": "every-admitted-operation",
+      "expected_canonical_bytes_hex": "0000000269640000000000000001000000016e0000000000000013000000367368616d69722d646220736368656d61206d6967726174696f6e206f702076310000010000000174000000046d61696e000100000000000000317368616d69722d646220686d61632063616e6f6e6963616c20763200000300000000000000046d61696e00000001740001000000357368616d69722d646220736368656d61206d6967726174696f6e206f7020763100000300000001740000000175000000046d61696e000000677368616d69722d646220736368656d61206d6967726174696f6e206f702076310000040000000269780000000174000000010000000100000001610000000000046d61696e0100000003667473010000000a776869746573706163650000000000000000000000000000367368616d69722d646220686d61632063616e6f6e6963616c20763200000400000000000000046d61696e0000000174000000026978010000003d7368616d69722d646220736368656d61206d6967726174696f6e206f702076310000060000000269780000000269790000000174000000046d61696e00000000357368616d69722d646220736368656d61206d6967726174696f6e206f702076310000070000000174000000046d61696e0000000000000000637368616d69722d646220736368656d61206d6967726174696f6e206f702076310000080000000174000000046d61696e0000000100000001610000000366363400000001013ff000000000000001018000000000000000000000000100000000000000000000397368616d69722d646220736368656d61206d6967726174696f6e206f702076310000090000000174000000046d61696e000000010000000161000000797368616d69722d646220686d61632063616e6f6e6963616c20763200001600000001660000000007696e766f6b6572000000000000000000016a8ff5ba6c1b7bbcf2cbebb9d38c826db877408a94c8478709e72a200a51db81000000000472757374000000046175746f0100000009666e20662829207b7d00000000247368616d69722d646220686d61632063616e6f6e6963616c20763200001a0000000166010000002d7368616d69722d646220736368656d61206d6967726174696f6e206f7020763100000c00000001660000000167000000427368616d69722d646220736368656d61206d6967726174696f6e206f7020763100000d0000000472757374000100000009666e20662829207b7d000000046175746f000000317368616d69722d646220736368656d61206d6967726174696f6e206f7020763100000e0000000166000000056e657665720000005c7368616d69722d646220686d61632063616e6f6e6963616c20763200001c00000001760001e3b8e9bc630de5a4716da69007d4e55109181bd0cfa53cca201be93acd6fed5a000100000010666e2076616c69646174652829207b7d00000000247368616d69722d646220686d61632063616e6f6e6963616c20763200001b0000000176010000002d7368616d69722d646220736368656d61206d6967726174696f6e206f7020763100001100000001760000000177000000437368616d69722d646220736368656d61206d6967726174696f6e206f702076310000120000000176000000026462000000046d61696e000000017400000002000105dc0000003b7368616d69722d646220736368656d61206d6967726174696f6e206f702076310000130000000176000000026462000000046d61696e0000000174",
+      "expected_checksum_hex": "2871d24c4d93a1b9465ff69d0a4e3ebc2ec8dff533fa76c3813dbfa8c6ecc1f8"
+    }
+  ],
+  "notes": "Neutral typed-body input descriptors for the 19 admitted operation families; operation construction in Rust tests uses the DDL builders. Golden bytes are independently derived from body.rs and ddl.rs grammar."
+}

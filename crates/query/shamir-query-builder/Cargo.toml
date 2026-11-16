@@ -12,6 +12,10 @@ license = "MIT OR Apache-2.0"
 # (rendered, not executed); behavioural coverage lives in the `tests/` modules.
 doctest = false
 
+[features]
+default = ["crypto"]
+crypto = ["shamir-query-types/crypto"]
+
 [dependencies]
 # The only domain dependency: the pure wire DTOs the builder constructs.
 shamir-query-types = { path = "../shamir-query-types", default-features = false }
