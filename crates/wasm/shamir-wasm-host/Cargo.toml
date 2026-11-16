@@ -12,6 +12,7 @@ shamir-funclib = { path = "../../query/shamir-funclib" }
 shamir-lang = { path = "../shamir-lang" }
 shamir-proc-tree = { path = "../../foundation/shamir-proc-tree" }
 shamir-wasm-admission = { path = "../shamir-wasm-admission" }
+shamir-metrics = { path = "../../foundation/shamir-metrics" }
 # Lock-free RCU slot holding a function's live compiled form (two-tier swap).
 arc-swap = "1.7"
 tokio = { version = "1.49.0", features = ["full"] }

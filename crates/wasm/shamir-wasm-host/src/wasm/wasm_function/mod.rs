@@ -75,6 +75,7 @@ mod call_exec;
 mod function;
 mod guest_io;
 mod linker;
+pub(crate) mod metrics;
 mod state;
 
 pub(crate) use function::run_compile_blocking;

@@ -3,6 +3,7 @@
 use super::compile_gate::run_gated_compile;
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::admission::{admit_module, AdmissionPolicy, ModuleReport};
+use crate::wasm::compile_cache::metrics::note_miss;
 use crate::wasm::engine::{TierMode, WasmEngine};
 use crate::wasm::wasm_function::build_linker;
 use std::sync::Arc;
@@ -76,6 +77,8 @@ fn compile_and_discard(engine: &WasmEngine, wasm: &[u8], mode: TierMode) -> FnRe
 
 fn check_optimized(engine: &WasmEngine, wasm: &[u8]) -> FnResult<()> {
     let uncached = engine.uncached_optimized_engine()?;
+    // The dry-run compiles on the cache-less engine — also a miss.
+    note_miss();
     let module = Module::from_binary(uncached, wasm).map_err(compile_error)?;
     pre_instantiate(uncached, &module)
 }

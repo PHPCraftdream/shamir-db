@@ -1,6 +1,7 @@
 mod disk_store;
 mod entry_frame;
 mod entry_index;
+pub(crate) mod metrics;
 mod namespace;
 mod private_dir;
 

@@ -137,7 +137,7 @@ impl ShamirDbCallResolver {
                 db_name: db_name.clone(),
                 actor: target.actor().clone(),
             });
-            target = target.with_db(gateway, repo.clone());
+            target = target.with_db(gateway, repo.clone()).with_db_name(db_name.clone());
         } else if self.db_name.is_some() || self.default_repo.is_some() {
             return Err(FunctionError::Compute(
                 "nested target database context is incomplete".into(),
@@ -256,7 +256,7 @@ impl ShamirDb {
                 db_name: db_name.to_string(),
                 actor: ctx.actor().clone(),
             });
-            ctx = ctx.with_db(gateway, repo.to_string());
+            ctx = ctx.with_db(gateway, repo.to_string()).with_db_name(db_name.to_string());
         }
         let batch = batch
             .map(|batch| FnBatch::with_context(batch.clone()))

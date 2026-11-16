@@ -1,5 +1,8 @@
 #[cfg(test)]
 use super::linker::build_linker;
+use super::metrics::CallMetricsEntry;
+#[cfg(test)]
+use super::metrics::resolve;
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::net_gateway::NetGateway;
 use crate::runtime::context::{BatchContext, GlobalVars};
@@ -44,6 +47,9 @@ pub(crate) struct HostState {
     pub(in crate::wasm) actor: Actor,
     pub(in crate::wasm) db: Option<Arc<dyn DbGateway>>,
     pub(in crate::wasm) repo: String,
+    pub(in crate::wasm) db_name: Option<String>,
+    // Per-(db,repo) telemetry entry (call duration, fuel, depth high water).
+    pub(in crate::wasm) metrics: Arc<CallMetricsEntry>,
     pub(in crate::wasm) net: Option<Arc<dyn NetGateway>>,
     /// Env-var names this function may read via `global_get("env.X")`.
     /// Non-`env.` globals are ungated; a denied secret looks absent.
@@ -92,6 +98,8 @@ pub(crate) fn test_linker_and_store(
         actor: Actor::System,
         db: None,
         repo: String::new(),
+        db_name: None,
+        metrics: resolve(None, ""),
         net: None,
         secret_grants: Arc::new(TFxSet::default()),
         fuel_pool: Arc::new(AtomicU64::new(0)),

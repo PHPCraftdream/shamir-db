@@ -53,6 +53,9 @@ pub struct FollowerLoopConfig {
     /// Per-loop exit notification for test observability.
     #[cfg(test)]
     pub(crate) exit_hook: Option<Arc<ApplyParkHook>>,
+    /// Test-only isolated registry; production loops always use the process registry.
+    #[cfg(test)]
+    metrics_registry: Option<Arc<super::metrics::ReplicationRegistry>>,
 }
 
 impl std::fmt::Debug for FollowerLoopConfig {
@@ -98,6 +101,8 @@ impl FollowerLoopConfig {
             apply_park: None,
             #[cfg(test)]
             exit_hook: None,
+            #[cfg(test)]
+            metrics_registry: None,
         }
     }
 
@@ -126,6 +131,16 @@ impl FollowerLoopConfig {
     #[must_use]
     pub fn with_max_iterations(mut self, n: usize) -> Self {
         self.max_iterations = Some(n);
+        self
+    }
+
+    /// Use a per-test owner registry rather than shared process telemetry.
+    #[cfg(test)]
+    pub(crate) fn with_metrics_registry(
+        mut self,
+        registry: Arc<super::metrics::ReplicationRegistry>,
+    ) -> Self {
+        self.metrics_registry = Some(registry);
         self
     }
 

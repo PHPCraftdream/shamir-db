@@ -33,6 +33,10 @@
 
 mod config;
 mod loop_body;
+mod metrics;
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 #[cfg(test)]
 mod test_hooks;
 
