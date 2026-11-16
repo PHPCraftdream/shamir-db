@@ -4546,3 +4546,27 @@ path = "crates/engine/shamir-engine/src/repo/durability_tests/mem/mem_sink_tests
 item = "shamir-engine::lib::repo::durability_tests::mem::mem_sink_tests::set_durability_downgrades_synced_to_buffered_on_mem_backend"
 reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
 owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/durability_policy/replication_page.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::durability_policy::replication_page::read_replication_page"
+reason = "R4a: the negative-control switch is read under cfg(any(test, feature = test-util)) because cfg(test) does not reach the crate when it is built as a dependency"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/replication_bound.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::replication_bound::replication_bound_impl"
+reason = "R4a: the negative-control switch is read under cfg(any(test, feature = test-util)) because cfg(test) does not reach the crate when it is built as a dependency"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::ensure_armed"
+reason = "R4a: the negative-control switch is read under cfg(any(test, feature = test-util)) because cfg(test) does not reach the crate when it is built as a dependency"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::mark_clean"
+reason = "R4a: the negative-control switch is read under cfg(any(test, feature = test-util)) because cfg(test) does not reach the crate when it is built as a dependency"
+owner = "<wave-R4a>"
