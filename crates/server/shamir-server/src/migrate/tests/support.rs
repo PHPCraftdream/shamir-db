@@ -322,10 +322,16 @@ fn snapshot_walk(root: &Path, directory: &Path, output: &mut Vec<SnapshotEntry>)
         if metadata.is_dir() {
             snapshot_walk(root, &path, output);
         } else {
+            // A held maintenance lock is byte-range locked on Windows; compare its length, not its bytes.
+            let bytes = if entry.file_name() == ".shamir.lock" {
+                Some(metadata.len().to_le_bytes().to_vec())
+            } else {
+                Some(fs::read(&path).expect("read snapshot file"))
+            };
             output.push(SnapshotEntry {
                 relative_path,
                 directory: false,
-                bytes: Some(fs::read(&path).expect("read snapshot file")),
+                bytes,
                 modified: metadata.modified().expect("file mtime"),
             });
         }

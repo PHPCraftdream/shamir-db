@@ -233,6 +233,8 @@ fn held_lock_precedes_missing_backup_gate_and_broken_chain() {
     let data = root.path().join("data");
     older_data_dir(&data);
     let before_stamp = fs::read(data.join(STAMP_FILE_NAME)).unwrap();
+    // Backups are taken of a stopped server, before anyone holds the lock.
+    let backup = super::support::fresh_backup(&data, &root.path().join("backups"));
     let _owner = crate::maintenance_lock::acquire(&data).expect("hold lock");
 
     let missing_gate = invoke(&config(&data), &args(true, false, None, false));
@@ -243,7 +245,6 @@ fn held_lock_precedes_missing_backup_gate_and_broken_chain() {
     assert_eq!(fs::read(data.join(STAMP_FILE_NAME)).unwrap(), before_stamp);
     assert!(!data.join("format_migration.journal").exists());
 
-    let backup = super::support::fresh_backup(&data, &root.path().join("backups"));
     let no_modules: [&dyn shamir_sync::format_stamp::migration::FormatStep; 0] = [];
     let broken_chain = super::support::invoke_with(
         &config(&data),
