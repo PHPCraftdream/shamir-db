@@ -4378,3 +4378,171 @@ to_path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry
 to_item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::durability_completion::TEST_SYNCED_WAL_REPO"
 reason = "R4a: moved with its module"
 owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_handle::changefeed::DurabilityHandle::read_changelog_bounded_from"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/repo_types.rs"
+item = "shamir-engine-repo::lib::journal::backend::repo_types::HybridRepoComposite::merge_store_names"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repl/bookmark_v3.rs"
+item = "shamir-engine-repo::lib::meta::repl::bookmark_v3::codec_error"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::RepoIdentity::bump"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_handle/changefeed.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_handle::changefeed::ChangefeedHandle"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_handle.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_handle::wal_durability_for"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_handle.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_handle::DurabilityHandle"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_handle.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_handle::retention_gate"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/durability_policy/recoverability_coverage.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::durability_policy::recoverability_coverage::RecoverabilityCoverage"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/durability_policy/recovered_open.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::durability_policy::recovered_open::checkpoint_allocation_floor"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/mod.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::replication_bound"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/replication_bound.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::replication_bound::SKIP_S_CLAMP_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/backend/durability_policy/replication_bound.rs"
+item = "shamir-engine-repo::lib::journal::backend::durability_policy::replication_bound::BOUND_WAIT_MS_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs"
+item = "shamir-engine-repo::lib::journal::changelog_store::write_domain::RepoWriteDomain::new"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs"
+item = "shamir-engine-repo::lib::journal::changelog_store::write_domain::RepoWriteDomain::admit"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs"
+item = "shamir-engine-repo::lib::journal::changelog_store::write_domain::RepoWriteDomain"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/journal/mod.rs"
+item = "shamir-engine-repo::lib::journal::bounded_journal_read"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/lib.rs"
+item = "shamir-engine-repo::lib::gate_visibility"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repl/bookmark_v3.rs"
+item = "shamir-engine-repo::lib::meta::repl::bookmark_v3::classify_follower_bookmark"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repl/bookmark_v3.rs"
+item = "shamir-engine-repo::lib::meta::repl::bookmark_v3::BookmarkV3"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repl/bookmark_v3.rs"
+item = "shamir-engine-repo::lib::meta::repl::bookmark_v3::receipt_pointer_resolves"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::SKIP_ARMING_FLUSH_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::SKIP_CLEAN_FLUSH_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-repo/src/meta/repo_identity.rs"
+item = "shamir-engine-repo::lib::meta::repo_identity::SKIP_BUMP_FLUSH_FOR_TEST"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/durability_tests/mem/mem_sink_hybrid_tests.rs"
+item = "shamir-engine::lib::repo::durability_tests::mem::mem_sink_hybrid_tests::hybrid_reopen_starts_a_new_lineage_and_keeps_no_table_data"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/durability_tests/mem/mem_sink_tests.rs"
+item = "shamir-engine::lib::repo::durability_tests::mem::mem_sink_tests::mem_sink_keeps_r_equal_w_regardless_of_policy"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/durability_tests/mem/mem_sink_tests.rs"
+item = "shamir-engine::lib::repo::durability_tests::mem::mem_sink_tests::set_durability_downgrades_synced_to_buffered_on_mem_backend"
+reason = "R4a: the repo layer becomes the crate shamir-engine-repo: imports, bounds or signature follow the move"
+owner = "<wave-R4a>"
