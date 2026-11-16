@@ -65,13 +65,11 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
-use crate::table::table_manager_tx_ops::{
-    PostGenCapturePreUniqueCheckHook, TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK,
-};
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use crate::table::{PostGenCapturePreUniqueCheckHook, TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK};
+use shamir_engine_repo::repo_types::BoxRepo;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());

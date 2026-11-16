@@ -1,5 +1,5 @@
-use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableConfig;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
 use shamir_query_builder::filter as qf;
 use shamir_query_types::read::ReadQuery;
 use shamir_tx::IsolationLevel;

@@ -1,0 +1,483 @@
+//! Interner manager for lazy loading and persistence
+
+use async_trait::async_trait;
+
+use crate::Persistable;
+use bytes::Bytes;
+use futures::StreamExt;
+use shamir_engine_repo::meta::MetaKey;
+use shamir_storage::error::DbResult;
+use shamir_storage::types::{RecordKey, Store};
+use shamir_tunables::instance_defaults;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+use shamir_types::codecs::basic::bincode;
+use shamir_types::core::interner::{Interner, InternerKey, InternerQuota, UserKey};
+use shamir_types::types::record_id::RecordId;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::{Mutex, OnceCell};
+
+/// Manages interned keys with lazy loading and persistence.
+///
+/// The interner is loaded lazily on first access. Persistence is
+/// **incremental and append-only**: each `persist()` call writes only
+/// the entries added since the previous call, as a fresh chunk record
+/// in the info store. The old "rewrite the whole dictionary" path is
+/// gone — on cold-write / schema-growth workloads it was O(N²) bytes
+/// serialised and written across N first-touches; the chunked layout
+/// makes the total O(N).
+///
+/// **On-disk layout (chunked):**
+/// * Chunk N at `RecordId::system("i.dNNNNNNNNN")` (9-digit zero-padded
+///   decimal index — fits in the 12-byte system-name budget). Each
+///   chunk is `bincode::Vec<(InternerKey, UserKey)>` containing only
+///   the entries added between persist call N-1 and N.
+/// * Legacy single-blob format at `MetaKey::Internals` is still read on
+///   boot (backward compatibility for repos written by older code).
+///   New code does NOT write to `MetaKey::Internals`; the legacy blob
+///   acts as the "chunk -1" seed.
+///
+/// **Boot reconstruction:**
+/// 1. Read legacy `MetaKey::Internals` blob — apply if present.
+/// 2. `scan_prefix_stream("\\0\\0\\0\\0i.d", ...)` — apply chunks in
+///    lexicographic key order (which equals chunk-index order thanks
+///    to zero-padded decimal).
+/// 3. The forward + reverse mappings are reconstructed by
+///    `Interner::with_state`, identical to the pre-chunking format.
+///
+/// **Concurrency:**
+/// * `get()` is `Arc<OnceCell>` — at most one loader runs.
+/// * `persist()` serialises writes through a `tokio::sync::Mutex` so
+///   two concurrent persists don't race on the chunk index. The mutex
+///   is only contended on the rare new-key path; reads never touch it.
+/// * The forward (`UserKey → id`) and reverse (`id → UserKey`) maps
+///   inside `Interner` keep their existing lock-free read semantics
+///   (DashMap + ArcSwap); this manager only coordinates persistence.
+///
+/// Uses `Arc<OnceCell>` so all clones share the same interner.
+pub struct InternerManager {
+    info_store: Arc<dyn Store>,
+    interner: Arc<OnceCell<Interner>>,
+    /// Highest persisted interned ID (the cursor `entries_after` scans
+    /// above), seeded at hydration from the highest hydrated ID, not the
+    /// tuple count. Compared against the interner's ID high-water
+    /// (`generation()`) on each `persist()` call to skip no-op writes.
+    /// Also identifies the "lower bound" of the delta to write on the
+    /// next persist.
+    last_persisted_len: Arc<AtomicUsize>,
+    /// O(1) publication generation snapshot, kept separate from the ID cursor.
+    last_persisted_generation: Arc<AtomicUsize>,
+    /// Index of the next chunk record to write. Initialised from
+    /// `scan_prefix_stream` at boot (= number of existing chunks). Only
+    /// touched under `persist_lock` so the increment-and-write pair is
+    /// atomic relative to other persists.
+    next_chunk_idx: Arc<AtomicUsize>,
+    /// Serialises concurrent `persist()` calls so they don't race on
+    /// `next_chunk_idx` / `last_persisted_len`. The mutex is only ever
+    /// acquired when there's a real delta to write; read-only callers
+    /// never touch it.
+    persist_lock: Arc<Mutex<()>>,
+    /// Repo label embedded in interner quota errors (set via
+    /// `new_labeled`).
+    label: String,
+    /// Test-only quota override: when set, hydration attaches this quota
+    /// instead of reading the process-global env tunables (which tests
+    /// must not mutate).
+    #[cfg(any(test, feature = "test-util"))]
+    test_quota: Option<InternerQuota>,
+}
+
+/// System-record-name prefix for an incremental delta chunk. Combined
+/// with a 9-digit zero-padded decimal index this fits in the 12-byte
+/// `RecordId::system` name budget (`"i.d" + 9 = 12`).
+const CHUNK_TAG_PREFIX: &str = "i.d";
+
+/// 9-digit zero-padded decimal index → 10^9 chunks max. At one chunk
+/// per persist on the schema-growth path that's 1B persists per repo,
+/// way past any realistic working set.
+fn chunk_record_id(idx: usize) -> RecordId {
+    // `format!` is fine here — chunks are written at most once per
+    // genuinely-new-key persist, and the bincode + storage write that
+    // follows dwarfs an 11-byte format call.
+    let tag = format!("{}{:09}", CHUNK_TAG_PREFIX, idx);
+    RecordId::system(&tag)
+}
+
+/// Bytes prefix for `scan_prefix_stream` — 4 system zero-bytes +
+/// the chunk-tag prefix. Matches every chunk record id without
+/// matching the legacy `internals` blob (different second byte:
+/// `'.'` vs `'n'`).
+fn chunk_scan_prefix() -> Bytes {
+    let mut prefix = Vec::with_capacity(4 + CHUNK_TAG_PREFIX.len());
+    prefix.extend_from_slice(&[0u8, 0, 0, 0]);
+    prefix.extend_from_slice(CHUNK_TAG_PREFIX.as_bytes());
+    Bytes::from(prefix)
+}
+
+impl Clone for InternerManager {
+    fn clone(&self) -> Self {
+        Self {
+            info_store: Arc::clone(&self.info_store),
+            interner: Arc::clone(&self.interner),
+            last_persisted_len: Arc::clone(&self.last_persisted_len),
+            last_persisted_generation: Arc::clone(&self.last_persisted_generation),
+            next_chunk_idx: Arc::clone(&self.next_chunk_idx),
+            persist_lock: Arc::clone(&self.persist_lock),
+            label: self.label.clone(),
+            #[cfg(any(test, feature = "test-util"))]
+            test_quota: self.test_quota,
+        }
+    }
+}
+
+impl InternerManager {
+    /// Create a new interner manager
+    pub fn new(info_store: Arc<dyn Store>) -> Self {
+        Self::new_labeled(info_store, String::new())
+    }
+
+    /// [`InternerManager::new`] with a repo label embedded in interner
+    /// quota errors.
+    pub fn new_labeled(info_store: Arc<dyn Store>, label: String) -> Self {
+        Self {
+            info_store,
+            interner: Arc::new(OnceCell::new()),
+            last_persisted_len: Arc::new(AtomicUsize::new(0)),
+            last_persisted_generation: Arc::new(AtomicUsize::new(0)),
+            next_chunk_idx: Arc::new(AtomicUsize::new(0)),
+            persist_lock: Arc::new(Mutex::new(())),
+            label,
+            #[cfg(any(test, feature = "test-util"))]
+            test_quota: None,
+        }
+    }
+
+    /// Test-only quota injection: hydration attaches `q` instead of the
+    /// env-derived defaults, so tests never mutate process-global env.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_quota_for_test(mut self, q: InternerQuota) -> Self {
+        self.test_quota = Some(q);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_quota_for_test(&mut self, q: InternerQuota) {
+        self.test_quota = Some(q);
+    }
+
+    /// Return a cloned `Arc` to the underlying `OnceCell<Interner>`.
+    ///
+    /// Used by callers that need to hold a long-lived handle to the interner
+    /// (e.g. for storing in a shared decode cache) without keeping the full
+    /// `TableManager` alive.  The `OnceCell` will be populated after the first
+    /// `get().await` call; subsequent accesses via `cell.get()` are sync and
+    /// lock-free (a single `AtomicPtr` load inside `tokio::sync::OnceCell`).
+    pub fn interner_cell(&self) -> Arc<OnceCell<Interner>> {
+        Arc::clone(&self.interner)
+    }
+
+    /// Get interner, loading it lazily on first access.
+    ///
+    /// **Audit §2.6 (corruption is fatal):** any decode failure while
+    /// loading the interner (legacy blob OR delta chunk) is a FATAL error
+    /// — the open must fail rather than continuing with a truncated
+    /// dictionary. A truncated dictionary means minting new ids over
+    /// already-occupied ones = silent corruption of every old record
+    /// referencing those ids. The earlier CRIT-2 / A5 / A11 work ensures
+    /// chunks are durably flushed before `last_persisted_len` advances, so
+    /// a decode failure here is genuine corruption (not a partial write) —
+    /// treating it as fatal does not interact badly with those invariants.
+    pub async fn get(&self) -> DbResult<&Interner> {
+        if self.interner.get().is_some() {
+            return Ok({
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "guard: the preceding get().is_some() check proves the OnceCell is initialized"
+                )]
+                self.interner.get().unwrap()
+            });
+        }
+
+        let info_store = Arc::clone(&self.info_store);
+        let last_persisted_len = Arc::clone(&self.last_persisted_len);
+        let last_persisted_generation = Arc::clone(&self.last_persisted_generation);
+        let next_chunk_idx = Arc::clone(&self.next_chunk_idx);
+        let label = self.label.clone();
+        #[cfg(any(test, feature = "test-util"))]
+        let test_quota = self.test_quota;
+
+        self.interner
+            .get_or_try_init(|| async move {
+                // 1) Legacy single-blob seed — repos written by older
+                //    code stored the whole dictionary under
+                //    `MetaKey::Internals`. New code never writes here,
+                //    but must still read it to upgrade old data in
+                //    place. If absent we fall through to the chunk scan;
+                //    a corrupt blob is a FATAL open error (audit §2.6).
+                let internals_id =
+                    RecordKey::from_slice(MetaKey::Internals.as_record_id().as_bytes());
+                let mut entries: Vec<(InternerKey, UserKey)> =
+                    match info_store.get(internals_id).await {
+                        Ok(bytes) => bincode::from_bytes(&bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize legacy interner blob (audit §2.6 — \
+                                 corruption is fatal, not skippable): {e}"
+                            ))
+                        })?,
+                        Err(shamir_storage::error::DbError::NotFound(_)) => Vec::new(),
+                        Err(e) => return Err(e),
+                    };
+
+                // 2) Apply append-only delta chunks in order. The
+                //    `scan_prefix_stream` API yields records in
+                //    lexicographic key order; the 9-digit
+                //    zero-padded decimal index ensures
+                //    lexicographic order == numeric order. A corrupt
+                //    chunk or a scan error is FATAL (audit §2.6).
+                let prefix = chunk_scan_prefix();
+                let mut stream = info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+                let mut chunk_count: usize = 0;
+                while let Some(batch_res) = stream.next().await {
+                    let batch = batch_res.map_err(|e| {
+                        shamir_storage::error::DbError::Storage(format!(
+                            "Error scanning interner delta chunks (audit §2.6 — \
+                             fatal, not skippable): {e}"
+                        ))
+                    })?;
+                    for (_key, val) in batch {
+                        let chunk: Vec<(InternerKey, UserKey)> = bincode::from_bytes(&val)
+                            .map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "Failed to deserialize interner delta chunk (audit §2.6 — \
+                                     corruption is fatal, not skippable): {e}"
+                                ))
+                            })?;
+                        entries.extend(chunk);
+                        chunk_count += 1;
+                    }
+                }
+
+                // Seed the cursor from the end of the contiguous hydrated ID prefix
+                // (largest k with 1..=k all present). Do not use the tuple count,
+                // which duplicate recaptures inflate. Do not use the max ID: an ID
+                // later filled into a gap below max would be skipped. Persist rescans
+                // already-known IDs above the cursor.
+                let mut ordered_ids: Vec<usize> =
+                    entries.iter().map(|(key, _)| key.id() as usize).collect();
+                ordered_ids.sort_unstable();
+                ordered_ids.dedup();
+                let mut high_water = 0usize;
+                for id in ordered_ids {
+                    if id != high_water.saturating_add(1) {
+                        break;
+                    }
+                    high_water = id;
+                }
+                last_persisted_len.store(high_water, Ordering::Release);
+                next_chunk_idx.store(chunk_count, Ordering::Release);
+
+                // RU8: attach the per-repo admission quota at load, counters
+                // seeded from the hydrated entries (never persisted; env-
+                // overridable via SHAMIR_INTERNER_MAX_NAMES / _BYTES).
+                // Tests inject a quota directly so they never mutate env.
+                #[allow(unused_mut)]
+                let mut quota = InternerQuota {
+                    max_names: instance_defaults::interner_max_names(),
+                    max_bytes: instance_defaults::interner_max_name_bytes(),
+                };
+                #[cfg(any(test, feature = "test-util"))]
+                if let Some(q) = test_quota {
+                    quota = q;
+                }
+                let interner =
+                    Interner::with_labeled_quota(entries, quota, label).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "Corrupt interner state: {e}"
+                        ))
+                    })?;
+                last_persisted_generation.store(interner.generation() as usize, Ordering::Release);
+                // Acceptance 9: warn once at load when at/above 80% of
+                // either limit (new names will be refused soon).
+                let (used_names, used_bytes) = interner.quota_usage();
+                if quota.max_names.saturating_mul(100) <= used_names.saturating_mul(125)
+                    || quota.max_bytes.saturating_mul(100) <= used_bytes.saturating_mul(125)
+                {
+                    log::warn!(
+                        "repo interner at/above 80% quota: {used_names}/{} names, \
+                         {used_bytes}/{} bytes (SHAMIR_INTERNER_MAX_NAMES / \
+                         SHAMIR_INTERNER_MAX_NAME_BYTES raise the limits)",
+                        quota.max_names,
+                        quota.max_bytes
+                    );
+                }
+                Ok(interner)
+            })
+            .await?;
+
+        Ok({
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: get_or_try_init completed successfully and initialized the OnceCell"
+            )]
+            self.interner.get().unwrap()
+        })
+    }
+
+    /// Save new interned keys to storage as a single delta chunk.
+    ///
+    /// This is the explicit form callers can use when they have the
+    /// new entries in hand. `persist()` is the more common path —
+    /// it computes the delta from the interner's current length.
+    pub async fn save_new_keys(&self, new_keys: &[(InternerKey, UserKey)]) -> DbResult<()> {
+        if new_keys.is_empty() {
+            return Ok(());
+        }
+
+        // Ensure the interner is loaded so `next_chunk_idx` /
+        // `last_persisted_len` reflect any on-disk state. Without this,
+        // a fresh `InternerManager` would write chunk 0 on top of an
+        // existing chunk 0 from a prior process.
+        let _ = self.get().await?;
+
+        let _guard = self.persist_lock.lock().await;
+        let idx = self.next_chunk_idx.load(Ordering::Acquire);
+        let bytes = bincode::to_bytes(&new_keys.to_vec()).map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!(
+                "Failed to serialize interner chunk: {}",
+                e
+            ))
+        })?;
+        self.info_store
+            .set(
+                RecordKey::from_slice(chunk_record_id(idx).as_bytes()),
+                bytes,
+            )
+            .await?;
+        self.next_chunk_idx.store(idx + 1, Ordering::Release);
+        // `last_persisted_len` is advanced by `persist()` callers based
+        // on `interner.len()`. For `save_new_keys`, advance by the
+        // number of entries written — but only if it doesn't regress.
+        let cur = self.last_persisted_len.load(Ordering::Acquire);
+        let advanced = cur + new_keys.len();
+        self.last_persisted_len.store(advanced, Ordering::Release);
+        Ok(())
+    }
+
+    /// Returns the high-water mark of interner ids whose (name, id)
+    /// mappings have been durably checkpointed to the chunk store.
+    /// Any WAL entry whose interner delta contains only ids ≤ this
+    /// value can be safely truncated — the mappings are recoverable
+    /// from the persisted chunks without the WAL.
+    ///
+    /// This is `last_persisted_len` expressed as an id upper bound.
+    /// The cursor is id-based: it is the highest persisted interned ID
+    /// (gap ids carry no mapping, so claiming them persisted is safe).
+    ///
+    /// # Durability guarantee (post-CRIT-2 / #436)
+    ///
+    /// `persist()` advances `last_persisted_len` ONLY AFTER
+    /// `info_store.flush()` returns Ok (see the CRIT-2 block in
+    /// [`persist`](Self::persist)). On disk-backed stores `flush()` is
+    /// a real drain + fsync of the chunk write, so by the time an id
+    /// is reflected here its chunk is durable on disk (level 3). On
+    /// in-memory stores `flush()` is a no-op and "durable" reduces to
+    /// "in RAM" — which is the only durability tier an in-memory repo
+    /// offers, so the contract holds relative to the backend.
+    ///
+    /// NOTE: this guarantee holds ONLY for entries written via
+    /// [`persist`](Self::persist). The legacy [`save_new_keys`](Self::save_new_keys)
+    /// path advances `last_persisted_len` WITHOUT the CRIT-2 flush and
+    /// WITHOUT checking id density, so it can prematurely satisfy the
+    /// A5 truncate gate — which is why `save_new_keys` is retained only
+    /// for tests and must NOT be called from production paths.
+    pub fn persisted_high_water(&self) -> usize {
+        self.last_persisted_len.load(Ordering::Acquire)
+    }
+
+    /// Persist the delta accumulated since the previous `persist()` as
+    /// a fresh append-only chunk. No-op when nothing has been added.
+    ///
+    /// Callers (insert/update/set on the write path) invoke this after
+    /// every op; thanks to the monotonic + length-tracking trick, only
+    /// the ops that actually intern a new key pay the I/O cost — and
+    /// that cost is O(delta), not O(total dictionary size).
+    pub async fn persist(&self) -> DbResult<()> {
+        let interner = self.get().await?;
+        // Compare with the persisted publication generation, not the ID
+        // cursor; sparse IDs and a filled hole need not align numerically.
+        let generation = interner.generation() as usize;
+        if generation == self.last_persisted_generation.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Serialise concurrent persists so two writers can't pick the
+        // same chunk index. The lock is only acquired on the rare
+        // genuinely-new-key path (the fast no-op return above handles
+        // every other call).
+        let guard = self.persist_lock.lock().await;
+        // Re-check under the lock — another persist may have raced us
+        // and already written the same delta.
+        let generation = interner.generation() as usize;
+        if generation == self.last_persisted_generation.load(Ordering::Acquire) {
+            drop(guard);
+            return Ok(());
+        }
+
+        // Capture only the new entries (id > last). Uses the
+        // reverse-vec atomic snapshot to avoid clone-the-world; under
+        // concurrent `touch_ind` the returned `new_high` may be less
+        // than `interner.len()` (the forward map can advance ahead of
+        // the reverse vec by a window). We advance `last_persisted_len`
+        // to exactly `new_high` so the very next persist picks up
+        // anything that was mid-insert here.
+        let last = self.last_persisted_len.load(Ordering::Acquire);
+        let (delta, new_high) = interner.entries_after(last);
+        if delta.is_empty() {
+            drop(guard);
+            return Ok(());
+        }
+
+        let idx = self.next_chunk_idx.load(Ordering::Acquire);
+        let bytes = bincode::to_bytes(&delta).map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!(
+                "Failed to serialize interner chunk: {}",
+                e
+            ))
+        })?;
+        self.info_store
+            .set(
+                RecordKey::from_slice(chunk_record_id(idx).as_bytes()),
+                bytes,
+            )
+            .await?;
+        // CRIT-2 (#436): flush the chunk write BEFORE advancing
+        // `last_persisted_len`. `Store::set` above lands in a write-back
+        // buffer (MemBuffer's periodic drain / fjall's unfsynced journal) —
+        // without this flush, `persisted_high_water()` (read by the
+        // drainer's A5 gate, `materialize.rs::interner_delta_safe_to_
+        // truncate`) claims a mapping is "durably persisted" while it is
+        // still only in RAM. A crash before the periodic drain would lose
+        // the chunk while the WAL segment that could have recovered it was
+        // already truncated (trusting the premature hwm) — the exact
+        // corruption CRIT-2 closes on the drainer side. `flush()` is a
+        // best-effort default no-op on `Store` for in-memory backends
+        // (harmless there) and a real drain+fsync on disk-backed stores.
+        self.info_store.flush().await?;
+        self.next_chunk_idx.store(idx + 1, Ordering::Release);
+        self.last_persisted_len.store(new_high, Ordering::Release);
+        // Store only the generation captured before entries_after(). A name
+        // published during capture/write has a newer generation and forces a
+        // subsequent persist; if it was already included, that retry is safe.
+        self.last_persisted_generation
+            .store(generation, Ordering::Release);
+        drop(guard);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Persistable for InternerManager {
+    async fn persist(&self) -> DbResult<()> {
+        InternerManager::persist(self).await
+    }
+}

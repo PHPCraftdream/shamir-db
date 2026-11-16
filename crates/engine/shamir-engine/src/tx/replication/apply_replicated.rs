@@ -37,7 +37,6 @@ pub mod follower_durability;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
 use shamir_tx::{collect_referenced_ids, remap_inner_value_bytes, ChangeOp, ChangelogEvent};
-use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
@@ -219,13 +218,13 @@ async fn prepare_event(
                     .map(|index| index.name_interned)
             });
         let index_name = if let Some(id) = legacy_index {
-            let interner = table.interner().get().await?;
-            Some(
-                interner
-                    .get_str(&InternerKey::new(id))
-                    .ok_or_else(|| DbError::Codec("missing follower index name".into()))?
-                    .to_string(),
-            )
+            let interner = table
+                .info_store_read_view()
+                .interner_read_view()
+                .await?
+                .get_str(&shamir_types::core::interner::InternerKey::new(id))
+                .map(|name| name.to_string());
+            Some(interner.ok_or_else(|| DbError::Codec("missing follower index name".into()))?)
         } else {
             table
                 .index2_registry()

@@ -21,12 +21,12 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::index2::backend::{IndexQuery, IndexResult};
-use crate::index2::vector::SearchOpts;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::backend::{IndexQuery, IndexResult};
+use shamir_index::vector::SearchOpts;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -264,7 +264,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
     // Downcast to FtsRankedBackend to read `stats.doc_count`.
     let fts = backend
         .as_any()
-        .downcast_ref::<crate::index2::fts_ranked_backend::FtsRankedBackend>()
+        .downcast_ref::<shamir_index::fts_ranked_backend::FtsRankedBackend>()
         .expect("backend must be FtsRankedBackend");
     let doc_count_pre = fts.doc_count();
 
@@ -309,7 +309,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
     let result = backend
         .lookup(IndexQuery::Fts {
             tokens,
-            mode: crate::index2::backend::FtsMode::OrAny,
+            mode: shamir_index::backend::FtsMode::OrAny,
             limit: None,
         })
         .await

@@ -116,13 +116,13 @@ fn install_validators(table: &mut TableManager) -> (Arc<AtomicUsize>, Arc<Atomic
 
 fn pause_next_persist(table: &mut TableManager) -> Arc<PausingInfoStore> {
     let store = Arc::new(PausingInfoStore {
-        inner: Arc::clone(&table.info_store),
+        inner: table.info_store_for_test(),
         armed: AtomicBool::new(true),
         entered: Notify::new(),
         release: Notify::new(),
     });
     // Binding DDL uses this handle; sub-managers still use the same inner store.
-    table.info_store = store.clone();
+    table.set_info_store_for_test(store.clone());
     store
 }
 
@@ -130,7 +130,7 @@ async fn assert_binding_sets(table: &TableManager, expected: &[RecordId]) {
     let mut expected = expected.to_vec();
     expected.sort();
     let live = table.validator_bindings();
-    let persisted = load_validators_metadata(&table.info_store)
+    let persisted = load_validators_metadata(&table.info_store_for_test())
         .await
         .unwrap()
         .expect("binding metadata must have been persisted");

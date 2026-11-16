@@ -14,6 +14,11 @@
 //! (immediate `version_of` + SSI `validate_read_set`) fires through the
 //! actual commit pipeline — mirrors the `ssi_stress_tests` harness.
 
+use shamir_types::types::common::new_map;
+use shamir_types::types::common::new_map_wc;
+use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
+
 use std::sync::Arc;
 
 use serial_test::serial;
@@ -25,11 +30,11 @@ use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 
 use crate::query::filter::eval_context::FilterContext;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
 use crate::tx::CommitError;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -38,9 +43,6 @@ fn make_repo() -> RepoInstance {
 
 /// Insert a record and return the RecordId.
 async fn insert_row(tbl: &TableManager, name: &str) -> RecordId {
-    use shamir_types::types::common::new_map;
-    use shamir_types::types::value::InnerValue;
-
     let interner = tbl.interner().get().await.unwrap();
     let key = interner.touch_ind("name").unwrap().into_key();
     let _ = interner;
@@ -291,9 +293,6 @@ async fn expected_version_zero_match_is_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn concurrent_cas_exactly_one_wins() {
-    use shamir_types::types::common::new_map_wc;
-    use shamir_types::types::value::QueryValue;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
@@ -436,9 +435,6 @@ async fn concurrent_cas_exactly_one_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn concurrent_cas_exactly_one_wins_under_snapshot() {
-    use shamir_types::types::common::new_map_wc;
-    use shamir_types::types::value::QueryValue;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();

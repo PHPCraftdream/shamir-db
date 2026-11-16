@@ -8,11 +8,11 @@ use shamir_tx::{IsolationLevel, MvccStore, RepoTxGate, TxContext, TxId};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
 use crate::tx::CommitError;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 async fn make_table() -> TableManager {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());

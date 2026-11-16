@@ -16,10 +16,10 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::ReadQuery;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 use shamir_query_builder::Query;
 use shamir_storage::storage_in_memory::InMemoryRepo;

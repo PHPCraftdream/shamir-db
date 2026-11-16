@@ -17,12 +17,12 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::filter::FilterContext;
-use crate::query::read::QueryResult;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::{TableConfig, TableManager};
 use crate::tx::CommitError;
+use shamir_engine_query::query::filter::FilterContext;
+use shamir_engine_query::query::read::QueryResult;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 fn repo() -> RepoInstance {
     RepoInstance::new(
@@ -436,7 +436,7 @@ async fn tx_read_shortcut_keyset_ties_both_directions() {
                 .records
                 .iter()
                 .map(|r| match r {
-                    crate::query::read::QueryRecord::Inserted(r) => r.id.unwrap(),
+                    shamir_engine_query::query::read::QueryRecord::Inserted(r) => r.id.unwrap(),
                     _ => panic!("id-bearing result expected"),
                 })
                 .collect();
@@ -528,7 +528,7 @@ async fn tx_read_shortcut_filter_stream_decodable_nonmap_fallback() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
     // Empty conjunction is true even for a non-map record.
-    let f = filter::and(Vec::<crate::query::filter::Filter>::new());
+    let f = filter::and(Vec::<shamir_engine_query::query::filter::Filter>::new());
     for isolation in [IsolationLevel::Snapshot, IsolationLevel::Serializable] {
         let (tx, _guard) = repo.begin_tx(isolation).await.unwrap();
         let stream = table

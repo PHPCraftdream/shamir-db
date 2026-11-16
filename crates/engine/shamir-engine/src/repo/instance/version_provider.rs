@@ -1,7 +1,3 @@
-use shamir_types::types::common::THasher;
-
-use crate::table::table_manager::table_token_for;
-
 /// Convert the wire DTO [`shamir_query_types::admin::Retention`] into the
 /// engine-internal [`shamir_tx::Retention`]. The orphan rule forbids a
 /// cross-crate `From` impl, so this free fn bridges the two types.
@@ -21,34 +17,3 @@ pub fn to_mvcc_retention(r: &shamir_query_types::admin::Retention) -> shamir_tx:
 /// repository); re-exported so `crate::repo::version_provider::repo_token`
 /// and `crate::repo::repo_token` keep working for all callers and tests.
 pub use crate::repo::meta::repo_identity::repo_token;
-
-/// Record `table_token_for(name) → name` in the reverse index, detecting
-/// the two non-trivial cases explicitly:
-///
-/// * **Idempotent re-registration** — the same name added twice (e.g.
-///   `create_table` issued twice, or catalogue reload over an existing
-///   config). The existing entry already equals `name`, so this is a
-///   no-op.
-/// * **Token collision** — two *distinct* names that hash to the same
-///   `u64` token. With a 64-bit `DefaultHasher` over table names this is
-///   astronomically unlikely, but if it ever happens we keep the FIRST
-///   registration (do not clobber a live mapping) and log a warning so the
-///   situation is visible instead of silently corrupting `table_by_token`
-///   for the first table. The second table is then unresolvable by token —
-///   the caller should rename it.
-pub(crate) fn register_token(token_names: &scc::HashMap<u64, String, THasher>, name: &str) {
-    let token = table_token_for(name);
-    if let Err((_, attempted)) = token_names.insert_sync(token, name.to_string()) {
-        // Key already present — inspect the existing mapping.
-        let existing = token_names.read_sync(&token, |_, n| n.clone());
-        if existing.as_deref() != Some(attempted.as_str()) {
-            log::warn!(
-                "repo_instance: table token collision on {} — keeping '{}', \
-                 refusing '{}'; the latter is unresolvable by token",
-                token,
-                existing.as_deref().unwrap_or("<unknown>"),
-                attempted
-            );
-        }
-    }
-}

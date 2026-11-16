@@ -292,7 +292,7 @@ impl SeedImageWriter {
             }
             let manager = self.repo.get_table(&table.name).await?;
             manager.counter().set(*count).await?;
-            manager.info_store().flush().await?;
+            manager.info_store_read_view().flush().await?;
         }
         for store in schema_stores {
             store.flush().await?;

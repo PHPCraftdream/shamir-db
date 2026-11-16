@@ -23,12 +23,12 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
-use crate::index2::fts_ranked_backend::FtsRankedBackend;
 use crate::query::filter::eval_context::FilterContext;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::fts_ranked_backend::FtsRankedBackend;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());

@@ -20,15 +20,15 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info::IndexInfo;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_record_key::IndexRecordKey;
-use crate::index2::persistence::{load_index_identity_version, INDEX_IDENTITY_VERSION};
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info::IndexInfo;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::base_index::index_record_key::IndexRecordKey;
+use shamir_index::persistence::{load_index_identity_version, INDEX_IDENTITY_VERSION};
 use shamir_query_builder::{select, Query};
 
 const K: u64 = 0xf1357aea2e62a9c5;
@@ -670,7 +670,7 @@ async fn p34_12_recover_inflight_v2_replays_pre_upgrade_index_put_and_reruns_mig
     repo.add_table_for_test(TableConfig::new("t"));
     let migrated = repo.get_table("t").await.unwrap();
     assert!(migrated.identity_migrated_this_open());
-    let v2_key = crate::index::index_keys::build_index_key(
+    let v2_key = shamir_index::base_index::index_keys::build_index_key(
         true,
         idx,
         &[InnerValue::Int(7), InnerValue::Int(-11)],
@@ -705,7 +705,7 @@ async fn p34_12_recover_inflight_v2_replays_pre_upgrade_index_put_and_reruns_mig
         wal.fresh_txn_id(),
         crate::repo::repo_token(repo.name()),
         vec![WalOpV2::IndexDel {
-            table_id_interned: crate::table::table_manager::table_token_for("t"),
+            table_id_interned: crate::table::table_token_for("t"),
             idx_id: 0,
             key: Bytes::from(old_key.clone()),
         }],
@@ -718,7 +718,7 @@ async fn p34_12_recover_inflight_v2_replays_pre_upgrade_index_put_and_reruns_mig
         wal.fresh_txn_id(),
         crate::repo::repo_token(repo.name()),
         vec![WalOpV2::IndexPut {
-            table_id_interned: crate::table::table_manager::table_token_for("t"),
+            table_id_interned: crate::table::table_token_for("t"),
             idx_id: 0,
             key: Bytes::from(old_key),
             value: Bytes::copy_from_slice(rid.as_bytes()),

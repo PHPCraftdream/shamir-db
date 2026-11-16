@@ -24,6 +24,8 @@
 //! complete while the lock is held), the brief poll only lets the scheduler
 //! park the blocked task before the assertion.
 
+use crate::table::{PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK};
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,10 +34,10 @@ use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 use tokio::sync::Notify;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {
@@ -224,9 +226,6 @@ async fn f48_drain_catches_writer_that_read_false_before_flag_went_up() {
     // FIRST writer to reach the seam parks; `reached` for busy-poll detection
     // (no sleeps); `resume` for the release signal. nextest isolates this
     // global per test process.
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
     let hook = Arc::new(PostBarrierPreWriteHook {
         reached: std::sync::atomic::AtomicUsize::new(0),
         resume: Notify::new(),

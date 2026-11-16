@@ -29,12 +29,12 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::index2::backend::{IndexQuery, IndexResult};
-use crate::index2::functional_backend::FunctionalBackend;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::backend::{IndexQuery, IndexResult};
+use shamir_index::functional_backend::FunctionalBackend;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {

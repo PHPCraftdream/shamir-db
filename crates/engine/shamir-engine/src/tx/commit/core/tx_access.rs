@@ -171,7 +171,7 @@ impl RepoCore {
         // checks pays only a thin `Arc` construction + clone, no behavior
         // change to Phase 2 (still gated on `isolation == Serializable`).
         let provider = std::sync::Arc::new(RepoVersionProvider {
-            per_table_mvcc: Arc::clone(&self.catalog.per_table_mvcc),
+            per_table_mvcc: Arc::clone(self.catalog.mvcc_map_for_commit_pipeline()),
         });
         tx.set_version_provider(provider);
 
@@ -202,7 +202,7 @@ impl RepoCore {
     pub(crate) fn per_table_mvcc(
         &self,
     ) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
-        &self.catalog.per_table_mvcc
+        self.catalog.mvcc_map_for_commit_pipeline()
     }
 
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
@@ -221,8 +221,7 @@ impl RepoCore {
     /// instead of a per-table one (Stage I keystone).
     pub(crate) async fn repo_interner(&self) -> DbResult<InternerManager> {
         self.catalog
-            .repo_interner
-            .get_or_try_init(|| async {
+            .repo_interner_or_try_init(|| async {
                 let store: Arc<dyn Store> = self.repo.store_get("__interner__").await?;
                 Ok::<InternerManager, DbError>(InternerManager::new_labeled(
                     store,
@@ -230,7 +229,6 @@ impl RepoCore {
                 ))
             })
             .await
-            .cloned()
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.

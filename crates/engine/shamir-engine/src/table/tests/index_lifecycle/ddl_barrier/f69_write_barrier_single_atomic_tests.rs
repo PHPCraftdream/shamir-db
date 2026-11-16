@@ -35,6 +35,9 @@
 //!    writer's row, so a subsequent duplicate is correctly rejected
 //!    (`f69_first_unique_index_create_drains_parked_writer_and_rejects_duplicate`).
 
+use crate::table::{PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK};
+use tokio::sync::Notify;
+
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -46,10 +49,10 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {
@@ -227,11 +230,6 @@ async fn unique_index_exists_bit_is_the_same_shared_word_table_manager_reads() {
 /// is the one that made `needs_write_barrier()` relevant.
 #[tokio::test]
 async fn f69_first_unique_index_create_drains_parked_writer_and_rejects_duplicate() {
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
-    use tokio::sync::Notify;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();

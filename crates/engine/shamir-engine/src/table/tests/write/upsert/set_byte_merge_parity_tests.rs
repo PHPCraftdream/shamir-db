@@ -44,10 +44,10 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use smallvec::smallvec;
 
 use crate::repo::RepoInstance;
-use crate::table::table_manager::TableManager;
 use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     insert_via_tx, setup_empty_table,
 };
+use crate::table::TableManager;
 use crate::validator::schema::{rule, SchemaValidator};
 use crate::validator::{RecordValidator, ValidatorBinding, ValidatorRegistry, WriteOp};
 
@@ -137,8 +137,8 @@ fn ops_as_sortkeys(ops: &[shamir_tx::IndexWriteOp]) -> Vec<Vec<u8>> {
 async fn set_via_implicit_tx(
     repo: &RepoInstance,
     table: &TableManager,
-    op: &crate::query::write::SetOp,
-) -> Result<crate::query::write::WriteResult, crate::query::batch::BatchError> {
+    op: &shamir_engine_query::query::write::SetOp,
+) -> Result<shamir_engine_query::query::write::WriteResult, crate::query::batch::BatchError> {
     let owned_op = op.clone();
     let owned_table = table.clone();
     repo.run_implicit_batch_tx(Actor::System, "test_set", move |tx| {
@@ -153,7 +153,10 @@ async fn set_via_implicit_tx(
 
 /// Drive a SET upsert through a bare (non-committed) `TxContext` so the test
 /// can inspect staging (`counter_deltas`, `index_write_set`) directly.
-async fn set_into_tx(tbl: &TableManager, op: &crate::query::write::SetOp) -> TxContext {
+async fn set_into_tx(
+    tbl: &TableManager,
+    op: &shamir_engine_query::query::write::SetOp,
+) -> TxContext {
     let mut tx = TxContext::new(TxId::new(99), 0, u64::MAX, IsolationLevel::Snapshot);
     tbl.execute_set_tx(op, &mut tx, None, &shamir_types::access::Actor::System)
         .await
@@ -718,7 +721,7 @@ async fn bind_timestamp_schema(table: &mut crate::table::TableManager) {
 }
 
 /// Extract an `i64` field from an `InsertedRecord`'s value map.
-fn int_field(rec: &crate::query::write::InsertedRecord, field: &str) -> Option<i64> {
+fn int_field(rec: &shamir_engine_query::query::write::InsertedRecord, field: &str) -> Option<i64> {
     match rec.get_value_owned(field) {
         Some(QueryValue::Int(i)) => Some(i),
         _ => None,

@@ -75,7 +75,7 @@ pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
     for name in &names {
         let table = repo.get_table_unfenced(name).await?;
         table.counter().persist().await?;
-        table.info_store().flush().await?;
+        table.info_store_read_view().flush().await?;
     }
     repo.flush_seed_metadata().await?;
     if repo.consistent_version().await? != version {

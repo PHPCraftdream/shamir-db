@@ -1,7 +1,6 @@
 use crate::repo::fk_reverse_cache::FkReverseCache;
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use crate::repo::repo_types::BoxRepo;
-use crate::repo::version_provider::register_token;
 pub use crate::repo::version_provider::repo_token;
 use crate::repo::DurabilityHandle;
 use crate::table::{TableCatalog, TableConfig, TableManager};
@@ -85,22 +84,19 @@ impl RepoInstance {
         let token_names: scc::HashMap<u64, String, THasher> =
             scc::HashMap::with_capacity_and_hasher(initial_cap, THasher::default());
         for cfg in configs {
-            register_token(&token_names, &cfg.name);
+            TableCatalog::register_token_in(&token_names, &cfg.name);
             configs_map.insert(cfg.name.clone(), cfg);
         }
 
         let tables: TDashMap<String, Arc<OnceCell<TableManager>>> = new_dash_map_wc(100);
 
-        let catalog = TableCatalog {
-            configs: Arc::new(configs_map),
-            tables: Arc::new(tables),
-            token_names: Arc::new(token_names),
-            per_table_mvcc: Arc::new(scc::HashMap::with_capacity_and_hasher(
-                initial_cap,
-                THasher::default(),
-            )),
-            repo_interner: Arc::new(OnceCell::new()),
-        };
+        let catalog = TableCatalog::new(
+            configs_map,
+            tables,
+            token_names,
+            scc::HashMap::with_capacity_and_hasher(initial_cap, THasher::default()),
+            OnceCell::new(),
+        );
         let policy = crate::repo::durability_policy::DurabilityPolicy::default()
             .for_wal_backend(wal_dir.is_some());
         let durability_handle = DurabilityHandle {

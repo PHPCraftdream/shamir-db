@@ -65,33 +65,28 @@ async fn set_child_field_null(
             code: Some("fk_actions".to_string()),
         })?;
 
-    let interner = table
-        .interner()
-        .get()
+    let field_id = table
+        .info_store_read_view()
+        .interned_field_id(field)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
             message: format!("fk_actions: set_null interner: {e}"),
             code: Some("fk_actions".to_string()),
-        })?;
-
-    let field_id = match interner.get_ind(field) {
-        Some(id) => id,
-        None => {
-            return Err(BatchError::query_coded(
+        })?
+        .ok_or_else(|| {
+            BatchError::query_coded(
                 alias,
                 "fk_actions",
                 format!("set_null: unknown field '{}'", field),
-            ));
-        }
-    };
-
-    let new_bytes =
-        null_out_field(&old_bytes, field_id.id()).map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_actions: set_null merge failed: {e}"),
-            code: Some("fk_actions".to_string()),
+            )
         })?;
+
+    let new_bytes = null_out_field(&old_bytes, field_id).map_err(|e| BatchError::QueryError {
+        alias: alias.to_string(),
+        message: format!("fk_actions: set_null merge failed: {e}"),
+        code: Some("fk_actions".to_string()),
+    })?;
 
     // #1205: `new_bytes` nulls out an existing field id (not captured at
     // this call site) — leave A8's decode fallback in effect for this

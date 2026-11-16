@@ -13,12 +13,12 @@ use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 use tokio::sync::Notify;
 
-use crate::index::write_barrier_flags::{MIGRATION_FREEZE, SCHEMA_ACTIVATION};
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::{MigrationFreezeError, TableConfig, TableManager};
 use crate::tx::commit::{PostValidatePrePublishHook, TEST_POST_VALIDATE_PRE_PUBLISH_HOOK};
 use crate::tx::CommitError;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::write_barrier_flags::{MIGRATION_FREEZE, SCHEMA_ACTIVATION};
 
 async fn fixture() -> (RepoInstance, TableManager, InnerValue) {
     let repo = RepoInstance::new(

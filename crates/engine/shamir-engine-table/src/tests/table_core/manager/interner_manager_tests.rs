@@ -1,0 +1,585 @@
+use crate::interner_manager::InternerManager;
+use async_trait::async_trait;
+use bytes::Bytes;
+use shamir_engine_repo::meta::MetaKey;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::{RecordKey, Store};
+use shamir_types::codecs::basic::bincode;
+use shamir_types::core::interner::{InternerKey, InternerQuota, UserKey};
+use shamir_types::types::record_id::RecordId;
+use std::sync::Arc;
+
+async fn create_manager() -> InternerManager {
+    InternerManager::new(Arc::new(InMemoryStore::new()))
+}
+
+#[tokio::test]
+async fn test_interner_lazy_loading() {
+    let manager = create_manager().await;
+
+    let interner = manager.get().await.unwrap();
+    assert_eq!(interner.len(), 0);
+
+    let interner2 = manager.get().await.unwrap();
+    assert!(std::ptr::eq(interner, interner2));
+}
+
+#[tokio::test]
+async fn test_interner_save_new_keys() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager1 = InternerManager::new(Arc::clone(&store));
+    let manager2 = InternerManager::new(store);
+
+    let interner1 = manager1.get().await.unwrap();
+    let result1 = interner1.touch_ind("name").unwrap();
+    let result1_id = result1.key().id();
+    let new_keys = vec![(result1.into_key(), UserKey::from_str("name"))];
+    manager1.save_new_keys(&new_keys).await.unwrap();
+
+    let interner2 = manager2.get().await.unwrap();
+    let result2 = interner2.touch_ind("name").unwrap();
+
+    assert_eq!(result1_id, result2.key().id());
+}
+
+#[tokio::test]
+async fn test_interner_persistence() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager1 = InternerManager::new(Arc::clone(&store));
+
+    let interner1 = manager1.get().await.unwrap();
+    let name_key = interner1.touch_ind("name").unwrap();
+    let age_key = interner1.touch_ind("age").unwrap();
+    let new_keys = vec![
+        (name_key.key().clone(), UserKey::from_str("name")),
+        (age_key.key().clone(), UserKey::from_str("age")),
+    ];
+    manager1.save_new_keys(&new_keys).await.unwrap();
+
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+
+    assert_eq!(interner2.len(), 2);
+    assert_eq!(
+        interner2.touch_ind("name").unwrap().key().id(),
+        name_key.key().id()
+    );
+    assert_eq!(
+        interner2.touch_ind("age").unwrap().key().id(),
+        age_key.key().id()
+    );
+}
+
+#[tokio::test]
+async fn test_interner_empty_save() {
+    let manager = create_manager().await;
+
+    let result = manager.save_new_keys(&[]).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_interner_multiple_saves() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = InternerManager::new(store);
+
+    let interner = manager.get().await.unwrap();
+
+    let key1 = interner.touch_ind("key1").unwrap();
+    manager
+        .save_new_keys(&[(key1.into_key(), UserKey::from_str("key1"))])
+        .await
+        .unwrap();
+
+    let key2 = interner.touch_ind("key2").unwrap();
+    manager
+        .save_new_keys(&[(key2.into_key(), UserKey::from_str("key2"))])
+        .await
+        .unwrap();
+
+    assert_eq!(interner.len(), 2);
+}
+
+/// Incremental persist writes one chunk per call, reload reconstructs
+/// the identical dictionary (every id → name mapping preserved).
+#[tokio::test]
+async fn test_interner_incremental_persist_then_reload() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = InternerManager::new(Arc::clone(&store));
+
+    let interner = manager.get().await.unwrap();
+    let mut expected: Vec<(u64, String)> = Vec::new();
+    for i in 0..50usize {
+        let name = format!("field_{i}");
+        let t = interner.touch_ind(&name).unwrap();
+        expected.push((t.key().id(), name));
+        // Persist after every touch — exercises the per-op call path.
+        manager.persist().await.unwrap();
+    }
+
+    // Reload into a fresh manager wired to the same store.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), expected.len());
+    for (id, name) in &expected {
+        let key = interner2.make_key(*id);
+        let got = interner2.get_str(&key).expect("id must resolve to name");
+        assert_eq!(&*got, name.as_str(), "id {} mismapped", id);
+        // Reverse: name → id round-trips.
+        let id2 = interner2.get_ind(name).expect("name must intern");
+        assert_eq!(id2.id(), *id, "name {} mismapped", name);
+    }
+}
+
+/// OLD-format single-blob written under MetaKey::Internals must load
+/// correctly under new code (backward-compat). After load, new
+/// persists chain on top as delta chunks.
+#[tokio::test]
+async fn test_interner_legacy_blob_loads_under_new_code() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Hand-write a legacy blob: a Vec<(InternerKey, UserKey)> serialized
+    // with bincode under MetaKey::Internals — mirrors what the old
+    // persist() used to write.
+    let legacy_entries = vec![
+        (InternerKey::new(1), UserKey::from_str("alpha")),
+        (InternerKey::new(2), UserKey::from_str("beta")),
+        (InternerKey::new(3), UserKey::from_str("gamma")),
+    ];
+    let bytes = bincode::to_bytes(&legacy_entries).unwrap();
+    store
+        .set(MetaKey::Internals.as_record_id().to_bytes().into(), bytes)
+        .await
+        .unwrap();
+
+    // New code reads the legacy blob.
+    let manager = InternerManager::new(Arc::clone(&store));
+    let interner = manager.get().await.unwrap();
+    assert_eq!(interner.len(), 3);
+    assert_eq!(&*interner.get_str(&InternerKey::new(1)).unwrap(), "alpha");
+    assert_eq!(&*interner.get_str(&InternerKey::new(2)).unwrap(), "beta");
+    assert_eq!(&*interner.get_str(&InternerKey::new(3)).unwrap(), "gamma");
+
+    // Append a fresh entry — should land as a delta chunk, not as a
+    // rewrite of the legacy blob.
+    let touch = interner.touch_ind("delta").unwrap();
+    assert_eq!(touch.key().id(), 4);
+    manager.persist().await.unwrap();
+
+    // Reload into yet another fresh manager — legacy blob + delta
+    // chunk must combine into the full dictionary.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), 4);
+    for (id, name) in [(1u64, "alpha"), (2, "beta"), (3, "gamma"), (4, "delta")] {
+        assert_eq!(&*interner2.get_str(&InternerKey::new(id)).unwrap(), name);
+    }
+}
+
+/// Concurrent touch + persist must converge to a consistent state:
+/// every interned id resolves to its name after reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_interner_concurrent_touch_and_persist() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = InternerManager::new(Arc::clone(&store));
+
+    // Force initial load so all clones share the same interner.
+    let _ = manager.get().await.unwrap();
+
+    let mut handles = Vec::new();
+    for t in 0..4usize {
+        let mgr = manager.clone();
+        handles.push(tokio::spawn(async move {
+            let mut names = Vec::new();
+            for i in 0..100usize {
+                let name = format!("t{}_f{}", t, i);
+                let interner = mgr.get().await.unwrap();
+                let touch = interner.touch_ind(&name).unwrap();
+                names.push((touch.key().id(), name));
+                mgr.persist().await.unwrap();
+            }
+            names
+        }));
+    }
+
+    let mut all_pairs: Vec<(u64, String)> = Vec::new();
+    for h in handles {
+        all_pairs.extend(h.await.unwrap());
+    }
+
+    // Reload and verify every name we touched still resolves to its id.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), 400);
+    for (id, name) in &all_pairs {
+        let key = interner2.make_key(*id);
+        let got = interner2
+            .get_str(&key)
+            .unwrap_or_else(|| panic!("id {} (name {}) not found after reload", id, name));
+        assert_eq!(&*got, name.as_str());
+    }
+}
+
+/// Audit §2.6 regression: a corrupt delta chunk must be a FATAL open error,
+/// not a silent skip-and-continue. Before the fix, a corrupt chunk was
+/// logged and skipped — continuing with a truncated dictionary means minting
+/// new ids over already-occupied ones, silently corrupting every old record
+/// referencing those ids. Now `get()` must return `Err`.
+#[tokio::test]
+async fn corrupt_delta_chunk_is_fatal() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Write ONE valid chunk (one entry) so the dictionary has state.
+    let valid_chunk = vec![(InternerKey::new(1), UserKey::from_str("alpha"))];
+    let chunk_key = RecordId::system("i.d000000000").to_bytes();
+    store
+        .set(
+            chunk_key.clone().into(),
+            bincode::to_bytes(&valid_chunk).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Write a SECOND chunk that is garbage (not valid bincode).
+    let corrupt_key = RecordId::system("i.d000000001").to_bytes();
+    store
+        .set(
+            corrupt_key.into(),
+            Bytes::from_static(b"NOT_VALID_BINCODE_GARBAGE"),
+        )
+        .await
+        .unwrap();
+
+    // Loading must FAIL — the corrupt chunk cannot be silently skipped.
+    let manager = InternerManager::new(store);
+    let result = manager.get().await;
+    assert!(
+        result.is_err(),
+        "corrupt interner chunk must be fatal, not silently skipped (audit §2.6)"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("§2.6") || err.contains("corrupt") || err.contains("deserialize"),
+        "error must indicate corruption is fatal, got: {err}"
+    );
+}
+
+/// Audit §2.6 regression: a corrupt LEGACY blob (MetaKey::Internals) must
+/// be a FATAL open error, not silently become "empty dictionary". Before the
+/// fix, `unwrap_or_else(|e| { log::error!(...); Vec::new() })` turned a
+/// corrupt legacy blob into an empty seed — then chunk scan found nothing,
+/// and the interner started from zero, re-minting ids over old records.
+#[tokio::test]
+async fn corrupt_legacy_blob_is_fatal() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Write a corrupt legacy blob under MetaKey::Internals.
+    store
+        .set(
+            MetaKey::Internals.as_record_id().to_bytes().into(),
+            Bytes::from_static(b"CORRUPT_LEGACY_BLOB_GARBAGE"),
+        )
+        .await
+        .unwrap();
+
+    // Loading must FAIL.
+    let manager = InternerManager::new(store);
+    let result = manager.get().await;
+    assert!(
+        result.is_err(),
+        "corrupt legacy interner blob must be fatal, not silently emptied (audit §2.6)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// F-27a (#820) — fault-injection seam: prove `InternerManager::persist()`
+// itself can genuinely fail (a real I/O error from the backing `Store`),
+// which is the precondition `admin_schema.rs`'s new catalogue-rollback
+// path (the compensating `save_table_meta(&rec_prev)` added alongside
+// `interner_mgr.persist()`) guards against. There is no existing
+// error-injection hook on `InternerManager`/`Interner` themselves — the
+// simplest reachable seam is a `Store` wrapper whose `set` (the exact
+// call `persist()` makes to write a new delta chunk) returns `Err`,
+// mirroring the `PausableInfoStore` wrapper pattern already established
+// in `crate::tests::stale_index_tests` for injecting faults at the
+// `Store` boundary.
+// ═══════════════════════════════════════════════════════════════════════
+
+type TestStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+/// A `Store` wrapper whose `set` unconditionally fails. Every other
+/// operation (including `get`, needed by `InternerManager::get()`'s
+/// initial load) delegates straight through to the inner store.
+struct FailingSetStore {
+    inner: Arc<dyn Store>,
+}
+
+impl FailingSetStore {
+    fn new(inner: Arc<dyn Store>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Store for FailingSetStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
+        Err(DbError::Storage(
+            "FailingSetStore: injected write failure".to_string(),
+        ))
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> TestStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> TestStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> TestStream {
+        self.inner
+            .iter_range_stream(start_inclusive, end_inclusive, batch_size)
+    }
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> TestStream {
+        self.inner
+            .iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size)
+    }
+}
+
+/// Core regression: once a new key has been interned (so `persist()` has
+/// a genuine non-empty delta to write), a `set` failure on the backing
+/// store surfaces as an `Err` from `persist()` — this is the exact
+/// failure `admin_schema.rs`'s 3 DDL handlers now roll the catalogue back
+/// on, instead of leaving the just-written NEW schema durably persisted
+/// while its interned path ids never made it to disk.
+#[tokio::test]
+async fn persist_fails_when_backing_store_set_fails() {
+    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let failing_store: Arc<dyn Store> = Arc::new(FailingSetStore::new(Arc::clone(&inner)));
+    let manager = InternerManager::new(failing_store);
+
+    // Intern a new key so `persist()` has a real delta (an empty delta is
+    // a documented no-op short-circuit, which would trivially "succeed"
+    // and not exercise the failure path at all).
+    let interner = manager.get().await.unwrap();
+    interner.touch_ind("new_field").unwrap();
+
+    let result = manager.persist().await;
+    assert!(
+        result.is_err(),
+        "persist() must surface the backing store's set() failure, got: {result:?}"
+    );
+
+    // The failed write must NOT have advanced the high-water mark — a
+    // later retry against a healthy store must still see the delta as
+    // pending (this is what makes the retry path recoverable rather than
+    // silently losing the never-persisted key forever).
+    assert_eq!(
+        manager.persisted_high_water(),
+        0,
+        "a failed persist() must not advance last_persisted_len"
+    );
+}
+
+/// RV-TYPES-2A1AB215 regression: hydration seeds the cursor from the end of the contiguous
+/// hydrated ID prefix, not tuple count. A fresh allocation beyond that cursor must survive reload.
+#[tokio::test]
+async fn rv_types_2a1ab215_hydrated_cursor_is_contiguous_prefix() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Three chunks with a duplicate-recapture history and a permanent
+    // gap at id 2: 4 tuples total, max ID 3.
+    let chunks: Vec<Vec<(InternerKey, UserKey)>> = vec![
+        vec![
+            (InternerKey::new(1), UserKey::from_str("a")),
+            (InternerKey::new(3), UserKey::from_str("c")),
+        ],
+        vec![(InternerKey::new(3), UserKey::from_str("c"))],
+        vec![(InternerKey::new(3), UserKey::from_str("c"))],
+    ];
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let tag = format!("i.d{:09}", idx);
+        store
+            .set(
+                RecordId::system(&tag).to_bytes().into(),
+                bincode::to_bytes(chunk).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // The persisted cursor is the contiguous hydrated prefix (1), not max ID.
+    let manager1 = InternerManager::new(Arc::clone(&store));
+    let interner1 = manager1.get().await.unwrap();
+    assert_eq!(
+        manager1.persisted_high_water(),
+        1,
+        "hydration cursor stops before sparse hole, not tuple count"
+    );
+
+    // Allocate above the hydrated gap and persist; reopen must still resolve it.
+    let touch = interner1.touch_ind("delta").unwrap();
+    assert_eq!(touch.key().id(), 4);
+    manager1.persist().await.unwrap();
+
+    // Second reopen: the id-4 mapping must resolve. This assertion guards
+    // against treating the tuple count or sparse max as the safe cursor.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    let got = interner2
+        .get_str(&InternerKey::new(4))
+        .expect("id 4 must be persisted and resolve after reopen");
+    assert_eq!(&*got, "delta");
+}
+
+/// Regression: filling a hole from hydrated state must trigger persistence
+/// even though the new ID is below the hydrated max cursor.
+#[tokio::test]
+async fn hydration_gap_then_fill_persists_across_reopen() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    // Hydrate exactly [1, 3], with a missing id 2.
+    store
+        .set(
+            RecordId::system("i.d000000000").to_bytes().into(),
+            bincode::to_bytes(&vec![
+                (InternerKey::new(1), UserKey::from_str("one")),
+                (InternerKey::new(3), UserKey::from_str("three")),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let manager = InternerManager::new(Arc::clone(&store));
+    let interner = manager.get().await.unwrap();
+    assert_eq!(manager.persisted_high_water(), 1);
+
+    interner.touch_with_id("two", 2).unwrap();
+    manager.persist().await.unwrap();
+    let reopened = InternerManager::new(store);
+    let persisted = reopened.get().await.unwrap();
+    assert_eq!(
+        persisted.get_str(&InternerKey::new(2)).as_deref(),
+        Some("two")
+    );
+    assert_eq!(
+        persisted.get_str(&InternerKey::new(3)).as_deref(),
+        Some("three")
+    );
+}
+
+// ── RU8 (RV-TYPES-2EB39DFD): per-repo interner quota at load ───────────
+
+fn manager_with_test_quota(store: Arc<dyn Store>) -> InternerManager {
+    let mut manager = InternerManager::new(store);
+    manager.set_quota_for_test(InternerQuota {
+        max_names: 2,
+        max_bytes: 1_048_576,
+    });
+    manager
+}
+
+/// The manager attaches the quota at hydration: metered touches beyond the
+/// injected cap are rejected (counters are seeded from the store, and the
+/// 80%-of-limit load warn fires inside `get()` — observability only).
+#[tokio::test]
+async fn rv_types_2eb39dfd_manager_attaches_quota_at_load() {
+    let manager = manager_with_test_quota(Arc::new(InMemoryStore::new()));
+    let interner = manager.get().await.unwrap();
+
+    assert!(interner.touch_ind("first").unwrap().is_new());
+    assert!(interner.touch_ind("second").unwrap().is_new());
+    assert_eq!(interner.quota_usage().0, 2);
+    assert!(interner.touch_ind("third").is_err());
+}
+
+/// Acceptance 7 analogue at the manager layer: names interned before the
+/// cap was hit (here via the unmetered replication/seed/recovery path)
+/// persist and survive a reopen, while the next METERED touch is rejected.
+#[tokio::test]
+async fn rv_types_2eb39dfd_touch_over_cap_persists_prefix_and_reopens() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager1 = manager_with_test_quota(Arc::clone(&store));
+    let interner1 = manager1.get().await.unwrap();
+
+    interner1.touch_ind("alpha").unwrap();
+    interner1.touch_ind("beta").unwrap();
+    // Exempt path: counted, never rejected.
+    interner1.touch_ind_unmetered("gamma").unwrap();
+    manager1.persist().await.unwrap();
+
+    let manager2 = manager_with_test_quota(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), 3);
+    assert!(interner2.get_ind("alpha").is_some());
+    assert!(interner2.get_ind("gamma").is_some());
+    assert!(interner2.touch_ind("delta").is_err());
+}
+
+/// A quota error must not discard accepted prefix names: persist the
+/// metered prefix and verify the rejected suffix was never inserted.
+#[tokio::test]
+async fn rv_types_2eb39dfd_rejected_name_absent_after_reopen() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = manager_with_test_quota(Arc::clone(&store));
+    let interner = manager.get().await.unwrap();
+
+    let _ = interner.touch_ind("accepted-prefix").unwrap();
+    let _ = interner.touch_ind("accepted-prefix-2").unwrap();
+    let rejected = interner.touch_ind("rejected-suffix");
+    assert!(matches!(
+        rejected,
+        Err(shamir_types::core::interner::InternerError::QuotaExceeded { .. })
+    ));
+    manager.persist().await.unwrap();
+
+    let reopened = manager_with_test_quota(store);
+    let persisted = reopened.get().await.unwrap();
+    assert_eq!(persisted.generation(), 2);
+    assert!(persisted.get_ind("accepted-prefix").is_some());
+    assert!(persisted.get_ind("accepted-prefix-2").is_some());
+    assert!(persisted.get_ind("rejected-suffix").is_none());
+}
+
+#[tokio::test]
+async fn conflicting_legacy_and_delta_hydration_is_fatal() {
+    for (id, name) in [(1, "different"), (2, "alpha")] {
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let legacy = vec![(InternerKey::new(1), UserKey::from_str("alpha"))];
+        let delta = vec![(InternerKey::new(id), UserKey::from_str(name))];
+        store
+            .set(
+                MetaKey::Internals.as_record_id().to_bytes().into(),
+                bincode::to_bytes(&legacy).unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .set(
+                RecordId::system("i.d000000000").to_bytes().into(),
+                bincode::to_bytes(&delta).unwrap(),
+            )
+            .await
+            .unwrap();
+        let manager = InternerManager::new(store);
+        assert!(matches!(manager.get().await, Err(DbError::Codec(_))));
+        assert!(manager.interner_cell().get().is_none());
+    }
+}

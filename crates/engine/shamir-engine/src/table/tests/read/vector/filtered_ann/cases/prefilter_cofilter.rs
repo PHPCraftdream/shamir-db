@@ -1,6 +1,8 @@
-use crate::query::filter::eval_context::FilterContext;
+use shamir_types::types::value::QueryValue;
+
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
 use shamir_query_builder::filter as qf;
 use shamir_query_types::read::ReadQuery;
 use shamir_tx::IsolationLevel;
@@ -93,7 +95,6 @@ async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
         .unwrap();
 
     // All returned records MUST have price > 100.
-    use shamir_types::types::value::QueryValue;
     for rec in &result.records {
         let price_val = match rec.get_value("price") {
             Some(QueryValue::F64(v)) => *v,
@@ -127,7 +128,7 @@ async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
 
 /// Assert that a filtered-ANN query took the given path by inspecting
 /// `stats.index_used`. Returns the label for chaining.
-pub(crate) fn path_label(result: &crate::query::read::QueryResult) -> &str {
+pub(crate) fn path_label(result: &shamir_engine_query::query::read::QueryResult) -> &str {
     result
         .stats
         .as_ref()

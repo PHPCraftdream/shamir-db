@@ -18,13 +18,17 @@ use shamir_tx::IsolationLevel;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::filter::eval_context::FilterContext;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
-use crate::validator::schema::{Constraints, FieldRule, SchemaValidator, TypeTag};
-use crate::validator::{RecordValidator, ValidatorBinding, ValidatorRegistry, WriteOp};
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
+use shamir_engine_validator::validator::schema::{
+    Constraints, FieldRule, SchemaValidator, TypeTag,
+};
+use shamir_engine_validator::validator::{
+    RecordValidator, ValidatorBinding, ValidatorRegistry, WriteOp,
+};
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());

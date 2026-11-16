@@ -1,0 +1,55 @@
+//! Persistence for per-table validator bindings — save/load
+//! `PersistedValidators` via `MetaEnvelope` to `__meta__/validators`.
+//!
+//! Mirrors `shamir_index::persistence` exactly.
+
+use bytes::Bytes;
+use shamir_engine_repo::meta::MetaEnvelope;
+use shamir_engine_validator::validator::{PersistedValidators, ValidatorBinding};
+use shamir_storage::error::DbError;
+use shamir_storage::types::{RecordKey, Store};
+use std::sync::Arc;
+
+/// Persist the given validator bindings into the table's info-twin.
+///
+/// S5c-X: `pub(crate)` — the permit-free persistence bypass is closed at
+/// the crate boundary. The ONLY legitimate writers are the admitted
+/// binding paths in `table_manager_validators.rs` (under a repo permit)
+/// and in-crate tests.
+/// under `MetaKey::Validators`.
+#[doc(hidden)]
+pub async fn save_validators_metadata(
+    bindings: &[ValidatorBinding],
+    info_store: &Arc<dyn Store>,
+) -> Result<(), DbError> {
+    let p = PersistedValidators {
+        bindings: bindings.to_vec(),
+    };
+    let envelope = MetaEnvelope::new(p);
+    let bytes = envelope
+        .encode()
+        .map_err(|e| DbError::Internal(e.to_string()))?;
+    let key = shamir_engine_repo::meta::MetaKey::Validators.as_record_id();
+    info_store
+        .set(RecordKey::from_slice(key.as_bytes()), Bytes::from(bytes))
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?;
+    Ok(())
+}
+
+/// Load the persisted validator bindings from the table's info-twin.
+/// Returns `Ok(None)` when no bindings have been saved yet.
+pub async fn load_validators_metadata(
+    info_store: &Arc<dyn Store>,
+) -> Result<Option<PersistedValidators>, DbError> {
+    let key = shamir_engine_repo::meta::MetaKey::Validators.as_record_id();
+    match info_store.get(RecordKey::from_slice(key.as_bytes())).await {
+        Ok(bytes) => {
+            let p: PersistedValidators =
+                MetaEnvelope::open(&bytes).map_err(|e| DbError::Internal(e.to_string()))?;
+            Ok(Some(p))
+        }
+        Err(DbError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}

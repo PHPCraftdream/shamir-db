@@ -29,13 +29,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::p34_12_identity_migration_tests::{count_prefix, legacy_v3_key};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_record_key::IndexRecordKey;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::base_index::index_record_key::IndexRecordKey;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
@@ -549,7 +549,7 @@ async fn p34_12_index2_repo_migration_preserves_fts_and_functional_state() {
         wal.fresh_txn_id(),
         crate::repo::repo_token(repo.name()),
         vec![WalOpV2::IndexPut {
-            table_id_interned: crate::table::table_manager::table_token_for("t"),
+            table_id_interned: crate::table::table_token_for("t"),
             idx_id: 0,
             key: legacy_key(
                 FTS_ID,

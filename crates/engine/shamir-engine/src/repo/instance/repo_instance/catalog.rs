@@ -5,7 +5,6 @@ pub use self::rename_outcome::RenamePersistOutcome;
 use super::RepoInstance;
 use crate::meta::repo_identity::RepoIdentity;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
@@ -13,7 +12,6 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::sync::Arc;
 
 mod rename_attempt;
 mod rename_fence;
@@ -329,18 +327,8 @@ impl RepoInstance {
                 "rename recovery identity mismatch".into(),
             ));
         }
-        let source = self
-            .core
-            .catalog
-            .configs
-            .get(from)
-            .map(|source| source.value().clone());
-        let destination = self
-            .core
-            .catalog
-            .configs
-            .get(to)
-            .map(|destination| destination.value().clone());
+        let (source, destination, destination_identity_matches) =
+            self.core.catalog.config_pair_matches(from, to, &config);
         let source_matches = source
             .as_ref()
             .is_some_and(|source| source.store_id.as_ref() == expected_source_id);
@@ -349,10 +337,7 @@ impl RepoInstance {
                 "rename source incarnation changed".into(),
             ));
         }
-        if destination.as_ref().is_some_and(|destination| {
-            destination.store_id != config.store_id
-                || destination.enable_indexes != config.enable_indexes
-        }) {
+        if destination.is_some() && !destination_identity_matches {
             return Err(DbError::Validation(
                 "rename destination incarnation changed".into(),
             ));
@@ -428,10 +413,10 @@ impl RepoInstance {
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
         self.check_rename_pair(from, to)?;
-        if !self.core.catalog.configs.contains_key(from) {
+        if !self.core.catalog.has_table(from) {
             return Ok(false);
         }
-        if self.core.catalog.configs.contains_key(to) {
+        if self.core.catalog.has_table(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         let pair = self.take_rename_fence(from, to);
@@ -517,10 +502,10 @@ impl RepoInstance {
         let rts_started = std::time::Instant::now();
         log::debug!("rename_table_stores: enter from={from} to={to}");
         self.check_rename_pair(from, to)?;
-        if !self.core.catalog.configs.contains_key(from) {
+        if !self.core.catalog.has_table(from) {
             return Ok(false);
         }
-        if self.core.catalog.configs.contains_key(to) {
+        if self.core.catalog.has_table(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         self.check_table_rename_fence(from)?;
@@ -569,16 +554,10 @@ impl RepoInstance {
             .durability_handle
             .write_domain
             .debug_check_permit(permit);
-        let Some(config) = self
-            .core
-            .catalog
-            .configs
-            .get(from)
-            .map(|entry| entry.value().clone())
-        else {
+        let Some(config) = self.core.catalog.table_config(from) else {
             return Ok(None);
         };
-        if self.core.catalog.configs.contains_key(to) {
+        if self.core.catalog.has_table(to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         // 0. Force-drain the source table's MVCC overlay into
@@ -591,17 +570,11 @@ impl RepoInstance {
         //    by the background drainer) would be missed by the store copy.
         //    Idempotent: if the overlay is already drained (all entries are
         //    in history), this is a no-op.
-        let from_token = table_token_for(from);
         // Clone the Arc out: `get_sync`'s entry guard holds the bucket lock,
         // and the drainer's `iter_sync` over this map parks its thread on it,
         // so holding it across the awaits below wedges a current-thread
         // runtime (#589 class).
-        if let Some(mvcc) = self
-            .core
-            .catalog
-            .per_table_mvcc
-            .read_sync(&from_token, |_, mvcc| Arc::clone(mvcc))
-        {
+        if let Some(mvcc) = self.core.catalog.mvcc_for_table(from) {
             // F-68 (#895) cluster D / task #124: timestamped before/after
             // around `drain_to_history` — this synchronously walks the overlay
             // and writes each drained version to `__history__`, the one
@@ -687,10 +660,10 @@ impl RepoInstance {
                 "rename source and destination must differ".into(),
             ));
         }
-        if self.core.catalog.configs.contains_key(&to) {
+        if self.core.catalog.has_table(&to) {
             return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
-        if !self.core.catalog.configs.contains_key(from) {
+        if !self.core.catalog.has_table(from) {
             return Err(DbError::NotFound(format!("Table '{from}' not found")));
         }
         self.remove_table(from, permit);

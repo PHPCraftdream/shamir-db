@@ -4,6 +4,12 @@
 //! regardless of `tx`. These tests pin that contract so future wiring
 //! (3.2.B.2 / 3.3) can be sanity-checked without surprises.
 
+use crate::repo::RepoInstance;
+use crate::table::TableConfig;
+use crate::tx::CommitError;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_storage::storage_in_memory::InMemoryRepo;
+
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -236,13 +242,6 @@ async fn list_stream_tx_isolation_other_tx_does_not_see_staged_insert() {
 
 #[tokio::test]
 async fn a3_record_scan_reads_records_snapshot_version_not_current_after_concurrent_commit() {
-    use shamir_storage::storage_in_memory::InMemoryRepo;
-
-    use crate::repo::repo_instance::RepoInstance;
-    use crate::repo::repo_types::BoxRepo;
-    use crate::table::TableConfig;
-    use crate::tx::CommitError;
-
     let repo = Arc::new(InMemoryRepo::new());
     let repo = RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new());
     repo.add_table_for_test(TableConfig::new("t"));

@@ -18,6 +18,8 @@
 //! 4. **Default unchanged**: `ResultEncoding::Name` (or absent) → `Direct`
 //!    rows exactly as before.
 
+use futures::StreamExt;
+
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{QueryRecord, ReadQuery, Select};
 use crate::table::record_cow::RecordCow;
@@ -67,7 +69,6 @@ async fn insert_alice_and_get_bytes(
     .unwrap();
 
     // Collect the raw stored bytes for the one record.
-    use futures::StreamExt;
     let stream = table.list_stream(100);
     futures::pin_mut!(stream);
     let mut out = Vec::new();

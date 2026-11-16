@@ -25,6 +25,8 @@
 //! implementation report for the exact revert/re-run each test was checked
 //! against.
 
+use shamir_index::backend::{IndexQuery, IndexResult};
+
 use std::sync::Arc;
 
 use shamir_query_types::admin::types::CreateIndexOp;
@@ -34,15 +36,15 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index2::functional_backend::FunctionalBackend;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
-use crate::table::table_manager::table_token_for;
+use crate::repo::RepoInstance;
+use crate::table::table_token_for;
 use crate::table::TableConfig;
 use crate::table::TableManager;
 use crate::tx::pre_commit::{RederivePreTxReadFailHook, TEST_REDERIVE_PRE_TX_READ_FAILURE};
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::functional_backend::FunctionalBackend;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -97,7 +99,6 @@ fn functional_lower_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
 /// given (already-lowercased) value, by querying the backend directly.
 /// Mirrors `index2_lifecycle_state_tests.rs::functional_lookup`.
 async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str) -> Vec<[u8; 16]> {
-    use crate::index2::backend::{IndexQuery, IndexResult};
     let backend = match tbl.index2_registry().get_by_name(index_name_id).await {
         Some(b) => b,
         None => return Vec::new(),
@@ -145,7 +146,7 @@ async fn drop_regular_before_commit_no_resurrected_posting() {
 
     let _ = tbl.get(rid).await.expect("row itself must commit");
 
-    let irk = crate::index::index_keys::build_index_key_from_record(
+    let irk = shamir_index::base_index::index_keys::build_index_key_from_record(
         false,
         idx_name,
         &record_with_str(name_key, "alice"),
@@ -200,7 +201,7 @@ async fn drop_unique_before_commit_no_resurrected_posting() {
 
     let _ = tbl.get(rid).await.expect("row itself must commit");
 
-    let irk = crate::index::index_keys::build_index_key_from_record(
+    let irk = shamir_index::base_index::index_keys::build_index_key_from_record(
         true,
         idx_name,
         &record_with_str(email_key, "alice@example.com"),

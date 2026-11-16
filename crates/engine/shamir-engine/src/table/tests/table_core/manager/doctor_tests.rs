@@ -1,5 +1,7 @@
 //! Tests for the integrity doctor — `verify` and `repair`.
 
+use crate::table::index2_backfill_hook::BackfillPauseHook;
+
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -7,16 +9,16 @@ use num_bigint::BigInt;
 use rust_decimal::Decimal;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::index::index_record_key::IndexRecordKey;
-use crate::index2::state::IndexState;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::{BoxRepo, BoxRepoFactory};
 use crate::repo::RepoConfig;
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use crate::repo::RepoInstance;
 use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     delete_via_tx, update_via_tx,
 };
 use crate::table::TableConfig;
+use shamir_engine_repo::repo_types::{BoxRepo, BoxRepoFactory};
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
+use shamir_index::base_index::index_record_key::IndexRecordKey;
+use shamir_index::state::IndexState;
 use shamir_query_builder::{filter, write};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Store;
@@ -654,8 +656,6 @@ fn int_record(key: u64, val: i64) -> InnerValue {
 /// Ready check as the regression guard for this family.
 #[tokio::test]
 async fn verify_detects_building_regular_index() {
-    use crate::table::index2_backfill_hook::BackfillPauseHook;
-
     let (_repo, tbl) = make_pause_test_repo("people").await;
     let status_key = intern_id(&tbl, "status").await;
 
@@ -673,8 +673,7 @@ async fn verify_detects_building_regular_index() {
 
     // Install the pause hook on the TableManager's online-index path.
     let hook = Arc::new(BackfillPauseHook::new());
-    tbl.online_index_backfill_hook
-        .store(Some(Arc::clone(&hook)));
+    tbl.set_online_index_backfill_hook(Some(Arc::clone(&hook)));
 
     // Spawn create_index — registers at Building, then parks mid-backfill.
     let tbl_c = tbl.clone();

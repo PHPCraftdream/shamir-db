@@ -25,7 +25,7 @@ sys.path.insert(
 import features_matrix_check as fmc  # noqa: E402
 
 
-def tree_text(engine_features):
+def tree_text(engine_features, table_features=("default",)):
     """Build realistic captured-shape probe ``cargo tree`` stdout.
 
     Mirrors ``cargo tree --manifest-path <probe>/Cargo.toml -e
@@ -61,10 +61,15 @@ def tree_text(engine_features):
         lines.append('shamir-engine-repo feature "fjall"')
     if "test-util" in engine_features:
         lines.append('shamir-engine-repo feature "test-util"')
+    # The table package's features are supplied separately from engine_features.
+    lines.append("shamir-engine-table v0.1.0")
+    for feat in ("default", "fjall", "test-util", "loom"):
+        if feat in table_features:
+            lines.append('shamir-engine-table feature "%s"' % feat)
     return "\n".join(lines) + "\n"
 
 
-def runner_ok(engine_features, captured=None):
+def runner_ok(engine_features, captured=None, table_features=("default",)):
     """A subprocess.run stand-in returning captured-shape tree output.
 
     Reads the generated probe manifest from the ``cwd`` the script passes
@@ -75,7 +80,7 @@ def runner_ok(engine_features, captured=None):
     class Proc:
         returncode = 0
         stderr = ""
-        stdout = tree_text(engine_features)
+        stdout = tree_text(engine_features, table_features)
 
     def run(cmd, capture_output=True, text=True, cwd=None, timeout=None):
         manifest = ""
@@ -207,7 +212,11 @@ class ProbeManifestTests(unittest.TestCase):
                 os.path.join(os.path.abspath("crates"), "engine", "shamir-engine", "Cargo.toml"),
                 "--flags=--no-default-features --features fjall,test-util",
             ],
-            runner=runner_ok(["fjall", "test-util"], captured=captured),
+            runner=runner_ok(
+                ["fjall", "test-util"],
+                captured=captured,
+                table_features={"default", "fjall", "test-util"},
+            ),
         )
         self.assertEqual(code, 0, err)
         self.assertIn("default-features = false", captured["manifest"])
@@ -267,7 +276,10 @@ class MainCellTests(unittest.TestCase):
             with self.subTest(cell=cell):
                 code, out, _ = run_main(
                     ["--expected", cell, "--flags=" + flags],
-                    tree=tree_text(features),
+                    tree=tree_text(
+                        features,
+                        {"default"} | (set(features) & {"fjall", "test-util", "loom"}),
+                    ),
                     runner=runner_ok(features),
                 )
                 self.assertEqual(code, 0, out)
@@ -320,15 +332,46 @@ class ForwardedFeatureTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("shamir-engine-repo does not appear", err)
 
+    def test_missing_table_package_exits_2(self):
+        tree = "".join(
+            line + "\n"
+            for line in tree_text([]).splitlines()
+            if not line.startswith("shamir-engine-table")
+        )
+        code, _, err = run_main(["--expected", "no-default"], tree=tree)
+        self.assertEqual(code, 2)
+        self.assertIn("shamir-engine-table does not appear", err)
+
+    def test_table_test_util_forwarded_mismatch_exits_1(self):
+        tree = tree_text(["test-util"], {"default", "test-util"}).replace(
+            'shamir-engine-table feature "test-util"\n', ""
+        )
+        code, _, err = run_main(["--expected", "test-util"], tree=tree)
+        self.assertEqual(code, 1)
+        self.assertIn("shamir-engine-table", err)
+        self.assertIn("complete cargo tree stdout", err)
+
+    def test_table_loom_forwarded_mismatch_exits_1(self):
+        tree = tree_text(
+            ["default", "all-backends", "fjall", "loom"],
+            {"default", "fjall", "loom"},
+        ).replace(
+            'shamir-engine-table feature "loom"\n', ""
+        )
+        code, _, err = run_main(["--expected", "loom"], tree=tree)
+        self.assertEqual(code, 1)
+        self.assertIn("shamir-engine-table", err)
+        self.assertIn("complete cargo tree stdout", err)
+
     def test_validator_forwarded_mismatch_exits_1(self):
-        tree = tree_text(["test-util"]).replace('shamir-engine-validator feature "test-util"\n', "")
+        tree = tree_text(["test-util"], {"default", "test-util"}).replace('shamir-engine-validator feature "test-util"\n', "")
         code, _, err = run_main(["--expected", "test-util"], tree=tree)
         self.assertEqual(code, 1)
         self.assertIn("shamir-engine-validator", err)
         self.assertIn("complete cargo tree stdout", err)
 
     def test_forwarded_mismatch_exits_1(self):
-        tree = tree_text(["test-util"]).replace('shamir-engine-query feature "test-util"\n', "")
+        tree = tree_text(["test-util"], {"default", "test-util"}).replace('shamir-engine-query feature "test-util"\n', "")
         code, _, err = run_main(["--expected", "test-util"], tree=tree)
         self.assertEqual(code, 1)
         self.assertIn("shamir-engine-query", err)
