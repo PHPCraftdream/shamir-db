@@ -3,6 +3,7 @@ use std::fs;
 use super::support::{
     args, config, fresh_backup, invoke, older_data_dir, read_stamp, temp, DirSnapshot,
 };
+use shamir_sync::format_stamp::{write_stamp, FormatStamp};
 
 #[test]
 fn real_pre_migration_backup_passes_gate_and_is_compared_to_epoch_one_before_lock() {
@@ -114,4 +115,46 @@ fn adopted_stamp_with_yes_warns_and_advances() {
     assert!(result.stderr.contains("adopted stamp"));
     assert_eq!(read_stamp(&data).format_epoch(), 2);
     assert_eq!(read_stamp(&data).created_by().adopted, None);
+}
+
+#[test]
+fn format_migrate_backup_gate_rejects_other_directory_same_epoch() {
+    let root = temp();
+    let live = root.path().join("live");
+    let other = root.path().join("other");
+    older_data_dir(&live);
+    older_data_dir(&other);
+    write_stamp(
+        &other,
+        &FormatStamp::with_epoch(
+            1,
+            "different-directory-actor",
+            super::support::FIXED_UNIX_MS,
+        ),
+    )
+    .expect("write distinct actor stamp");
+    assert_eq!(
+        read_stamp(&live).format_epoch(),
+        read_stamp(&other).format_epoch()
+    );
+    assert_eq!(
+        fs::read(live.join("payload.bin")).unwrap(),
+        fs::read(other.join("payload.bin")).unwrap()
+    );
+
+    let backup = fresh_backup(&other, &root.path().join("other-backups"));
+    assert!(backup.join("format.stamp").is_file());
+    assert!(!backup.join(".shamir.lock").exists());
+    let before = DirSnapshot::take(&live);
+
+    let result = invoke(&config(&live), &args(true, false, Some(backup), false));
+
+    assert!(result.result.is_err());
+    assert_eq!(super::support::mapping_exit_code(&result.result), 1);
+    assert!(result
+        .stderr
+        .contains("backup stamp created_by does not match the live pre-migration stamp"));
+    before.assert_unchanged_except_top_level_files(&live, &[".shamir.lock"]);
+    assert!(live.join(".shamir.lock").is_file());
+    assert!(!live.join("format_migration.journal").exists());
 }
