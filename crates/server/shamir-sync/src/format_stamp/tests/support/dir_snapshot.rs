@@ -47,10 +47,38 @@ impl DirSnapshot {
         );
     }
 
+    /// Listing, bytes and mtimes must be identical except for named files at
+    /// the directory root.
+    pub fn assert_unchanged_except_top_level_files(&self, dir: &Path, excluded: &[&str]) {
+        let expected: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| !is_excluded_top_level_file(entry, excluded))
+            .collect();
+        let after = Self::take(dir);
+        let actual: Vec<_> = after
+            .entries
+            .iter()
+            .filter(|entry| !is_excluded_top_level_file(entry, excluded))
+            .collect();
+        assert_eq!(
+            expected,
+            actual,
+            "directory changed unexpectedly outside excluded top-level files in {}",
+            dir.display()
+        );
+    }
+
     /// Number of listed entries (excluding `.shamir.lock`).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+}
+
+fn is_excluded_top_level_file(entry: &Entry, excluded: &[&str]) -> bool {
+    entry.kind == EntryKind::File
+        && !entry.rel.contains('/')
+        && excluded.contains(&entry.rel.as_str())
 }
 
 fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
@@ -80,7 +108,9 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
         } else {
             EntryKind::File
         };
-        let meta = match entry.metadata() {
+        // Fresh metadata: on Windows `DirEntry::metadata` comes from the
+        // enumeration cache and can lag behind the file.
+        let meta = match fs::symlink_metadata(entry.path()) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -92,11 +122,16 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
         } else {
             None
         };
-        let mtime_ns = meta.modified().ok().map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        });
+        // Directory mtimes are skipped: NTFS updates them lazily, and the
+        // listing already records every entry created or removed inside.
+        let mtime_ns = (kind != EntryKind::Dir)
+            .then(|| meta.modified().ok())
+            .flatten()
+            .map(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            });
         out.push(Entry {
             rel,
             kind,

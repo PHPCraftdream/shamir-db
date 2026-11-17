@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::format_stamp::codec::{STAMP_FILE_NAME, STAMP_TMP_NAME};
 use crate::format_stamp::io::{data_present, inspect, write_stamp, IgnoreSet, StampState};
+use crate::format_stamp::migration::JOURNAL_FILE_NAME;
 use crate::format_stamp::model::{now_unix_ms, CorruptKind, EpochPolicy, FormatStamp, StampError};
 use tracing::{info, warn};
 
@@ -180,6 +181,9 @@ fn present(
             // Row 21: the stale tmp of an interrupted replacement is deleted
             // once the epoch rule lets the start proceed.
             remove_leftover_tmp(dir)?;
+            // Format-migration design 4.3: a journal left after the stamp
+            // reached the current epoch is stale and goes the same way.
+            remove_if_present(dir, JOURNAL_FILE_NAME)?;
             let version_changed =
                 stamp.last_opened_by().map(|actor| actor.version.as_str()) != Some(VERSION);
             if version_changed {
@@ -192,8 +196,11 @@ fn present(
 }
 
 fn remove_leftover_tmp(dir: &Path) -> Result<(), StampError> {
-    let tmp = dir.join(STAMP_TMP_NAME);
-    match fs::remove_file(&tmp) {
+    remove_if_present(dir, STAMP_TMP_NAME)
+}
+
+fn remove_if_present(dir: &Path, name: &str) -> Result<(), StampError> {
+    match fs::remove_file(dir.join(name)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(StampError::Io {
