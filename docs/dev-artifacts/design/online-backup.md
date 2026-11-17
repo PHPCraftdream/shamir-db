@@ -311,69 +311,404 @@ Independent code review findings applied to this document. Each: severity, what 
 
 **Verdict.** The architecture — option C, two short barriers, manifest v2, stamp reuse — is sound and retained, contingent on the corrected contracts: the truncation pin must be NEWLY built (finding 1) and replay must be specified as unconditional boot-recovery convergence with same-barrier catalogue capture (findings 2-4). Open items Q3 (inverted), Q9 and Q10 (new) and the release-plan deviations (finding 5) remain owner decisions.
 
-### Step 1 findings (2026-11-17)
+### Step 1 findings (2026-11-17), revised into the settled capture/seal design
 
-**Scope and disposition.** Documentation-only review; the owner chose **defer the facade; implement the truncation pin only**. The unsafe capture/seal/replay facade draft is being removed separately. No source changes are made by this subsection. No tests, builds or compilation were run for this review; compilation, builds and tests belong on GitHub CI, not this machine. Every remedy and test below is **PROPOSED**, not implemented or verified. The earlier Review verdict is not evidence that capture/seal or restore is safe; the two blockers below prevent that conclusion.
+**Scope and disposition.** Documentation-only revision of the previous Step 1
+findings into a settled design. Since those findings were written, TWO of the
+prerequisites LANDED: (1) the WAL truncation pin
+(`engine/shamir-engine/src/tx/drain/truncation_pin.rs`,
+`truncation_pin_guard.rs`, `truncation_lease.rs`) with its drainer wiring
+(`tx/drain/drainer/truncate.rs:145-150`), and (2) the online copy engine and
+protocol in `server/shamir-sync/src/sync/durability/backup/online/` with the
+port trait `OnlineBackupPort` (`wal_capture.rs:64-87`) and the full steps A-G
+state machine (`protocol.rs:232-266`). The capture/seal/replay facade in
+shamir-engine is NOT built; this subsection settles its two blocking hazards
+and specifies it. No source, test, CI or `.rust-guard` file changes here.
+Compilation, builds and tests run on GitHub CI, not on this machine; no
+build or test was run for this revision. Everything below is either
+SOURCE-OBSERVED (a freshly read production call site, cited) or PROPOSED
+(a decision of this document); INFERRED marks a scheduling counterexample
+derived from source, not a reproduced hang or corrupted artifact.
 
-**Evidence convention.** SOURCE-OBSERVED means a freshly read production call site or body, not a runtime observation. INFERRED means a possible scheduling counterexample derived from those bodies, not a reproduced hang or corrupt backup. All citations below use complete `crates/`-relative paths under this document's convention (the literal `crates/` prefix is omitted). No removed-draft line number is used as production evidence. The draft's outer operation, “hold `RepoWritePermit`s, freeze tables, quiesce, then flush/sample”, is review context only; the surviving production suffixes are cited explicitly.
+**What the landed pieces already answer (reconciliation with the old
+findings and the Review).**
 
-#### 1. Blocker: capture/seal can re-enter its own repository admission
+| Old open item | Status | Evidence |
+|---|---|---|
+| Truncation pin (D4, finding 1) | LANDED — CAS/ArcSwap registry, ceiling clamp, drainer wired after history flush | `tx/drain/truncation_pin.rs:47-69,71-88`; `drainer/truncate.rs:148` |
+| Copy engine, manifest v2, progress, self-verify, permit (4.1, 4.4, 4.5, step F) | LANDED as library over the port | `online/copy_engine.rs:199`, `online/manifest.rs:136,156,204`, `online/progress.rs`, `online/protocol.rs:233` (`BackupPermit` `protocol.rs:25-49`) |
+| Protocol steps A-G incl. seal re-copy and cancellation cleanup | LANDED, but over a port with NO implementation — safety of step E depends on the gate below | `online/protocol.rs:268-433`; cleanup `protocol.rs:251-265` |
+| `shamir-metrics` "PROPOSED new crate, not an existing dependency" (4.8) | STALE — the crate now exists at `foundation/shamir-metrics` | crate listing, this revision |
+| Capture/seal/replay facade + the two hazards below | STILL OPEN — the port has no shamir-engine implementation, by design until the gate lands | `wal_capture.rs:1-4` (doc: "Step 1 of the plan implements this port in `shamir-engine`") |
 
-**SOURCE-OBSERVED — flush/replay callchains.**
+#### 1. Hazard analysis (kept, re-verified against the current tree)
 
-* `RepoCore::flush_buffers` calls `self.drainer().drain_all(self)` at `engine/shamir-engine/src/tx/commit/core/durability_access.rs:383-394` → `Drainer::drain_all` loops over `drain_step` at `engine/shamir-engine/src/tx/drain/drainer/truncate.rs:178-187` → `drain_step` first locks `replaying` at `engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:51-53`.
-* Interner branch: the non-data-op fallback calls `replay_v2_op` at `engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:364-365` → `engine/shamir-engine/src/tx/recovery/v2.rs:57-68` calls `repo.write_domain().admit()` before dispatch → `engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs:139-160` acquires the domain mutex **before** checking the reservation. `RepoWritePermit` owns that mutex guard for its lifetime (`engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs:50-64`). The dispatcher handles `InternerOverlayMerge` by touching the repo interner and persisting it (`engine/shamir-engine/src/tx/recovery/v2.rs:295-327`); the admission happens even if the eventual merge would be redundant.
-* Orphan-index-posting branch: `engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:600-620` calls `tbl.begin_write_barrier(SCHEMA_ACTIVATION)` when the table belongs to `orphan_tables` → `engine/shamir-engine-table/src/table_manager/barriers/ddl_barriers.rs:80-86` calls `self.admit()` → `engine/shamir-engine-table/src/table_manager/admission/domain/barrier/write_domain_barrier.rs:39-45` calls the same domain `admit()` → mutex acquisition before reservation check at `engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs:139-160`.
-* Background entry: the production loop invokes `this.drain_all(&repo)` at `engine/shamir-engine/src/tx/drain/drainer/truncate.rs:286-298`, reaching the same `replaying` lock and admission sites. This is not only a direct call-from-capture concern.
+All call chains below were re-read after the engine split into
+`shamir-engine` / `shamir-engine-repo` / `shamir-engine-table`; stale
+line numbers from the previous revision are corrected in place.
 
-**INFERRED — counterexamples, not executed.** If capture/seal retains that repo's permit and then calls the ordinary flush path with an eligible overlay-merge WAL op, it awaits a second acquisition of the mutex it already owns. A reservation cannot turn this into prompt rejection because the check is after the lock. An eligible orphan posting follows the second chain and has the same dependency. Alternatively, a background pass can own `replaying`, block acquiring the domain held by capture, and capture can block acquiring `replaying`: capture → replay lock → background → domain permit → capture. These are conditional lock cycles inferred from source; no actual deadlock is claimed to have been observed.
+##### Hazard 1 — capture/seal draining while holding repo admission can self-deadlock
 
-**SOURCE-OBSERVED — why the pin cannot fix this.** The pin registry admits deletion leases and clamps their ceiling (`engine/shamir-engine/src/tx/drain/truncation_pin.rs:43-88`); the drainer uses that lease only at deletion, after checkpoint/history-flush (`engine/shamir-engine/src/tx/drain/drainer/truncate.rs:145-150`). It supplies neither a `RepoWritePermit` nor a replay-lock handoff, and commit does not touch the registry (`engine/shamir-engine/src/tx/drain/truncation_pin.rs:11-14`). Retaining physical WAL history does not remove either admission edge.
+**SOURCE-OBSERVED chain.**
 
-**PROPOSED — minimal follow-up for hazard 1.** Use the tx-layer leader-admission lease and ordered drain/pause/admitted-replay phases below, not a facade-only lock rearrangement. In particular, acquire no exclusive repo permit while waiting for any existing replay pass; provide a production owned pause guard over the existing `replaying` mutex, and thread a supplied repo permit down **every** drain/replay/index-barrier/repair path that can re-admit. The existing private admitted op dispatcher (`engine/shamir-engine/src/tx/recovery/v2.rs:71-85`) and public admitted table barrier (`engine/shamir-engine-table/src/table_manager/admission/domain/barrier/write_domain_barrier.rs:53-59`) are building blocks, not an existing admitted drainer. Fail capture on unsettled or failed replay; for restore, apply the shared PROPOSED fail-closed preflight below before calling a cold constructor. Neither piece is part of the pin-only scope.
+* `RepoCore::flush_buffers` calls `drain_all` at
+  `tx/commit/core/durability_access.rs:383-396` (call `:394`);
+  `Drainer::drain_all` loops `drain_step` at
+  `tx/drain/drainer/truncate.rs:178-190` (`drain_step` call `:181`);
+  `drain_step` first locks `replaying` at
+  `tx/drain/drainer/drain_step.rs:52`.
+* Interner branch: the non-data-op fallback calls `replay_v2_op` at
+  `drain_step.rs:364-376` (call `:365`) → `tx/recovery/v2.rs:59-60` acquires
+  `repo.write_domain().admit()` BEFORE dispatch (`:63-68` boxes the admitted
+  body) → `engine-repo/journal/changelog_store/write_domain.rs:135-160`
+  acquires the domain mutex (`:141`) **before** checking the reservation
+  (`:154-159`; explicit rationale comment `:135-138`). `RepoWritePermit`
+  owns that guard for its lifetime (`write_domain.rs:61-64`).
+* Orphan-posting branch: `drain_step.rs:601-620` calls
+  `tbl.begin_write_barrier(SCHEMA_ACTIVATION)` for `orphan_tables` members
+  (call `:617-618`) →
+  `engine-table/table_manager/barriers/ddl_barriers.rs:80-89` (`admit()`
+  call `:84`, permit retained in the returned guard, comment `:75-79`) →
+  `engine-table/table_manager/admission/domain/barrier/write_domain_barrier.rs:39-47`
+  → the same domain `admit()` with mutex-before-reservation.
+* Background entry: the drainer background loop calls `drain_all` at
+  `truncate.rs:297` — hazard 1 is not only a call-from-capture concern.
 
-**PROPOSED — CI proof obligations for hazard 1 (not run).** Deterministically stage an eligible pending `InternerOverlayMerge` WAL entry, start capture and seal separately, and require completion or an explicit bounded refusal without deadlock and without a success manifest on refusal. Exercise orphan `IndexPut`/`IndexDel` postings through the `begin_write_barrier` branch too, not only ordinary index batches. Handshake a background pass owning `replaying` and waiting for the domain, then start capture: assert capture has not taken a domain permit while waiting; after the external domain owner releases, the background pass must finish and capture must pause/drain using the admitted route. Instrument admissions so the supplied permit is never reacquired; cancellation/error must release pause/reservation/freeze ownership. Include the shared recovery/refusal cases below so “no deadlock” cannot be mistaken for a valid copy.
+**INFERRED counterexample (unchanged in substance).** If capture/seal
+retains the repo permit and then calls the ordinary flush path with an
+eligible overlay-merge WAL op pending, it awaits a second acquisition of a
+mutex it already holds; the reservation check sits after the lock
+(`write_domain.rs:135-138`) so it cannot turn this into prompt rejection.
+Eligible orphan postings follow the second chain. Cross-cycle variant: a
+background pass owning `replaying` waits for the domain permit held by
+capture, while capture waits for `replaying`.
 
-#### 2. Blocker: freezing every table is not stopping every leader
+**Why the landed pin does not help.** The pin registry admits deletion
+leases and clamps their ceiling (`truncation_pin.rs:47-88`); the drainer
+consumes the lease only at deletion, after checkpoint/history-flush
+(`truncate.rs:145-150`, lease `try_begin_truncate` `:148`). It supplies
+neither a `RepoWritePermit` nor a replay-lock handoff, and commit never
+touches the registry (`truncation_pin.rs:9-12` module doc).
 
-**SOURCE-OBSERVED — overlay-only commit callchain and quiescence.**
+**PROPOSED remedy — hazard 1 (settled).** The commit-admission gate of the
+next section provides phase A (close leaders, await zero) without holding
+replay or domain locks; the drain then runs through the ordinary production
+paths AFTER leaders are zero and NO repo permit is held, and capture pauses
+replay with an owned RAII pause guard over the existing `replaying` mutex
+(never calling `drain_all`/`drain_step` recursively while paused). The
+admitted building blocks already exist — the private admitted op dispatcher
+`replay_v2_op_admitted` (`tx/recovery/v2.rs:72-85`) and the public admitted
+table barrier `begin_write_barrier_admitted`
+(`write_domain_barrier.rs:53-64`) — but no admitted drainer; threading a
+supplied permit through every re-admitting drain/replay/barrier/repair site
+remains the PROPOSED refactor, outside pin scope. Capture fails closed on
+unsettled or failed replay.
 
-* Entry: `commit_tx` → `commit_tx_with_options` at `engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:581-583` → `commit_tx_with_kind` at `engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs:22-27` → `commit_tx_inner` at `engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs:63-68` → `pre_commit_prelock` at `engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:668-677`. The prelock merges a nonempty overlay into the repo base interner **before** the table-drain loop (`engine/shamir-engine/src/tx/preparation/pre_commit/prelock.rs:84-93`).
-* That loop enters writer-drain participation only for `touched_table_tokens(tx)` (`engine/shamir-engine/src/tx/preparation/pre_commit/prelock.rs:270-289`). The helper includes write-set, index, counter, staged-vector and vector-delete tokens, but **not** `interner_overlay` (`engine/shamir-engine/src/tx/preparation/pre_commit/prelock.rs:828-863`). `TxContext::is_empty` includes `interner_overlay.is_empty()` in its conjunction (`storage/shamir-tx/src/tx/tx_context.rs:643-650`), so an overlay-only tx is not the empty-tx fast path.
-* After prelock, `CommitDriver::new` enters the tail counter and dispatches the lock-free branch (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:679-723`). That branch calls `pre_commit_locked_validate` (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs:296-298`) → empty check, version assignment and `wal_ops_from_tx` (`engine/shamir-engine/src/tx/preparation/pre_commit/locked.rs:150-174`) → nonempty-overlay emission of `InternerOverlayMerge` (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:482-493`) → WAL queue/completion (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs:340-354`). These are surviving production call sites, not a removed facade's positions.
-* `quiesce_commits` only times out a `wait_zero()` (`engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs:50-64`). The tail barrier has an unconditional counter increment and a zero-observation loop, not a closed-admission state (`engine/shamir-engine/src/tx/commit/pipeline/driver/commit_tail_barrier.rs:12-32`). Its own comment requires stopping admission separately. The counter is entered only after prelock (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:668-683`), later than the base-interner merge.
+##### Hazard 2 — interner-only (overlay-only) leader commits bypass every table freeze
 
-**INFERRED — counterexample, not executed.** Even with every current table frozen, seal can observe zero counted tails, then a new overlay-only leader can enter prelock. With no touched table token, it need not encounter a table freeze; it can change the base interner and later append WAL while the outer capture/seal guard remains held. A leader already in prelock may also be uncounted at the zero observation. This demonstrates a missing exclusion proof, not an observed version, returned result, or corrupted artifact; no particular scheduler timing or successful runtime outcome is asserted.
+**SOURCE-OBSERVED chain.**
 
-**SOURCE-OBSERVED — why the pin cannot fix this.** The pin controls the deletion ceiling (`engine/shamir-engine/src/tx/drain/truncation_pin.rs:73-88`), not the leader entry, touched-token calculation, version assignment or WAL append sites above. The write domain explicitly says the leader commit path acquires nothing there (`engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs:8-11`). Neither a truncation pin nor a DDL domain reservation substitutes for leader admission.
+* Entry: `commit_tx` → `commit_tx_with_options` at
+  `tx/commit/pipeline/phase/commit/entry.rs:581-583` (import `entry.rs:9`,
+  fn `tx/commit/acknowledgement/tail.rs:23-28`) → `commit_tx_with_kind`
+  (`tail.rs:33`, gate initialization `:52-66`) → `commit_tx_inner` at
+  `entry.rs:600` → `repo.tx_gate()` `:629` → `pre_commit_prelock` call at
+  `entry.rs:671`. The prelock merges a nonempty overlay into the repo base
+  interner BEFORE any table work (`tx/preparation/pre_commit/prelock.rs:84-95`).
+* The table-drain loop enters writer-drain participation only for
+  `touched_table_tokens(tx)` (`prelock.rs:270-289`, `enter_writer_drain`
+  `:278`); the helper covers write-set, index, counter, staged-vector and
+  vector-delete tokens but **not** `interner_overlay`
+  (`prelock.rs:828-863`). `TxContext::is_empty` includes
+  `interner_overlay.is_empty()` (`storage/shamir-tx/src/tx/tx_context.rs:642-649`),
+  so an overlay-only tx is not the empty fast path.
+* Only after prelock does `CommitDriver::new` enter the tail counter
+  (`entry.rs:694-695`, `repo.commit_tail().enter()` `:695`) and dispatch the
+  lock-free branch (`entry.rs:703-727`) → `pre_commit_locked_validate`
+  (`tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs:294-298`) →
+  empty check, version assignment, `wal_ops_from_tx`
+  (`tx/preparation/pre_commit/locked.rs:150-174`; assignment `:167-169`) →
+  `InternerOverlayMerge` emission (`entry.rs:462-493`, push `:493`) → WAL
+  queue/completion (`legacy_and_lockfree.rs:340-356`).
+* `quiesce_commits` only times out `wait_zero()`
+  (`repo/instance/repo_instance/lifecycle.rs:51-62`); `CommitTailBarrier`
+  is an unconditional counter + armed-notify zero loop
+  (`tx/commit/pipeline/driver/commit_tail_barrier.rs:12-32`), and its own
+  doc requires admission to be stopped separately (`:21-22`).
+* **Follower apply is a SEPARATE commit entry, not `commit_tx`.** The
+  receipt pipeline is the only apply protocol (PR6b-3):
+  `apply_replicated_batch` at `tx/replication/apply_replicated.rs:323-330`
+  → `apply_batch_receipt`
+  (`tx/replication/follower_durability/receipt/apply.rs:46`), which holds
+  the write-domain permit for its whole run (`apply.rs:96-140`, `admit()`
+  `:134-136`, reservation twin `:112-119`) — it has NO prelock, NO tail
+  counter and NO table-drain participation. A follower-apply mutation is
+  therefore invisible to every mechanism hazard 2's freeze relies on.
 
-**PROPOSED — minimal follow-up for hazard 2.** Add one per-repo lock-free commit-admission gate, with a single atomic word containing **closed + active leader count**, and an owned RAII leader lease. Acquire it before any prelock/version/interner/WAL side effect, including overlay-only and AsyncIndex leaders. Capture/seal must atomically close admissions and await all pre-close leases, not sample today's tail count and assume it closes entry. Keep the lease through detached continuation, publication, separately spawned tail and error cleanup as specified below. This same gate is a necessary first phase for hazard 1's drain ordering; it is not sufficient without that refactor. Before restore, reject post-V* state and unknown scopes via the shared PROPOSED fail-closed preflight below; table freezes do not make such a copy acceptable.
+**INFERRED counterexample (unchanged).** With every table frozen, seal can
+observe a zero tail count and a new overlay-only leader can still enter
+prelock (uncounted — the counter is entered at `entry.rs:695`, after
+prelock), change the base interner, assign a version and append WAL while
+the capture/seal guard is held. On a follower, the same slip exists via the
+receipt pipeline with even fewer shared mechanisms.
 
-**PROPOSED — CI proof obligations for hazard 2 (not run).** Close the new gate, then attempt an overlay-only leader: it must block cancel-safely or be refused **before** changing the base interner, assigning a version, appending WAL or publishing anything; freezing tables alone is the negative control. Hold a pre-close lease immediately before prelock and require capture to wait. Cover cancellation before acquisition, after lease CAS/before prelock, in prelock, after WAL acceptance, and in detached/AsyncIndex tails; no active lease may disappear while its continuation or cleanup can still mutate. Handshake close versus lease acquisition at the CAS boundary (also a model-checking candidate): either counted pre-close or refused post-close, never an uncounted entrant. Check reopening after timeout/error/unwind, with no leaked count or zero-count gap at a tail handoff; include the shared post-V* recovery refusal cases below.
+**Why the landed pin does not help.** The pin controls only the deletion
+ceiling (`truncation_pin.rs:71-88`); neither the leader entry, the
+touched-token calculation, version assignment nor the WAL append consults
+it. The write-domain doc states the leader commit path acquires
+nothing there (`engine-repo/journal/changelog_store/write_domain.rs:8-11`).
 
-#### PROPOSED shared tx-layer barrier: smallest required contract, not a delivered API
+#### 2. Commit admission barrier (PROPOSED — settled)
 
-The following is **PROPOSED** for both hazards. It adds no new `Mutex`/`RwLock` on commit or truncate. The existing drainer `replaying` Tokio mutex may be retained for maintenance serialization; adding an unrelated facade mutex does not solve leader admission.
+**Primitive: `CommitAdmissionGate`, lock-free.** One `Arc`-shared per-repo
+gate with a SINGLE `AtomicUsize` state word:
 
-1. **PROPOSED — primitive and linearization.** An `Arc`-owned per-repo gate has one `AtomicUsize` (or equivalent single atomic state word): one closed bit and a bounded active count. Admission uses an Acquire/Release CAS to increment only an open, non-overflowed state, then synchronously constructs the owned lease before any await or mutation. Close CASes the closed bit while preserving the count; decrement/reopen use the same atomic state with acquire/release visibility. Do not implement “check closed; increment another atomic”: that admits the check/increment race. Reject count overflow. One exclusive RAII close owner rejects a competing closer; reopening preserves the count and only that owner's closure. Any generation/ownership mechanism must be included in the proof, not a second independently checked admission flag.
-2. **PROPOSED — acquire/release placement and cancellation.** Acquire at the common leader entry before today's acknowledgement wrapper initializes `tx_gate` (`engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs:52-66`), and pass the lease into the inner pipeline before its own `tx_gate`/`repo_wal` initialization and `pre_commit_prelock` (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:629-671`). Audit all alternate/direct inner entry points and require the same owned capability without recursively acquiring it; inserting a lease only after the wrapper's initialization is too late for the stated contract. A waiting acquisition has no side effects; cancellation after a successful CAS drops its lease on prelock abort. Once a commit is detached, move the **same owned lease** into its exact continuation, not a caller-stack guard. `CommitDriver` already transfers the suspended future on drop (`engine/shamir-engine/src/tx/commit/pipeline/driver/commit_driver.rs:79-113`); the new lease must follow it and its error/panic cleanup. AsyncIndex must transfer or extend ownership before spawn with no zero-count gap (today's tail-counter handoff is at `engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs:137-163`). Release only after publication, all mutation-capable tails and error cleanup finish. Current best-effort separately spawned panic lock cleanup (`engine/shamir-engine/src/tx/commit/pipeline/driver/commit_driver.rs:85-108`) requires an explicit ownership handoff too; merely adding a local lease would not prove this.
-3. **PROPOSED — phase A, close leaders without holding replay/domain/table locks.** Establish the captured repo set under a coordinated catalogue contract; order per-repo gate closures by stable instance-unique domain token, not name (`engine/shamir-engine-repo/src/journal/changelog_store/write_domain.rs:238-241,265-272` supplies the existing domain-order precedent). Close all relevant admissions, then await all active leases reaching zero. Register/enable a `Notify` waiter **before** rechecking the atomic count (the existing wait pattern is `engine/shamir-engine/src/tx/commit/pipeline/driver/commit_tail_barrier.rs:22-31`), or use a yielding recheck fallback; a final decrement must not be lost. Hold no exclusive repo permit while waiting for leaders, since their tails can need drain/replay. Resolve unknown WAL outcomes as explicit refusal, not a successful zero observation.
-4. **PROPOSED — phase B, finish existing replay and pause it before exclusive admission.** With leaders closed/zero and **no repo permits held**, drain through ordinary production paths, await any background pass, then acquire a production RAII pause guard on the existing `replaying` lock. Recheck pending work under that guard: DDL or a final pass may have changed it between drain and pause. A reservation conflict or inability to settle is failure, not permission to sample a point. Do not hold this lock and call `drain_all`/`drain_step` recursively; those acquire it themselves. Pausing must cover every replay entrant, including startup seeding, until the final admitted pass and flush finish.
-5. **PROPOSED — phase C, exclusive DDL admission and admitted final drain.** While paused, acquire compatible repo reservations/permits in stable domain-token order; fail on another owner's reservation rather than bypass it. Revalidate the catalogue/repo/table set under exclusive admission. Use admitted table freezes with the established repo → DDL admission → raise intent → drain writers → unique-lock preparation order; the existing migration-freeze body drops its DDL admission and preparation fence before returning (`engine/shamir-engine-table/src/table_manager/barriers/ddl_barriers.rs:105-121`). Do not retain a table DDL/unique lock and then ask replay to take that same lock. Run a refactored **already-paused, admitted drain body** that accepts the owned repo permit by borrow and never acquires `replaying` or the domain again. Thread it through interner-op replay, dormant table resolution, orphan-posting barriers, counter persistence, event repair/checkpoint and every indirect re-admission site; using only the admitted top-level op is not enough. This is a production admitted-drain refactor **outside pin scope**. The ordinary background path retains its replay → domain order; capture joins that order only after leaders finish. Audit other permit holders for waits on replay and interner persistence before claiming cycle freedom; any unconverted path remains an **open proof obligation** and blocks the facade.
-6. **PROPOSED — phase D, validate/flush/finish and unwind.** Under the admitted final-drain/pause discipline, explicitly persist the repo interner and all relevant stores, validate durable/settled/visible/WAL coverage, then record a point only if the contract is satisfied. Coordinate background interner/checkpoint writers through their existing persistence synchronization and admitted APIs; a leader gate alone does not pause an independent interner task. Flush errors, no-progress gaps, missing proof of direct-write coverage, or uncertain catalogues fail capture. Release temporary table barriers, repo permits/reservations, then replay pause, and reopen leader admissions last; retain WAL pins for the intended copy lifetime independently. A synchronous RAII close owner reopens on every ordinary/error/timeout/cancellation/unwind exit; guards must be created before suspension. If capture delegates mutation or cleanup, transfer the whole close/pause ownership until it stops rather than reopen early. Keep the runtime alive for owned continuations; aborting the process is not an unwind guarantee. Error-cleanup ownership and global catalogue/system-store/registry ordering remain proof obligations, not solved APIs.
+```text
+bit 62      CLOSED      (gate closed for admission)
+bit 63      CLOSE_TAKEN (one exclusive RAII close owner holds the right to reopen)
+bits 0..62  ACTIVE      bounded active-leader count (leases)
+```
 
-#### PROPOSED fail-closed recovery and point validation prerequisites (both hazards)
+* **Admission (`acquire`)**: `load(Acquire)`; if `CLOSED` set → wait per
+  the waiting policy below, then retry; if `ACTIVE == ACTIVE_MAX` (reject
+  overflow well below the 62-bit ceiling — `ACTIVE_MAX = i32::MAX as usize`)
+  → `Err(AdmissionOverflow)`; else `compare_exchange(current, current + 1, AcqRel, Acquire)`;
+  on success synchronously construct the RAII `CommitAdmissionLease` before
+  any `.await` or side effect. No new `Mutex`/`RwLock` anywhere on the
+  commit or truncate paths (CLAUDE.md lock-free ideology; the pin is the
+  in-tree precedent, `truncation_pin.rs:5-12`). Waiters park on a `Notify`
+  armed before the count recheck — the exact `CommitTailBarrier::wait_zero`
+  pattern (`commit_tail_barrier.rs:22-32`); a yielding recheck is the
+  fallback.
+* **Waiting policy (settled).** A leader that finds the gate closed WAITS
+  for reopen on the gate's `Notify` (armed before the recheck), bounded by
+  the barrier cap of the step-E resolution below; past the cap it is refused
+  with a typed retryable error (`AdmissionClosed`) and no side effect.
+  Client commits therefore see a short stall during a barrier, not an error,
+  and a nested acquisition on a task that already holds a lease (which would
+  otherwise wait for a close that waits for it) ends in a bounded refusal,
+  not a deadlock. The bounded wait is cancel-safe because nothing is
+  mutated before the lease exists. Follower apply refuses immediately (Q13).
+* **Release (`CommitAdmissionLease::drop`)**:
+  `fetch_sub(1, Release)` + `notify_one` — never a "check closed, then
+  increment a second atomic", which admits the check/increment race.
+* **Close (`close()`)**: single owner — CAS `CLOSE_TAKEN` 0→1 (AcqRel;
+  competing closer gets `Err(AdmissionBusy)`); then `fetch_or(CLOSED)`;
+  then await zero via armed-notify recheck. **Reopen**: only the close
+  owner (guarded by `CLOSE_TAKEN`), CAS `(CLOSED|ACTIVE)` → `ACTIVE`
+  (Release), then clears `CLOSE_TAKEN`; the count is preserved across
+  close/reopen. Any generation scheme must be part of the proof, not a
+  second independent flag.
 
-These are **PROPOSED follow-up prerequisites**, not additional implemented features or replacements for the two blockers. They apply to hazard 1's partially drained copy and hazard 2's possibly post-point copy alike. The prior section 5 instruction to *tolerate* post-V* store state is not an acceptable safety contract.
+**(i) ENTERED on every commit path.**
 
-* **SOURCE-OBSERVED — cold opening is already mutating.** The production constructor builds an instance, opens metadata, obtains admission and calls recovery before returning (`engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/durability_repo_impl.rs:64-79`). Recovery constructs the tx gate **before** reading and sorting all recovered entries (`engine/shamir-engine/src/tx/recovery/v2.rs:371-379`) and applies every entry (`engine/shamir-engine/src/tx/recovery/v2.rs:429-432`). `RepoWalManager::recover` delegates to group replay without a V* filter (`storage/shamir-tx/src/tx/repo_wal_manager.rs:168-171`). A later comparison against V* is therefore too late to be a preflight.
-* **PROPOSED — preflight before construction.** In an isolated staging copy, inspect metadata/version floors, history, changefeed events, follower receipts and all version-bearing recovery inputs **before repo/table/tx-gate construction**. Reject any state beyond the per-repo V*, unknown formats/scopes, incompatible captured catalogue, or state whose bound cannot be established. Arbitrary already-applied post-V* index/interner/catalogue/direct-store effects cannot be rolled back by replaying an older WAL: refuse the copy, do not lower markers and declare success. Receipt/version-domain comparisons need an explicit format-aware contract; no claim is made that the required reader exists today.
-* **PROPOSED — bound physical WAL before the cold constructor.** Verify complete entry boundaries/checksums and produce a durable staged WAL containing only complete entries with `commit_version <= V*`, with consistent segment metadata/sidecars. Reject malformed or unclassifiable entries/tails. Where append order interleaves versions, filtering/re-encoding must preserve all eligible entries, not cut at an assumed version-sorted byte offset. Remove/rewrite the staged post-V* entries under an explicit validated staging contract, fsync and verify before any cold open; never mutate the live source. A replay-loop filter alone leaves bytes that ordinary recovery on the **next boot** could replay. The actual WAL-bound transformation and crash-atomic staging protocol remain PROPOSED work, not existing functionality.
-* **SOURCE-OBSERVED — permissive lookup/scoping today.** Missing nonbroadcast table tokens return `Ok(())` for Put/Delete (`engine/shamir-engine/src/tx/recovery/v2.rs:92-105,123-134`) and index ops (`engine/shamir-engine/src/tx/recovery/v2.rs:188-200,252-264`). Broadcast table-open failures are logged/skipped (`engine/shamir-engine/src/tx/recovery/v2.rs:234-239,285-290`); the interner delta scope field is ignored (`engine/shamir-engine/src/tx/recovery/v2.rs:606-623`). Cold `CounterDelta` remains a no-op (`engine/shamir-engine/src/tx/recovery/v2.rs:155-180`), unlike the warm orphan counter increment (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:816-838`).
-* **PROPOSED — strict restore contract.** Prevalidate every nonbroadcast table token and every interner scope/name/id mapping against the captured catalogue/repo scope before replay; fail closed on unknown/dangling tokens, scope mismatches and broadcast lookup/write failures. Preserve cold `CounterDelta` semantics unchanged; do not substitute warm draining. Run the bounded cold constructor only after preflight, and refuse adoption on any replay or postflight error. Apply the same refusal to unknown tokens and post-V* receipts on ordinary reopen of a prepared backup, rather than assume the wrapper was its only opener.
-* **SOURCE-OBSERVED — zero progress is not proof of a clean point.** `drain_all` stops successfully at a zero pass (`engine/shamir-engine/src/tx/drain/drainer/truncate.rs:178-187`); `drain_step` can return `Ok(0)` with no replayable window (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:188-190`), logs/breaks on op failures (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:364-376`) and stops finalization at failed tables (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:738-752`) before returning its drained count (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:953-959`). Interner A5 failure conservatively retains unsafe state rather than making the count a success certificate (`engine/shamir-engine/src/tx/drain/drainer/drain_step.rs:772-805`).
-* **PROPOSED — explicit point/coverage certificate or refusal.** Check durable watermark and completion/settled progress against the closed leader horizon, unresolved/orphan work, interner persistence and captured WAL coverage; handle legitimate aborted/settled version holes explicitly rather than require unexplained numeric equality. Reject `Ok(0)` with a remaining gap or any drain/persist fault. A WAL maximum is not a certificate for WAL-less direct writes at versions above that maximum: introduce an explicit version/coverage contract for supported direct paths or reject such repos/modes from online backup. Do not silently sample `max_committed` and relabel it a consistency point. This is an unimplemented support contract, not an assertion that a runtime counterexample was reproduced.
+| Path | Entry point | Note |
+|---|---|---|
+| Ordinary + overlay-only leader commits | inside `commit_tx_inner` at `entry.rs:600`, immediately after the wound/expiry early exits and BEFORE `repo.tx_gate()` (`:629`) and `pre_commit_prelock` (`:671`) — earlier than the tail counter (`:695`) | the lease must be acquired before the acknowledgement wrapper initializes `tx_gate` (`tail.rs:52-66`) so a cancelled wait has no side effect |
+| DDL leaders | DDL pays write-domain admission today (`engine-table/table_manager/admission/domain/barrier/write_domain_barrier.rs:8-9`); any DDL that commits rows through the pipeline already passes `commit_tx_inner` and acquires the gate there | no separate gate acquisition at the DDL barrier |
+| Follower (replicated apply) | SEPARATE entry — at the top of `apply_replicated_batch` (`apply_replicated.rs:323`), before `apply_batch_receipt`'s write-domain admission (`receipt/apply.rs:134-136`) | the receipt pipeline does NOT route through `commit_tx`; without the gate here a follower-side mutation could run during a capture barrier |
 
-**PROPOSED — shared GitHub CI acceptance (none run here).** Inject zero-progress replay, interner persist, history/posting and checkpoint/drain faults; assert capture/seal fail with no success manifest when durable/settled/coverage evidence is incomplete. Stage WAL containing complete entries above and below V* (including interleaved append order), prepare the bounded copy, then open it through the ordinary constructor **twice**: no post-V* history, events or receipt effects may resurrect on either boot. Reject unknown nonbroadcast tokens, invalid interner scopes/mappings, broadcast table-open/write failures, post-V* metadata/history/events/receipts and WAL-less direct-write coverage violations before mutating constructors; assert the live source and adopted destination remain untouched on refusal. Keep cold counter behavior unchanged. Exercise close-owner and leader-lease cleanup on cancellation/panic, with deterministic handshakes rather than sleeps as correctness evidence. These are test specifications, not passing results.
+**(ii) LEFT (release points).** The lease moves WITH the continuation, never
+sits on a caller stack: `CommitDriver::new` already transfers the suspended
+future on drop (`commit_driver.rs:79-114`) and the AsyncIndex tail handoff
+enters-before-spawn (`legacy_and_lockfree.rs:139-163`) — the lease follows
+both, including the separately spawned panic cleanup (`commit_driver.rs:82-96`).
+Release only after publication, every mutation-capable tail (detached and
+spawned AsyncIndex materialization), and error/panic cleanup finish; on
+follower apply, after receipt publication and `durable_tail`. Cancellation
+after a successful CAS drops the lease at the abort point.
 
-**Remaining prerequisites, not a gate/safety claim.** The PROPOSED tx gate and admitted drainer address the two exclusion/ordering obligations only. R3 is still unresolved: section 4.2 E requires re-copying every mutable repo-database file inside seal, contradicting “flush time plus a constant” independently of leader admission; waiting for leases/replay also needs an explicit bound/refusal policy. File-set/compaction consistency remains separately unproved: per-file hashes/retries do not establish one recoverable fjall file set, and a paused drainer does not pause fjall's internal compaction. Catalogue/system-store/registry capture and the fail-closed recovery contracts above also remain prerequisites. No online facade, copy barrier, restore correctness, CI result or release gate is claimed by the pin-only step.
+**(iii) Interaction with the drainer and the landed truncation pin — chosen
+order (per repo).** Pins are already held from protocol step A
+(`protocol.rs:292-293`, port contract `wal_capture.rs:69-71`) — they are
+held from BEFORE the gate closes, so WAL deletion is impossible throughout.
+Then: close gate → await zero leases (a fixed commit horizon) → with NO repo
+permit held, let any in-flight background drain finish → acquire the RAII
+pause guard on `replaying` → recheck pending work under the guard → final
+admitted drain + flush → sample `V*` → re-copy under pause+pin (see the
+step-E resolution below) → drop pause → reopen gate LAST. Why this order:
+draining before pausing avoids the recursive `replaying` acquisition that
+causes hazard 1; pausing before the re-copy is what makes copied store files
+provably contain nothing above `V*`; reopening last keeps the horizon stable
+until all capture reads finish.
+
+**(iv) Fail-closed recovery.** The close owner is a synchronous RAII guard
+created before any suspension point; it reopens on drop — ordinary error,
+timeout, cancellation or unwind. A cancelled or panicked capture therefore
+cannot leave a repo closed. Leases vanish with their tasks. A crashed
+process releases all state by definition (atomics and the in-memory pin
+registry are process-local). A restart must recheck: (a) the gate word is
+open with zero leases — trivially true after a crash, asserted in tests
+after graceful shutdown; (b) no partial backup destination is adopted — a
+directory without a `manifest.json` is refused exactly as today's restore
+refuses unmanifested snapshots; (c) cold recovery replays the full retained
+WAL (unchanged), so no committed state can be lost by a mid-backup crash
+because the pin never truncated below the pinned floor.
+
+#### 3. Facade API mapping (shamir-engine `db_instance` layer ↔ landed port)
+
+The port trait stays in `shamir-sync` (`wal_capture.rs:64-87`); it exists
+precisely so `shamir-sync` never depends on `shamir-engine`. The
+implementation adapter lives in `shamir-server` (already depends on both)
+and calls the new `pub` facade functions in shamir-engine's `db_instance`
+layer. `.rust-guard/layers.toml` declares ONLY the shamir-engine layer order
+`repo < table < validator < tx < query < instance < db_instance`
+(`.rust-guard/layers.toml:6`); shamir-sync is not layer-declared. Adding
+`pub` facade items to the top layer of shamir-engine creates NO new edge
+and NO new backward dependency — nothing to change in `layers.toml`.
+
+| `OnlineBackupPort` method | Facade function (PROPOSED, shamir-engine `db_instance`) | Owns |
+|---|---|---|
+| `catalogue()` (`wal_capture.rs:67`) | `catalogue_repos() -> Vec<RepoSource>` (repo name, store dir, optional WAL dir; `in_memory` ⇒ `wal_dir: None`, Q8) | shamir-engine: catalogue read |
+| `acquire_pins()` (`:71`) | `acquire_truncation_pins(repos)` — pin per repo via the landed registry | shamir-engine: pin |
+| `capture_point(repo)` (`:75`) | `capture_point(repo)` — close gate, admitted flush (`flush_all_history` `durability_access.rs:275-291`, `pub(crate)` → `pub`), report `max_committed` | shamir-engine: gate + flush + position |
+| `capture_system_store()` (`:79`) | `capture_system_store()` — `flush_buffers_with_quiesce_timeout` (`engine/shamir-db/src/shamir_db/system_store/store.rs:333`, `pub(crate)` → `pub`) + version | shamir-engine `db_instance` over shamir-db system store |
+| `seal_point(repo)` (`:83`) | `seal_point(repo)` — §2 (iii) sequence, returns `V*` | shamir-engine: gate + pause + flush |
+| `release_pins()` (`:86`) | `release_pins()` — idempotent guard drop | shamir-engine: pin |
+| (no port method — restore side) | `replay_to(repo_path, wal_dir)` — cold `recover_inflight_v2` semantics against an offline staged copy | shamir-engine: recovery; called by offline `restore` (section 5), not by the online protocol |
+
+Layer ownership summary: gate, pause guard, pins, flush, position report and
+replay all live in shamir-engine (tx/repo internals below `db_instance`);
+protocol, copy, manifest, verification stay in shamir-sync; the adapter and
+admin wiring live in shamir-server.
+
+#### 4. CI tests (GitHub CI only — nothing runs locally)
+
+Placement per repo conventions: engine-level concurrency tests in
+`engine/shamir-engine/tests/`; server-boot/protocol acceptance in
+`devtools/shamir-e2e` (the e2e crate exists at `crates/devtools/shamir-e2e`)
+and `server/shamir-server/tests/` (server boot tests live there, e.g.
+`tests/seed_recovery_e2e/`).
+
+| Test (PROPOSED) | Crate / path | Proves |
+|---|---|---|
+| `commit_admission_gate::close_refuses_overlay_only_leader` | `shamir-engine/tests/commit_admission_gate/` | close-then-attempt: an overlay-only leader is refused (or blocks cancel-safely) BEFORE touching the base interner, assigning a version or appending WAL; freezing tables alone is the negative control (hazard 2) |
+| `commit_admission_gate::capture_completes_under_concurrent_commits` | same | continuous ordinary commits during capture/seal complete without deadlock, bounded by a test timeout; includes eligible `InternerOverlayMerge` and orphan `IndexPut`/`IndexDel` postings through the `begin_write_barrier` branch (`drain_step.rs:617-618`) (hazard 1) |
+| `commit_admission_gate::lease_survives_detached_and_async_tails` | same | no zero-count gap across `CommitDriver` detach (`commit_driver.rs:79-114`) and the AsyncIndex spawn handoff (`legacy_and_lockfree.rs:139-163`) |
+| `commit_admission_gate::follower_apply_respects_gate` | same | `apply_replicated_batch` refuses/blocks while the gate is closed (`apply_replicated.rs:323`) |
+| `online_backup_seal::cancellation_releases_gate_and_pin` | `shamir-engine/tests/online_backup_seal/` | cancel at every protocol step: pin registry empty (`truncation_pin.rs` state), gate reopened, active count 0, no leaked close owner |
+| `online_backup_seal::replay_to_v_star_double_boot` | same | bounded staged WAL (only complete entries ≤ `V*`), cold open twice reproduces exactly the sealed state; no post-V* effects resurrect on either boot |
+| `online_backup_gate_e2e` | `devtools/shamir-e2e` (or `shamir-server/tests/`) | full protocol over a live server with writer clients: capture/seal succeed under load, snapshot verifies, restore replays to the recorded consistency point |
+
+Deterministic handshakes (armed notifies at the CAS boundary, park hooks)
+instead of sleeps; handshakes at the close-vs-acquire CAS boundary are also
+the model-checking candidate.
+
+#### 5. Implementation plan (two PR-sized steps)
+
+**PR A — gate + admitted seal, in `shamir-engine` (must land FIRST, and
+BEFORE the tx crate extraction).** Scope: `CommitAdmissionGate` + lease +
+close owner (new `tx/commit/pipeline/admission/` module), wiring at
+`commit_tx_inner` and `apply_replicated_batch`, lease transfer through
+`CommitDriver`/AsyncIndex, the owned `replaying` pause guard, the
+`capture_point`/`seal_point`/`replay_to` facade in the `db_instance` layer,
+and the gate-aware unit tests above. Touched crates: shamir-engine only.
+rust-guard: visibility widenings to `pub` — the facade entries, the pin
+registry (`truncation_pin.rs`, already `pub(crate)`), `flush_all_history`
+(`durability_access.rs:275`), system-store flush (`system_store/store.rs:333`);
+new tx-layer module needs no layer move (still inside `tx`). **Ordering
+versus the engine split:** the split design extracts `shamir-engine-tx` in
+wave R4, last (`docs/dev-artifacts/design/engine-layering.md:11`, the pair
+becomes the crate dependency "at R4" `engine-layering.md:89,181`); no
+release-plan wave schedules it earlier (`docs/dev-artifacts/release-1/README.md`
+lists R2 waves — online backup — separately). A gate living inside tx commit
+code is cheaper to review and moves as one unit at R4, so PR A lands while
+tx is still in shamir-engine.
+
+**PR B — port implementation + server wiring, in `shamir-server`.** Scope:
+the `OnlineBackupPort` adapter over the facade (in shamir-server, which
+already depends on shamir-engine and shamir-sync), connecting the landed
+`run_online_backup` (`protocol.rs:233`) to the admin ops of 4.7, restore
+`replay_to` integration (section 5), metrics, and the e2e acceptance tests.
+Touched crates: shamir-server, plus shamir-db only if a `BatchOp` DTO arm is
+added (Q1 unchanged). rust-guard: nothing new — no new dependency edges, no
+layer moves; the port pattern keeps shamir-sync engine-free. Independent of
+the tx-crate split.
+
+#### Fail-closed recovery and point validation (kept prerequisites)
+
+The previous revision's fail-closed contract is RETAINED as a restore-side
+prerequisite and updated to the current code: the production constructor
+already mutates on open — `durability_repo_impl.rs:65-79` admits
+(`:73-75`), reads identity and runs `recover_v2_inflight_admitted`
+(`:79`) before returning; recovery builds the gate from inflight versions
+BEFORE replay (`tx/recovery/v2.rs:374`) and applies every sorted entry via
+`replay_v2_entry_admitted` (`v2.rs:429-432`); `RepoWalManager::recover`
+delegates to group replay with no V* filter
+(`storage/shamir-tx/src/tx/repo_wal_manager.rs:169-171`; `commit` stays a
+no-op `:163-165`). Permissive scoping today (warn+Ok on missing nonbroadcast
+table tokens `v2.rs:93-104,123-133` and index ops `v2.rs:188-199,252-263`;
+broadcast table-open failures logged/skipped `v2.rs:225-239,285-293`;
+interner delta scope ignored `v2.rs:606-635`; cold `CounterDelta` a no-op
+`v2.rs:155-180` vs the warm orphan increment `drain_step.rs:814-838`)
+mandates the strict restore contract. Zero progress is not a clean-point
+proof (`drain_all` stops at a zero pass `truncate.rs:178-190`; `drain_step`
+returns `Ok(0)` on an empty window `drain_step.rs:187-190`, logs/breaks on
+op failures `:364-377`, stops finalization at failed tables `:735-752`,
+returns the count `:959`; A5 failure conservatively retains unsafe state
+`:772-806`). Consequence: restore must preflight (bounded staged WAL,
+token/scope validation, post-V* rejection) BEFORE any cold constructor, and
+capture must refuse on incomplete durable/settled/coverage evidence — these
+remain PROPOSED work, unchanged in substance from the previous revision.
+
+#### Step E re-copy versus R3 — resolved (owner decision, default stated)
+
+Section 4.2 E required re-copying every mutable repo-database file inside
+the seal barrier, contradicting R3's "flush time plus a constant". The
+landed protocol runs the seal re-copy with writers running
+(`protocol.rs:338-368`), which is only safe if copied stores provably
+contain nothing above `V*` — exactly what §2 (iii)'s drain-pause provides.
+**Default (settled): keep the re-copy INSIDE the pause window** (pause is
+writer-blocking, so the bound is real data size, not flush time), with an
+explicit bound policy: a per-repo re-copy cap (bytes + wall clock,
+`shamir_backup_writer_block_seconds` extension) after which capture FAILS
+CLOSED instead of blocking unboundedly — R3's wording becomes "each barrier
+lasts at most flush + capped re-copy, with the cap enforced by refusal".
+Alternative (rejected default): move re-copy outside the pause with a
+convergence proof — no such proof exists (post-V* store effects are
+non-convergent, Review finding 4), so it stays an open question (Q12).
+
+#### Remaining prerequisites (updated)
+
+Settled by this subsection: the primitive, its entry/release protocol, the
+seal ordering over the landed pin, the port-to-facade mapping, the layer
+placement (no new `.rust-guard` edges), the test specifications and the
+two-step plan. Still open before implementation: the admitted-drain refactor
+(threading a supplied permit through every re-admitting drain/replay/barrier
+site — the existing admitted dispatcher `v2.rs:72-85` and admitted barrier
+`write_domain_barrier.rs:53-64` are building blocks, not a drainer);
+the fail-closed restore preflight and bounded-WAL staging contract; the
+point/coverage certificate (explicit contract for WAL-less direct writes —
+the follower receipt pipeline is one such path); fjall compaction is NOT
+paused by any of this (file-set consistency still rests on the final hash
+pass plus the bounded re-copy, not on a stable file set); catalogue/
+system-store/registry capture ordering (Q9/Q7 unchanged); R3's amended
+bound needs the cap metric. No correctness claim is made for the landed
+protocol until PR A lands: as shipped, the port has no implementation and
+the two hazards above are unaddressed.
+
+#### Open questions (new, each with a default; Q11+ continues section 8's numbering)
+
+* **Q11. Gate placement inside the commit pipeline.** Acquire in
+  `commit_tx_inner` before `tx_gate()` (default, chosen) vs in
+  `commit_tx_with_kind` (`tail.rs:33`). Default: `commit_tx_inner` — it is
+  the single funnel both the acknowledgement wrapper and all inner entries
+  pass; a wrapper-level acquisition still allows uncounted alternate inner
+  entrants.
+* **Q12. Re-copy placement (owner confirmation of the default).** Inside the
+  drain-pause window with a hard cap and fail-closed refusal (default) vs
+  outside with a convergence proof (none exists today). Default as stated
+  above; R3's test (6.2) must assert the cap, not just p99.
+* **Q13. Follower-apply gate semantics.** Refuse while closed (fail-closed,
+  resume worker retries from the durable bookmark) vs block. Default: refuse
+  with a typed error; the follower's receipt pipeline is crash-safe by
+  design (`apply.rs:14-16` cancel-safety note), so refusal is recoverable.
+* **Q14. `replay_to` ownership.** Put the restore-side replay entry in
+  shamir-engine's `db_instance` layer (default) vs in shamir-db. Default:
+  `db_instance`, consistent with 4.1 and the layer order; shamir-db only
+  orchestrates (as the stamp's restore gate already does).
+* **Q15. Stale `shamir-metrics` claim in 4.8.** That section says
+  `shamir-metrics` is "a PROPOSED new crate"; `foundation/shamir-metrics`
+  now exists. Default: a future revision of 4.8 re-points emission at the
+  existing crate; no behaviour change decided here (outside this
+  subsection's edit scope, flagged to the metrics owner).
