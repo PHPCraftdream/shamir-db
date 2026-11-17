@@ -205,14 +205,14 @@ async fn status_in_doubt_reports_the_pending_operation() {
 }
 
 #[tokio::test]
-async fn status_detects_a_checksum_mismatch_between_body_and_applied_record() {
+async fn status_refuses_a_journal_whose_stored_body_no_longer_matches_its_checksum() {
     let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, _digest) = stage_applied(&db, "testdb").await;
 
-    // Corrupt ONLY the stored body of the started event: the recorded
-    // checksums stay consistent, so the history validates but the
-    // server-recomputed canonical checksum no longer matches.
+    // Corrupt ONLY the stored body of the started event: the journal reader
+    // validates every row's body against its recorded checksum, so a tampered
+    // body is refused as an integrity failure before any status is built.
     let table = db
         .system_store()
         .system_repo()
@@ -246,8 +246,24 @@ async fn status_detects_a_checksum_mismatch_between_body_and_applied_record() {
     }
     super::helpers::overwrite_row(&table, event_id, envelope).await;
 
-    let value = run_status(&db, identity).await;
-    assert_eq!(str_field(&value, "checksum_validation"), "mismatch");
+    let mut b = Batch::new();
+    b.op("status", status_op(identity));
+    let request = b.to_request_via_msgpack().unwrap();
+    let error = db
+        .execute("testdb", &request)
+        .await
+        .expect_err("a tampered journal body must be refused");
+    assert_eq!(
+        error.code(),
+        Some("schema_migration_durability_unavailable"),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("body metadata/checksum mismatch"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
