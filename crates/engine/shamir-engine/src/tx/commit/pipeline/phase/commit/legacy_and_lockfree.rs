@@ -9,6 +9,7 @@ use super::entry::{
     fire_post_validate_pre_publish_test_hook, maybe_crash, wal_completion, TxError,
 };
 use crate::tx::commit::core::RepoCore;
+use crate::tx::commit::pipeline::admission::lease::CommitAdmissionLease;
 use crate::tx::commit_phases::{
     apply_data_phase, apply_vector_delta_phase, materialize_async_tail, promote_vectors,
 };
@@ -27,6 +28,7 @@ pub(super) async fn commit_tx_inner_legacy_async(
     repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
+    admission_lease: CommitAdmissionLease,
 ) -> Result<TxOutcome, TxError> {
     let commit_guard = gate.commit_lock().await;
 
@@ -138,7 +140,12 @@ pub(super) async fn commit_tx_inner_legacy_async(
     let metrics = repo.tx_metrics().clone();
     // Enter before spawn while the inline driver is still counted: no zero-count gap.
     let tail_guard = repo.commit_tail().enter();
+    // R2a 1c: the admission lease moves INTO the spawned tail (enters-before-
+    // spawn, same no-gap argument as `tail_guard`): the AsyncIndex materiali-
+    // zation stays counted for admission until it finishes. Every early
+    // return above dropped the lease instead — no gap, no leak.
     let join = tokio::spawn(async move {
+        let _admission_lease = admission_lease;
         let _tail_guard = tail_guard;
         fire_async_index_tail_test_hook(&repo_clone).await;
         let state = materialize_async_tail(

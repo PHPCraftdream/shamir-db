@@ -1,6 +1,8 @@
 use shamir_query_types::batch::VisibilityWait;
 use std::sync::Arc;
 
+use crate::tx::commit::pipeline::admission::gate::CommitAdmissionGate;
+
 #[derive(Clone)]
 pub(crate) struct TxHorizon {
     /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.
@@ -9,6 +11,10 @@ pub(crate) struct TxHorizon {
     tx_metrics: Arc<shamir_tx::TxMetrics>,
     /// Counts owned inline and detached commits for explicit shutdown waiting.
     commit_tail: Arc<crate::tx::CommitTailBarrier>,
+    /// R2a 1c: commit admission gate (design `online-backup.md` section 2).
+    /// One per repository, owned next to `commit_tail`; reachable from the
+    /// commit pipeline (leader) and the follower apply path.
+    commit_admission: Arc<CommitAdmissionGate>,
     /// D2 P1d-2b: lazily-spawned background drainer (history-write off the
     /// ack-path). Created + spawned once on first `drainer`
     /// call; shared across foreground clones. The drain TASK holds a
@@ -33,6 +39,7 @@ impl TxHorizon {
         tx_gate: Arc<tokio::sync::OnceCell<Arc<shamir_tx::RepoTxGate>>>,
         tx_metrics: Arc<shamir_tx::TxMetrics>,
         commit_tail: Arc<crate::tx::CommitTailBarrier>,
+        commit_admission: Arc<CommitAdmissionGate>,
         drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
         commit_visibility_wait: VisibilityWait,
     ) -> Self {
@@ -40,6 +47,7 @@ impl TxHorizon {
             tx_gate,
             tx_metrics,
             commit_tail,
+            commit_admission,
             drainer,
             commit_visibility_wait,
         }
@@ -59,6 +67,10 @@ impl TxHorizon {
 
     pub(crate) fn commit_tail(&self) -> &Arc<crate::tx::CommitTailBarrier> {
         &self.commit_tail
+    }
+
+    pub(crate) fn commit_admission(&self) -> &Arc<CommitAdmissionGate> {
+        &self.commit_admission
     }
 
     pub(crate) fn drainer_cell(

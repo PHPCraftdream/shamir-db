@@ -43,6 +43,11 @@ pub(crate) fn receipt_error_code(error: &CommitError) -> Option<&'static str> {
         // RETRYABLE: the refusal clears by itself once the drainer truncates
         // the WAL back under the cap; a retried commit then succeeds.
         CommitError::WalRetentionExceeded => Some("wal_retention_exceeded"),
+        // R2a 1c: admission gate refused (closed past the bounded reopen cap,
+        // or ACTIVE overflow). RETRYABLE: acquisition precedes `tx_gate` /
+        // prelock, so nothing was mutated; a retried commit succeeds once the
+        // capture barrier reopens the gate.
+        CommitError::CommitAdmissionRefused => Some("commit_admission_refused"),
         CommitError::Storage(error) => error.code(),
         CommitError::Expired { .. } => None,
         CommitError::WalDurability { .. } => Some("wal_durability"),

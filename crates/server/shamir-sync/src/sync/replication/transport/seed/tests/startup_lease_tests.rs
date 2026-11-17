@@ -177,3 +177,25 @@ async fn cancelled_startup_future_cleans_the_lease() {
     wait_until_lease_gone(&follower, "sub_a").await;
     assert!(!sup.is_running("sub_a"), "nothing may have spawned");
 }
+
+/// Run an async test body on a 64 MiB thread: deep debug-build engine poll
+/// frames can overflow the 2 MiB test-thread stack (as the recovery_gap and
+/// server lifecycle fixtures already guard against).
+pub(super) fn run_on_big_stack<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(body());
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}

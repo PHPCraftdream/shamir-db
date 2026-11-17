@@ -8,6 +8,7 @@ use super::legacy_and_lockfree::{
 };
 use crate::tx::ack::commit_tx_with_options;
 use crate::tx::commit::core::RepoCore;
+use crate::tx::commit::pipeline::admission::gate::LEADER_REOPEN_WAIT_CAP;
 use crate::tx::pre_commit::{pre_commit_prelock, PreLockResult};
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
@@ -326,6 +327,14 @@ pub enum TxError {
     /// pass brings retention back under the cap.
     #[error("WAL retention limit exceeded; writes are refused until the journal catches up")]
     WalRetentionExceeded,
+    /// R2a 1c: the commit admission gate refused this leader — either CLOSED
+    /// past the bounded reopen-wait cap (`LEADER_REOPEN_WAIT_CAP`) or the
+    /// bounded ACTIVE count overflowed. Retryable: the acquisition happens
+    /// BEFORE `tx_gate` / `pre_commit_prelock`, so no side effect exists —
+    /// the base interner is unchanged, no version was assigned, no WAL was
+    /// appended. Succeeds once the capture barrier reopens the gate.
+    #[error("commit admission refused; retry after the capture barrier reopens")]
+    CommitAdmissionRefused,
     #[error("commit {commit_version} published but WAL durability failed")]
     WalDurability {
         commit_version: u64,
@@ -406,6 +415,7 @@ impl TxError {
                 return TransactionInfo::indeterminate(tx_id, snapshot_version, commit_version);
             }
             Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
+            Self::CommitAdmissionRefused => "commit_admission_refused".to_string(),
             Self::Storage(e) => e
                 .code()
                 .map(str::to_owned)
@@ -424,6 +434,7 @@ impl From<TxError> for DbError {
             error @ (TxError::WalRequiresReopen
             | TxError::WalOutcomeUnknown { .. }
             | TxError::WalRetentionExceeded
+            | TxError::CommitAdmissionRefused
             | TxError::WalDurability { .. }) => DbError::Storage(error.to_string()),
             TxError::Storage(error) => error,
             TxError::MigrationFrozen { table } => DbError::MigrationFrozen { table },
@@ -620,6 +631,29 @@ pub(in crate::tx) async fn commit_tx_inner(
         });
     }
 
+    // R2a 1c: commit admission gate (design `online-backup.md` section 2).
+    // Acquired after the wound/expiry early exits and BEFORE `tx_gate` and
+    // `pre_commit_prelock` (which would merge the overlay into the base
+    // interner), so an overlay-only leader blocked here has touched NOTHING.
+    // A closed gate waits for reopen bounded by `LEADER_REOPEN_WAIT_CAP`,
+    // then returns a typed retryable error with no side effect. The lease
+    // moves INTO the `CommitDriver` continuation below — through the
+    // suspended-future transfer on drop, the AsyncIndex tail handoff and the
+    // spawned panic cleanup — and is released only after publication and
+    // every mutation-capable tail / error cleanup. Every early-return error
+    // path below simply drops it (RAII), releasing the count.
+    let admission_lease = match repo
+        .commit_admission()
+        .acquire_leader(LEADER_REOPEN_WAIT_CAP)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(_) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(TxError::CommitAdmissionRefused);
+        }
+    };
+
     // Group 15 (2026-08-14 review, SUMMARY.md 6.2): both resolutions can
     // hit REAL I/O on first touch (`repo_wal()` does `create_dir_all` +
     // `SegmentSet::open`) — mirror every other early-exit path in this
@@ -692,6 +726,7 @@ pub(in crate::tx) async fn commit_tx_inner(
                 &repo,
                 gate.as_ref(),
                 wal.as_ref(),
+                admission_lease,
             )
             .await
         } else {
@@ -710,6 +745,9 @@ pub(in crate::tx) async fn commit_tx_inner(
             //
             // Group-commit WAL batching is sacrificed for parallelism; the
             // WAL backend's internal batching (if any) still amortizes fsync.
+            // R2a 1c: the admission lease lives until the lock-free body —
+            // including every mutation-capable tail — has completed inline.
+            let _admission_lease = admission_lease;
             commit_tx_lockfree(
                 tx,
                 uwl_guards,

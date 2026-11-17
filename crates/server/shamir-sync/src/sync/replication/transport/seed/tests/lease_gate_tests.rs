@@ -862,8 +862,14 @@ async fn obsolete_follower_parked_in_pull_applies_nothing_after_replacement() {
 // T5 — start-race hook replacement prevents spawn
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn start_race_hook_replacement_prevents_spawn() {
+// Deep debug-build poll frames (DDL inside the start path) overflowed the 2 MiB
+// test thread on Windows on 2026-11-17: run on a roomy stack.
+#[test]
+fn start_race_hook_replacement_prevents_spawn() {
+    super::startup_lease_tests::run_on_big_stack(start_race_hook_replacement_prevents_spawn_body);
+}
+
+async fn start_race_hook_replacement_prevents_spawn_body() {
     let follower = build_db().await;
     create_profile_and_subscription(&follower).await;
 
