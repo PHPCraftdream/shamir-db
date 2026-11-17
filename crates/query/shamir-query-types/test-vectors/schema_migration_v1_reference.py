@@ -119,7 +119,8 @@ def rule(value):
     for key in ("len", "max_len", "min_len"):
         payload += optional(value.get(key), u64)
     payload += b"\0"  # one_of absent
-    payload += (b"\1\0" if "default" in value else b"\0")  # present null encodes FilterValue::Null
+    # default: JSON null or missing is Option::None (0x00); present is 1 || FilterValue.
+    payload += optional(value.get("default"), query_value)
     payload += optional(value.get("array_of"), string)
     payload += optional(value.get("format"), string)
     payload += b"\0"  # foreign_key absent
