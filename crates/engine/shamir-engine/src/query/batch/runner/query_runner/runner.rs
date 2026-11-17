@@ -102,12 +102,12 @@ impl<'a> QueryRunner<'a> {
     }
 
     /// Query-metrics sinks of the repositories a request declares.
-    pub(in crate::query::batch) fn batch_sinks(
+    pub(in crate::query::batch) fn batch_sinks<'r>(
         resolver: &dyn BatchResolver,
-        repos: &[String],
+        repos: impl IntoIterator<Item = &'r String>,
     ) -> Vec<std::sync::Arc<dyn QueryMetrics>> {
         repos
-            .iter()
+            .into_iter()
             .filter_map(|repo_name| resolver.query_metrics(repo_name))
             .collect()
     }
