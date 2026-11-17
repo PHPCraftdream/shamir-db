@@ -1,0 +1,290 @@
+# Operational views and query cancellation (release-1 operational views)
+
+- Status: design (release-1 observability direction), rev 2 (reviewer points 1-9 applied)
+- Brief: `docs/dev-artifacts/prompts/release/28-r4b-operational-views-design.md`
+- Plan: `docs/dev-artifacts/release-1/README.md` §5 gate, `docs/dev-artifacts/release-1/04-observability.md` §4, 6, 7
+- This document changes no code, test, CI or other document. OBSERVED = fact in the current code (path:line); PROPOSED = design decision of this document; INFERRED = conclusion drawn from cited facts, not read verbatim at that line.
+- Paths are relative to `crates/` unless they start with `docs/`.
+
+## 0. Summary and decisions
+
+Today the server has registries that already know everything an operator needs — session store, interactive-tx registry, cursor registry — but no operation exposes them, and the only way to stop work is shutdown (`server/shamir-server/src/boot/runtime.rs:21-79`) or letting a budget expire. The release-1 gate ("the operator sees query delays, data and WAL size, the state of backups and replication in /metrics and can find and cancel a stuck query") is half-served by `docs/dev-artifacts/design/engine-metrics.md`; this document designs the other half: an activity view, cooperative cancellation, statistics by query shape, their surfaces, tests and plan.
+
+Decisions:
+
+| # | Decision | Where |
+|---|---|---|
+| D1 | Activity view is a single admin batch op `ListActivity` returning sessions → requests → transactions → cursors; each fact comes from an existing registry, no new source of truth | 2.1 |
+| D2 | Registration for the activity view is lock-free: every registry cited in §1 already uses atomics/`DashMap`/`scc`; we add `AtomicUsize` mirrors for cardinality instead of calling `len()` | 2.2 |
+| D3 | Privacy: activity rows carry ids, actor, db, op kind, timing, state only — never filter values, literals, or message bodies. Sessions render as a MINTED non-secret numeric handle (`AtomicU64` in `SessionStore`), never the 32-byte bearer token or its 8-byte prefix (the audit-log prefix is a separate, out-of-scope residual risk) | 2.3 |
+| D4 | `ListActivity` pages by cursor-style continuation over a snapshot; global cap + per-session cap aligned with admission caps | 2.4 |
+| D5 | Server mints a per-execution request id (`RequestExecId(pub u64)`, handler-local `AtomicU64` like `next_cursor_id`) when a batch is admitted; client `rid` stays optional and is carried alongside | 3.1 |
+| D6 | Cancellation v1 covers: interactive tx (rollback), cursors (already exists), and batch execution via cooperative checkpoints; connection-level abort of the sync request loop stays teardown-only | 3.1-3.2 |
+| D7 | New wire error code `cancelled`; the cancelled caller receives the ordinary error path (same `BatchError` → code mapping) | 3.3 |
+| D8 | Race-free commit-vs-cancel: each in-flight entry carries a state word `AtomicU8` (`Running → Committing → Done`, `Running → Cancelled`); the executor CASes `Running → Committing` once in `CommitDriver::new` just after the tail-barrier enter, before any durable work; `CancelRequest` CASes `Running → Cancelled`; exactly one CAS wins — loser cancel reports `already_committing`, loser executor aborts at the next checkpoint. This CAS is the linearization point | 3.4 |
+| D9 | Replication-apply work on a follower is not operator-cancellable | 3.6 |
+| D10 | Shape key = 128-bit FxHash (two `THasher` passes, two fixed seeds, both u64 halves) over a canonical encoding of INTERNER KEYS (u64 ids) + op discriminants + 1-byte literal type tags — no wire strings, no SHA-256. Non-cryptographic: collisions affect folded statistics only, bounded by the 256-row cap — accepted trade-off | 4.1 |
+| D11 | Total time per shape: plain `AtomicU64` nanos accumulator on the shape row (not the histogram primitive) | 4.4 |
+| D12 | Shape accumulation happens post-execution on the slow path (once per completed execution, not per iteration) | 4.2 |
+| D13 | Surfaces: typed BatchOps + `DbResponse` DTOs through the query builder; permission = server-level `ActivityView:Manage` for other users' work, own-session listing allowed for ordinary users (read-only, own rows only) | 5.1-5.2 |
+| D14 | New `/metrics`: active requests/sessions gauges, cancellations total, refused cancels total — `shamir_` prefix, `_total` counters, cardinality caps | 5.4 |
+| D15 | Shape registry lives in the query/batch layer of `shamir-engine`, per-repo instance, per the engine-metrics bundle-placement rule; no new crate | 4.2 |
+| D16 | Wake primitive: per-entry `Arc<CancelHandle>` holding the D8 state word + a `tokio::sync::Notify`, passed down as a parameter (shamir-tx already has tokio `sync`; no new dependency). Every long wait site adds a select arm on the Notify | 3.7 |
+| D17 | Waiting states (`waiting_lock`, `waiting_visibility`, `waiting_budget`) are recorded by the wait sites themselves via a small per-entry `waiting: AtomicU8` written before parking and cleared after — state derived from where the task last parked, lock-free | 3.7 |
+| D18 | The `(other)` shape row is the ACCUMULATOR into which evicted rows' counters are folded at eviction time (executions, nanos, errors move in before delete); reset zeroes everything including `(other)` | 4.2-4.3 |
+| D19 | New `ResourcePath::ActivityView` variant following the `WasmCompiler` global-singleton precedent; no persisted ACLs are keyed by `ResourcePath`, so this is not a persisted-compatibility question — but it is a `shamir-types` change (plan step 1) | 5.2 |
+| D20 | `CancelRequest` cannot be delivered on the connection whose request it targets (lock-step dispatch); it must arrive on a second session/connection — no API change needed | 5.3 |
+
+## 1. Map of what exists (OBSERVED)
+
+### 1.1 Request travel
+
+| Stage | Where | Key fact |
+|---|---|---|
+| Transports | `net/shamir-transport-tcp/src/listener.rs` (TCP), `net/shamir-transport-http/src/lib.rs` with `budget.rs`/`gate.rs` admission, ws `listener.rs`, ipc `endpoint.rs` | each transport admits then hands to dispatch |
+| Session | `net/shamir-connect/src/server/state/session.rs:129` (`Session`), `:150` (`last_activity_ns: AtomicU64`), `:266` (id is `[u8;32]`), `:434-485` (`SessionStore`: DashMap keyed by the 32-byte `Sid` at :457 + per-user slots; `insert` :485; admission in `admission.rs:21`, INFERRED); **no numeric session handle exists today** (verified) | store created in `server/shamir-server/src/engine/server/server_launcher/launch.rs:333` |
+| Dispatch | `net/shamir-connect/src/server/infra/dispatch.rs:27` (`RequestHandler` trait), lock-step one-request-at-a-time per connection (comment 17-20), errors collapse to `application_error` (55-60) | `server/shamir-server/src/engine/db_handler/handler.rs:374` `handle`, `:401` `handle_decoded` route `DbRequest` variants |
+| Engine entry | `engine/shamir-db/src/shamir_db/execute/repo_admin/db_execute.rs:20-64` | single async entry |
+| Batch exec | `engine/shamir-engine/src/query/batch/exec/batch_execute.rs:277-311`; `ExecScope` with limits + deadline at `exec_scope.rs:99` | deadline from `BatchLimits.max_execution_time_secs` |
+| Interactive tx | `server/shamir-server/src/engine/db_handler/repo_admin/tx_handlers.rs:80` (wire handle = `tx.tx_id.0`; registration failure drops tx = RAII rollback); `TxRegistry` `sync/sync/durability/tx_registry.rs:217` keyed by handle, one tx per session (241-243), reaper 318-384 wired `launch.rs:609`; `INTERACTIVE_TX_MAX_LIFETIME = 300 s` (`handler.rs:107-110` area, verified comment at 107) | TxRegistry lives in the SERVER layer (`server/shamir-sync`) — see §7 step 3 |
+| Cursors | `server/shamir-server/src/engine/cursor_registry.rs:380-383` (open `DashMap<u64, Arc<Cursor>>` + per-session counts); cursors pin an MVCC snapshot (`pinned_version` ~237; opened in `db_handler/cursor_handlers/handlers.rs:119-120`, INFERRED); reaper wired `launch.rs:619` | `CancelCursor` wire op exists, idempotent, cross-session cancel treated as closed (`db_handler/cursor_handlers/fetch.rs:605-622`; `cursor_registry.rs:555-562` — INFERRED for fetch.rs range) |
+| Subscriptions | `db_handler/handlers/subscribe_handler.rs:75-140` via `SubscriptionRegistry` (`engine/subscriptions/core/bridge.rs:33`) | |
+| Stored procedures | `query/shamir-query-types/src/ops/call/call_op.rs:27`; **no in-batch transactional wasm call exists** — `Call` ops are rejected inside transactional batches (`engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:22-27`; tests `call_tx_tests.rs`) | |
+| Duplex multi-in-flight | only on the sync connection: `server/shamir-sync/src/sync/connection/request_loop.rs:5-33` (JoinSet, semaphore, `abort_all` on teardown, rid correlation) | db connections are one-at-a-time |
+
+### 1.2 Existing identifiers
+
+| Kind | Value | Evidence |
+|---|---|---|
+| Session | raw 32-byte CSPRNG bearer token | `net/shamir-connect/src/server/state/session.rs:266` |
+| Request | client-supplied `Option<u32> rid` on the envelope only (`net/shamir-connect/src/common/messages/envelope.rs:29`, echoed at 98/128/159, INFERRED for echo lines); **no server-minted request id exists** | |
+| Tx | `TxId(pub u64)` (`storage/shamir-tx/src/tx/support/core/types.rs:12`) from `RepoTxGate::next_tx_id` `AtomicU64` (`storage/shamir-tx/src/gate/repo_tx_gate.rs:78` area); wire handle = tx_id, exposed in `DbResponse::TxOpened` (`query/shamir-query-types/src/wire/db_message.rs:454-458`) and `TransactionInfo.tx_id` (`ops/batch/req/transaction_info.rs:11`, INFERRED); implicit writes report `tx_id == 0` (`engine/shamir-engine/src/query/batch/control/implicit.rs:139-140`) | |
+| Cursor | `CursorId(pub u64)` (`query/shamir-query-types/src/wire/cursor_id.rs:20`) from handler-local `AtomicU64` (`handler.rs:195-198`) | no Uuid anywhere |
+
+### 1.3 Budgets, deadlines, and how work stops today
+
+- `ExecutionDeadline` (`engine/shamir-engine/src/query/batch/exec/execution_deadline.rs:221`; `from_budget_secs` 264; `check()` → `BatchError::ExecutionTimedOut` 308-315). Budget enters `ExecScope` at `exec_scope.rs:99`.
+- Checkpoints where the deadline is checked: `exec_scope.rs:266`, `nested.rs:72`, per-iteration `query_runner/arms_read.rs:349, 383, 574` (ranges INFERRED from spot reads); last checkpoint immediately before commit (`batch_execute.rs:881-919`; expired-budget abort rolls back and maps into `TransactionInfo::aborted` at 926).
+- `BatchLimits` fields (`query/shamir-query-types/src/ops/batch/req/batch_limits.rs:34-91`); `TooManyIterations` pre-flight (`arms_read.rs:305-316`).
+- Server caps: `QueryLimitsCap`/`TxLimitsCap`/`CursorLimitsCap` (`server/shamir-server/src/engine/db_handler/config.rs:26-46, 112-114, 135-141`; injected `handler.rs:292-305`).
+- Global in-flight response-byte budget acquired pre-exec, task-local stash release (`handler.rs:310-312, 718-739, 801-827`; impl `server/shamir-server-security/src/security/perimeter/byte_budget.rs`; the acquire park is `notified.await` at `byte_budget.rs:169`, UNBOUNDED; default budget is unbounded, `handler.rs:237, 260` → immediate).
+- Wire error vocabulary: `error_code()` maps `BatchError` → codes at `handler.rs:871-935`; vocabulary `db_message.rs:418-448`.
+
+**Verified absences:** there is no mid-query cancellation flag or `CancellationToken` in the request path — cancellation exists only for shutdown (`server/shamir-server/src/boot/runtime.rs:21-79`; scheduler `Notify`+broadcast `boot/scheduler.rs:12,109`; sync `close_requested` `AtomicBool` + `abort_all` `request_loop.rs:30-40, 197-198`). There is no server request id (§1.2), no session-inventory API, no activity query, and no semaphore in the batch path (verified). The deadline checkpoints above are exactly where a cancel flag would plug in.
+
+### 1.4 Slow-query log
+
+`SlowQueryConfig { threshold_us, DISABLED = 0 }` (`db_handler/config.rs:7-15`; default `handler.rs:234`, builder `:286-288`); a single `tracing::warn!` after execution with `elapsed_us`, db, query count, and `request_id = response.id` (`handler.rs:764-775`). No persistence.
+
+### 1.5 Locks and pinned snapshots
+
+- `RepoTxGate` (`storage/shamir-tx/src/gate/repo_tx_gate.rs:37-125`): commit mutex, MVCC counter, `active_snapshots` refcount map, `snapshot_versions: TreeIndex` (`:78`), `active_snapshots_opening` barrier (field `:104`).
+- `SnapshotGuard::Drop` releases the refcount (`storage/shamir-tx/src/gate/repo_tx_gate/snapshot.rs:57, 118`; `open_snapshot` 154/183/207 — ranges INFERRED).
+- `PredicateSet` SSI locks (`storage/shamir-tx/src/gate/predicate_set.rs:82-144`); `ri_barrier_tokens` (`engine/shamir-engine/src/tx/preparation/pre_commit/locked.rs:82-90`; commit pipeline `tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs:250-288`, INFERRED).
+- Pessimistic record locks: `mvcc.lock_key`, wound-wait abort as `DbError::Conflict` (`engine/shamir-engine/src/table/table_manager/accessors/table_manager_locks.rs:8-35`); the park itself is in `storage/shamir-tx/src/mvcc_store/mvcc_locks.rs` (§3.7).
+- `VersionedOverlay` snapshot reads bounded by min active snapshot (`storage/shamir-tx/src/version/versioned_overlay.rs:59, 193-196`).
+- Abort today: `TxContext::Drop` = RAII rollback, no I/O (`storage/shamir-tx/src/tx/tx_context.rs:4, 125, 448`); server `TxRollback` op (`tx_handlers.rs:393-404`) + reaper.
+
+### 1.6 Admin dispatch and permissions
+
+Admin ops are `BatchOp`s; `BatchOp::is_admin()` (`query/shamir-query-types/src/ops/batch/ops/batch_op.rs:645, 652`) drives a coarse gate in `handle_decoded`: non-superuser → `permission_denied` for non-exempt admin ops (`handler.rs:662-678`; exemption allowlist `is_coarse_admin_gate_exempt` at `handler.rs:668`). Engine-side `authorize_access(..., Action::Manage)`, e.g. `engine/shamir-db/src/shamir_db/execute/core/admin_dispatch.rs:217`; `Action` enum Read/Write/Create/Delete/Execute/List/Manage (`foundation/shamir-types/src/entries/access/action.rs:9, 22-28`). Authorization resources: `ResourcePath` enum (`foundation/shamir-types/src/entries/access/resource_path.rs:31-86`: variants `Root` :33, `Database` :34, `Store` :37, `Table` :41, `Record` :48, `Index` :55, `FunctionNamespace` :62, `WasmCompiler` :68 (global-singleton precedent), `FunctionFolder` :74, `Function` :77, `User` :80, `Group` :83), deriving only `Clone, Debug, PartialEq, Eq, Hash` (:30) — NO serde; in-memory POSIX-style `ResourceMeta` owner/group/mode (`access/policy.rs:23-54`); no stored ACL tables keyed by `ResourcePath` found (INFERRED: absence of evidence). DTOs: `DbResponse` variants `db_message.rs:354-533`. Typed client builders exist (e.g. `query/shamir-query-builder/src/wire/token_admin/create_api_token.rs:8`); client methods `client/shamir-client/src/client/api.rs` (`create_api_token` :432, `list_api_tokens` :463, `revoke_api_token` :483, `create_scram_user` :522, `set_replicator` :573, `repl` :609, `get_ddl_op_status` :641); TS mirror camelCase in `client/shamir-client-ts/src/core/client/client.ts` (`createScramUser` :652, `getDdlOpStatus` :770; builders under `src/core/builders/admin/`). Backup is a library fn, not a wire op (`server/shamir-sync/src/sync/durability/backup.rs:218`).
+
+### 1.7 What /metrics, /info, /audit say about running work
+
+Observability server: `server/shamir-server-security/src/security/observability/mod.rs:1-26, 529-532` — routes `GET /healthz /readyz /metrics /info`, loopback-only unless opted in (208-217, INFERRED for range); per-scrape sampling `sample_gate_metrics(db)` (607-616); `GateDiagnostics` incl. `oldest_blocker` (`storage/shamir-tx/src/gate/repo_tx_gate/gate_diagnostics.rs:36`); `visibility_export.rs:1-38`. Audit log: HMAC-chained `AuditEntry { ..., session_id_prefix [u8;8], ... }` (`net/shamir-connect/src/server/infra/audit_chain.rs:51-74`); repo audit wiring `server/shamir-server/src/engine/db_handler/repo_admin/repo_audit.rs:80-94` (INFERRED); `with_audit_writer` `handler.rs:221` (INFERRED).
+
+Missing for the operator: session inventory, per-request/per-tx activity, cancel-by-identifier, shape statistics.
+
+### 1.8 Primitives we will reuse
+
+- Canonical wire encoding: `ToWire::to_msgpack = rmp_serde::to_vec_named` (`query/shamir-query-builder/src/wire/to_wire.rs:6-16`) with byte-exact fixtures (`tests/repl_ddl_msgpack.rs:39`, INFERRED). `ReadQuery` is `Serialize/Deserialize` with `deny_unknown_fields` (`query/shamir-query-types/src/read/core/read_query.rs:15-47`); `Filter` tagged enum with `MAX_FILTER_DEPTH = 64` (`read/filter/filter_enum.rs:10-15`; on the wire `field: FieldPath = Vec<String>`, `read/core/field_path.rs:2`; `de_field_path` accepts string-or-segments, `filter_enum.rs:18-19, 408-420`). **No `Hash` impls / fingerprint / prepared-statement cache in the builder today** (verified absence).
+- Interner: lock-free str↔key (`foundation/shamir-types/src/core/interner/interner.rs:70-90`); at the engine fold point field names are already interned: `intern_field_path(field: &[String], interner) -> Option<Vec<u64>>` (`engine/shamir-engine-query/src/query/filter/evaluation/semantics/resolve.rs:67`), cached as `InternerKey`s (`query/filter/caches/field_path_cache.rs:29, 60-62`).
+- Metrics primitive planned in `shamir-metrics`: fixed-bucket atomic histogram + seqlock snapshot (`docs/dev-artifacts/design/engine-metrics.md:162-245`); that doc leaves form statistics to this design (`engine-metrics.md:308`). Naming rules: `shamir_` prefix, `_total` counters, cardinality caps with `(other)` aggregation; bundle placement per-repo (`engine-metrics.md:296-302`).
+- Bounded-table precedent: compile-cache disk store `scc::HashMap` + recency tick `AtomicU64` + single-trimmer evicting lowest recency (`wasm/shamir-wasm-host/src/wasm/compile_cache/disk_store.rs:27-28, 222-282`; tests `trim_tests.rs:31,43`, INFERRED). `THasher = BuildHasherDefault<FxHasher>` (`foundation/shamir-collections/src/lib.rs:52`). **sha2 is NOT a dependency of shamir-engine/shamir-engine-query** (verified `Cargo.toml` of both); it is regular in shamir-server :90 / shamir-sync :41 / shamir-connect :27 and optional in shamir-query-types :33.
+- Loom convention (for §6): optional loom in `engine/shamir-engine` (`Cargo.toml:15, :111`, build.rs :105-110), model in `table/support/guards/writer_drain_barrier.rs:148+`; also `shamir-metrics` (`Cargo.toml:19-27`, model `src/tests/loom_model.rs`); root `Cargo.toml:37-41` registers cfg(loom). Stress-guard: `devtools/shamir-test-diag/src/guard.rs:89` (`FlakeGuard::with_watchdog`; usage `server_tests.rs:15`, `boot_oracle_tests.rs:58`).
+
+## 2. Activity view (PROPOSED)
+
+### 2.1 The view (D1)
+
+One admin batch op `ListActivity` returns, per repo database, three flat lists plus a session header list:
+
+- **Sessions**: minted numeric session handle (D3), user, transport, created-at, `last_activity_ns` age, open tx count, open cursor count. Source: `SessionStore` DashMap + per-user slots (`session.rs:434-485`); age from `last_activity_ns` (`:150`).
+- **Transactions**: tx handle (`u64`), owning session handle, user, state (`active` / `awaiting_commit` / `expired_pending_reap`), idle time, size class if cheaply available (INFERRED: registry rows already carry idle timestamps — `tx_registry.rs:318` computes `expired_handles(now, idle_ttl)`). Source: `TxRegistry` (`tx_registry.rs:217`), one per session enforced at 241-243, reaper 318-384.
+- **Cursors**: cursor id, owning session handle, user, table (name only, no keys), pinned snapshot version, open duration. Source: `CursorRegistry` open map + per-session counts (`cursor_registry.rs:380-383`), `pinned_version` ~237.
+- **Requests (running batches)**: minted `RequestExecId` (D5), session handle, user, db, op kind summary (`read` / `write` / `tx_open` / `admin:<op>` — kind names only, never arguments), state (D8/D17 word: `running` / `committing` / `done` / `cancelled`, plus `waiting_lock` / `waiting_visibility` / `waiting_budget` once the wait sites record them — §3.7), elapsed. Source: a new lightweight in-flight table in the db handler (see 2.2); op kind from the already-parsed `QueryEntry::op` discriminant.
+
+INFERRED granularity: v1 reports state at batch granularity, not per-iteration.
+
+### 2.2 Hot-path cost (D2)
+
+- Registration is one `scc::HashMap` (or DashMap) entry insert with `THasher` (`foundation/shamir-collections/src/lib.rs:52`) and one `AtomicU64` start-timestamp store; deregistration is entry removal. No mutex, no O(N) per op, bounded memory: entry count ≤ in-flight cap × per-session cap, aligned with the existing admission caps (`config.rs:26-46`).
+- Cardinality mirrors: `AtomicUsize` counters incremented/decremented next to each registry; gauges in /metrics read the mirrors, never `len()`.
+- The activity reader iterates a registry (operator-driven, off the hot path) and must hold no lock the writer takes: scc/DashMap iterators are per-shard, so a scrape is lock-free with a momentarily-torn snapshot acceptable (page + continue, 2.4).
+
+### 2.3 Privacy rule (D3)
+
+Rows carry: ids (minted session handle, tx handle, cursor id, request-exec id), actor name, database name, op kind, timing, state. They must not carry: filter values, literals, table row data, message bodies, raw SQL/canonical query bytes, the 32-byte session bearer token, or even its 8-byte prefix.
+
+**Decision: `SessionStore` mints a non-secret per-session numeric handle** — an `AtomicU64` counter assigned at `insert` (`session.rs:485`), stored alongside the `Sid` key (`:457`). The activity view and all cancel targets use this handle. Justification: the session id is a secret credential; its prefix is part of that credential, and operators are exactly the audience who must not see credential material (they may share screens, paste logs, copy view output). The audit-log precedent keeps its prefix (`audit_chain.rs:66`) only because that log is operator-controlled on the host — an explicit residual risk, unchanged here and out of scope for this design.
+
+### 2.4 Paging and bounds (D4)
+
+`ListActivity` takes an optional continuation token (opaque: registry kind + last-seen key + monotonic snapshot sequence) and a `limit`. Implementation: copy-on-iterate — snapshot keys of the requested kind, sort, then render up to `limit` rows and return a continuation pointing past the last key. Bounds: global cap on rendered rows per call (default 256, aligned with shape-cardinality scale) and the view itself is naturally bounded by admission caps; expired sessions/tx/cursors disappear via the existing reapers (`launch.rs:609, 619`; reaper `tx_registry.rs:318-384`).
+
+## 3. Cancellation (PROPOSED)
+
+### 3.1 Identifier decision (D5, D6)
+
+- **Interactive tx**: cancel by tx handle — the handle already exists on the wire (`db_message.rs:454-458`), the registry is keyed by it (`tx_registry.rs:217`), and rollback is the existing RAII path (`tx_context.rs:125`; `tx_handlers.rs:393-404`).
+- **Cursor**: `CancelCursor` already exists and is idempotent with cross-session cancel treated as closed (`fetch.rs:605-622`; `cursor_registry.rs:555-562`) — no new work, only listing in the activity view.
+- **Batch request**: the client `rid` is optional, per-connection, and not server-minted (`envelope.rs:29`) — cancelling "rid 7" of some session is ambiguous under pipelining on the sync loop and meaningless across reconnects. **Decision: the server mints a per-execution `RequestExecId(pub u64)` from a handler-local `AtomicU64` (exactly the `next_cursor_id` pattern, `handler.rs:195-198`) when a batch is admitted**, echoes it in the response/audit details, and registers the in-flight entry (2.1). This also gives R4c tracing a span id (engine-metrics.md:308). Cost: one atomic increment per batch — negligible.
+- **Scope of v1**: tx, cursor, and running-batch cancellation as below. Connection-level abort of the sync multi-in-flight loop stays teardown-only (`request_loop.rs:30-40`); cancelling one in-flight request on that loop is v2 — the sync loop's JoinSet already isolates tasks, but its teardown semantics are entangled with `abort_all`, and the db-path checkpoints below already cover the stuck-query case the release gate asks for.
+
+### 3.2 Cooperative cancellation (D6, D16)
+
+`CancelRequest(request_exec_id)` CASes the entry's state word `Running → Cancelled` (D8) and fires the entry's `CancelHandle` Notify (D16). The `Arc<CancelHandle>` (state word + `tokio::sync::Notify`) is passed down as a parameter alongside `ExecScope`, per the engine-metrics bundle-placement rule (instance → query → tx downward only; shamir-tx already has the tokio `sync` feature, `storage/shamir-tx/Cargo.toml:24`; no tokio-util, no new dependency). **Every checkpoint is an existing deadline checkpoint** — a cancel check is `deadline.check()` followed by the same flag test, so no new traversal points:
+
+- scope entry: `exec_scope.rs:266`;
+- nested batches: `nested.rs:72`;
+- per-iteration read arms: `arms_read.rs:349, 383, 574`;
+- `TooManyIterations` pre-flight site (`arms_read.rs:305-316`) also consults the flag;
+- final checkpoint immediately before commit (`batch_execute.rs:881-919`).
+
+### 3.3 Caller-visible behaviour (D7)
+
+A cancelled batch returns a new `BatchError::Cancelled` mapped to a new wire code `cancelled` in `error_code()` (`handler.rs:871-935`), added to the vocabulary (`db_message.rs:418-448`). The client sees the ordinary error path — no new wire semantics. Cancellation is best-effort idempotent like `CancelCursor`: cancelling an id that has completed returns "already finished".
+
+### 3.4 Proof obligations
+
+1. A cancelled request releases everything it holds **by unwinding, not by new code**: `SnapshotGuard::Drop` releases the gate refcount (`snapshot.rs:57, 118`), `TxContext::Drop` = RAII rollback with no I/O (`tx_context.rs:4, 125, 448`), the tx slot frees in the registry (one-per-session invariant `tx_registry.rs:241-243`), cursor entries are unaffected unless the cursor op itself is cancelled (then `cursor_registry.rs:555-562` removal applies), and the in-flight entry + byte-budget stash release mirrors `handler.rs:718-739, 801-827`.
+2. Interactive tx cancellation rolls back: cancel = registry remove + drop of the `Arc<Tx>` — the registration-failure path in `tx_handlers.rs:80` already proves drop-of-`Arc<Tx>` is a correct rollback.
+3. Deadlock freedom: the state word and Notify are touched only with lock-free atomics; no cancellation path takes the gate commit mutex or any table lock.
+4. **Race-free commit-vs-cancel (D8) — the linearization point.** Each in-flight entry carries `state: AtomicU8` with transitions `Running → Committing → Done` and `Running → Cancelled`:
+   - The executor CASes `Running → Committing` **once, in `CommitDriver::new`, immediately after the tail-barrier enter** (`engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:682-683`) and **before the path branch** at `entry.rs:687` — so both commit paths are covered. OBSERVED placement of the durable phase: the commit transition is at `batch_execute.rs:929-931` (`match commit_tx_with_options(tx, &repo, visibility_wait).await` → `TxOutcome`); the commit path is `engine/shamir-engine/src/tx/commit/acknowledgement/tail.rs:22-28` → `commit_tx_with_kind` (:33) → `commit_tx_inner` (`entry.rs:600`); the durable phase begins at the WAL begin — legacy/AsyncIndex `wal.begin_grouped` (`storage/shamir-tx/src/tx/repo_wal_manager.rs:100`), lock-free `wal.begin_grouped_ticketed` (`legacy_and_lockfree.rs:341-344`, comment :202 "no global commit_mutex"; fsync deferred to the drainer, `legacy_and_lockfree.rs:372`). (Interactive twin CAS site: `interactive_tx.rs:177`.)
+   - `CancelRequest` CASes `Running → Cancelled`. **Exactly one CAS wins**: if cancel loses (state already `Committing`), the cancel handler reports `already_committing` and the commit completes and reports normally; if the executor loses (state `Cancelled` before its CAS), it aborts at the next checkpoint. Because both sides attempt an atomic CAS on one word, the winner is determined at a single linearization point — no window exists where a cancel is "in flight" against a commit already writing to the WAL.
+   - The activity view's `state` reads the same word.
+
+### 3.5 Waiting states and the activity view (D17)
+
+See §3.7: `waiting_lock` / `waiting_visibility` / `waiting_budget` are derived from where the task last parked.
+
+### 3.6 Followers and replication apply (D9)
+
+Replication-apply work on a follower is driven by the leader's durable stream (`sync/connection/request_loop.rs`); it is not operator-cancellable — cancelling it would desynchronize apply from the stream. The sync loop keeps its own `abort_all` purely for connection teardown (`request_loop.rs:30-40, 197-198`). The activity view on a follower shows apply progress as read-only rows; `CancelRequest` against an apply task is refused with `not_cancellable`. Leader-side write commits created by operator batches are cancellable only per 3.4.
+
+### 3.7 Long waits inside batch execution, and the wake primitive (D16, D17)
+
+Every long/unbounded await in the batch path, its bound today, and the cancel-aware design (`Arc<CancelHandle>` = state word + `tokio::sync::Notify`, passed down; each wait's select gains an arm on the Notify; on wake, re-check the flag and return a cancel error if set):
+
+| Wait | OBSERVED | Bound today | Design |
+|---|---|---|---|
+| Record-lock (the classic stuck query) | `mvcc_locks.rs:45` `lock_key`; park is `tokio::select!` at :178-181 on `lock.notify` (`notify_waiters` :151, :209; pre-registered `Notified::enable()` :175-176) and `wound_notify` (`notify_one` :137); only exits are grant (:106) or wound-wait abort `DbError::Conflict` (:60-65, :160-165) — **no timeout anywhere in the file** | UNBOUNDED | add a third select arm fed by the CancelHandle Notify; **tx-layer change (shamir-tx)**, listed in plan step 2. Callers: `table_manager_locks.rs:26-33` (read), `:54-61` (write) |
+| `active_snapshots_opening` barrier | atomic RAII counter (`gate/repo_tx_gate/snapshot.rs:184, :256`; field `repo_tx_gate.rs:104`) | NA — not an await, no suspension points, cancel-safe by construction | no change |
+| As-of visibility confirmation | `engine/shamir-engine/src/table/read/planning/read_temporal.rs:97-98` `observe_gate_with_budget(...)`; budget in `eval_context.rs:241-259`: `Bounded { timeout_ms }` → bounded, `Strict` → unbounded; timeout raises `DbError::AsOfVisibilityTimeout` (:124-128) | bounded by budget, or UNBOUNDED under `Strict` | select on the CancelHandle wake; v1 minimally re-checks the flag on wake/timeout |
+| WASM call | **no in-batch transactional wasm call exists** (`db_gateway.rs:22-27`; tests `call_tx_tests.rs`); non-tx calls are fuel-bounded only (`wasm/shamir-wasm-host/src/wasm/wasm_function/call_exec.rs:60-81`), wall-clock unbounded (:147-148 comment) | fuel-bounded | v1 does NOT interrupt a running wasm call mid-execution; bound = fuel; cancel takes effect at the next checkpoint after the call returns |
+| ByteBudget acquire | `handler.rs:738-739` acquire; with a cap configured the park is `notified.await` (`byte_budget.rs:169`), wake primitive `Notify` (:91, enable :155); default is unbounded budget (`handler.rs:237, 260`) → immediate | UNBOUNDED when capped | select on the CancelHandle wake; **server layer only** (shamir-server-security), no engine change |
+| Semaphore | none exists in the batch path (verified) | — | — |
+
+**Consequence for the activity view (D17):** `waiting_lock` (parked in `lock_key`), `waiting_visibility` (as-of wait), `waiting_budget` (byte-budget park) become real states derived from where the task last parked. The wait sites record the state via the same entry — a small per-entry `waiting: AtomicU8` written before parking and cleared after — keeping the whole scheme lock-free.
+
+## 4. Statistics by query shape (PROPOSED)
+
+### 4.1 Shape definition (D10)
+
+**Canonical encoding:** field names at the fold point are INTERNER KEYS. OBSERVED: on the wire, `field: FieldPath = Vec<String>` (`read/core/field_path.rs:2`; `de_field_path` accepts string-or-segments, `filter_enum.rs:408-420`); at the engine fold point the names are already interned — `intern_field_path(field: &[String], interner) -> Option<Vec<u64>>` (`resolve.rs:67`), cached as `InternerKey`s (`field_path_cache.rs:29, 60-62`). **Decision: the shape's canonical byte string uses interner keys (u64 ids), op discriminants, and 1-byte literal type tags — NOT wire strings** — so the shape is rename-stable and compact. Literal payloads are replaced by a 1-byte type tag (int / float / string / bytes / bool / null); the walk is depth-bounded by `MAX_FILTER_DEPTH = 64` (`filter_enum.rs:10-15`). The builder gains no `Hash` impls on public types; the folding lives engine-side where the canonicalization cache already exists (INFERRED placement argument).
+
+**Key hash (D10):** drop SHA-256. The key is **128 bits from two passes of the workspace `THasher` (FxHasher) over the canonical interner-key encoding — two different fixed seeds, both u64 halves — no new dependency** (sha2 is not a dependency of shamir-engine/shamir-engine-query, §1.8). Collision argument, stated honestly: FxHash is not cryptographic; a malicious client could craft colliding shapes, but the impact is folded statistics only — no correctness, no data — and is bounded by the 256-row cap. Accepted trade-off, noted as such.
+
+### 4.2 Bounded registry and accumulation (D10, D12)
+
+- Per repo: `scc::HashMap<[u8;16], ShapeRow, THasher>`, cap **256 shapes**, recency tick `AtomicU64` on the instance, **single-trimmer** `trim_pass` evicting the lowest tick — a direct copy of the compile-cache trim pattern (`disk_store.rs:27-28, 222-282`). `ShapeRow { executions, total_nanos (D11), errors, last_tick }` — atomics only; no per-row mutex.
+- Accumulation point: **post-execution** in the batch epilogue (slow path, once per batch, not per iteration — D12). Cost per execution: one entry lookup-or-insert + one tick bump + three atomic adds. No dependency beyond `scc` + `fxhash` already in-tree.
+- `(other)` row (D18): defined as the **accumulator into which evicted rows' counters are folded at eviction time** — the trimmer folds `executions`, `total_nanos`, `errors` into `(other)` before deleting the row. The engine-metrics `(other)` naming rule is satisfied by this fold (`engine-metrics.md:308`).
+
+### 4.3 Reset (D10, D18)
+
+Admin batch op `ResetShapeStats` clears the map (single-trimmer swap-to-empty under the same `trimming: AtomicBool` guard pattern, `disk_store.rs:28`) and zeroes the mirrors. **Reset zeroes everything, including `(other)`** (D18) — unlike eviction folds, reset is a wipe, not a relocation. Reads during reset see either old or empty — never partial rows.
+
+### 4.4 Total time (D11)
+
+Plain `AtomicU64` nanos accumulator per shape, not the `shamir-metrics` histogram: a histogram's ~16 buckets × 256 shapes = 4k atomics plus snapshot machinery for a stat whose only consumer is "total time per shape"; one summing accumulator is sufficient and the per-repo execution-duration histogram (engine-metrics R4a) already provides distribution shape globally. Overflow at u64 nanos (~584 years) is not a concern; wrap-risk at read time is handled by read-twice-consistency or accepted (INFERRED: acceptable).
+
+## 5. Surfaces (PROPOSED)
+
+### 5.1 Wire ops and DTOs (D13)
+
+New typed `BatchOp`s + `DbResponse` variants in `query/shamir-query-types` (DTOs within `db_message.rs:354-533` style), builders in `query/shamir-query-builder/src/wire/admin/` (new module, mirroring `token_admin/`):
+
+- `ListActivity(ListActivityReq { scope: All | Own, kind: Sessions|Transactions|Cursors|Requests|All, limit, continuation })` → `ActivityPage { rows, continuation: Option<...> }`. Session identity in all rows is the minted numeric handle (D3).
+- `CancelRequest(RequestExecId)` → `CancelOutcome { cancelled | already_finished | already_committing | not_cancellable }`. `already_committing` = the state word was past `Running` (D8): the refusal means "observe the outcome", not an error. `cancelled` includes the case where the request was parked in a waiting state and woke via the CancelHandle (D16/D17).
+- `CancelTx(handle)` (thin wrapper over existing rollback semantics; refused per D8 if committing).
+- `ResetShapeStats` → `ResetAck`; `ListShapeStats(limit)` → `ShapeStatsPage { rows: [{ shape_hex, executions, total_nanos, errors }], truncated_other: bool }`.
+
+No raw JSON anywhere: all through `ToWire`/builders (`to_wire.rs:6-16`).
+
+### 5.2 Permission default (D13, D19, answers 04-observability §7 Q2)
+
+**Decision: add a new `ResourcePath::ActivityView` (or `Observability`) variant** following the `WasmCompiler` global-singleton precedent (`resource_path.rs:68`). Compatibility: `ResourcePath` derives only `Clone, Debug, PartialEq, Eq, Hash` (:30) — no serde, so nothing serialized; authorization is the in-memory POSIX-style `ResourceMeta` owner/group/mode (`policy.rs:23-54`); no stored ACL tables keyed by `ResourcePath` were found (INFERRED: absence of evidence) — adding a variant is therefore **not** a persisted-ACL compatibility question, but it IS a `shamir-types` change, owned by plan step 1.
+
+Server-level `ActivityView` + `Action::Manage` (`action.rs:9, 22-28`) is required to see **other users'** work — via the normal `authorize_access` path (`admin_dispatch.rs:217`) rather than the coarse `is_admin()` gate (`handler.rs:662-678`); the new ops are added to `is_coarse_admin_gate_exempt` (`handler.rs:668`). **Default answer: an ordinary user may call `ListActivity { scope: Own }` and sees only rows whose user matches, read-only; `CancelRequest` for own requests is also allowed; everything cross-user needs `ActivityView:Manage`.**
+
+### 5.3 Client methods and dispatch topology (D13, D20)
+
+Rust `client/shamir-client/src/client/api.rs`, following the existing naming (`api.rs:432-641`): `list_activity`, `cancel_request`, `cancel_tx`, `reset_shape_stats`, `list_shape_stats`. TS mirror camelCase in `client/shamir-client-ts/src/core/client/client.ts` next to `createScramUser` :652 / `getDdlOpStatus` :770, builders under `src/core/builders/admin/`. The future admin CLI (`docs/dev-artifacts/release-1/05-admin-cli.md`) calls exactly these: `activity ls`, `activity cancel <id>`, `shapes ls`, `shapes reset`.
+
+**Dispatch topology note (D20):** dispatch is lock-step one-request-at-a-time per connection (`dispatch.rs:17-20`), so a `CancelRequest` **cannot be delivered on the connection whose request it targets** — it must arrive on ANOTHER connection/session. Cancelling one's own request therefore requires a second session. This is acceptable and requires no API change: the admin CLI and TS/Rust clients routinely hold separate control connections, and the release-1 admin shell is exactly such a second session.
+
+### 5.4 Metrics (D14)
+
+New gauges/counters in the observability export (`observability/mod.rs:529-532` + `visibility_export.rs`), reading the `AtomicUsize` mirrors (D2):
+
+- `shamir_active_requests`, `shamir_active_sessions`, `shamir_active_transactions`, `shamir_active_cursors` (gauges);
+- `shamir_cancellations_total{result="cancelled|already_finished|already_committing|not_cancellable"}` (counter, cardinality-capped at 4 labels);
+- `shamir_shapes_tracked` (gauge, cap 256 + `(other)` per D10/D18).
+
+`shamir_` prefix, `_total` for counters, no per-user or per-session labels (privacy + cardinality, D3).
+
+## 6. Tests and acceptance (CI only)
+
+Repo test organisation: per-crate `tests/` dirs with `mod.rs` manifests. **Loom policy (revised):** a loom model across scc/DashMap registries and the server is not feasible; loom is kept ONLY for a small extracted state machine — the D8 state word + wake primitive — if it can live in a crate with a loom cfg, copying the existing convention (`shamir-engine` optional loom `Cargo.toml:15, :111`, build.rs :105-110, model `writer_drain_barrier.rs:148+`; `shamir-metrics` `Cargo.toml:19-27`, model `src/tests/loom_model.rs`; root `Cargo.toml:37-41`). If the state machine cannot be extracted into such a module, replace loom with a named stress test using `shamir-test-diag`'s `FlakeGuard::with_watchdog` (`guard.rs:89`; usage `server_tests.rs:15`, `boot_oracle_tests.rs:58`). Named tests:
+
+| Test | Crate | Property |
+|---|---|---|
+| `activity_view_under_load` | `shamir-server` (tests/) | 50 concurrent sessions/tx/cursors; `ListActivity` returns a consistent, bounded page; continuation walks to exhaustion |
+| `activity_privacy_no_literals_or_credentials` | `shamir-query-types` + `shamir-server` | activity/shape DTOs serialized for a query containing distinctive literals contain none of them, and no 32-byte session token nor 8-byte prefix (byte-scan) |
+| `state_word_commit_vs_cancel` (loom, or `FlakeGuard` stress) | extracted state-machine module (or `shamir-engine`) | all interleavings of CAS `Running→Committing` vs `Running→Cancelled` end with exactly one winner: loser cancel → `already_committing`, loser executor → abort at next checkpoint; `Done`/`Cancelled` terminal |
+| `cancel_wakes_parked_lock_wait` | `shamir-server` + `shamir-tx` | a request parked on a record-lock wait (`lock_key`) is cancelled, wakes via the CancelHandle, and releases its pinned snapshot, its locks and its tx slot |
+| `cancel_releases_all_under_concurrency` | `shamir-server` | cancel during iteration → snapshot refcount returns to baseline, record locks free, tx slot free, in-flight entry removed |
+| `cancel_interactive_tx_rolls_back` | `shamir-server` | cancel tx → staged writes invisible to fresh snapshot; registry slot reusable |
+| `durable_phase_commit_refusal` | `shamir-server` | cancel racing the commit CAS → `already_committing`; commit outcome reported normally |
+| `cancelled_code_on_error_path` | `shamir-server` | cancelled batch → `cancelled` wire code via `error_code()` (`handler.rs:871-935` vocabulary) |
+| `shape_folding_same_shape_diff_literals` | `shamir-engine` | `age = 5` and `age = 999` fold to one row; `age > 5` vs `age = 5` are two rows |
+| `shape_eviction_bound_and_other_fold` | `shamir-engine` | 1000 distinct shapes → ≤ 256 rows + `(other)`; evicted counters move into `(other)` (D18); trimmer single-flight (mirror `trim_tests.rs`) |
+| `shape_stats_reset` | `shamir-engine` | reset zeroes everything including `(other)`; in-flight accumulation after reset lands in fresh rows |
+| `permission_denial_activity` | `shamir-server` | ordinary user `scope: All` → `permission_denied`; `scope: Own` → own rows only; non-holder `CancelRequest` on foreign request → denied |
+| `follower_apply_not_cancellable` | `shamir-server` | cancel against apply task → `not_cancellable` |
+
+Acceptance rows R4b-1/2/3 of `docs/dev-artifacts/release-1/04-observability.md` map to: R4b-1 activity view correctness (`activity_view_under_load`, `activity_privacy_no_literals_or_credentials`), R4b-2 cancellation (`state_word_commit_vs_cancel`, `cancel_wakes_parked_lock_wait`, `cancel_releases_all_under_concurrency`, `durable_phase_commit_refusal`), R4b-3 shape statistics (`shape_folding_same_shape_diff_literals`, `shape_eviction_bound_and_other_fold`).
+
+## 7. Implementation plan
+
+| # | Step | Crates | Engine layer | Before/after tx-crate move (`shamir-engine-tx`) |
+|---|---|---|---|---|
+| 1 | Minted `RequestExecId` + minted session handles (`SessionStore` `AtomicU64` at `insert`) + in-flight table + activity registration + `ResourcePath::ActivityView` variant + `ListActivity` op + DTOs + builders + client methods + activity /metrics gauges. States reported in step 1: `running` / `committing` / `done` (read from the server-owned in-flight entry; the word lives in the server's entry — see step 2 for the CAS wiring; non-wired executions default `running` → `done` on completion) | `shamir-types`, `shamir-query-types`, `shamir-query-builder`, `shamir-client(-ts)`, `shamir-server` (db handler + `net/shamir-connect` session store), `shamir-server-security` (export) | none — step 1 touches no engine crate | Either; independent of the move |
+| 2 | Cooperative cancel: **CAS wiring at `CommitDriver::new`** (`entry.rs:682-687`, recommended here so step 1 stays server-only), state word in the server in-flight entry, checkpoint checks, `cancelled` code, refusal per D8, `CancelRequest` op, wake primitive `Arc<CancelHandle>` + select arms at the wait sites (§3.7), waiting states (D17) | `shamir-engine` (query/batch + commit driver), **`shamir-tx`** (lock-wait select arm — tx layer), `shamir-server`, `shamir-server-security` (byte-budget arm), `shamir-query-types` | query(batch) + tx boundary: the only tx-layer edit is the `lock_key` select arm; the CAS is in the commit driver (engine) | **Before** the move: the checkpoint/CAS edits are all in files that stay in the facade; doing it before keeps the tx move diff pure. The tx-layer select arm travels with `shamir-tx` either way. |
+| 3 | Interactive tx + cursor cancel wiring (registry entry removal, activity states, `CancelTx` op) | `shamir-server`, `shamir-sync` (tx_registry remove API), `shamir-query-types` | repo/instance (server only) | **Either — independent of the move**: `TxRegistry` lives in `server/shamir-sync/src/sync/durability/tx_registry.rs`, the SERVER layer, and does NOT move with `shamir-engine-tx`. Collision note: R2a online backup (`docs/dev-artifacts/design/online-backup.md`; `docs/dev-artifacts/release-1/02-online-backup-and-encryption.md:13` references the flat path `sync/durability/backup.rs`) plans to regroup `sync/durability/` into a `backup/` subfolder — NOT yet executed on this branch (current layout is flat: `mod.rs, backup.rs, restore.rs, config.rs, maintenance_lock.rs, tx_registry.rs, tests/`; `mod.rs:5 pub mod backup;`). Any tx_registry edit may conflict with that future move; sequence step 3 to rebase after the R2a regroup lands, or land it before it starts. |
+| 4 | Shape statistics: interner-key canonical fold in the engine epilogue, 128-bit Fx key, bounded scc registry with `(other)` eviction fold, `ResetShapeStats`/`ListShapeStats`, `shamir_shapes_tracked` export | `shamir-engine` (query/batch epilogue + filter walk reusing `shamir-engine-query` caches), `shamir-server-security` (export) | query(batch) (accumulation) + query leaf (`field_path_cache` reuse — no edits) | **After** the move: the epilogue commit path in `query/batch` calls into tx outcome types (`TxOutcome`, `ack::commit_tx_with_kind`) whose paths stabilize post-move. |
+
+Each step is PR-sized; no new dependencies in any step (scc, fxhash, tracing, rmp-serde, tokio `sync` all already in-tree at the cited sites).
+
+## 8. Open questions (each with a default answer)
+
+1. **Are the existing deadline checkpoints enough, or must cancellation also break long single-row operations?** Default: the existing checkpoints (§3.2) plus the wake arms (§3.7) are sufficient for v1 — reads are per-iteration, writes are pre-commit, and the only unbounded parks are now cancel-aware; a running wasm call is fuel-bounded only (§3.7), accepted. Revisit only if a workload shows an uncancellable window > one iteration.
+2. **Should ordinary users see their own sessions/requests?** Default: yes, `scope: Own`, read-only, own-request cancel allowed — but own-request cancel needs a second session (D20/§5.3).
+3. **Request-id minting scope: batches only, or every wire request?** Default: minted when a batch is admitted (D5); envelope-level minting for non-batch requests is v2 and only needed if R4c tracing wants spans for control ops too (`engine-metrics.md:308`).
+4. **Shape cardinality: 256 per repo — per repo or per repo+user?** Default: per repo, 256, `(other)` eviction fold (D18); per-user split doubles memory and leaks per-user workload info through cardinality; revisit only if a multi-tenant deployment requests it.
+5. **Cancel-permission granularity: per-request `ActivityView:Manage`, or a separate `Cancel:Manage`?** Default: one permission, `ActivityView:Manage` (D19 variant), governs both view and cross-user cancel; own-request cancel needs no permission beyond authentication.
+6. **Should the shape registry persist across restart?** Default: no — in-memory, rebuilt by traffic, reset by restart; persistence adds a store owner in the tx/repo layers for little value (shapes re-converge within minutes on a warm workload).
+7. **Do rejected cancels (refusals) get audited?** Default: yes — `already_committing` and `not_cancellable` refusals append to the audit chain with the same entry shape as other admin ops (`audit_chain.rs:51-74`), since they are operator actions on shared state.
+8. **Can the D8 state machine be extracted into a loom-cfg module, or does its test fall back to a `FlakeGuard` stress test?** Default: attempt extraction into a small module following the `shamir-engine`/`shamir-metrics` loom convention (§6); if it cannot live in such a crate cleanly, use the named stress test — both are acceptable for R4b-2.
