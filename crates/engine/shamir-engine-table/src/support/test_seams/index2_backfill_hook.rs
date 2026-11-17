@@ -10,11 +10,11 @@
 //!
 //! With the hook the test can:
 //!   1. spawn `create_index_v2`, which runs the backfill, then blocks in
-//!      [`wait_at_window`] (signalling `reached` first);
+//!      [`BackfillPauseHook::wait_at_window`] (signalling `reached` first);
 //!   2. drive a concurrent `insert` — which, WITH the fix, blocks on the
 //!      `unique_write_lock` the paused create still holds, and WITHOUT the fix
 //!      would slip through and be lost;
-//!   3. release the create via [`release`], then assert the row is queryable
+//!   3. release the create via [`BackfillPauseHook::release`], then assert the row is queryable
 //!      through the new index.
 //!
 //! Two `Notify`s give the test full ordering control (create → "I'm parked",
@@ -39,13 +39,13 @@ impl BackfillPauseHook {
     }
 
     /// Called from `create_index_v2` at the post-backfill / pre-register point.
-    /// Announces arrival, then parks until the test calls [`release`].
+    /// Announces arrival, then parks until the test calls [`Self::release`].
     pub async fn wait_at_window(&self) {
         self.reached.notify_one();
         self.resume.notified().await;
     }
 
-    /// Test side: block until the create has parked in [`wait_at_window`].
+    /// Test side: block until the create has parked in [`Self::wait_at_window`].
     pub async fn wait_until_parked(&self) {
         self.reached.notified().await;
     }
