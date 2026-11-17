@@ -14,7 +14,6 @@ use shamir_engine::repo::durability_policy::{effective_wal_segment_bytes, resolv
 use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -178,6 +177,15 @@ pub struct ShamirDb {
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
+    /// R1c §4.3 — in-process per-database application-schema maintenance
+    /// fence: db name → held durable fence generation; absent entry = free.
+    /// Lock-free (`DashMap` entries, admin/DDL frequency only); the ONLY
+    /// accessors are in `execute/admin_db/schema_migration/fence.rs`.
+    pub(in crate::shamir_db) schema_migration_gate: Arc<DashMap<String, u64, THasher>>,
+    /// R1c §4.5 — engine-side read-only (follower) flag lowered by the server
+    /// at launch (`set_node_read_only`); application-schema apply fails closed
+    /// on it. One `AtomicBool`, written once at boot, read per admission.
+    pub(in crate::shamir_db) node_read_only: Arc<std::sync::atomic::AtomicBool>,
     /// S5c-X PR8b — lock-free cache of `(db, repo)` targets covered by a
     /// `resync_required` subscription; rebuilt wholesale by
     /// `refresh_resync_quarantine_cache`. READS of a covered repo fail
@@ -356,6 +364,8 @@ impl ShamirDb {
             principal_resolver: None,
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
+            schema_migration_gate: Arc::new(DashMap::with_hasher(THasher::default())),
+            node_read_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
             changelog_receivers: Arc::new(
                 super::revocation::registry::ChangelogReceiverRegistry::new(),
@@ -941,32 +951,6 @@ impl ShamirDb {
     /// `ValidatorRegistry::add_binding` / `bound_tables`.
     pub(super) fn table_ref_str(db: &str, repo: &str, table: &str) -> String {
         format!("{}/{}/{}", db, repo, table)
-    }
-
-    /// Poll a DDL operation's status by its operation ID (#1015).
-    ///
-    /// Returns the full `DdlOpStatus` if found, `None` if the operation is unknown
-    /// (GC'd, never existed, or a pre-RFC op that had no op_id).
-    ///
-    /// This is the mechanism that allows a client to learn whether a crashed-and-recovered
-    /// DDL op actually completed after a server restart.
-    pub async fn get_ddl_op_status(
-        &self,
-        db_name: &str,
-        repo_name: &str,
-        table_name: &str,
-        op_id_str: &str,
-    ) -> Result<Option<crate::query::read::DdlOpStatus>, shamir_storage::error::DbError> {
-        // Parse the op_id from the string representation.
-        let op_id = RecordId::from_str(op_id_str).map_err(|error| {
-            shamir_storage::error::DbError::Validation(format!("Invalid op_id format: {error}"))
-        })?;
-
-        // Resolve the specific table's TableManager — op-status log is per-table.
-        let table = self.get_table(db_name, repo_name, table_name).await?;
-
-        // Read the op status from this table's info store (read-only view).
-        table.info_store_read_view().read_op_status(&op_id).await
     }
 
     /// Build a captured-root [`FnCtx`] with the target's catalogue-derived

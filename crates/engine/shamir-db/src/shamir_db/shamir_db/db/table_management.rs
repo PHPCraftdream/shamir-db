@@ -5,6 +5,8 @@ use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::shamir_db::system_store::TableRenameKey;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
+use shamir_types::types::record_id::RecordId;
+use std::str::FromStr;
 
 use super::super::ShamirDb;
 
@@ -605,5 +607,33 @@ impl ShamirDb {
             }
         }
         Ok(())
+    }
+}
+
+impl ShamirDb {
+    /// Poll a DDL operation's status by its operation ID (#1015).
+    ///
+    /// Returns the full `DdlOpStatus` if found, `None` if the operation is unknown
+    /// (GC'd, never existed, or a pre-RFC op that had no op_id).
+    ///
+    /// This is the mechanism that allows a client to learn whether a crashed-and-recovered
+    /// DDL op actually completed after a server restart.
+    pub async fn get_ddl_op_status(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        op_id_str: &str,
+    ) -> Result<Option<crate::query::read::DdlOpStatus>, shamir_storage::error::DbError> {
+        // Parse the op_id from the string representation.
+        let op_id = RecordId::from_str(op_id_str).map_err(|error| {
+            shamir_storage::error::DbError::Validation(format!("Invalid op_id format: {error}"))
+        })?;
+
+        // Resolve the specific table's TableManager — op-status log is per-table.
+        let table = self.get_table(db_name, repo_name, table_name).await?;
+
+        // Read the op status from this table's info store (read-only view).
+        table.info_store_read_view().read_op_status(&op_id).await
     }
 }
