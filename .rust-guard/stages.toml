@@ -24,3 +24,11 @@ name = "engine-layering-R4b"
 packages = ["shamir-engine", "shamir-engine-table"]
 delta = ".rust-guard/stages/engine-layering-R4b.toml"
 discovery_delta = ".rust-guard/stages/engine-layering-R4b-discovery.toml"
+
+# PIN ONLY: touch the dedicated delta and shamir-engine to activate CI diff
+# gates without reviving or extending the landed layering campaign above.
+[[campaigns]]
+name = "engine-truncation-pin-R2a-1"
+packages = ["shamir-engine"]
+delta = ".rust-guard/stages/r2a-1-visibility.toml"
+discovery_delta = ".rust-guard/stages/r2a-1-discovery.toml"

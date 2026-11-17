@@ -28,6 +28,8 @@ pub struct RepoCore {
     /// repo, owned by the repo layer; cloned shallowly like every field.
     pub(crate) durability_handle: DurabilityHandle,
     pub(crate) horizon: TxHorizon,
+    /// One deletion-admission registry per open repo, shared by all clones.
+    pub(crate) truncation_pins: Arc<crate::tx::drain::truncation_pin::TruncationPin>,
     /// `Weak` of the shell's repo-liveness token (dead on background clones);
     /// the drainer loop exits once no foreground clone holds the strong ref.
     pub(crate) live_weak: Weak<()>,

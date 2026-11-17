@@ -143,7 +143,12 @@ impl Drainer {
             // nothing (the data is also already in `history`).
             crate::tx::commit::maybe_crash("pre_truncate", repo).await;
             repo.flush_all_history().await?;
-            let removed = wal.truncate_below(checkpoint_ceiling).await?;
+            #[cfg(test)]
+            test_seam::before_delete(repo).await;
+            let removed = match repo.try_begin_truncate(checkpoint_ceiling) {
+                Some(lease) => lease.truncate(Arc::clone(&wal)).await?,
+                None => 0,
+            };
             #[cfg(test)]
             test_seam::record(repo, "truncate");
             // Recheck actual retained bytes after unlink; clear admission refusal only below cap.
@@ -224,6 +229,15 @@ impl Drainer {
             // (shouldn't happen on a healthy repo) the loop still runs and
             // drain_step falls back to wal.recover() as before.
             if let Some(this) = drainer.upgrade() {
+                // Protect the startup recovery snapshot until the window owns it.
+                // Release before any drain/checkpoint can attempt truncation.
+                let startup_pin = match repo.pin_wal_history(0).await {
+                    Ok(pin) => pin,
+                    Err(error) => {
+                        log::warn!("drainer spawn: startup pin failed: {error}");
+                        return;
+                    }
+                };
                 match repo.repo_wal().await {
                     Ok(wal) => match wal.recover().await {
                         Ok(entries) => {
@@ -245,6 +259,7 @@ impl Drainer {
                         );
                     }
                 }
+                drop(startup_pin);
             }
             loop {
                 // Exit promptly once every foreground repo clone has dropped.
