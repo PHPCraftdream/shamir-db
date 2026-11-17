@@ -49,6 +49,17 @@ fn block_on_boxed<F: Future>(rt: &Runtime, fut: F) -> F::Output {
     rt.block_on(Box::pin(fut))
 }
 
+// Deep debug-build engine poll frames: run the heaviest scenario on a roomy
+// stack, as the server's lifecycle fixtures do.
+fn on_big_stack(body: fn()) {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(body)
+        .expect("spawn test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
 // The catalogue is fresh on each boot; the DATA repo is the same raw fjall
 // directory. This isolates certification from metadata/file-lock retry timing.
 async fn open(path: Option<&Path>) -> ShamirDb {
@@ -227,6 +238,10 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
 
 #[test]
 fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
+    on_big_stack(explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h_body);
+}
+
+fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h_body() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leader");
     let rt = runtime();
