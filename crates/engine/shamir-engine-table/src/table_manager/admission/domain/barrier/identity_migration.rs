@@ -29,6 +29,7 @@
 //! full rebuild from the (already replayed) data store.
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -37,6 +38,8 @@ use shamir_storage::types::RecordKey;
 
 use super::TableManager;
 use shamir_engine_repo::RepoWritePermit;
+
+use crate::index_metrics::{observe_build, IndexMetricKind};
 
 impl TableManager {
     const INDEX2_IDENTITY_FAILURE_KEY: &'static str = "_m.idx.err";
@@ -251,6 +254,7 @@ impl TableManager {
             self.index_manager_ref()
                 .sweep_postings_for_rebuild(false, def.name_interned)
                 .await?;
+            let rebuild_start = Instant::now();
             let stream = self
                 .list_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH)
                 .map(|batch| {
@@ -263,6 +267,15 @@ impl TableManager {
             self.index_manager_ref()
                 .create_index_from_stream(def.clone(), stream)
                 .await?;
+            // Metrics: the open-time identity migration re-invokes the create
+            // path over existing definitions — one rebuild observation per
+            // completed backfill.
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Regular,
+                true,
+                rebuild_start,
+            );
         }
         if !unique_defs.is_empty() {
             let records = self.collect_all_current_records().await?;
@@ -270,9 +283,17 @@ impl TableManager {
                 self.index_manager_ref()
                     .sweep_postings_for_rebuild(true, def.name_interned)
                     .await?;
+                let rebuild_start = Instant::now();
                 self.index_manager_ref()
                     .create_unique_index_from_records_borrowed(def.clone(), &records)
                     .await?;
+                // Metrics: same rebuild classification as the regular loop.
+                observe_build(
+                    self.index_build_observer().as_ref(),
+                    IndexMetricKind::Regular,
+                    true,
+                    rebuild_start,
+                );
             }
         }
         drop(_barrier);

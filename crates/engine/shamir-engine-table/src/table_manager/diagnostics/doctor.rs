@@ -24,6 +24,7 @@ use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::value::InnerValue;
 
+use crate::index_metrics::{observe_build, IndexMetricKind};
 use crate::record_cow::RecordCow;
 use shamir_engine_repo::RepoWritePermit;
 use shamir_index::base_index::index_definition::IndexDefinition;
@@ -641,6 +642,7 @@ impl TableManager {
         // streaming introduces no new lost-write window versus the old
         // clone-based rebuild.
         for def in regular_defs.iter() {
+            let rebuild_start = Instant::now();
             let stream = self.list_stream(FULL_SCAN_BATCH).map(|batch| {
                 batch.and_then(|rows| {
                     rows.into_iter()
@@ -651,6 +653,13 @@ impl TableManager {
             self.index_manager_ref()
                 .create_index_from_stream(def.clone(), stream)
                 .await?;
+            // Metrics: one rebuild observation per recreated definition.
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Regular,
+                true,
+                rebuild_start,
+            );
         }
 
         // Unique indexes share one decoded snapshot under the repair barrier;
@@ -660,9 +669,17 @@ impl TableManager {
             shamir_types::types::value::InnerValue,
         )> = self.collect_all_current_records().await?;
         for def in unique_defs.iter() {
+            let rebuild_start = Instant::now();
             self.index_manager_ref()
                 .create_unique_index_from_records_borrowed(def.clone(), &all_records)
                 .await?;
+            // Metrics: one rebuild observation per recreated definition.
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Regular,
+                true,
+                rebuild_start,
+            );
         }
         // Sorted indexes don't have a create+backfill helper —
         // register the def, then replay on_record_created for
@@ -670,6 +687,7 @@ impl TableManager {
         for def in sorted_defs.iter() {
             self.sorted_indexes().register(def.clone()).await?;
         }
+        let sorted_rebuild_start = Instant::now();
         if !sorted_defs.is_empty() {
             let stream = self.list_stream(FULL_SCAN_BATCH);
             futures::pin_mut!(stream);
@@ -703,6 +721,17 @@ impl TableManager {
                     }
                 }
             }
+        }
+        // Metrics: the sorted replay is one shared pass over the table; each
+        // recreated definition gets one rebuild observation with that pass's
+        // duration.
+        for _def in sorted_defs.iter() {
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Sorted,
+                true,
+                sorted_rebuild_start,
+            );
         }
         drop(_barrier);
         drop(_uwl_guard);

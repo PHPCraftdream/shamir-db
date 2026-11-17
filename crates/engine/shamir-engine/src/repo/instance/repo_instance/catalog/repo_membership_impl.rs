@@ -7,8 +7,10 @@
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
+use std::sync::Arc;
 
 use super::super::RepoInstance;
+use crate::repo::instance::support::metrics::wire_table_index_metrics;
 
 impl RepoInstance {
     #[cfg(test)]
@@ -37,7 +39,14 @@ impl RepoInstance {
     /// calls retry; no partial table is exposed. The clone of the cell
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
-        self.core.get_table(table_name).await
+        let table = self.core.get_table(table_name).await?;
+        // Metrics wiring: the observer slot lives in an Arc shared across
+        // clones, so installing it on the returned handle covers the stored
+        // manager too. Idempotent (first install wins); tables that are never
+        // resolved through here simply record no index-build observations.
+        let metrics = Arc::clone(self.query_metrics());
+        let _ = wire_table_index_metrics(&table, &metrics);
+        Ok(table)
     }
 
     /// Resolve a table during frozen-source token lookups without checking the name fence.
@@ -62,7 +71,11 @@ impl RepoInstance {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        self.core.get_table_admitted(table_name, permit).await
+        let table = self.core.get_table_admitted(table_name, permit).await?;
+        // Metrics wiring: see `get_table`.
+        let metrics = Arc::clone(self.query_metrics());
+        let _ = wire_table_index_metrics(&table, &metrics);
+        Ok(table)
     }
 
     /// Register a new table in the repository.

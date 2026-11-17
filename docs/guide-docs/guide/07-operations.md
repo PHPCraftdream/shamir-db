@@ -750,6 +750,13 @@ Prometheus text format. Метрики:
 || `shamir_group_commit_waiters{db,repo}` | gauge | Участники группового коммита, ожидающие покрытия WAL fsync |
 || `shamir_wal_bytes_total{db,repo}` | counter | Байты полезной нагрузки WAL с момента создания каталога WAL |
 || `shamir_wal_fsync_seconds{db,repo}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность раунда sync-worker: replay снапшота + fsync приёмника (тот же интервал, что `shamir_wal_sync_duration_ns`); `le` и `_sum` — в секундах |
+|| `shamir_index_entries{db,repo,table,index}` | gauge | Записи в индексах, снимок за scrape (усечение до 64 таблиц / 32 индексов на репозиторий) |
+|| `shamir_index_build_seconds{db,repo,kind}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность завершённой сборки индекса, в секундах |
+|| `shamir_index_rebuild_seconds{db,repo,kind}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность завершённого rebuild (doctor/repair, миграция identity), в секундах |
+|| `shamir_interner_names{db,repo}` | gauge | Число интернированных имён полей |
+|| `shamir_interner_high_water{db,repo}` | gauge | Персистентный high-water mark интернера |
+|| `shamir_export_tables_truncated{db,repo}` | gauge (1/0) | Усечение по лимитам кардинальности активно |
+|| `shamir_export_tables_known{db,repo}` | gauge | Всего открытых таблиц, известных репозиторию |
 
 Серии WAL/storage (R4a-2) — снапшоты за scrape, метки только `db`/`repo`
 (у bucket-серий дополнительно `le`):
@@ -782,6 +789,38 @@ backlog на truncate, проверить фоновую очистку сегм
 ячейки — наносекунды). Норма на локальном диске — суб-миллисекундная. Серии
 не экспортируются, пока WAL не инициализирован (`fsync == None`); «рваный»
 снапшот (`torn`) отбрасывается вместо блокировки scrape.
+
+Серии индексов и интернера (R4a-2) — снапшоты за scrape, берутся из уже
+открытых таблиц/индексов; закрытые репозитории, таблицы и индексы невидимы —
+то же ограничение open-registry, что у `shamir_gate_*` и degraded-index.
+
+`shamir_index_entries{db,repo,table,index}` — gauge числа записей в индексе,
+снимается при scrape по живым счётчикам записей. Норма — порядок числа строк
+таблицы. Кардинальность ограничена: не более 64 таблиц и 32 индексов на
+репозиторий с полными метками; выбор — по текущему числу записей (tie-break —
+имя таблицы, детерминированно), остальные агрегируются в одну строку
+`table="(other)"` на репозиторий. Лимиты 64/32 — константы, а не настройки.
+
+`shamir_index_build_seconds{db,repo,kind}` — гистограмма длительности
+завершённой сборки индекса в секундах, с меткой `kind`; наблюдение один раз на
+завершённую сборку (на горячем пути — только чтение часов и observe).
+
+`shamir_index_rebuild_seconds{db,repo,kind}` — та же гистограмма для
+завершённого rebuild (doctor/repair и миграция identity), те же метки.
+
+`shamir_interner_names{db,repo}` — gauge числа различных интернированных имён
+полей (чтение длины map без итерации). Норма — рост с числом различных имён;
+intent для алерта — неограниченный рост без новых полей.
+
+`shamir_interner_high_water{db,repo}` — gauge персистентного high-water mark
+интернера; значение монотонно почти не убывает.
+
+`shamir_export_tables_truncated{db,repo}` — gauge 1/0: усечение по лимитам
+кардинальности активно (есть таблицы сверх 64/32, попавшие в `(other)`).
+
+`shamir_export_tables_known{db,repo}` — gauge общего числа открытых таблиц,
+известных репозиторию; вместе с `_truncated` показывает, сколько осталось за
+лимитом (`_known`, не `_total` — суффикс `_total` зарезервирован за counter'ами).
 
 Версии, ожидающие GC, уже экспортируются как `shamir_gate_pending_versions` —
 отдельная серия `shamir_gc_pending_versions` не создаётся.

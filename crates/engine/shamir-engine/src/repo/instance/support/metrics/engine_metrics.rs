@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::QueryMetrics;
-use crate::repo::durability_policy::{Histogram, LATENCY_NS_BOUNDS};
+use crate::repo::durability_policy::{Histogram, HistogramSnapshot, LATENCY_NS_BOUNDS};
+use shamir_engine_table::index_metrics::{IndexBuildObserver, IndexMetricKind};
 
 /// Stable error labels. Unlisted and absent codes are recorded as `other`.
 pub const ERROR_LABELS: [&str; 17] = [
@@ -33,6 +34,12 @@ pub struct EngineMetrics {
     durations: [Histogram; 5],
     errors: [AtomicU64; ERROR_LABELS.len()],
     rows: [AtomicU64; 2],
+    /// `shamir_index_build_seconds` — one observe per completed first-time
+    /// index build, slot per [`IndexMetricKind`].
+    index_builds: [Histogram; 3],
+    /// `shamir_index_rebuild_seconds` — doctor/repair or identity-migration
+    /// re-invocations of the create paths.
+    index_rebuilds: [Histogram; 3],
 }
 
 impl Default for EngineMetrics {
@@ -41,6 +48,8 @@ impl Default for EngineMetrics {
             durations: std::array::from_fn(|_| Histogram::new(LATENCY_NS_BOUNDS)),
             errors: std::array::from_fn(|_| AtomicU64::new(0)),
             rows: std::array::from_fn(|_| AtomicU64::new(0)),
+            index_builds: std::array::from_fn(|_| Histogram::new(LATENCY_NS_BOUNDS)),
+            index_rebuilds: std::array::from_fn(|_| Histogram::new(LATENCY_NS_BOUNDS)),
         }
     }
 }
@@ -75,6 +84,16 @@ impl QueryMetrics for EngineMetrics {
     }
 }
 
+impl IndexBuildObserver for EngineMetrics {
+    fn observe_index_build(&self, kind: IndexMetricKind, elapsed_ns: u64) {
+        self.index_builds[kind.index()].observe(elapsed_ns);
+    }
+
+    fn observe_index_rebuild(&self, kind: IndexMetricKind, elapsed_ns: u64) {
+        self.index_rebuilds[kind.index()].observe(elapsed_ns);
+    }
+}
+
 impl EngineMetrics {
     /// Copy metric state for export; allocations are confined to this cold path.
     pub fn snapshot(&self) -> super::EngineMetricsSnapshot {
@@ -88,5 +107,14 @@ impl EngineMetrics {
             rows_viewed: self.rows[0].load(Ordering::Relaxed),
             rows_returned: self.rows[1].load(Ordering::Relaxed),
         }
+    }
+
+    /// Torn-free copies of the index build/rebuild histograms for the
+    /// index/interner snapshot (scrape-time only).
+    pub(crate) fn index_metric_parts(&self) -> ([HistogramSnapshot; 3], [HistogramSnapshot; 3]) {
+        (
+            std::array::from_fn(|index| self.index_builds[index].snapshot()),
+            std::array::from_fn(|index| self.index_rebuilds[index].snapshot()),
+        )
     }
 }
