@@ -24,9 +24,9 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
-use crate::repo::RepoInstance;
 use shamir_engine_repo::repo_types::BoxRepo;
 
 fn make_repo() -> RepoInstance {

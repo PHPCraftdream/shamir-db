@@ -2,22 +2,6 @@ base = "56fe3e374b724bf13f9eb84c980586686f249f79"
 
 [[moved]]
 path = "shamir-engine"
-item = "table::support::guards::tests"
-to_path = "shamir-engine-table"
-to_item = "support::guards::tests"
-reason = "R4b: tests move with their module into the new crate or the facade test folder"
-owner = "<wave-R4b>"
-
-[[moved]]
-path = "shamir-engine"
-item = "table::support::guards::tests::loom_model"
-to_path = "shamir-engine-table"
-to_item = "support::guards::tests::loom_model"
-reason = "R4b: tests move with their module into the new crate or the facade test folder"
-owner = "<wave-R4b>"
-
-[[moved]]
-path = "shamir-engine"
 item = "table::support::guards::tests::loom_model::drain_returns_only_after_fast_path_writer_completes"
 to_path = "shamir-engine-table"
 to_item = "support::guards::tests::loom_model::drain_returns_only_after_fast_path_writer_completes"
