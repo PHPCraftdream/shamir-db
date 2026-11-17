@@ -401,7 +401,8 @@ impl ShamirDb {
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {
                 if name != SYSTEM_DB_NAME {
-                    ensure_database_identity(&shamir.system_store, name).await?;
+                    // Boxed: keeps the backfill future out of this large init future.
+                    Box::pin(ensure_database_identity(&shamir.system_store, name)).await?;
                 }
             }
         }

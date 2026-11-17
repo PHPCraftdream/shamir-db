@@ -180,6 +180,23 @@ impl SystemStore {
         Ok(())
     }
 
+    /// Create the journal's unique record-key index when it is missing. Boxed at
+    /// the call site: the index-creation future must not widen the init future.
+    async fn ensure_journal_index(db: &DbInstance) -> DbResult<()> {
+        let journal = db
+            .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
+            .await?;
+        if !journal
+            .unique_index_exists("schema_migration_record_key")
+            .await
+        {
+            journal
+                .create_unique_index("schema_migration_record_key", &["record_key"])
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Initialize system store with the given config.
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
         Self::init_with_durability(config, DurabilityPolicy::default()).await
@@ -227,17 +244,7 @@ impl SystemStore {
 
         // DbInstance recovers/certifies before exposing the system repo.
         db.add_repo_with_durability(repo_config, policy).await?;
-        let journal = db
-            .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
-            .await?;
-        if !journal
-            .unique_index_exists("schema_migration_record_key")
-            .await
-        {
-            journal
-                .create_unique_index("schema_migration_record_key", &["record_key"])
-                .await?;
-        }
+        Box::pin(Self::ensure_journal_index(&db)).await?;
 
         let store = Self {
             db,
