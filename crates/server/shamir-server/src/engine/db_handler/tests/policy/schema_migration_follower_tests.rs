@@ -17,10 +17,12 @@ use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::access::{principal64, Actor};
 use shamir_db::ShamirDb;
 
+use shamir_query_builder::application_schema_plan;
 use shamir_query_builder::application_schema_status;
 use shamir_query_builder::batch::Batch;
 use shamir_query_types::admin::types::schema_migration::{
-    SchemaMigrationStatusRequest, SchemaMigrationTarget,
+    SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
+    SchemaMigrationTarget,
 };
 
 use crate::db_handler::config::NodeMode;
@@ -89,6 +91,58 @@ async fn follower_refuses_application_schema_status_as_stale() {
             );
         }
         other => panic!("follower must refuse status, got: {other:?}"),
+    }
+}
+
+/// Plan-for-apply is primary-only (design §4.5): the same single
+/// `BatchOp::ApplicationSchema` gate refuses it on a ReadOnly node.
+fn plan_batch() -> shamir_query_builder::BatchRequest {
+    let mut b = Batch::new();
+    b.op(
+        "plan",
+        application_schema_plan(SchemaMigrationPlanRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: shamir_types::types::record_id::RecordId::from_ts_seq(
+                    1_700_000_000_000_000,
+                    7,
+                ),
+            },
+            expected_predecessor: SchemaMigrationPredecessor {
+                migration_id: None,
+                ordinal: 0,
+                checksum: [0; 32],
+            },
+            migrations: Vec::new(),
+        }),
+    );
+    b.build()
+}
+
+#[tokio::test]
+async fn follower_refuses_application_schema_plan_as_stale() {
+    let handler = build_handler(NodeMode::ReadOnly).await;
+    let session = alice_session();
+    let conn = ConnectionServices::without_push(0);
+
+    let resp = handler
+        .execute(
+            &session,
+            CURRENT_QUERY_LANG_VERSION,
+            "app",
+            plan_batch(),
+            &conn,
+        )
+        .await;
+
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "schema_migration_follower_read_only",
+                "wrong code; message: {message}"
+            );
+        }
+        other => panic!("follower must refuse plan, got: {other:?}"),
     }
 }
 

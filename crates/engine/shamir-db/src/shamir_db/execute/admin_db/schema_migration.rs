@@ -1,14 +1,16 @@
 //! Application-schema migration admin handler (release-1 R1c step 2b-1).
 //!
-//! Implements the read-only `ApplicationSchemaStatus` arm of
-//! [`SchemaMigrationAdminOp`]: authorize `Read` on the database (design §5.2),
+//! Implements the read-only `ApplicationSchemaStatus` arm and the
+//! side-effect-free `ApplicationSchemaPlan` arm (delegated to
+//! `schema_migration_plan.rs`) of
+//! [`SchemaMigrationAdminOp`]: authorize `Read` (status) or `Manage` (plan) on the database (design §5.2),
 //! resolve the serving database's stable identity, read the durable journal
 //! through the step-2a `SystemStore` API and build a typed
 //! `SchemaMigrationStatusResult` as the admin result record.
 //!
-//! The plan and apply arms are NOT implemented in this step; they return one
-//! documented temporary error (`schema_migration_operation_not_implemented`)
-//! that steps 2b-2 / 2b-3 replace. No new wire error code is introduced.
+//! The apply arm is NOT implemented in this step; it returns one documented
+//! temporary error (`schema_migration_operation_not_implemented`) that step
+//! 2b-3 replaces. No new wire error code is introduced.
 //!
 //! §5.3 error mapping lives in [`map_store_error`] only — application-schema
 //! codes stay distinguishable from the online storage-move errors.
@@ -28,8 +30,8 @@ use shamir_types::types::common::new_map;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 
-/// Temporary error code returned by the plan and apply arms until their
-/// steps land. Deliberately not a `SchemaMigrationErrorCode` variant.
+/// Temporary error code returned by the apply arm until its step lands.
+/// Deliberately not a `SchemaMigrationErrorCode` variant.
 const OPERATION_NOT_IMPLEMENTED: &str = "schema_migration_operation_not_implemented";
 
 impl ShamirAdminExecutor {
@@ -50,11 +52,19 @@ impl ShamirAdminExecutor {
                 self.authorize_database_read().await?;
                 self.status_result(request).await
             }
-            SchemaMigrationAdminOp::ApplicationSchemaPlan(_)
-            | SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(_) => Err(err_code(
+            SchemaMigrationAdminOp::ApplicationSchemaPlan(request) => {
+                super::admin_db_schema_migration_plan::authorize_database_manage(self).await?;
+                // Box::pin keeps the plan future out of this dispatcher's
+                // own stack frame (Windows debug-build overflow, 2026-11-17).
+                Box::pin(
+                    super::admin_db_schema_migration_plan::plan_application_schema(self, request),
+                )
+                .await
+            }
+            SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(_) => Err(err_code(
                 OPERATION_NOT_IMPLEMENTED,
-                "application-schema plan/apply is not implemented yet; \
-                 status is the only wired operation in R1c step 2b-1"
+                "application-schema apply is not implemented yet; \
+                 status and plan are the wired operations in R1c step 2b-2"
                     .to_string(),
             )),
         }
