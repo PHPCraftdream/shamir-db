@@ -20,7 +20,6 @@ use crate::query::batch::{
 };
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
-use shamir_engine_query::query::filter::read_budget::QueryOp;
 use shamir_query_types::batch::{
     IndexVisibility, IsolationLevel as WireIsolationLevel, RequestDurability, ResultEncoding,
 };
@@ -81,12 +80,7 @@ pub async fn execute_batch(
     invoker: Option<&dyn FunctionInvoker>,
 ) -> Result<BatchResponse, BatchError> {
     let scope = auth.root_scope();
-    let batch_metrics: Vec<_> = auth
-        .metadata()
-        .repos
-        .iter()
-        .filter_map(|repo_name| resolver.query_metrics(repo_name))
-        .collect();
+    let batch_sinks = QueryRunner::batch_sinks(resolver, &auth.metadata().repos);
     let (request, actor, db_name) = auth.into_parts();
     let started = Instant::now();
     let result = crate::query::batch::receipts::scope(execute_batch_impl(
@@ -101,10 +95,7 @@ pub async fn execute_batch(
         &scope,
     ))
     .await;
-    let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-    for metrics in batch_metrics {
-        metrics.record_duration(QueryOp::Batch, elapsed_ns);
-    }
+    QueryRunner::observe_batch(batch_sinks, started.elapsed());
     result
 }
 
@@ -923,9 +914,16 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
         }
         Ok(results) => {
             // Commit.
-            match QueryRunner::commit_with_metrics(resolver, &repo_name, tx, &repo, visibility_wait)
-                .await
-            {
+            let commit_started = Instant::now();
+            let commit_result =
+                crate::tx::commit::commit_tx_with_options(tx, &repo, visibility_wait).await;
+            QueryRunner::observe_commit(
+                resolver,
+                &repo_name,
+                commit_started.elapsed(),
+                commit_result.is_err(),
+            );
+            match commit_result {
                 Ok(outcome) => {
                     // Thread the commit's materialization state to the
                     // client. `Complete` → materialized=true (projections

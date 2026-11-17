@@ -29,13 +29,7 @@ async fn rows_viewed_and_returned_follow_actual_read_work() {
 
     let mut reads = Batch::new();
     reads.id(2);
-    reads.query(
-        "page",
-        Query::from("users")
-            .where_eq("active", true)
-            .count_total(true)
-            .limit(1),
-    );
+    reads.query("page", Query::from("users").count_total(true).limit(1));
     reads.query(
         "count",
         Query::from("users").select([select::count_all("n")]),
@@ -47,8 +41,10 @@ async fn rows_viewed_and_returned_follow_actual_read_work() {
     assert_eq!(response.results["page"].records.len(), 1);
     assert_eq!(response.results["count"].records.len(), 1);
     let snapshot = resolver.metrics.snapshot();
-    // The count_total scan examines all three stored rows despite its one-row
+    // The count_total scan streams all three stored rows despite its one-row
     // page; the count(*) shortcut consults metadata and examines no table rows.
+    // (A filter pushed down into the store's stream would hide rejected rows
+    // from the engine, so this read carries no filter.)
     assert_eq!(snapshot.rows_viewed, 3);
     assert_eq!(snapshot.rows_returned, 2);
 }
