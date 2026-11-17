@@ -192,6 +192,21 @@ impl Drainer {
         self.pause.is_held()
     }
 
+    /// Test-only: yield the future that owns the `replaying` lock WITHOUT
+    /// the pause busy flag — exactly the state an in-flight drain pass
+    /// leaves behind. The cancel-safety tests need this to park a pause
+    /// acquisition deterministically: `DrainPauseState::acquire` checks the
+    /// busy flag FIRST (a second acquisition while a guard holds the pause
+    /// is refused with `DrainPauseBusy` before it can ever park), so the
+    /// flag-cleanup path of a cancelled acquisition is reachable only when
+    /// someone else (a drain pass) holds the lock flag-free.
+    #[cfg(test)]
+    pub(crate) fn test_replaying_lock(
+        &self,
+    ) -> impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.replaying).lock_owned()
+    }
+
     /// R2a-1d: pending-work probe for the settle/recheck checks (atomic
     /// mirror of `window`; production-capable twin of the test-only
     /// `window_depth`).

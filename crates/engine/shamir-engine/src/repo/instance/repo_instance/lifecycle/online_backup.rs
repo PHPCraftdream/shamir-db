@@ -187,7 +187,7 @@ impl RepoInstance {
     /// Step E seal barrier: the design §2 (iii) order up to the hold —
     /// close gate → zero leases → settled drain (no permit held) → pause
     /// guard → non-empty-recheck fails closed → flush history → sample
-    /// `V*` → reopen gate → return the [`SealHold`]. Capture and seal are
+    /// `V*` → reopen gate → return the `SealHold`. Capture and seal are
     /// mutually exclusive with each other and with any live hold (typed
     /// busy errors).
     pub async fn seal_point(&self) -> Result<SealHold, OnlineBackupError> {

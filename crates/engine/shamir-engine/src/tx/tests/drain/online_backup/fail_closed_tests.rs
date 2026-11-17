@@ -1,8 +1,10 @@
 //! Typed fail-closed refusals (brief item 8, test 5a): an unsettled drain
 //! refuses capture with `DrainUnsettled` (no position reported, nothing
-//! left closed or paused), a live close owner refuses capture with
-//! `AdmissionClosed`, and a live seal hold refuses both barriers with
-//! `HoldActive` until the hold drops.
+//! left closed or paused), a live close owner refuses capture with the
+//! typed `Busy` error (the single-owner CAS refusal, mapped by
+//! `barrier_owner`; `begin_close` refuses BEFORE the gate is ever closed,
+//! so the loser sees `Busy`, not `AdmissionClosed`), and a live seal hold
+//! refuses both barriers with `HoldActive` until the hold drops.
 
 use std::time::Duration;
 
@@ -40,8 +42,15 @@ async fn capture_fails_closed_when_drain_never_settles() {
     assert_eq!(admission.active_count(), 0);
     assert!(!repo.drainer().pause_held());
 
-    // Once the parked version becomes visible, the SAME repository's
-    // capture succeeds — the failure left nothing wedged.
+    // Recovery: fill the gap BELOW the parked version. Drain replay is
+    // strictly contiguous — each replayed entry `mark_durable`s its own
+    // version (drain_step.rs) and a version sitting above an empty range
+    // that does not exist in the WAL is deferred, never skipped — so
+    // `publish_committed_max(9)` alone can never settle: versions 1..8
+    // must first exist as replayable WAL entries.
+    for version in 1u8..=8 {
+        seed_inflight_put(&repo, "t", rid(version), "gap", version as u64).await;
+    }
     gate.publish_committed_max(9);
     let position = tokio::time::timeout(REFUSAL_BUDGET, repo.capture_point())
         .await
@@ -52,7 +61,7 @@ async fn capture_fails_closed_when_drain_never_settles() {
 }
 
 #[tokio::test]
-async fn capture_while_a_close_owner_is_live_is_admission_closed() {
+async fn capture_while_a_close_owner_is_live_is_busy() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
     let admission = repo.core().commit_admission();
@@ -64,7 +73,7 @@ async fn capture_while_a_close_owner_is_live_is_admission_closed() {
         .expect("capture must not hang against a live close owner")
         .expect_err("the concurrent barrier won the race");
     assert!(
-        matches!(outcome, OnlineBackupError::AdmissionClosed),
+        matches!(outcome, OnlineBackupError::Busy),
         "unexpected refusal: {outcome:?}"
     );
 

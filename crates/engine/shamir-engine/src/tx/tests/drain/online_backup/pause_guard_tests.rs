@@ -125,7 +125,16 @@ async fn cancelled_pause_wait_clears_the_tentative_busy_flag() {
 
     let drainer = repo.drainer();
     let pause = drainer.pause();
-    let guard = pause.acquire().await.expect("initial pause acquired");
+
+    // Deterministic contended schedule: hold the `replaying` lock DIRECTLY
+    // (flag-free — exactly what an in-flight drain pass holds) so a pause
+    // acquisition is genuinely parkable. Under a held pause GUARD the busy
+    // flag is already set and `acquire` refuses with `DrainPauseBusy`
+    // before it can ever park (pinned by
+    // `second_pause_acquire_is_busy_while_held_then_admitted_after_drop`),
+    // so lock-held-without-flag is the ONLY schedule that reaches the
+    // cancelled-wait cleanup path.
+    let replaying = drainer.test_replaying_lock().await;
 
     // A waiter parked on the held lock (busy flag tentatively set).
     let mut waiter = Box::pin(pause.acquire());
@@ -137,9 +146,10 @@ async fn cancelled_pause_wait_clears_the_tentative_busy_flag() {
         "the cancelled PauseAttempt must clear the tentative busy flag"
     );
 
-    // The original guard still owns the lock; dropping it releases, and a
-    // fresh acquisition is admitted.
-    drop(guard);
+    // Release the simulated in-flight pass; a fresh acquisition must be
+    // admitted — a leaked tentative flag would fail this with
+    // `DrainPauseBusy`.
+    drop(replaying);
     let fresh = pause.acquire().await.expect("fresh acquire admitted");
     assert!(repo.drainer().pause_held());
     drop(fresh);
