@@ -34,7 +34,7 @@
 # (skipped by check_new_file). No new #[allow] attributes, so no
 # ALLOW_ADDED entries. Counts: 16 allow_widen.
 
-base = "5ecd718b83dca5b7e3b52d669e6e0638ca9587fb"
+base = "f0685450e95cd5538492fa9ecc3c8aaa760258f8"
 
 [[allow_widen]]
 path = "crates/engine/shamir-engine/src/tx/drain/truncation_pin_guard.rs"
@@ -664,4 +664,10 @@ owner = "<r2a-1d>"
 path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pause_guard_tests.rs"
 item = "poll_pending_once"
 reason = "Test helper shared by the online-backup test files."
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::test_replaying_lock"
+reason = "R2a-1d: test-only accessor that holds the replaying lock to simulate an in-flight drain pass"
 owner = "<r2a-1d>"
