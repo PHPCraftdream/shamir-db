@@ -35,6 +35,12 @@ pub(crate) async fn run(
     }
     let owned = home.clone();
     let expected = Expected::new(pf, db_name, owner_ids);
+    // Shared read-path admission: the engine read facade refuses unopened
+    // tables (a booted server opens every catalogue table). Both the stage
+    // validation and the idempotent-retry check re-read through this
+    // function, so opening every catalogue table here keeps the two read
+    // paths from ever diverging again.
+    open_catalogue_tables(&owned, pf, db_name).await?;
     let artifact = artifact.to_owned();
     let cancel = cancel.clone();
     let gate = MaintenanceGate::default();
@@ -129,6 +135,31 @@ impl Expected {
 
 fn mismatch(message: String) -> LogicalImportError {
     LogicalImportError::Validation(message)
+}
+
+/// Open every catalogue table of the imported database on the given engine.
+/// The single shared opener for both callers of [`run`]: the post-load
+/// validation of a freshly staged database and the integrity re-check of an
+/// already-published target.
+async fn open_catalogue_tables(
+    home: &ShamirDb,
+    pf: &Preflight,
+    db_name: &str,
+) -> Result<(), LogicalImportError> {
+    let db = home
+        .get_db(db_name)
+        .ok_or_else(|| mismatch("database did not load".into()))?;
+    for item in pf.tables.values() {
+        db.get_table(&item.repository, &item.name)
+            .await
+            .map_err(|e| {
+                mismatch(format!(
+                    "cannot open table '{}/{}': {e}",
+                    item.repository, item.name
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 /// Numeric owner the catalogue stores for the artifact's logical owner name.

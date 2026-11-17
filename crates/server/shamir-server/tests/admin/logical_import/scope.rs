@@ -51,6 +51,10 @@ fn schema_only_imports_definitions_without_records() {
         seen
     });
     assert_eq!(tables.len(), 3);
+    // Drop the engine handle before reopening the published directory — a
+    // second ShamirDb over the same Fjall keyspace fails on the file lock.
+    drop(home);
+    drop(instance);
     let snapshot = runtime().block_on(crate::logical_import::common::engine_snapshot(
         &target,
         "app",
@@ -94,6 +98,9 @@ fn as_db_renames_catalogue_and_identity_scope() {
         .unwrap();
     assert!(home.get_db("staging").is_some());
     assert!(home.get_db("app").is_none());
+    // Drop the engine handle before reopening the published directory — a
+    // second ShamirDb over the same Fjall keyspace fails on the file lock.
+    drop(home);
 
     // Every minted identity is disabled, carries the staging scope, and the
     // catalogue ownership rows resolve to it.

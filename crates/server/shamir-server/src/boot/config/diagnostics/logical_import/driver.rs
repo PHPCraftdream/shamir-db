@@ -121,6 +121,11 @@ async fn import_into_stage(
     if cancel.is_cancelled() {
         return Err(LogicalImportError::Cancelled);
     }
+    // Handle-lifecycle invariant: every handle the import opened (the staged
+    // engine, its repositories and the user directory) is closed and dropped
+    // BEFORE the publish rename, exactly once per instance — no database may
+    // survive a publish or the next open of the directory fails on the lock.
+    drop(loaded.home);
     Ok(ImportReport {
         database: loaded.db_name,
         items: preflight.report.items,

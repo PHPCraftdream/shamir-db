@@ -194,20 +194,20 @@ pub async fn build_fixture(root: &Path) -> Fixture {
         nested.insert("a".to_string(), QueryValue::Str("x".into()));
         l.insert("m".to_string(), QueryValue::Map(nested));
         batch.op(
-            "put",
+            "put_rows_rich",
             write::Insert::with_repo("main", "rows").row(QueryValue::Map(l)),
         );
     }
     batch.op(
-        "put",
+        "put_rows_second",
         write::Insert::with_repo("main", "rows").row(doc! { "s" => "second" }),
     );
     batch.op(
-        "put",
+        "put_users_ada",
         write::Insert::with_repo("main", "users").row(doc! { "name" => "ada" }),
     );
     batch.op(
-        "put",
+        "put_events_tick",
         write::Insert::with_repo("cold", "events").row(doc! { "kind" => "tick", "n" => 7_i64 }),
     );
     home.execute("app", &batch.build()).await.unwrap();

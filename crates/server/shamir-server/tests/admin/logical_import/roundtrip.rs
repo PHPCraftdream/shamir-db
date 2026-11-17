@@ -128,17 +128,21 @@ fn retry_with_a_different_artifact_is_refused() {
     let target = root.join("target");
     import_now(&import_args(&artifact, &target), CancellationToken::new()).unwrap();
     // Append a record to the source and export a DIFFERENT artifact.
-    let reopened = runtime()
+    // Bind the runtime: the reopened engine's background changefeed writers
+    // must outlive this statement, or their quiesce fails with "changefeed
+    // writer closed" and flush_all_waiting reports an unclean shutdown.
+    let rt = runtime();
+    let reopened = rt
         .block_on(ShamirDb::init(SystemStoreConfig::Fjall(
             root.join("shamir_db_meta.redb"),
         )))
         .unwrap();
     let mut batch = Batch::new();
     batch.op(
-        "put",
+        "put_events_extra",
         write::Insert::with_repo("cold", "events").row(doc! { "kind" => "extra", "n" => 8_i64 }),
     );
-    runtime().block_on(async {
+    rt.block_on(async {
         reopened.execute("app", &batch.build()).await.unwrap();
         reopened.flush_all_waiting().await.unwrap();
     });
