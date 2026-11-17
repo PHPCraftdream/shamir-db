@@ -1,4 +1,7 @@
+use std::time::Instant;
+
 use shamir_collections::TFxSet;
+use shamir_engine_query::query::filter::read_budget::QueryOp;
 use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
 use shamir_types::access::{Actor, ResourcePath};
@@ -72,6 +75,28 @@ impl<'a> QueryRunner<'a> {
             table: table_ref.table.clone(),
         }
     }
+    pub(in crate::query::batch) async fn commit_with_metrics(
+        resolver: &dyn BatchResolver,
+        repo_name: &str,
+        tx: shamir_tx::TxContext,
+        repo: &crate::tx::RepoCore,
+        wait: shamir_query_types::batch::VisibilityWait,
+    ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
+        let sink = resolver.query_metrics(repo_name);
+        let started = std::time::Instant::now();
+        let result = crate::tx::commit::commit_tx_with_options(tx, repo, wait).await;
+        if let Some(sink) = sink {
+            sink.record_duration(
+                QueryOp::Tx,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+            if result.is_err() {
+                sink.record_error(None);
+            }
+        }
+        result
+    }
+
     /// Execute a single query entry.
     ///
     /// Dispatches by `BatchOp` variant. When `self.tx.is_some()`,
@@ -88,7 +113,41 @@ impl<'a> QueryRunner<'a> {
     /// authorized. Do not remove the outer `authorize_access` call under
     /// the impression that the `trace_access` calls below are doing the
     /// enforcement — they never have.
+    ///
+    /// Also records the op's duration and error code into the repository's
+    /// query metrics.
     pub(in crate::query::batch) async fn run_with_wait(
+        &mut self,
+        alias: &str,
+        entry: &QueryEntry,
+        resolved_refs: &TMap<String, QueryResult>,
+        wait: Option<shamir_query_types::batch::VisibilityWait>,
+    ) -> Result<QueryResult, BatchError> {
+        let (op, repo_name) = match &entry.op {
+            BatchOp::Read(query) => (Some(QueryOp::Read), Some(query.from.repo.as_str())),
+            BatchOp::Insert(op) => (Some(QueryOp::Write), Some(op.insert_into.repo.as_str())),
+            BatchOp::Update(op) => (Some(QueryOp::Write), Some(op.update.repo.as_str())),
+            BatchOp::Delete(op) => (Some(QueryOp::Write), Some(op.delete_from.repo.as_str())),
+            BatchOp::Set(op) => (Some(QueryOp::Write), Some(op.set.repo.as_str())),
+            BatchOp::Call(op) => (Some(QueryOp::Function), Some(op.repo.as_str())),
+            _ => (None, None),
+        };
+        let sink = repo_name.and_then(|repo| self.resolver.query_metrics(repo));
+        let started = Instant::now();
+        let result = self
+            .run_with_wait_inner(alias, entry, resolved_refs, wait)
+            .await;
+        let elapsed = started.elapsed();
+        if let (Some(sink), Some(op)) = (sink, op) {
+            sink.record_duration(op, elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            if let Err(error) = &result {
+                sink.record_error(error.code());
+            }
+        }
+        result
+    }
+
+    async fn run_with_wait_inner(
         &mut self,
         alias: &str,
         entry: &QueryEntry,

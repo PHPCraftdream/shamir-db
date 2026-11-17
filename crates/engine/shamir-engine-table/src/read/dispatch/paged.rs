@@ -83,6 +83,9 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
 
             for (id, cow) in &batch {
                 // Inline helper: filter + project via the correct RecordRef impl.
@@ -103,7 +106,10 @@ impl TableManager {
                                 if idx < skip + lim {
                                     let row =
                                         QueryRecord::Direct(proj.project_value($rec, interner)?);
-                                    if let Some(meter) = ctx.row_byte_meter {
+                                    if let Some(meter) = ctx
+                                        .row_byte_meter
+                                        .filter(|meter| meter.byte_policy_enabled())
+                                    {
                                         meter.charge_record(&row)?;
                                     }
                                     if tracking_versions {
@@ -113,7 +119,10 @@ impl TableManager {
                                 }
                             } else {
                                 let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge_record(&row)?;
                                 }
                                 if tracking_versions {
@@ -262,6 +271,9 @@ impl TableManager {
             }
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
 
             for (id, cow) in &batch {
                 // ── Id-keyed pass-through path (S-read) ─────────────────────
@@ -313,7 +325,10 @@ impl TableManager {
                                     }
                                 }
                             };
-                            if let Some(meter) = ctx.row_byte_meter {
+                            if let Some(meter) = ctx
+                                .row_byte_meter
+                                .filter(|meter| meter.byte_policy_enabled())
+                            {
                                 meter.charge_record(&record)?;
                             }
                             if tracking_versions {
@@ -362,7 +377,10 @@ impl TableManager {
                                     }
                                 }
                             };
-                            if let Some(meter) = ctx.row_byte_meter {
+                            if let Some(meter) = ctx
+                                .row_byte_meter
+                                .filter(|meter| meter.byte_policy_enabled())
+                            {
                                 meter.charge_record(&record)?;
                             }
                             if tracking_versions {
@@ -396,7 +414,10 @@ impl TableManager {
                             }
                         }
                         let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
-                        if let Some(meter) = ctx.row_byte_meter {
+                        if let Some(meter) = ctx
+                            .row_byte_meter
+                            .filter(|meter| meter.byte_policy_enabled())
+                        {
                             meter.charge_record(&row)?;
                         }
                         if tracking_versions {

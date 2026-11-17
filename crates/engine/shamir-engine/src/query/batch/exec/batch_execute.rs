@@ -5,6 +5,7 @@ use crate::query::batch::batch_validate::{
     validate_abort_on_skip_scope, validate_executable_guards, validate_tables,
 };
 use crate::query::batch::exec_scope::ExecScope;
+use crate::query::batch::execution_deadline::warn_if_op_slow;
 use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::op_watchdog::register_op_watchdog;
 #[cfg(test)]
@@ -19,6 +20,7 @@ use crate::query::batch::{
 };
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
+use shamir_engine_query::query::filter::read_budget::QueryOp;
 use shamir_query_types::batch::{
     IndexVisibility, IsolationLevel as WireIsolationLevel, RequestDurability, ResultEncoding,
 };
@@ -26,25 +28,6 @@ use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::QueryValue;
-
-/// A single op taking longer than this is logged (#1019): the cooperative
-/// deadline (see `execution_deadline.rs`'s module doc, "Deliberate
-/// non-goal") cannot interrupt a stall INSIDE one op's `.await` — it only
-/// notices the overrun at the NEXT checkpoint, once the stalled op finally
-/// returns. That makes a single-op stall indistinguishable, from the
-/// error alone, from "many small ops accumulated past the budget" — this
-/// warning exists so a future occurrence is diagnosable (which alias, how
-/// long) straight from the log instead of only a wall-clock/budget
-/// mismatch in the error message.
-const SLOW_OP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Log a warning if a single op's execution took longer than
-/// [`SLOW_OP_WARN_THRESHOLD`]. See its doc comment for why this exists.
-fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
-    if elapsed > SLOW_OP_WARN_THRESHOLD {
-        log::warn!("batch op '{alias}' took {elapsed:?} to execute (exceeds the {SLOW_OP_WARN_THRESHOLD:?} slow-op logging threshold)");
-    }
-}
 
 /// Execute a batch request against a table resolver.
 ///
@@ -98,8 +81,15 @@ pub async fn execute_batch(
     invoker: Option<&dyn FunctionInvoker>,
 ) -> Result<BatchResponse, BatchError> {
     let scope = auth.root_scope();
+    let batch_metrics: Vec<_> = auth
+        .metadata()
+        .repos
+        .iter()
+        .filter_map(|repo_name| resolver.query_metrics(repo_name))
+        .collect();
     let (request, actor, db_name) = auth.into_parts();
-    crate::query::batch::receipts::scope(execute_batch_impl(
+    let started = Instant::now();
+    let result = crate::query::batch::receipts::scope(execute_batch_impl(
         request,
         resolver,
         admin,
@@ -110,7 +100,12 @@ pub async fn execute_batch(
         &new_map(),
         &scope,
     ))
-    .await
+    .await;
+    let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    for metrics in batch_metrics {
+        metrics.record_duration(QueryOp::Batch, elapsed_ns);
+    }
+    result
 }
 
 /// Test-only convenience: calls [`execute_batch`] via
@@ -928,7 +923,9 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
         }
         Ok(results) => {
             // Commit.
-            match crate::tx::commit::commit_tx_with_options(tx, &repo, visibility_wait).await {
+            match QueryRunner::commit_with_metrics(resolver, &repo_name, tx, &repo, visibility_wait)
+                .await
+            {
                 Ok(outcome) => {
                     // Thread the commit's materialization state to the
                     // client. `Complete` → materialized=true (projections

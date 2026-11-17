@@ -8,6 +8,7 @@
 
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use shamir_engine_query::query::filter::read_budget::QueryMetrics;
 use shamir_query_types::CallOp;
 use shamir_storage::error::DbResult;
 use shamir_types::access::Actor;
@@ -30,6 +31,12 @@ pub trait BatchResolver: TableResolver {
     /// Cross-repo guard upstream guarantees `repo_name` is well-defined
     /// for transactional batches.
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore>;
+
+    /// Optional per-repository telemetry sink for query dispatch. Implementors
+    /// that do not own engine metrics may keep the default no-op behavior.
+    fn query_metrics(&self, _repo_name: &str) -> Option<std::sync::Arc<dyn QueryMetrics>> {
+        None
+    }
 }
 
 /// Trait for executing admin (DDL) operations.

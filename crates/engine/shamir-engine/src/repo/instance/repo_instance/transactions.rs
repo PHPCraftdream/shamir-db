@@ -6,6 +6,9 @@ use shamir_types::access::Actor;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
+
+use shamir_engine_query::query::filter::read_budget::{QueryMetrics, QueryOp};
 
 use super::RepoInstance;
 
@@ -127,7 +130,16 @@ impl RepoInstance {
         tx: shamir_tx::TxContext,
         wait: VisibilityWait,
     ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
-        crate::tx::commit::commit_tx_with_options(tx, &self.core, wait).await
+        let started = Instant::now();
+        let result = crate::tx::commit::commit_tx_with_options(tx, &self.core, wait).await;
+        self.metrics.record_duration(
+            QueryOp::Tx,
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
+        if result.is_err() {
+            self.metrics.record_error(None);
+        }
+        result
     }
 
     /// Borrow rather than clone the retained gate on the acknowledgement fast path.

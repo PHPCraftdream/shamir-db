@@ -279,6 +279,9 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
 
             // CR-C3 (#778): fetch the AS-OF value for the WHOLE batch in one
             // vectored call instead of one `get_at` await per record. The
@@ -507,6 +510,9 @@ impl TableManager {
         let mut matched_ids: Vec<RecordId> = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
             for (id, cow) in batch {
                 let passes = match (&filter_cb, &cow) {
                     (Some(cb), RecordCow::Borrowed(b)) => {

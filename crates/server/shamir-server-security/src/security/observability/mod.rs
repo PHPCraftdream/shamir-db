@@ -75,7 +75,10 @@ pub use export::replication::{
 use durability_export::{record_durability_metrics, register_durability_metrics};
 use export::functions::{record_functions_metrics, register_functions_metrics};
 use export::replication::{record_replication_metrics, register_replication_metrics};
-use export::{record_storage_metrics, register_storage_metrics};
+use export::{
+    record_engine_metrics, record_storage_metrics, record_transactions_metrics,
+    register_engine_metrics, register_storage_metrics, register_transactions_metrics,
+};
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
 /// Live state shared between the HTTP handlers and the boot path.
@@ -465,7 +468,9 @@ pub async fn spawn_with_byte_budget(
     // R4a-2 §2.4: WAL size/segments/truncation lag/waiters + fsync histogram.
     register_storage_metrics();
     register_functions_metrics();
+    register_engine_metrics();
     register_replication_metrics();
+    register_transactions_metrics();
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -498,6 +503,7 @@ pub async fn spawn_with_byte_budget(
                         metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
                         metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
                         metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
+                        record_transactions_metrics(&snap);
                         metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
                         metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
                     }
@@ -722,6 +728,8 @@ pub(crate) fn sample_gate_metrics(db: &shamir_db::ShamirDb) {
                 let snapshot = handle.durability_metrics_snapshot();
                 record_durability_metrics(&db_name, &repo, &snapshot);
                 record_storage_metrics(&db_name, &repo, &snapshot);
+                let query_snapshot = handle.query_metrics_snapshot();
+                record_engine_metrics(&db_name, &repo, &query_snapshot);
             }
         }
     }

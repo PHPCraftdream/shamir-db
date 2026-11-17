@@ -241,6 +241,9 @@ impl TableManager {
                 Err(e) => return Err(e),
             };
             candidates_examined += id_vec.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(id_vec.len() as u64);
+            }
 
             // CR-C3 (#778): batch-fetch the AS-OF bytes for all candidates in
             // one vectored `get_at_many` call instead of one `get_at` await

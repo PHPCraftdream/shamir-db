@@ -120,6 +120,14 @@ impl TableManager {
                                 }
                                 Err(e) => return Err(e),
                                 Ok(entries) => {
+                                    // Single accounting point: this covering-index
+                                    // path builds and returns rows directly — it
+                                    // never streams through collect/paged, so
+                                    // counting the candidate entries here is the
+                                    // only viewed accounting for the path.
+                                    if let Some(meter) = ctx.row_byte_meter {
+                                        meter.viewed(entries.len() as u64);
+                                    }
                                     let mut matched: Vec<(RecordId, InnerValue)> =
                                         Vec::with_capacity(entries.len());
                                     let mut fallback: Vec<RecordId> = Vec::new();
@@ -248,6 +256,9 @@ impl TableManager {
         if needs_inner {
             // ── Aggregate / GROUP BY branch (S4 — zero-copy RecordView lens) ──
             let raw = self.get_many_bytes(&id_vec).await?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(raw.iter().filter(|row| row.is_some()).count() as u64);
+            }
             let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
             for (id, opt) in id_vec.iter().zip(raw) {
                 if let Some(bytes) = opt {
@@ -273,6 +284,8 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            // Row accounting is single-point at the get_many_bytes fetch above;
+            // do not also count matched here (same rows, would double-count).
 
             // try_project_page_only gates out for aggregates/group_by (always
             // None here) — skip the call entirely on this branch.
@@ -312,6 +325,9 @@ impl TableManager {
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
             let raw = self.get_many_bytes(&id_vec).await?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(raw.iter().filter(|row| row.is_some()).count() as u64);
+            }
             let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
             for (id, opt) in id_vec.iter().zip(raw) {
                 if let Some(bytes) = opt {
@@ -337,6 +353,8 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            // Row accounting is single-point at the get_many_bytes fetch above;
+            // do not also count matched here (same rows, would double-count).
             let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)
@@ -439,9 +457,11 @@ impl TableManager {
         };
 
         let records_scanned = ids.len() as u64;
-        // S3: zero-copy bytes path — no aggregate in this fast path.
         let needed: Vec<RecordId> = ids.into_iter().skip(skip).collect();
         let fetched = self.get_many_bytes(&needed).await?;
+        if let Some(meter) = ctx.row_byte_meter {
+            meter.viewed(fetched.iter().filter(|row| row.is_some()).count() as u64);
+        }
         let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(take.min(PREALLOC_CAP));
         for (id, opt) in needed.iter().zip(fetched) {
             if matched.len() == take {
@@ -570,6 +590,9 @@ impl TableManager {
 
             // Fetch record bytes (already value-ordered, already ≤ need).
             let raw = self.get_many_bytes(&id_vec).await?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(raw.iter().filter(|row| row.is_some()).count() as u64);
+            }
             for (id, opt) in id_vec.iter().zip(raw) {
                 if let Some(bytes) = opt {
                     matched.push((*id, bytes));
@@ -600,6 +623,8 @@ impl TableManager {
         )?;
 
         let records_scanned = matched.len() as u64;
+        // Row accounting is single-point at the get_many_bytes fetch above;
+        // do not also count matched here (same rows, would double-count).
         let records_returned = result_qv.len() as u64;
 
         // Task #537: surface each row's stable identity so a client can echo
@@ -693,6 +718,9 @@ impl TableManager {
         if needs_inner {
             // ── Aggregate / GROUP BY branch (S4 — zero-copy RecordView lens) ──
             let raw = self.get_many_bytes(&id_vec).await?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(raw.iter().filter(|row| row.is_some()).count() as u64);
+            }
             let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
             for (id, opt) in id_vec.iter().zip(raw) {
                 if let Some(bytes) = opt {
@@ -718,6 +746,8 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            // Row accounting is single-point at the get_many_bytes fetch above;
+            // do not also count matched here (same rows, would double-count).
 
             // try_project_page_only gates out for aggregates/group_by (always
             // None here) — skip the call entirely on this branch.
@@ -765,6 +795,9 @@ impl TableManager {
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
             let raw = self.get_many_bytes(&id_vec).await?;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(raw.iter().filter(|row| row.is_some()).count() as u64);
+            }
             let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
             for (id, opt) in id_vec.iter().zip(raw) {
                 if let Some(bytes) = opt {
@@ -790,6 +823,8 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            // Row accounting is single-point at the get_many_bytes fetch above;
+            // do not also count matched here (same rows, would double-count).
             let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)

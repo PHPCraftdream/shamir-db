@@ -542,7 +542,9 @@ impl<'a> QueryRunner<'a> {
         // S-read: thread result_encoding into the read path so that
         // Id-encoding requests return id-keyed IdBytes rows instead of
         // de-interning on the server.
-        let meter = crate::query::batch::exec_scope::ScopeRowMeter::new(self.scope);
+        let metrics = self.resolver.query_metrics(&table_ref.repo);
+        let meter =
+            crate::query::batch::exec_scope::ScopeRowMeter::new(self.scope, metrics.as_deref());
         let ctx = ctx
             .with_row_byte_meter(meter.as_ref().map(|m| m as &dyn ReadByteMeter))
             .with_read_visibility_scope(self.scope);
@@ -589,6 +591,31 @@ impl<'a> QueryRunner<'a> {
         })?;
         if let Some(meter) = &meter {
             meter.finish(&result)?;
+            // Scan paths account actual stream batches. Candidate/index paths that
+            // do not use those streams report their existing scanned-row statistic.
+            if !meter.has_viewed_rows() {
+                let index = result
+                    .stats
+                    .as_ref()
+                    .and_then(|stats| stats.index_used.as_deref());
+                let count_all = matches!(
+                    query.select.items.as_slice(),
+                    [shamir_engine_query::query::read::SelectItem::CountAll { .. }]
+                );
+                let viewed = match index {
+                    // Counter/index count shortcuts inspect count/posting metadata,
+                    // not table rows. MIN loads and examines exactly one source row.
+                    Some("__record_counter__") => 0,
+                    Some(name) if count_all && name.starts_with("idx_") => 0,
+                    Some(name) if name.ends_with("_min") => 1,
+                    _ => result
+                        .stats
+                        .as_ref()
+                        .map_or(0, |stats| stats.records_scanned),
+                };
+                meter.viewed(viewed);
+            }
+            meter.finish_rows(result.records.len() as u64);
         }
         Ok(result)
     }
