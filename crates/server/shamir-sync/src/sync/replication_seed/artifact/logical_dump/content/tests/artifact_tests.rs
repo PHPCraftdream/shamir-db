@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::super::content::{LogicalValue, PortableItem, RecordItem};
 use super::super::super::section::SectionKind;
-use super::super::super::stream::{verify_dump, DumpReader, DumpWriter};
+use super::super::super::stream::{verify_dump, DumpWriter};
 use super::fixture::{
     build_fixture, fixture_header, fixture_items, item_record_payload, read_fixture_items,
     walk_frames,
@@ -85,10 +85,7 @@ fn end_section_rejects_nonzero_declared_count() {
     let mut reader_bytes = Vec::new();
     let writer = DumpWriter::new(&mut reader_bytes, fixture_header()).expect("preamble writes");
     drop(writer);
-    let error = match DumpReader::new(Cursor::new(reader_bytes)) {
-        Err(e) => e,
-        Ok(_) => panic!("empty artifact accepted"),
-    };
+    let error = verify_dump(Cursor::new(reader_bytes)).expect_err("empty artifact rejected");
     assert!(
         error.to_string().contains("byte offset"),
         "unexpected error: {error}"

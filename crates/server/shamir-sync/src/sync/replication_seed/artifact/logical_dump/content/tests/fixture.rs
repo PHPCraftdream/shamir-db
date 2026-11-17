@@ -139,7 +139,8 @@ pub fn fixture_items() -> Vec<(SectionKind, Vec<PortableItem>)> {
         auto_now_add: false,
         keyset_safe: false,
     };
-    grouped(vec![
+    // design 3.1 item 4: `end` is an emitted, empty section.
+    let mut sections = grouped(vec![
         (
             SectionKind::Identities,
             PortableItem::Identity(IdentityItem {
@@ -307,7 +308,9 @@ pub fn fixture_items() -> Vec<(SectionKind, Vec<PortableItem>)> {
                 value: LogicalValue::Set(vec![LogicalValue::Int(2), LogicalValue::Int(1)]),
             }),
         ),
-    ])
+    ]);
+    sections.push((SectionKind::End, Vec::new()));
+    sections
 }
 
 /// Group consecutive same-section items so multi-item sections stay together.
