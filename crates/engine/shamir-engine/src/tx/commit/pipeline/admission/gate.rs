@@ -33,7 +33,6 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-#[cfg(test)]
 use super::close_owner::CommitAdmissionCloseOwner;
 use super::error::CommitAdmissionError;
 use super::lease::CommitAdmissionLease;
@@ -58,8 +57,7 @@ pub(crate) const LEADER_REOPEN_WAIT_CAP: Duration = Duration::from_secs(2);
 /// CLOSED: gate refuses admission (bit 62).
 const CLOSED: usize = 1 << 62;
 /// CLOSE_TAKEN: an exclusive RAII close owner exists (bit 63).
-/// Test-gated alongside the close API until the seal step consumes it.
-#[cfg(test)]
+/// Ungated since R2a step 1d: capture/seal consume the close API.
 const CLOSE_TAKEN: usize = 1 << 63;
 /// ACTIVE mask: bits 0..62.
 const ACTIVE_MASK: usize = (1usize << 62) - 1;
@@ -145,13 +143,15 @@ impl CommitAdmissionGate {
         }
     }
 
-    /// Test-gated: no production consumer until the seal step.
     /// CAS-in CLOSE_TAKEN (single owner; a competing closer gets
-    /// [`CommitAdmissionError::Busy`]), then set CLOSED, then await zero
-    /// pre-close-admitted leases via the armed-notify recheck. Returns the
-    /// RAII owner; dropping it reopens with the count preserved.
-    #[cfg(test)]
-    pub(crate) async fn close(
+    /// [`CommitAdmissionError::Busy`]), then set CLOSED, then return the
+    /// RAII owner SYNCHRONOUSLY — no suspension point before the owner
+    /// exists, so cancellation cannot leak a closed gate (fail-closed
+    /// recovery: the owner reopens on drop, error or unwind). Zero-lease
+    /// waiting is [`CommitAdmissionCloseOwner::wait_zero`] with the
+    /// caller's cap; the old combined close-and-wait shape lives on as the
+    /// cfg(test) helper in this module's tests.
+    pub(crate) fn begin_close(
         self: &Arc<Self>,
     ) -> Result<CommitAdmissionCloseOwner, CommitAdmissionError> {
         let previous = self.state.fetch_or(CLOSE_TAKEN, Ordering::AcqRel);
@@ -162,20 +162,41 @@ impl CommitAdmissionGate {
         // Wake armed closed-waiters so they recheck (and keep waiting until
         // reopen, or hit their cap).
         self.notify.notify_waiters();
+        Ok(CommitAdmissionCloseOwner::new(Arc::clone(self)))
+    }
+
+    /// Await zero ACTIVE leases through the armed-notify recheck
+    /// (`CommitTailBarrier::wait_zero` pattern). Cancel-safe: nothing is
+    /// mutated; the close right lives in the caller's owner. Past `cap`
+    /// (`Duration::MAX` = unbounded) the typed
+    /// [`CommitAdmissionError::CloseTimeout`] is returned with no side
+    /// effect — the caller's owner drop reopens.
+    pub(crate) async fn wait_zero(&self, cap: Duration) -> Result<(), CommitAdmissionError> {
+        let deadline = if cap == Duration::MAX {
+            None
+        } else {
+            Some(tokio::time::Instant::now() + cap)
+        };
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if self.state.load(Ordering::Acquire) & ACTIVE_MASK == 0 {
-                return Ok(CommitAdmissionCloseOwner::new(Arc::clone(self)));
+                return Ok(());
             }
-            notified.await;
+            match deadline {
+                Some(deadline) => {
+                    if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                        return Err(CommitAdmissionError::CloseTimeout);
+                    }
+                }
+                None => notified.await,
+            }
         }
     }
 
     /// Reopen — ONLY reachable by the close owner (CLOSE_TAKEN held):
     /// clear CLOSED (preserving ACTIVE), clear CLOSE_TAKEN, wake waiters.
-    #[cfg(test)]
     pub(crate) fn reopen(&self) {
         loop {
             let state = self.state.load(Ordering::Acquire);

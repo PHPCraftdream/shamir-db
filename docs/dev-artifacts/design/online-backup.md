@@ -712,3 +712,46 @@ the two hazards above are unaddressed.
   now exists. Default: a future revision of 4.8 re-points emission at the
   existing crate; no behaviour change decided here (outside this
   subsection's edit scope, flagged to the metrics owner).
+
+#### Step 1d decisions (2026-11-17)
+
+**(a) Seal hold.** The drain pause survives `seal_point`: the barrier
+returns a `SealHold` that owns the `DrainPauseGuard` (`Send + 'static`)
+and drops it exactly once, with itself — so on hold drop the gate is
+already open (the close owner was dropped before the hold was handed out,
+`online_backup.rs` seal_point tail) and writers run again, but the stores
+stay frozen because `drain_step`/`drain_all`/the background loop cannot
+acquire the drainer's `replaying` lock (`drain_pause.rs`; `state.rs:144-149`)
+until the hold drops. Any error path inside the sealed async block drops
+the guard there — fail-closed is preserved.
+
+**(b) Port consequence.** Because the pause now outlives `seal_point`,
+`OnlineBackupPort` needs either a new "end of seal" method or a
+hold-returning `seal_point` signature; shamir-sync is NOT changed in this
+step — that port change belongs to R2a-3.
+
+**(c) Observed commit-side backpressure under the hold.** Commit execution
+itself does NOT wait on the drainer: with the gate reopened, a commit
+passes admission, performs the Phase-1 interner overlay merge outside
+`commit_lock` (`preparation/pre_commit/prelock.rs:46,85-108`), and the
+Phase-2.5 `enter_writer_drain` bump (`prelock.rs:270-291`) is a non-blocking
+counter on the per-table DDL writer-drain barrier (cross-atomic SeqCst
+against a DDL's `drain_writers` load) — it never touches the drainer's
+`replaying` lock; table freezes (`MIGRATION_FREEZE` check, `prelock.rs:325-333`)
+are a flag read. The commit then appends to WAL and offers the entry
+lock-free — `offer` DROPS (never blocks) above the 64K window high-watermark
+(`drainer/state.rs:21-24`, `pipeline/phase/commit/legacy_and_lockfree.rs:67`)
+and wakes the drainer (`finalize.rs:100`). What DOES wait is the
+acknowledgement tail: visibility advances only via the drainer's replay
+`mark_durable` (`drainer/drain_step.rs:890`), which is blocked for the
+whole hold, so `acknowledge_known_outcome` (`acknowledgement/tail.rs:82`)
+observes `Pending` — a `VisibilityWait::Strict` caller parks on the gate's
+durable-progress `Notify` with NO budget (`visibility_impl.rs:57-67`,
+`budget = None`), i.e. it waits unboundedly for a full drain window that
+cannot open until the hold drops; a `Bounded` caller returns `Pending` at
+its timeout, and the soft undrained-gap brake
+(`apply_backpressure_with_budget`, `tail.rs:299-372`) gives up after
+`BACKPRESSURE_MAX_WAIT` = 5 s (`tail.rs:378`) and proceeds (data already
+committed and visible in overlay; only the durability promise relaxes).
+So: overlay-only and `Bounded` commits proceed with degraded
+acknowledgement; `Strict` commits block for the duration of the hold.

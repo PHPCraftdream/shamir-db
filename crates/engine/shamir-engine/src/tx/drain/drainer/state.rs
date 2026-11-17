@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -6,6 +6,8 @@ use scc::TreeIndex;
 use shamir_collections::THasher;
 use shamir_wal::WalEntryV2;
 use tokio::sync::{Mutex, Notify};
+
+use crate::tx::drain::drain_pause::DrainPauseState;
 
 #[path = "diagnostics.rs"]
 mod diagnostics;
@@ -135,7 +137,16 @@ pub struct Drainer {
     // and explicit drains; the guard must span awaited replay/history I/O.
     // Lock order: replay -> per-table drain/marker locks. No callee re-enters
     // drain_step/drain_all; truncation uses flush_all_history, not flush_buffers.
-    replaying: Mutex<()>,
+    //
+    // Arc-shared since R2a-1d: the capture/seal barriers take an owned
+    // pause over this SAME lock (`DrainPauseState`) that can outlive the
+    // creating call (`Send + 'static` seal hold).
+    replaying: Arc<Mutex<()>>,
+    /// R2a-1d: the owned pause facade over `replaying` (one per drainer).
+    /// While its guard is held, `drain_step`, `drain_all`, the background
+    /// loop and the truncation wait are all blocked (they acquire
+    /// `replaying` through `drain_step` / `settle_and_truncate`).
+    pause: DrainPauseState,
 }
 
 impl Default for Drainer {
@@ -147,6 +158,7 @@ impl Default for Drainer {
 impl Drainer {
     /// Create a fresh, idle drainer.
     pub fn new() -> Self {
+        let replaying_cell = Arc::new(Mutex::new(()));
         Self {
             notify: Notify::new(),
             drained_total: AtomicU64::new(0),
@@ -164,7 +176,41 @@ impl Drainer {
             index_applied: scc::HashMap::with_hasher(THasher::default()),
             posting_applied: scc::HashMap::with_hasher(THasher::default()),
             counter_applied: scc::HashMap::with_hasher(THasher::default()),
-            replaying: Mutex::new(()),
+            replaying: Arc::clone(&replaying_cell),
+            pause: DrainPauseState::new(Arc::clone(&replaying_cell)),
         }
+    }
+
+    /// R2a-1d: the pause facade over `replaying` (capture/seal barriers).
+    pub(crate) fn pause(&self) -> &DrainPauseState {
+        &self.pause
+    }
+
+    /// R2a-1d: busy probe for the barrier entry check — a seal hold or a
+    /// transient pause currently owns `replaying`.
+    pub(crate) fn pause_held(&self) -> bool {
+        self.pause.is_held()
+    }
+
+    /// Test-only: yield the future that owns the `replaying` lock WITHOUT
+    /// the pause busy flag — exactly the state an in-flight drain pass
+    /// leaves behind. The cancel-safety tests need this to park a pause
+    /// acquisition deterministically: `DrainPauseState::acquire` checks the
+    /// busy flag FIRST (a second acquisition while a guard holds the pause
+    /// is refused with `DrainPauseBusy` before it can ever park), so the
+    /// flag-cleanup path of a cancelled acquisition is reachable only when
+    /// someone else (a drain pass) holds the lock flag-free.
+    #[cfg(test)]
+    pub(crate) fn test_replaying_lock(
+        &self,
+    ) -> impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.replaying).lock_owned()
+    }
+
+    /// R2a-1d: pending-work probe for the settle/recheck checks (atomic
+    /// mirror of `window`; production-capable twin of the test-only
+    /// `window_depth`).
+    pub(crate) fn pending_window_len(&self) -> usize {
+        self.window_depth.load(Ordering::Relaxed)
     }
 }

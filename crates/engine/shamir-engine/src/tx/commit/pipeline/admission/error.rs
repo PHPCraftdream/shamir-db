@@ -17,9 +17,13 @@ pub(crate) enum CommitAdmissionError {
     #[error("commit admission lease count overflow")]
     Overflow,
     /// A close was attempted while another close owner still holds the
-    /// CLOSE_TAKEN right. Single-owner by construction. Test-gated with the
-    /// close API until the seal step consumes it.
-    #[cfg(test)]
+    /// CLOSE_TAKEN right (another capture/seal barrier). Single-owner by
+    /// construction; nothing was mutated. Ungated since R2a step 1d.
     #[error("a commit admission close is already in progress")]
     Busy,
+    /// The bounded zero-lease wait of a barrier (`wait_zero`) passed its
+    /// cap while leases were still active. Nothing was mutated; the
+    /// caller's close owner drop reopens the gate.
+    #[error("commit admission leases did not reach zero within the barrier cap")]
+    CloseTimeout,
 }

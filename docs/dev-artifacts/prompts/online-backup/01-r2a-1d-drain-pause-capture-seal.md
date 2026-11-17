@@ -1,0 +1,35 @@
+# Brief: R2a step 1d — drain pause guard and per-repo capture/seal in shamir-engine
+
+## Why
+
+The online copy protocol needs, per repository, a flush barrier (step B) and a seal barrier (step E) that return a consistency position, and the seal must keep the stores free of anything above `V*` until the seal re-copy finishes. Nothing in `shamir-engine` offers that yet. The gate (step 1c) can stop and drain leaders; what is missing is the drain pause that freezes store application, the sequence that uses both without the hazard-1 self-deadlock, and a typed result the later server adapter (R2a-3) can call. The adapter, the admin operations, `replay_to` and the shamir-sync port change are NOT this step.
+
+## What (this step only)
+
+1. **Drain pause guard.** An owned RAII guard over the drainer's `replaying` lock (today a `tokio::sync::Mutex<()>` inside the drainer state; make it shareable so the guard can be `Send + 'static` and outlive the call that created it). While held, `drain_step`, `drain_all`, the background loop and truncation wait. Acquiring it waits for an in-flight drain pass. Cancel-safe acquisition. Documented lock order: gate close, then pause; never the reverse.
+2. **Enable the gate's close API** outside tests (the `#[cfg(test)]` on close/reopen); keep the owner RAII, the single-owner busy error and reopen-on-drop. Keep the leader wait cap as it is.
+3. **`capture_point` (step B)** on the repo (put it where the repo's other lifecycle operations live; `pub` only as far as the next step provably needs): close the gate and wait for zero leases (bounded; refusal is a typed error, the owner reopens on drop) → with NO repo write permit held, run the ordinary drain until settled (a failed or unsettled replay fails closed with a typed error) → flush history (`flush_all_history`) → read the committed version as the position (`RepoTxGate::last_committed`, verify it is the right source) → reopen. Returns a typed result with the position.
+4. **`seal_point` (step E)**: the order of design 2 (iii): close the gate → zero leases → let any in-flight background drain finish and drain to settled with no permit held → take the pause guard → recheck under the guard that nothing is pending (a non-empty recheck fails closed) → flush history → sample `V*` → reopen the gate and RETURN a seal hold that owns the pause guard. Writers may run again after return, but nothing is applied to the stores until the hold drops. The hold is `Send + 'static`, drops the pause exactly once, and exposes `V*` and how long it has been held (a monotonic instant; the cap policy lives with the caller). A second seal or capture on the same repo while a close owner or hold exists gets a typed busy error.
+5. **Pins.** The truncation pin must be acquirable by a later caller outside `shamir-engine`: expose the minimal public acquisition on the repo (a guard that releases on drop, idempotent), reusing the landed registry; do not change pin semantics. Capture and seal do NOT acquire pins themselves (design: pins are held from step A by the caller).
+6. **Fail-closed recovery.** The close owner and the hold are created before any suspension point that could leak them; an error, timeout, cancellation or unwind at any await point reopens the gate and releases the pause. Nothing is left closed or paused after a failed capture/seal.
+7. **Design addendum.** A short dated "Step 1d decisions" paragraph in `docs/dev-artifacts/design/online-backup.md` recording: the seal hold (pause survives `seal_point` and drops with the hold), the consequence that the `OnlineBackupPort` needs one more method (end of seal) or a hold-returning `seal_point` — shamir-sync is NOT changed here, the port change belongs to R2a-3 — and the observed commit-side backpressure while the pause is held (state what you found: does a commit wait on a full drain window, and for how long; if you cannot tell from the code, say so).
+8. **Tests** (CI-only, deterministic handshakes and park hooks — no sleeps as correctness evidence; layout per the repo convention, `tests/` manifests): the pause guard blocks drain and background passes and releases them on drop; capture and seal complete with continuous ordinary commits running, including a pending `InternerOverlayMerge` WAL op and an orphan index posting (the hazard-1 shapes; a regression test that would deadlock if capture kept a repo permit); a seal hold keeps committed-after-`V*` data out of the stores (assert on store state, not only on the drain counters) and the drainer applies it after the hold drops; cancellation at every await point of capture and seal (drop the future at each step through a step hook) leaves the gate open, the pause released and no leaked owner; unsettled drain fails closed; busy errors; a pin acquired by the caller keeps the truncation floor through capture and seal.
+
+## Do not
+
+Touch `shamir-sync`, `shamir-server`, `shamir-db` or any admin operation; implement the port adapter, `replay_to`, restore changes, catalogue/system-store capture or metrics; change commit semantics, ordering or error text while the gate is open and the pause is not held; add a dependency; add a `Mutex`/`RwLock` on the commit path.
+
+## Rules that bind the change
+
+* Layout: at most 7 entries per folder, at most 1000 lines per file (`python -I scripts/ci/check_layout.py`).
+* rust-guard `structure`: no logic in `mod.rs`, no inline `#[cfg(test)]` modules, no local `use`, no new `#[allow]`, no impl outside the type's module. Items that must become `pub` or wider than today are declared to rust-guard like the pin step did (`git log -p -- .rust-guard/stages.toml`, campaign `engine-truncation-pin-R2a-1`) — mirror that for this step (a new campaign entry with its own delta files, replacing the landed pin one if the files still list it), keep every widening as narrow as the next step needs, and list each one in the final report.
+* Future size: a Windows debug stack overflow was caused by growing inline futures on the init/commit chain; `Box::pin` large awaits at the call site and add no async layer on recursive paths.
+* Imports at the top; builder-only queries in tests; multi-line indented JSON literals.
+* Machine memory: run at most ONE cargo command at a time, always as `RUSTC_WRAPPER= wnice -p idle -c 50 -t 8 -m 50 -- cargo ... -j 1`.
+* Wrap-up: bring the change to a compiling, formatted, clippy-clean state.
+
+## Policy (verbatim, binding)
+
+Compilation, builds and tests run on GitHub CI, not on this machine. Banned locally: `cargo test`, `cargo nextest`, `./scripts/test.sh`, `cargo build`, `cargo run`, `cargo bench`, `cargo doc`, npm/tsc builds, any build or test run. Allowed locally only: `cargo check -p <crate> --all-targets`, `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo fmt -p <crate>` (and `-- --check`), `python -I scripts/ci/check_layout.py`.
+
+⛔ NEVER run `git reset` / `checkout` / `clean` / `stash` / `restore` / `rm`, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits (exception: the orchestrator has explicitly authorized the single brief commit described at the top of this document).

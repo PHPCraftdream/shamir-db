@@ -20,6 +20,7 @@ use shamir_types::types::value::InnerValue;
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
+use crate::tx::commit::pipeline::admission::tests::close_helpers::close;
 use crate::tx::{apply_replicated_batch, ApplyOutcome, ApplyPolicy, ReplicatedEvent};
 
 fn follower_repo() -> RepoInstance {
@@ -76,7 +77,7 @@ async fn follower_apply_respects_gate() {
     let event = put_event("gated", rid(1), 1);
 
     let admission = Arc::clone(follower.core().commit_admission());
-    let owner = admission.close().await.expect("close");
+    let owner = close(&admission).await.expect("close");
     assert!(admission.is_closed());
 
     // Closed gate: IMMEDIATE typed refusal, no wait, no side effect.

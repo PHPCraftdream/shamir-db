@@ -11,6 +11,6 @@
 mod commit_wire_tests;
 mod drain_tests;
 mod index_batch_tests;
-mod support;
+pub(crate) mod support;
 mod ticket_tests;
 mod window_tests;
