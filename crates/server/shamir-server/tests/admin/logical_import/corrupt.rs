@@ -139,17 +139,24 @@ fn non_canonical_value_encoding_is_refused() {
     }
     let frame_index = frame_index.expect("edited frame found");
     let frame_start = frames[frame_index].start;
+    // Patch the frame PAYLOAD, not the wire: extract the payload with its
+    // original length first, apply fixstr(5) -> str8(5) inside it, then
+    // rebuild the frame (new length + recomputed checksum over the frame
+    // sequence and the patched payload) so the verifier passes checksum and
+    // decoding and reaches the canonical-form comparison.
+    let payload_length =
+        u32::from_be_bytes(bytes[frame_start..frame_start + 4].try_into().unwrap()) as usize;
+    let mut payload = bytes[frame_start + 4..frame_start + 4 + payload_length].to_vec();
+    let at = payload
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("identity fixstr present in the frame payload");
     // fixstr(5) -> str8(5): marker + explicit length + the same text.
     let mut replacement = Vec::with_capacity(needle.len() + 1);
     replacement.push(0xd9);
     replacement.push(5);
     replacement.extend_from_slice(&needle[1..]);
-    bytes.splice(at..at + needle.len(), replacement);
-    // Repair the edited frame's checksum so the refusal is the canonical
-    // encoding check, not the checksum check.
-    let payload_length =
-        u32::from_be_bytes(bytes[frame_start..frame_start + 4].try_into().unwrap()) as usize;
-    let payload = bytes[frame_start + 4..frame_start + 4 + payload_length].to_vec();
+    payload.splice(at..at + needle.len(), replacement);
     replace_frame_payload(&mut bytes, frame_start, frame_index as u64, &payload);
     let artifact = write_bytes(&root.join("noncanon.mpack"), &bytes);
     let target = root.join("target");

@@ -6,6 +6,7 @@ use shamir_server::logical_import::LogicalImportError;
 use tokio_util::sync::CancellationToken;
 
 use crate::logical_import::common::assert_no_leftovers;
+use crate::logical_import::common::assert_target_untouched;
 use crate::logical_import::common::build_fixture;
 use crate::logical_import::common::export_args;
 use crate::logical_import::common::export_now;
@@ -73,7 +74,7 @@ fn non_empty_target_is_refused_without_touching_it() {
         b"precious".to_vec(),
         "target contents untouched"
     );
-    assert_no_leftovers(&root, &target);
+    assert_target_untouched(&root, &target);
 }
 
 /// An existing `<target>.import.lock` refuses the import before the target
@@ -128,7 +129,7 @@ fn receipt_less_target_is_never_merged() {
     assert!(matches!(error, LogicalImportError::Receipt(_)));
     assert!(error.to_string().contains("without a"));
     assert!(target.join("shamir_db_meta.redb").exists(), "target intact");
-    assert_no_leftovers(&root, &target);
+    assert_target_untouched(&root, &target);
     // The removed receipt is the test's only mutation; restore semantics by
     // confirming the directory was NOT republished over.
     assert!(!receipt.exists());

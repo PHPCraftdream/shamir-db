@@ -171,6 +171,11 @@ fn record_budget(
         QueryValue::Bin(value) => {
             *bytes = bytes.saturating_add(value.len());
         }
+        QueryValue::List(list) => {
+            for child in list {
+                record_budget(child, depth + 1, nodes, bytes)?;
+            }
+        }
         _ => {}
     }
     if *bytes > 512 * 1024 {

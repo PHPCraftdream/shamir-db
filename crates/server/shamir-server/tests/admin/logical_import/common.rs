@@ -152,6 +152,11 @@ pub async fn build_fixture(root: &Path) -> Fixture {
         .await
         .unwrap();
     let instance = home.get_db("app").unwrap();
+    // The export read facade refuses unopened tables; open every fixture
+    // table the way a booted server does before the engine is dropped.
+    for (repo, table) in [("main", "rows"), ("main", "users"), ("cold", "events")] {
+        instance.get_table(repo, table).await.unwrap();
+    }
     let users = instance.get_table("main", "users").await.unwrap();
     users
         .set_buffer_config(&MemBufferConfig {
@@ -469,6 +474,27 @@ pub fn assert_no_leftovers(root: &Path, target: &Path) {
     assert!(
         !target.exists(),
         "target {} must not exist",
+        target.display()
+    );
+    let lock = lock_path(target);
+    assert!(!lock.exists(), "lock {} must be removed", lock.display());
+    assert!(
+        !fs::read_dir(root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGE_PREFIX)),
+        "a stage directory was left behind"
+    );
+}
+
+/// The target legitimately exists (a foreign directory, or a previously
+/// published import): it must be untouched on disk, with no lock file and
+/// no stage directory beside it.
+pub fn assert_target_untouched(root: &Path, target: &Path) {
+    assert!(
+        target.is_dir(),
+        "target {} must still exist",
         target.display()
     );
     let lock = lock_path(target);

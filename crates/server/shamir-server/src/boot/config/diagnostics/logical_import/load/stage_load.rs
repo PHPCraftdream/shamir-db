@@ -167,9 +167,9 @@ async fn create_table(
             item.repository, item.name
         ))
     })?;
-    if item.buffer_ttl_ms.is_none() {
-        return Ok(());
-    }
+    // The validate stage re-reads the staged content through the engine
+    // read facade, which refuses unopened tables (a booted server opens
+    // every catalogue table); open each created table regardless of TTL.
     let db = home
         .get_db(db_name)
         .ok_or_else(|| load("database disappeared during load".to_string()))?;
@@ -182,10 +182,12 @@ async fn create_table(
                 item.repository, item.name
             ))
         })?;
-    let ttl = item.buffer_ttl_ms;
+    let Some(ttl) = item.buffer_ttl_ms else {
+        return Ok(());
+    };
     table
         .set_buffer_config(&MemBufferConfig {
-            ttl_ms: ttl,
+            ttl_ms: Some(ttl),
             ..MemBufferConfig::default()
         })
         .await
