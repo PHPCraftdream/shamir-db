@@ -58,6 +58,9 @@ mod admin_retention;
 #[path = "admin_db/admin_replication.rs"]
 mod admin_replication;
 
+#[path = "admin_db/schema_migration.rs"]
+mod admin_db_schema_migration;
+
 #[path = "admin_db/visibility_sample/mod.rs"]
 mod visibility_sample;
 

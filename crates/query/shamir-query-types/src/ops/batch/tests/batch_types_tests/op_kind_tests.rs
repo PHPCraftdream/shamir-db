@@ -183,6 +183,15 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "over": [],
             "bind_row": "row"
         }),
+        OpKind::ApplicationSchema => json!({
+            "operation": "application_schema_status",
+            "payload": {
+                "protocol_version": 1,
+                "target": {
+                    "database_identity": "0197f36a-1b2c-7cc3-8a44-3d6f5a9b0e17"
+                }
+            }
+        }),
     };
 
     let marker = match kind {
@@ -267,6 +276,7 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::CreateSubscription
         | OpKind::DropSubscription
         | OpKind::AlterSubscription
+        | OpKind::ApplicationSchema
         | OpKind::Call => json!("target"),
     };
     fields
@@ -352,6 +362,7 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::ListPublications(_) => OpKind::ListPublications,
         BatchOp::ListSubscriptions(_) => OpKind::ListSubscriptions,
         BatchOp::ReplicationStatus(_) => OpKind::ReplicationStatus,
+        BatchOp::ApplicationSchema(_) => OpKind::ApplicationSchema,
         BatchOp::Call(_) => OpKind::Call,
         BatchOp::ForEach(_) => OpKind::ForEach,
         BatchOp::Batch(_) => OpKind::Batch,

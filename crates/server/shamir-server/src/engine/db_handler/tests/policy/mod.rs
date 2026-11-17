@@ -4,5 +4,6 @@
 pub mod batch_tree_policy_tests;
 pub mod commit_visibility_policy_tests;
 pub mod pull_cap_tests;
+pub mod schema_migration_follower_tests;
 pub mod server_limit_policy_tests;
 pub mod server_result_enforcement_tests;

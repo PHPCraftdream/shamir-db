@@ -570,6 +570,13 @@ impl SessionPermissions {
             BatchOp::ListPublications(_)
             | BatchOp::ListSubscriptions(_)
             | BatchOp::ReplicationStatus(_) => (Action::Read, Resource::Global),
+
+            // Application-schema migrations (R1c): authorized inside the
+            // engine's admin handler against the target database (design
+            // §5.2); the session classifier grants only a conservative
+            // database-level Read here. The handler re-checks with the
+            // real action (Read for status, Manage for plan/apply later).
+            BatchOp::ApplicationSchema(_) => (Action::Read, Resource::Global),
         }
     }
 

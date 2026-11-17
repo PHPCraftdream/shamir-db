@@ -7,6 +7,7 @@ use shamir_types::access::{Action, ResourcePath};
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::{QueryValue, Value};
 
+use crate::admin::types::schema_migration::SchemaMigrationAdminOp;
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp,
     AlterRepoOp, AlterSubscriptionOp, BindValidatorOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp,
@@ -190,6 +191,15 @@ pub enum BatchOp {
     ListSubscriptions(ListSubscriptionsOp),
     /// Inspect runtime replication status (read-only).
     ReplicationStatus(ReplicationStatusOp),
+
+    /// Application-schema migration admin op (R1c). The inner
+    /// [`SchemaMigrationAdminOp`] tags the concrete operation
+    /// (`ApplicationSchemaStatus` / `ApplicationSchemaPlan` /
+    /// `ApplyApplicationSchemaMigration`). Classification: the status and
+    /// plan arms are read-only, the apply arm is a write; authorization is
+    /// enforced inside `shamir-db`'s admin handler (Read or Manage on the
+    /// target database, design §5.2), so `required_access` returns `None`.
+    ApplicationSchema(SchemaMigrationAdminOp),
 }
 
 impl Serialize for BatchOp {
@@ -275,6 +285,7 @@ impl Serialize for BatchOp {
             BatchOp::ListPublications(op) => op.serialize(serializer),
             BatchOp::ListSubscriptions(op) => op.serialize(serializer),
             BatchOp::ReplicationStatus(op) => op.serialize(serializer),
+            BatchOp::ApplicationSchema(op) => op.serialize(serializer),
         }
     }
 }
@@ -484,6 +495,9 @@ impl<'de> Deserialize<'de> for BatchOp {
                     OpKind::ReplicationStatus => {
                         ReplicationStatusOp::deserialize(value).map(BatchOp::ReplicationStatus)
                     }
+                    OpKind::ApplicationSchema => {
+                        SchemaMigrationAdminOp::deserialize(value).map(BatchOp::ApplicationSchema)
+                    }
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
@@ -612,7 +626,8 @@ impl BatchOp {
             | BatchOp::AlterSubscription(_)
             | BatchOp::ListPublications(_)
             | BatchOp::ListSubscriptions(_)
-            | BatchOp::ReplicationStatus(_) => return None,
+            | BatchOp::ReplicationStatus(_)
+            | BatchOp::ApplicationSchema(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -722,6 +737,7 @@ impl BatchOp {
                 | BatchOp::ListPublications(_)
                 | BatchOp::ListSubscriptions(_)
                 | BatchOp::ReplicationStatus(_)
+                | BatchOp::ApplicationSchema(_)
         )
     }
 
@@ -766,6 +782,15 @@ impl BatchOp {
             BatchOp::ListPublications(_) => false,
             BatchOp::ListSubscriptions(_) => false,
             BatchOp::ReplicationStatus(_) => false,
+            // Application-schema migrations: the read-only status and plan
+            // arms do not mutate state; the apply arm does (design §5.2).
+            BatchOp::ApplicationSchema(
+                SchemaMigrationAdminOp::ApplicationSchemaStatus(_)
+                | SchemaMigrationAdminOp::ApplicationSchemaPlan(_),
+            ) => false,
+            BatchOp::ApplicationSchema(
+                SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(_),
+            ) => true,
 
             // ----- data mutations ----------------------------------------
             BatchOp::Insert(_) => true,

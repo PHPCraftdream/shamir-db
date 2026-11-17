@@ -619,6 +619,12 @@ pub(crate) fn is_coarse_admin_gate_exempt(op: &BatchOp) -> bool {
         BatchOp::List(_)
             | BatchOp::AccessTree(_)
             | BatchOp::DescribeTable(_)
+            // R1c 2b-1: the application-schema op is authorized inside the
+            // engine handler per design §5.2 — `Read` on the database for
+            // status (`Manage` will gate plan/apply in their steps). The
+            // plan/apply arms still fail there with the documented temporary
+            // error, so the exemption grants nothing today.
+            | BatchOp::ApplicationSchema(_)
             | BatchOp::GetTableSchema(_)
     )
 }

@@ -1,0 +1,303 @@
+//! Application-schema migration admin handler (release-1 R1c step 2b-1).
+//!
+//! Implements the read-only `ApplicationSchemaStatus` arm of
+//! [`SchemaMigrationAdminOp`]: authorize `Read` on the database (design §5.2),
+//! resolve the serving database's stable identity, read the durable journal
+//! through the step-2a `SystemStore` API and build a typed
+//! `SchemaMigrationStatusResult` as the admin result record.
+//!
+//! The plan and apply arms are NOT implemented in this step; they return one
+//! documented temporary error (`schema_migration_operation_not_implemented`)
+//! that steps 2b-2 / 2b-3 replace. No new wire error code is introduced.
+//!
+//! §5.3 error mapping lives in [`map_store_error`] only — application-schema
+//! codes stay distinguishable from the online storage-move errors.
+
+use shamir_query_types::admin::types::schema_migration::{
+    canonical_body_checksum, SchemaMigrationAdminOp, SchemaMigrationChecksumValidation,
+    SchemaMigrationErrorCode, SchemaMigrationStatusRequest,
+};
+
+use crate::access::{Action, ResourcePath};
+use crate::query::batch::{BatchError, BatchOp};
+use crate::query::read::QueryResult;
+use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, MigrationHistory};
+use crate::types::value::QueryValue;
+use shamir_types::types::common::new_map;
+
+use super::admin_dispatch::ShamirAdminExecutor;
+use super::helpers::admin_result;
+
+/// Temporary error code returned by the plan and apply arms until their
+/// steps land. Deliberately not a `SchemaMigrationErrorCode` variant.
+const OPERATION_NOT_IMPLEMENTED: &str = "schema_migration_operation_not_implemented";
+
+impl ShamirAdminExecutor {
+    pub(super) async fn handle_application_schema(
+        &self,
+        batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let BatchOp::ApplicationSchema(op) = batch_op else {
+            unreachable!("handle_application_schema called with a non-ApplicationSchema op");
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        match op {
+            SchemaMigrationAdminOp::ApplicationSchemaStatus(request) => {
+                self.authorize_database_read().await?;
+                self.status_result(request).await
+            }
+            SchemaMigrationAdminOp::ApplicationSchemaPlan(_)
+            | SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(_) => Err(err_code(
+                OPERATION_NOT_IMPLEMENTED,
+                "application-schema plan/apply is not implemented yet; \
+                 status is the only wired operation in R1c step 2b-1"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// §5.2 authorization: `Read` on the database, through the normal
+    /// `authorize_access` path — no bypass — before any journal byte is read.
+    async fn authorize_database_read(&self) -> Result<(), BatchError> {
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::database(self.db_name.clone()),
+                Action::Read,
+            )
+            .await
+            .map_err(|error| BatchError::QueryError {
+                alias: String::new(),
+                message: error.to_string(),
+                code: Some("access_denied".to_string()),
+            })
+    }
+
+    /// Read identity + history through the step-2a API and encode the typed
+    /// status result as the admin record. The wire field names mirror the
+    /// serde names of `SchemaMigrationStatusResult`.
+    async fn status_result(
+        &self,
+        request: &SchemaMigrationStatusRequest,
+    ) -> Result<QueryResult, BatchError> {
+        let store = self.shamir.system_store();
+        let serving = store
+            .schema_migration_identity(&self.db_name)
+            .await
+            .map_err(map_store_error)?;
+        let target = DatabaseIdentity(request.target.database_identity);
+        if target != serving {
+            return Ok(admin_result(status_value(&StatusOutcome {
+                protocol_version: request.protocol_version,
+                identity: serving,
+                history: None,
+                checksum_validation: SchemaMigrationChecksumValidation::NotChecked,
+                error: Some(SchemaMigrationErrorCode::SchemaMigrationIdentityMismatch),
+            })));
+        }
+        let history = store
+            .read_schema_migration_history(serving)
+            .await
+            .map_err(map_store_error)?;
+        let outcome = StatusOutcome {
+            protocol_version: request.protocol_version,
+            identity: serving,
+            history: Some(&history),
+            checksum_validation: validate_last_applied_checksum(&history),
+            error: if history.in_doubt {
+                Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt)
+            } else {
+                None
+            },
+        };
+        Ok(admin_result(status_value(&outcome)))
+    }
+}
+
+/// The assembled status outcome before wire encoding; tests-free internal
+/// view keeping `status_value` total.
+struct StatusOutcome<'a> {
+    protocol_version: u16,
+    identity: DatabaseIdentity,
+    history: Option<&'a MigrationHistory>,
+    checksum_validation: SchemaMigrationChecksumValidation,
+    error: Option<SchemaMigrationErrorCode>,
+}
+
+/// Recompute the canonical checksum of the last applied migration's stored
+/// body and compare it with the recorded applied checksum (§5.2: checksum
+/// verification is server-side; the status request carries no trusted data).
+fn validate_last_applied_checksum(history: &MigrationHistory) -> SchemaMigrationChecksumValidation {
+    let Some(applied) = history.applied.last() else {
+        return SchemaMigrationChecksumValidation::NotChecked;
+    };
+    let body = history
+        .events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.migration.id == applied.migration.id && event.kind == JournalEventKind::Started
+        })
+        .and_then(|event| event.body.as_ref());
+    let Some(body) = body else {
+        return SchemaMigrationChecksumValidation::MissingBody;
+    };
+    match canonical_body_checksum(body) {
+        Ok(checksum) if checksum == applied.checksum => SchemaMigrationChecksumValidation::Valid,
+        Ok(_) => SchemaMigrationChecksumValidation::Mismatch,
+        Err(_) => SchemaMigrationChecksumValidation::UnknownVersion,
+    }
+}
+
+/// §5.3 mapping — the single place `shamir-db` store errors become
+/// application-schema codes. Journal corruption / durability failures are
+/// `schema_migration_durability_unavailable`; a missing database keeps the
+/// engine's existing `not_found`. Never reuse the online storage-move codes.
+fn map_store_error(error: crate::DbError) -> BatchError {
+    let code = match &error {
+        crate::DbError::NotFound(_) => "not_found",
+        _ => "schema_migration_durability_unavailable",
+    };
+    BatchError::QueryError {
+        alias: String::new(),
+        message: error.to_string(),
+        code: Some(code.to_string()),
+    }
+}
+
+/// Encode the typed result with the serde field names of
+/// `SchemaMigrationStatusResult`.
+fn status_value(outcome: &StatusOutcome<'_>) -> QueryValue {
+    let mut target = new_map();
+    target.insert(
+        "database_identity".to_string(),
+        QueryValue::Str(outcome.identity.to_string()),
+    );
+    let mut value = new_map();
+    value.insert(
+        "protocol_version".to_string(),
+        QueryValue::Int(outcome.protocol_version as i64),
+    );
+    value.insert("target".to_string(), QueryValue::Map(target));
+    let (last_applied_id, last_applied_ordinal, last_applied_checksum, in_flight) =
+        match outcome.history {
+            Some(history) => applied_fields(history),
+            None => (None, 0, None, None),
+        };
+    if let Some(id) = last_applied_id {
+        value.insert("last_applied_id".to_string(), QueryValue::Str(id));
+    }
+    value.insert(
+        "last_applied_ordinal".to_string(),
+        QueryValue::Int(last_applied_ordinal as i64),
+    );
+    if let Some(checksum) = last_applied_checksum {
+        value.insert(
+            "last_applied_checksum".to_string(),
+            QueryValue::Bin(checksum.to_vec()),
+        );
+    }
+    value.insert(
+        "checksum_validation".to_string(),
+        QueryValue::Str(checksum_validation_str(outcome.checksum_validation).to_string()),
+    );
+    if let Some(in_flight) = in_flight {
+        value.insert("in_flight".to_string(), in_flight);
+    }
+    if let Some(error) = outcome.error {
+        value.insert(
+            "error".to_string(),
+            QueryValue::Str(error_code_str(error).to_string()),
+        );
+    }
+    QueryValue::Map(value)
+}
+
+/// Derive last-applied and in-flight fields from the durable history.
+fn applied_fields(
+    history: &MigrationHistory,
+) -> (Option<String>, u64, Option<[u8; 32]>, Option<QueryValue>) {
+    let applied = history.applied.last();
+    let in_flight = history.unresolved.last().map(|event| {
+        let mut map = new_map();
+        map.insert(
+            "migration_id".to_string(),
+            QueryValue::Str(event.migration.id.clone()),
+        );
+        map.insert(
+            "ordinal".to_string(),
+            QueryValue::Int(event.migration.ordinal as i64),
+        );
+        if let Some(index) = event.operation_index {
+            map.insert("operation_index".to_string(), QueryValue::Int(index as i64));
+        }
+        map.insert(
+            "fence_generation".to_string(),
+            QueryValue::Int(event.fence_generation as i64),
+        );
+        map.insert(
+            "status".to_string(),
+            QueryValue::Str(event_kind_str(event.kind).to_string()),
+        );
+        QueryValue::Map(map)
+    });
+    (
+        applied.map(|event| event.migration.id.clone()),
+        applied.map_or(0, |event| event.migration.ordinal),
+        applied.map(|event| event.checksum),
+        in_flight,
+    )
+}
+
+fn checksum_validation_str(validation: SchemaMigrationChecksumValidation) -> &'static str {
+    match validation {
+        SchemaMigrationChecksumValidation::Valid => "valid",
+        SchemaMigrationChecksumValidation::MissingBody => "missing_body",
+        SchemaMigrationChecksumValidation::Mismatch => "mismatch",
+        SchemaMigrationChecksumValidation::UnknownVersion => "unknown_version",
+        SchemaMigrationChecksumValidation::NotChecked => "not_checked",
+    }
+}
+
+fn error_code_str(code: SchemaMigrationErrorCode) -> &'static str {
+    match code {
+        SchemaMigrationErrorCode::SchemaMigrationInProgress => "schema_migration_in_progress",
+        SchemaMigrationErrorCode::SchemaMigrationInDoubt => "schema_migration_in_doubt",
+        SchemaMigrationErrorCode::SchemaMigrationChecksumMismatch => {
+            "schema_migration_checksum_mismatch"
+        }
+        SchemaMigrationErrorCode::SchemaMigrationGap => "schema_migration_gap",
+        SchemaMigrationErrorCode::SchemaMigrationPredecessorMismatch => {
+            "schema_migration_predecessor_mismatch"
+        }
+        SchemaMigrationErrorCode::SchemaMigrationFollowerReadOnly => {
+            "schema_migration_follower_read_only"
+        }
+        SchemaMigrationErrorCode::SchemaMigrationDurabilityUnavailable => {
+            "schema_migration_durability_unavailable"
+        }
+        SchemaMigrationErrorCode::SchemaMigrationPostconditionFailed => {
+            "schema_migration_postcondition_failed"
+        }
+        SchemaMigrationErrorCode::SchemaMigrationIdentityMismatch => {
+            "schema_migration_identity_mismatch"
+        }
+    }
+}
+
+fn event_kind_str(kind: JournalEventKind) -> &'static str {
+    match kind {
+        JournalEventKind::Started => "started",
+        JournalEventKind::OperationIntent => "operation_intent",
+        JournalEventKind::OperationComplete => "operation_complete",
+        JournalEventKind::Applied => "applied",
+        JournalEventKind::InDoubt => "in_doubt",
+        JournalEventKind::Failed => "failed",
+        JournalEventKind::RecoveryAcquired => "recovery_acquired",
+        JournalEventKind::FenceReleased => "fence_released",
+    }
+}

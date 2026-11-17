@@ -16,6 +16,7 @@ pub enum SchemaMigrationChecksumValidation {
 pub struct SchemaMigrationInFlight {
     pub migration_id: String,
     pub ordinal: u64,
+    #[serde(default)]
     pub operation_index: Option<u32>,
     pub fence_generation: u64,
     pub status: String,

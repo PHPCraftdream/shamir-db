@@ -117,6 +117,8 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         | BatchOp::AlterSubscription(_)
         | BatchOp::ListPublications(_)
         | BatchOp::ListSubscriptions(_)
+        // R1c: application-schema operations are admin ops for tokens.
+        | BatchOp::ApplicationSchema(_)
         | BatchOp::ReplicationStatus(_) => "admin-denied",
     }
 }
