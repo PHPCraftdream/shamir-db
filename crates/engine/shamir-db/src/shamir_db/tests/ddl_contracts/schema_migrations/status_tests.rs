@@ -16,7 +16,9 @@ use shamir_query_types::admin::types::schema_migration::{
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 use super::helpers::{body, checksum, context, rows};
-use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, SchemaMigrationStep};
+use crate::shamir_db::system_store::{
+    DatabaseIdentity, JournalEventKind, SchemaMigrationStep, SystemStoreConfig,
+};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
@@ -87,6 +89,15 @@ async fn run_status(db: &ShamirDb, identity: DatabaseIdentity) -> QueryValue {
         .into_owned()
 }
 
+/// The journal needs a persistent system store; the directory must outlive the db.
+async fn persistent_db() -> (tempfile::TempDir, ShamirDb) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = ShamirDb::init(SystemStoreConfig::Fjall(dir.path().join("system")))
+        .await
+        .unwrap();
+    (dir, db)
+}
+
 fn field<'a>(value: &'a QueryValue, key: &str) -> &'a QueryValue {
     value
         .get(key)
@@ -101,7 +112,7 @@ fn str_field<'a>(value: &'a QueryValue, key: &str) -> &'a str {
 
 #[tokio::test]
 async fn status_of_an_empty_journal_reports_not_checked() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()
@@ -119,7 +130,7 @@ async fn status_of_an_empty_journal_reports_not_checked() {
 
 #[tokio::test]
 async fn status_after_applied_events_reports_last_applied_and_valid_checksum() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, digest) = stage_applied(&db, "testdb").await;
 
@@ -137,7 +148,7 @@ async fn status_after_applied_events_reports_last_applied_and_valid_checksum() {
 
 #[tokio::test]
 async fn status_with_an_owned_fence_reports_the_in_flight_owner() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let store = db.system_store();
     let identity = store.schema_migration_identity("testdb").await.unwrap();
@@ -159,7 +170,7 @@ async fn status_with_an_owned_fence_reports_the_in_flight_owner() {
 
 #[tokio::test]
 async fn status_in_doubt_reports_the_pending_operation() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let store = db.system_store();
     let identity = store.schema_migration_identity("testdb").await.unwrap();
@@ -195,7 +206,7 @@ async fn status_in_doubt_reports_the_pending_operation() {
 
 #[tokio::test]
 async fn status_detects_a_checksum_mismatch_between_body_and_applied_record() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, _digest) = stage_applied(&db, "testdb").await;
 
@@ -241,7 +252,7 @@ async fn status_detects_a_checksum_mismatch_between_body_and_applied_record() {
 
 #[tokio::test]
 async fn status_reports_identity_mismatch_for_a_foreign_target() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     db.create_db("other").await.unwrap();
     let foreign = db
@@ -261,7 +272,7 @@ async fn status_reports_identity_mismatch_for_a_foreign_target() {
 
 #[tokio::test]
 async fn status_requires_database_read() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()
@@ -305,7 +316,7 @@ async fn status_requires_database_read() {
 
 #[tokio::test]
 async fn plan_and_apply_arms_return_the_documented_temporary_error() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()

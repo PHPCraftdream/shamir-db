@@ -4,7 +4,7 @@
 //! `EngineMetrics` bundle (metrics flow downward only), so the create paths
 //! observe through this narrow trait. `shamir-engine` implements the trait
 //! for `EngineMetrics` and wires it via
-//! [`TableManager::set_index_build_observer`]; the observer slot is shared
+//! `TableManager::set_index_build_observer`; the observer slot is shared
 //! through `TableManager` clones (one `Arc<OnceLock<_>>` per manager), so a
 //! late install on any clone covers all of them.
 //!

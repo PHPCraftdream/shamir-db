@@ -1,7 +1,7 @@
 //! [`BatchOp`] — the dispatch enum for all supported batch operations.
 
 use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
-use serde::ser::Serializer;
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use shamir_types::access::{Action, ResourcePath};
 use shamir_types::types::common::TMap;
@@ -285,7 +285,21 @@ impl Serialize for BatchOp {
             BatchOp::ListPublications(op) => op.serialize(serializer),
             BatchOp::ListSubscriptions(op) => op.serialize(serializer),
             BatchOp::ReplicationStatus(op) => op.serialize(serializer),
-            BatchOp::ApplicationSchema(op) => op.serialize(serializer),
+            BatchOp::ApplicationSchema(op) => match op {
+                SchemaMigrationAdminOp::ApplicationSchemaStatus(request) => {
+                    serialize_application_schema(serializer, "application_schema_status", request)
+                }
+                SchemaMigrationAdminOp::ApplicationSchemaPlan(request) => {
+                    serialize_application_schema(serializer, "application_schema_plan", request)
+                }
+                SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(request) => {
+                    serialize_application_schema(
+                        serializer,
+                        "apply_application_schema_migration",
+                        request,
+                    )
+                }
+            },
         }
     }
 }
@@ -319,6 +333,11 @@ impl<'de> Deserialize<'de> for BatchOp {
                     });
                 }
                 let kind = selected.ok_or_else(|| DeError::custom("Unknown operation type"))?;
+                let qv = if kind == OpKind::ApplicationSchema {
+                    strip_application_schema_marker(qv)
+                } else {
+                    qv
+                };
                 let value = QueryValueDeserializer(qv);
                 match kind {
                     OpKind::Read => ReadQuery::deserialize(value).map(BatchOp::Read),
@@ -881,6 +900,32 @@ impl BatchOp {
             // classifies the FULL static body, even for zero iterations.
             BatchOp::Batch(_) | BatchOp::ForEach(_) => false,
         }
+    }
+}
+
+/// Wire shape of an application-schema operation: the `application_schema`
+/// discriminator next to the typed op's own `operation` / `payload` pair
+/// (the names equal `SchemaMigrationAdminOp`'s serde tagging).
+fn serialize_application_schema<S: Serializer, T: Serialize>(
+    serializer: S,
+    operation: &str,
+    payload: &T,
+) -> Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(Some(3))?;
+    map.serialize_entry("application_schema", &true)?;
+    map.serialize_entry("operation", operation)?;
+    map.serialize_entry("payload", payload)?;
+    map.end()
+}
+
+/// The discriminator key is routing data only; the typed op never sees it.
+fn strip_application_schema_marker(qv: QueryValue) -> QueryValue {
+    match qv {
+        QueryValue::Map(mut map) => {
+            map.shift_remove("application_schema");
+            QueryValue::Map(map)
+        }
+        other => other,
     }
 }
 

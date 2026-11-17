@@ -188,7 +188,7 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "payload": {
                 "protocol_version": 1,
                 "target": {
-                    "database_identity": "0197f36a-1b2c-7cc3-8a44-3d6f5a9b0e17"
+                    "database_identity": shamir_types::types::record_id::RecordId::from_ts_seq(1_700_000_000_000_000, 7).to_string()
                 }
             }
         }),

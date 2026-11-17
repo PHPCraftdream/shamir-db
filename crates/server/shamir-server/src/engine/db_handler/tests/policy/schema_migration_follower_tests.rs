@@ -7,7 +7,6 @@
 //!
 //! Requests are built exclusively through `shamir-query-builder` (CLAUDE.md).
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use shamir_connect::common::time::UnixNanos;
@@ -50,15 +49,16 @@ async fn build_handler(mode: NodeMode) -> ShamirDbHandler {
 }
 
 fn status_batch() -> shamir_query_builder::BatchRequest {
-    let identity = "0197f36a-1b2c-7cc3-8a44-3d6f5a9b0e17";
     let mut b = Batch::new();
     b.op(
         "status",
         application_schema_status(SchemaMigrationStatusRequest {
             protocol_version: 1,
             target: SchemaMigrationTarget {
-                database_identity: shamir_types::types::record_id::RecordId::from_str(identity)
-                    .expect("test identity parses"),
+                database_identity: shamir_types::types::record_id::RecordId::from_ts_seq(
+                    1_700_000_000_000_000,
+                    7,
+                ),
             },
         }),
     );

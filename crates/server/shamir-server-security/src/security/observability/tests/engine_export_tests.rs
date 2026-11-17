@@ -304,13 +304,14 @@ fn index_interner_export_renders_every_series_with_other_and_truncation() {
         record_index_interner_metrics("index_db", "index_repo", &snapshot);
     });
     let rendered = handle.render();
-    // 2 families x 3 kinds x (3 buckets + count + sum) + 1 named row +
-    // 1 (other) row + 2 interner gauges + 2 cardinality gauges.
+    // build: 3 kinds x (3 buckets + count + sum); rebuild: the torn regular
+    // histogram is skipped, so 2 kinds x (3 buckets + count + sum); plus
+    // 1 named row + 1 (other) row + 2 interner gauges + 2 cardinality gauges.
     let samples: Vec<_> = rendered
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .collect();
-    assert_eq!(samples.len(), 36, "{rendered}");
+    assert_eq!(samples.len(), 31, "{rendered}");
 
     let entries = sample(
         &rendered,
@@ -649,15 +650,19 @@ async fn table_cap_aggregates_into_other_with_companion_gauges() {
         .map(|i| TableConfig::new(format!("t{i:02}")))
         .collect();
     let shamir = boot_testdb(tables).await;
-    execute_batch(&shamir, |b| {
-        for i in 0..70 {
-            b.create_index(
-                format!("idx{i}"),
-                ddl::create_index(format!("idx_t{i:02}"), format!("t{i:02}")).field("k"),
-            );
-        }
-    })
-    .await;
+    // A batch is capped at 50 queries: create the indexes in chunks.
+    for chunk in (0..70).collect::<Vec<_>>().chunks(35) {
+        let chunk = chunk.to_vec();
+        execute_batch(&shamir, |b| {
+            for i in chunk {
+                b.create_index(
+                    format!("idx{i}"),
+                    ddl::create_index(format!("idx_t{i:02}"), format!("t{i:02}")).field("k"),
+                );
+            }
+        })
+        .await;
+    }
     let rendered = exporter_render(&shamir).await;
     let named: Vec<_> = rendered
         .lines()
