@@ -347,6 +347,36 @@ fn seed_login_user(data_dir: &Path) {
     drop(directory);
 }
 
+/// `seed_owner` drops its stores just before the launch; fjall releases the
+/// directory locks from background handles, so the first attempt can observe
+/// `Locked`. That is transient: retry until the release lands.
+async fn launch_through_fjall_release(config: Config, guard: &FlakeGuard) -> ServerHandle {
+    for _ in 0..200 {
+        let launched = ServerLauncher {
+            node_mode: Default::default(),
+            config: config.clone(),
+            bootstrap: BootstrapMode::Password {
+                username: "admin".into(),
+                password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
+            },
+        }
+        .launch()
+        .await;
+        match launched {
+            Ok(handle) => return handle,
+            Err(e) if format!("{e:?}").contains("Locked") => {
+                guard.mark("launch retry: fjall lock");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                guard.note("launch error", format!("{e:?}"));
+                panic!("launcher boot: {e:?}");
+            }
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
+}
+
 pub async fn boot() -> TokenFixture {
     boot_with(None).await
 }
@@ -371,17 +401,7 @@ async fn boot_with(login: Option<LoginSetup>) -> TokenFixture {
         config.listeners[1].http.login.enabled = true;
         config.tokens.login_allow_read_write = setup.allow_read_write;
     }
-    let handle = ServerLauncher {
-        node_mode: Default::default(),
-        config,
-        bootstrap: BootstrapMode::Password {
-            username: "admin".into(),
-            password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
-        },
-    }
-    .launch()
-    .await
-    .expect("launcher boot");
+    let handle = launch_through_fjall_release(config, &guard).await;
     guard.mark("launcher boot done");
     let tls = handle.bound_addrs[0].expect("TLS listener bound");
     let plain = handle.bound_addrs[1].expect("plain listener bound");
