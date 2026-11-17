@@ -1,4 +1,4 @@
-base = "56fe3e374b724bf13f9eb84c980586686f249f79"
+base = "24540ea8759f210585aab141a3265c771969b31f"
 
 [[moved]]
 path = "shamir-engine"
