@@ -132,6 +132,12 @@ fn preflight_rejects_one_tebibyte_plus_one_without_disk() {
 fn fixture_frame_walk_reaches_exact_eof() {
     let bytes = build_fixture();
     let (frames_start, frames) = walk_frames(&bytes);
+    let report = verify_dump(Cursor::new(bytes.clone())).expect("fixture verifies");
+    assert_eq!(
+        frames.len(),
+        report.frames as usize,
+        "walker matches production frame count"
+    );
     assert_eq!(frames.len(), 38);
     let total: usize = frames.iter().map(|frame| frame.wire_len).sum();
     assert_eq!(frames_start + total, bytes.len());

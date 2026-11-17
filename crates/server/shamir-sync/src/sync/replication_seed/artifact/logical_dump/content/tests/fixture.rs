@@ -363,11 +363,14 @@ pub struct FrameSpan {
     pub wire_len: usize,
 }
 
-/// Walk every frame of a fixture artifact (16-byte preamble + frames).
+/// Walk every frame of a fixture artifact. Layout (big-endian): 8-byte magic,
+/// 2-byte version, 2-byte flags, 4-byte header length, header, 32-byte header
+/// SHA-256, then frames (4-byte length + payload + 32-byte checksum each).
 pub fn walk_frames(bytes: &[u8]) -> (usize, Vec<FrameSpan>) {
     let header_length =
         u32::from_be_bytes(bytes[12..16].try_into().expect("header length")) as usize;
-    let mut offset = 16 + header_length;
+    let frames_start = 16 + header_length + 32;
+    let mut offset = frames_start;
     let mut frames = Vec::new();
     while offset < bytes.len() {
         let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().expect("frame length"))
@@ -379,7 +382,7 @@ pub fn walk_frames(bytes: &[u8]) -> (usize, Vec<FrameSpan>) {
         });
         offset += wire_len;
     }
-    (16 + header_length, frames)
+    (frames_start, frames)
 }
 
 /// Canonical payload of a section-item record, as the writer produces it.

@@ -12,12 +12,12 @@ use super::super::super::header::LogicalDumpHeader;
 use super::super::super::section::{SectionKind, SectionRecord};
 use super::super::super::trailer::{Trailer, TrailerSection};
 use super::fixture::{build_fixture, fixture_header, walk_frames};
-use crate::replication_seed::artifact::logical_dump::stream::DumpReader;
+use crate::replication_seed::artifact::logical_dump::stream::verify_dump;
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 
 fn opens(bytes: &[u8]) -> Result<(), String> {
-    DumpReader::new(Cursor::new(bytes.to_vec()))
+    verify_dump(Cursor::new(bytes.to_vec()))
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -127,8 +127,12 @@ fn truncated_header_is_reported_with_offset() {
 fn flipped_header_byte_fails_the_header_checksum() {
     let mut bytes = build_fixture();
     bytes[17] ^= 0x01;
+    let header_length = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as u64;
     let message = expect_error(&bytes, "header checksum mismatch");
-    assert!(message.contains("offset 16"), "unexpected: {message}");
+    assert!(
+        message.contains(&format!("offset {}", 16 + header_length)),
+        "unexpected: {message}"
+    );
 }
 
 #[test]
