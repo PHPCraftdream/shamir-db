@@ -6,6 +6,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use super::close_helpers::close;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -36,7 +38,7 @@ async fn poll_pending_once<F: Future>(mut fut: Pin<&mut F>) -> bool {
 #[tokio::test]
 async fn leader_waits_closed_then_admits_after_reopen() {
     let gate = Arc::new(CommitAdmissionGate::default());
-    let owner = gate.close().await.expect("close");
+    let owner = close(&gate).await.expect("close");
 
     let gate_for_leader = Arc::clone(&gate);
     let mut leader = Box::pin(gate_for_leader.acquire_leader(HANDSHAKE_CAP));
@@ -57,7 +59,7 @@ async fn close_waits_for_pre_close_leases_then_zero_gap_free() {
     let lease = gate.try_acquire().expect("admit");
 
     let gate_for_closer = Arc::clone(&gate);
-    let mut closer = Box::pin(gate_for_closer.close());
+    let mut closer = Box::pin(close(&gate_for_closer));
     // The close owner must NOT be handed out while a pre-close lease lives:
     // the close is parked on the armed zero-notify.
     assert!(poll_pending_once(closer.as_mut()).await);
@@ -116,7 +118,7 @@ async fn close_vs_acquire_boundary_never_leaves_an_uncounted_lease() {
     barrier.wait().await;
     drop(lease);
     let closer_gate = Arc::clone(&gate);
-    let owner = closer_gate.close().await.expect("close completes");
+    let owner = close(&closer_gate).await.expect("close completes");
     // Word-level invariant: closed AND zero counted leases — nothing
     // slipped through uncounted.
     assert_eq!(gate.active_count(), 0);

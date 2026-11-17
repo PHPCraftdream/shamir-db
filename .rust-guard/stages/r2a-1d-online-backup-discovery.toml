@@ -1,0 +1,7 @@
+# R2a-1d discovery delta — base-only, mirroring the superseded
+# r2a-1-discovery.toml shape: this step adds tests only, and discovery
+# accepts head-only test identities without allowances. No [[moved]] /
+# [[renamed]] declarations are needed; no test losses or ignore changes.
+# The loader requires `base`; it cannot be verified here (list-file
+# comparison), the CI job pins it to the merge base.
+base = "80175e0167ea9d1eddc09a0a897236059ff311f9"

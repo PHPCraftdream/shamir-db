@@ -18,6 +18,13 @@ use super::RepoInstance;
 mod clean_horizon_repo_impl;
 mod durability_repo_impl;
 mod journal;
+// R2a-1d: the per-repo online-backup capture/seal facade (mounted as a
+// sibling because this file's other impl blocks live in this directory).
+mod online_backup;
+// R2a-1d: the tx-layer test tree names the typed barrier failures. The
+// `pub` re-export the R2a-3 server adapter needs is that step's widening.
+#[cfg(test)]
+pub(crate) use online_backup::OnlineBackupError;
 mod recovery;
 mod seed_backing_impl;
 mod seed_metadata_impl;

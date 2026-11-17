@@ -3,11 +3,15 @@ use crate::repo::instance::support::metrics::{EngineMetrics, EngineMetricsSnapsh
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use crate::repo::repo_types::BoxRepo;
 pub use crate::repo::version_provider::repo_token;
+// R2a-1d: the tx-layer test tree names the typed barrier failures. The
+// `pub` re-export the R2a-3 server adapter needs is that step's widening.
 use crate::repo::DurabilityHandle;
 use crate::table::{TableCatalog, TableConfig, TableManager};
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::commit::pipeline::admission::gate::CommitAdmissionGate;
 use crate::tx::CommitTailBarrier;
+#[cfg(test)]
+pub(crate) use lifecycle::OnlineBackupError;
 use shamir_query_types::batch::VisibilityWait;
 #[cfg(test)]
 use shamir_storage::error::DbResult;

@@ -14,10 +14,8 @@
 //! This step ships the primitive, the leader/follower wiring and the close
 //! owner. The drain pause guard, the seal and the facade are later steps.
 
-// Close-side API (close owner) ships with the primitive but has no
-// production consumer until the seal step wires it; test-gated so no
-// dead code survives the lib build. The seal step un-gates this.
-#[cfg(test)]
+// Close-side API (close owner): consumed by the R2a-1d capture/seal
+// barriers (repo/instance/repo_instance/lifecycle/online_backup.rs).
 pub(crate) mod close_owner;
 pub(crate) mod error;
 pub(crate) mod gate;

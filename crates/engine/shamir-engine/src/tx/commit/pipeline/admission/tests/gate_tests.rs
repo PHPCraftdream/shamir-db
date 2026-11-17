@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::super::error::CommitAdmissionError;
 use super::super::gate::{CommitAdmissionGate, ADMISSION_REOPEN_WAIT_CAP};
 use super::super::lease::CommitAdmissionLease;
+use super::close_helpers::close;
 
 #[tokio::test]
 async fn admit_release_counts_are_exact_and_reopen_leaks_no_count() {
@@ -20,7 +21,7 @@ async fn admit_release_counts_are_exact_and_reopen_leaks_no_count() {
 
     // Reopen after error/drop leaks no count: a full close/reopen cycle
     // returns the gate to open with zero active leases.
-    let owner = gate.close().await.expect("first close owns");
+    let owner = close(&gate).await.expect("first close owns");
     assert!(gate.is_closed());
     drop(owner);
     assert!(!gate.is_closed());
@@ -34,7 +35,7 @@ async fn admit_release_counts_are_exact_and_reopen_leaks_no_count() {
 #[tokio::test]
 async fn closed_gate_refuses_immediately_without_side_effect() {
     let gate = Arc::new(CommitAdmissionGate::default());
-    let owner = gate.close().await.expect("close with zero leases at once");
+    let owner = close(&gate).await.expect("close with zero leases at once");
 
     // Follower-style refusal (Q13): typed, immediate, no count change.
     assert_eq!(gate.try_acquire().err(), Some(CommitAdmissionError::Closed));
@@ -57,13 +58,13 @@ async fn closed_gate_refuses_immediately_without_side_effect() {
 #[tokio::test]
 async fn second_closer_gets_busy_and_owner_drop_reopens() {
     let gate = Arc::new(CommitAdmissionGate::default());
-    let owner = gate.close().await.expect("first close owns");
-    assert_eq!(gate.close().await.err(), Some(CommitAdmissionError::Busy));
+    let owner = close(&gate).await.expect("first close owns");
+    assert_eq!(close(&gate).await.err(), Some(CommitAdmissionError::Busy));
 
     drop(owner);
     assert!(!gate.is_closed());
     // The exclusive right is released: a fresh close succeeds.
-    let owner2 = gate.close().await.expect("close right is free again");
+    let owner2 = close(&gate).await.expect("close right is free again");
     assert!(gate.is_closed());
     drop(owner2);
     assert!(!gate.is_closed());

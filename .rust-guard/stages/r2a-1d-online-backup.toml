@@ -1,0 +1,139 @@
+# R2a-1d (drain pause + per-repo capture/seal) — supersedes the landed
+# engine-truncation-pin-R2a-1 campaign (its stages.toml entry and delta
+# files are removed by this campaign's PR, per tools/rust-guard/README.md).
+# Base is git merge-base origin/master HEAD.
+# Static source inspection only; rust-guard execution is CI-only.
+#
+# Exact keys transcribed from the read-only rust-guard AST implementation
+# (tools/rust-guard/src/commands/structure_cmd/diff.rs):
+# - check_vis (existing files) reports an item whose visibility rank GREW
+#   between base and head (private < pub(super) < pub(crate) < pub);
+#   brand-new items in existing files are skipped.
+# - check_new_file (new files) reports every item at pub(crate)+ EXCEPT
+#   `mod` declarations; private items and fields are below the threshold.
+#
+# Widening inventory against base 80175e0167ea9d1eddc09a0a897236059ff311f9:
+# 1. tx/drain/truncation_pin_guard.rs — `TruncationPinGuard`
+#    pub(crate) -> pub (existing item; the R2a-3 facade
+#    `RepoInstance::acquire_truncation_pin` returns it across the crate edge).
+# 2. tx/drain/mod.rs — `truncation_pin_guard` module declaration
+#    pub(crate) -> pub (check_vis covers `mod` items in existing files).
+# 3. New file online_backup.rs — pub items: OnlineBackupError, SealHold,
+#    SealHold::position, SealHold::held_since, RepoInstance::capture_point,
+#    RepoInstance::seal_point, RepoInstance::acquire_truncation_pin,
+#    RepoInstance::set_online_backup_step_hook (test-util feature gate is
+#    production for cfg composition). Private items/fields skipped.
+# 4. New file drain_pause.rs — pub(crate) items: DrainPauseBusy,
+#    DrainPauseState, DrainPauseState::new, DrainPauseState::is_held,
+#    DrainPauseState::acquire, DrainPauseGuard (fields private; Drop is
+#    private). `pub(crate) mod drain_pause` declaration is skipped by
+#    check_new_file (kind `mod`).
+# 5. New file admission/tests/close_helpers.rs — `close` (pub(crate) fn).
+# Everything else the diff adds is either private, a new item in an
+# existing file (skipped by check_vis), or a new `mod` declaration
+# (skipped by check_new_file). No new #[allow] attributes, so no
+# ALLOW_ADDED entries. Counts: 16 allow_widen.
+
+base = "80175e0167ea9d1eddc09a0a897236059ff311f9"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/truncation_pin_guard.rs"
+item = "TruncationPinGuard"
+reason = "The per-repo facade RepoInstance::acquire_truncation_pin returns the RAII guard to callers outside shamir-engine (R2a-3 server adapter); release stays drop-exactly-once."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/mod.rs"
+item = "truncation_pin_guard"
+reason = "Mount the guard module publicly so the facade's returned TruncationPinGuard is nameable across the crate edge."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "OnlineBackupError"
+reason = "Typed fail-closed barrier failures reported to the R2a-3 server adapter across the crate edge."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "SealHold"
+reason = "The seal hold owning the drain pause must live in the R2a-3 adapter across the re-copy."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "SealHold::position"
+reason = "Report the sealed consistency position V* to the backup manifest writer."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "SealHold::held_since"
+reason = "Expose the hold's creation instant so the adapter can enforce the re-copy duration cap."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "RepoInstance::capture_point"
+reason = "Step B flush barrier entry for the R2a-3 server adapter."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "RepoInstance::seal_point"
+reason = "Step E seal barrier entry returning the SealHold for the R2a-3 server adapter."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "RepoInstance::acquire_truncation_pin"
+reason = "Minimal public pin acquisition so the adapter retains WAL history across the seal re-copy."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "RepoInstance::set_online_backup_step_hook"
+reason = "Test seam mounted on the publicly reachable RepoInstance so cross-crate dev-dependency tests can drive barrier cancellation; production never sees it (cfg(test)/test-util gated)."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseBusy"
+reason = "Typed refusal surfaced (mapped) by the seal barrier when a hold already owns the pause."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseState"
+reason = "Owned by Drainer; crate-wide access lets the barrier acquire the pause over the drainer's replaying lock."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseState::new"
+reason = "Drainer::new constructs exactly one pause facade over its shared replaying lock."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseState::is_held"
+reason = "Barrier-entry busy probe (pause_held) so a second barrier fails typed instead of blocking on a minutes-long hold."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseState::acquire"
+reason = "Seal barrier acquisition of the owned pause; cancel-safe and fail-closed on error paths."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "DrainPauseGuard"
+reason = "Consumed by SealHold (Send + 'static) so the pause survives seal_point and drops with the hold."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/close_helpers.rs"
+item = "close"
+reason = "Shared close-owner test helper for the barrier gate suites (close-owner RAII is the crate's reuse pattern)."
+owner = "<r2a-1d>"

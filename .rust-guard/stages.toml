@@ -25,10 +25,12 @@ packages = ["shamir-engine", "shamir-engine-table"]
 delta = ".rust-guard/stages/engine-layering-R4b.toml"
 discovery_delta = ".rust-guard/stages/engine-layering-R4b-discovery.toml"
 
-# PIN ONLY: touch the dedicated delta and shamir-engine to activate CI diff
-# gates without reviving or extending the landed layering campaign above.
+# R2a-1d: the landed engine-truncation-pin-R2a-1 campaign is superseded —
+# its entry and delta files are removed by this campaign's PR (see
+# tools/rust-guard/README.md: "A landed entry is inert; the next campaign's
+# PR removes it (and its delta files)").
 [[campaigns]]
-name = "engine-truncation-pin-R2a-1"
+name = "engine-online-backup-R2a-1d"
 packages = ["shamir-engine"]
-delta = ".rust-guard/stages/r2a-1-visibility.toml"
-discovery_delta = ".rust-guard/stages/r2a-1-discovery.toml"
+delta = ".rust-guard/stages/r2a-1d-online-backup.toml"
+discovery_delta = ".rust-guard/stages/r2a-1d-online-backup-discovery.toml"
