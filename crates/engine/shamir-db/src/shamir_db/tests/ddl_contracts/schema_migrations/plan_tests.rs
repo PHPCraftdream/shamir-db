@@ -18,7 +18,7 @@ use shamir_query_types::admin::types::schema_migration::{
 };
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
-use super::helpers::{body, checksum, context};
+use super::helpers::{body, checksum, context, persistent_db};
 use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, SchemaMigrationStep};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
@@ -138,7 +138,7 @@ fn assert_code(error: crate::query::batch::BatchError, expected: &str) {
 
 #[tokio::test]
 async fn plan_requires_manage_and_is_refused_with_read_only() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()
@@ -191,7 +191,7 @@ async fn plan_requires_manage_and_is_refused_with_read_only() {
 
 #[tokio::test]
 async fn plan_returns_the_typed_plan_for_the_next_migration() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, applied_digest) = stage_applied(&db, "testdb").await;
     let next = body("alpha-002", 2);
@@ -245,7 +245,7 @@ async fn plan_returns_the_typed_plan_for_the_next_migration() {
 
 #[tokio::test]
 async fn plan_leaves_the_journal_and_catalogue_untouched() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, applied_digest) = stage_applied(&db, "testdb").await;
     let journal = db
@@ -286,7 +286,7 @@ async fn plan_leaves_the_journal_and_catalogue_untouched() {
 
 #[tokio::test]
 async fn plan_refuses_a_checksum_mismatch() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()
@@ -306,7 +306,7 @@ async fn plan_refuses_a_checksum_mismatch() {
 
 #[tokio::test]
 async fn plan_refuses_a_wrong_expected_predecessor() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, applied_digest) = stage_applied(&db, "testdb").await;
     // The journal head is alpha-001/1; an empty predecessor is stale.
@@ -335,7 +335,7 @@ async fn plan_refuses_a_wrong_expected_predecessor() {
 
 #[tokio::test]
 async fn plan_refuses_gap_duplicate_and_reorder() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, applied_digest) = stage_applied(&db, "testdb").await;
     let expected = predecessor(Some("alpha-001"), 1, applied_digest);
@@ -376,7 +376,7 @@ async fn plan_refuses_gap_duplicate_and_reorder() {
 
 #[tokio::test]
 async fn plan_refuses_a_changed_body_for_an_applied_ordinal_without_a_write() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let (identity, applied_digest) = stage_applied(&db, "testdb").await;
     // Same id and ordinal as the applied migration, a different body, and a
@@ -412,7 +412,7 @@ async fn plan_refuses_a_changed_body_for_an_applied_ordinal_without_a_write() {
 
 #[tokio::test]
 async fn plan_reports_identity_mismatch_for_a_foreign_target() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     db.create_db("other").await.unwrap();
     let foreign = db
@@ -433,7 +433,7 @@ async fn plan_reports_identity_mismatch_for_a_foreign_target() {
 
 #[tokio::test]
 async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let store = db.system_store();
     let identity = store.schema_migration_identity("testdb").await.unwrap();
@@ -478,16 +478,11 @@ async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
     assert_code(error, "schema_migration_in_doubt");
 }
 
-#[tokio::test]
-async fn plan_refuses_an_operation_outside_the_admitted_subset() {
-    let db = ShamirDb::init_memory().await.unwrap();
-    db.create_db("testdb").await.unwrap();
-    let identity = db
-        .system_store()
-        .schema_migration_identity("testdb")
-        .await
-        .unwrap();
-    // A functional index with an operator outside the built-in allowlist.
+#[test]
+fn non_admitted_operations_cannot_enter_a_plan_request() {
+    // The admitted subset is enforced by the typed model itself, so a
+    // non-admitted operation cannot be put into a request (client side or
+    // wire decode) in the first place.
     let not_admitted = shamir_query_types::admin::types::CreateIndexOp {
         create_index: "ix_custom".to_string(),
         table: "items_1".to_string(),
@@ -506,37 +501,19 @@ async fn plan_refuses_an_operation_outside_the_admitted_subset() {
         include: Vec::new(),
         if_not_exists: false,
     };
-    // The validating builder rejects the operation at `build`, so inject it
-    // into an otherwise valid body: the server must refuse it on its own.
-    let mut outside = SchemaMigration::new("alpha-001", 1, "migration 1")
-        .op(ddl::create_table("items_1").build())
-        .expect("typed create-table operation is admitted")
-        .build()
-        .expect("base migration body is valid");
-    outside.operations.push(
-        SchemaMigrationOp::try_from(shamir_query_types::batch::BatchOp::CreateIndex(
-            not_admitted,
-        ))
-        .expect("the operation is constructible"),
-    );
-    let request = plan_request(
-        &identity,
-        predecessor(None, 0, [0; 32]),
-        vec![submission_with_checksum(&outside, [0; 32])],
-    );
-    let error = run_plan(&db, request)
-        .await
-        .expect_err("a non-admitted operation must be refused");
-    let message = error.to_string();
+    let error = SchemaMigrationOp::try_from(shamir_query_types::batch::BatchOp::CreateIndex(
+        not_admitted,
+    ))
+    .expect_err("a non-admitted operation must be refused by the typed model");
     assert!(
-        message.contains("functional-index allowlist"),
-        "the typed reason must name the offending operation: {message}"
+        error.to_string().contains("functional-index allowlist"),
+        "the typed reason must name the offending operation: {error}"
     );
 }
 
 #[tokio::test]
 async fn plan_lists_function_and_validator_warnings_and_registrations() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let (_dir, db) = persistent_db().await;
     db.create_db("testdb").await.unwrap();
     let identity = db
         .system_store()

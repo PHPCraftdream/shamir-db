@@ -9,6 +9,17 @@ use shamir_query_types::admin::types::schema_migration::{
 use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_types::types::record_id::RecordId;
 
+/// The journal needs a persistent system store; the directory must outlive the db.
+pub(super) async fn persistent_db() -> (tempfile::TempDir, crate::ShamirDb) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::ShamirDb::init(crate::shamir_db::system_store::SystemStoreConfig::Fjall(
+        dir.path().join("system"),
+    ))
+    .await
+    .unwrap();
+    (dir, db)
+}
+
 pub(super) fn context() -> SchemaMigrationContext {
     SchemaMigrationContext::new(crate::access::Actor::System, FormatEpoch::Known(7))
 }
