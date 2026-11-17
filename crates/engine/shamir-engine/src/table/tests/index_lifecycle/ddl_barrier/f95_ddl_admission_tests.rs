@@ -62,14 +62,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::index::write_barrier_flags::{
+use crate::repo::RepoInstance;
+use crate::table::TableConfig;
+use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::write_barrier_flags::{
     INDEX2_CREATE, REGULAR_INDEX_CREATE, SCHEMA_ACTIVATION, SORTED_INDEX_CREATE,
     UNIQUE_INDEX_CREATE,
 };
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
-use crate::table::TableConfig;
-use crate::table::TableManager;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 /// Bounded wait for tests that could hang on a bug — same convention as

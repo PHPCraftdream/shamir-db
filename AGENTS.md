@@ -30,12 +30,12 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*/*` glob
 must not try to load it). Crates live in layer folders `crates/<group>/<crate>/`
-(see CLAUDE.md for the group table). The default workspace ships **40 crates** under `crates/` (including
+(see CLAUDE.md for the group table). The default workspace ships **41 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
-`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-repo`, `shamir-engine-query`, `shamir-engine-validator`,
+`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-repo`, `shamir-engine-table`, `shamir-engine-query`, `shamir-engine-validator`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-server-security`, `shamir-sync`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,

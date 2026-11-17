@@ -11,10 +11,10 @@
 use std::time::Duration;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
-use crate::table::table_manager::AUTO_VERIFY_EVERY_N_WRITES;
 use crate::table::{TableConfig, TableManager};
+use shamir_engine_repo::repo_types::BoxRepoFactory;
+use shamir_engine_table::AUTO_VERIFY_EVERY_N_WRITES;
 
 /// Build a fresh in-memory DB with a single empty `t` table. No indexes or
 /// records needed — the injected panic fires before `verify()` touches any

@@ -13,22 +13,22 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::index2::build_index2_backend_with_resolver;
-use crate::index2::descriptor::IndexDescriptor;
-use crate::index2::expr::IndexExpr;
-use crate::index2::functional_backend::FunctionalBackend;
-use crate::index2::kind::{FunctionalConfig, IndexKind};
-use crate::index2::IndexRegistry;
 use crate::table::index2_backfill_hook::BackfillPauseHook;
 use crate::table::TableManager;
+use shamir_index::build_index2_backend_with_resolver;
+use shamir_index::descriptor::IndexDescriptor;
+use shamir_index::expr::IndexExpr;
+use shamir_index::functional_backend::FunctionalBackend;
+use shamir_index::kind::{FunctionalConfig, IndexKind};
+use shamir_index::IndexRegistry;
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -78,7 +78,7 @@ fn build_ready_functional_backend(
     name_interned: u64,
     field_path: Vec<u64>,
     info_store: &Arc<dyn Store>,
-) -> Arc<dyn crate::index2::backend::IndexBackend> {
+) -> Arc<dyn shamir_index::backend::IndexBackend> {
     let first_path = field_path.clone();
     let expr = IndexExpr::Lower(Box::new(IndexExpr::Field(first_path)));
     let kind = IndexKind::Functional(Box::new(FunctionalConfig { expr }));
@@ -125,7 +125,7 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
         .expect("functional backend must exist");
     let lookup_result = lease
         .backend
-        .lookup(crate::index2::backend::IndexQuery::Point {
+        .lookup(shamir_index::backend::IndexQuery::Point {
             keys: smallvec::smallvec![FunctionalBackend::hash_value(&InnerValue::Str(
                 "alice".into()
             ))
@@ -134,8 +134,8 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
         .await
         .unwrap();
     let count = match lookup_result {
-        crate::index2::backend::IndexResult::Set(s) => s.len(),
-        crate::index2::backend::IndexResult::Ranked(v) => v.len(),
+        shamir_index::backend::IndexResult::Set(s) => s.len(),
+        shamir_index::backend::IndexResult::Ranked(v) => v.len(),
     };
     assert_eq!(count, 1, "sanity: index must be usable");
 

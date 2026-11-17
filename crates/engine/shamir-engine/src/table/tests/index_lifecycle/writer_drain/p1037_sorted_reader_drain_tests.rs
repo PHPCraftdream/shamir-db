@@ -11,10 +11,10 @@ use std::sync::Arc;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 

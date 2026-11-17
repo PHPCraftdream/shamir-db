@@ -220,7 +220,9 @@ impl RepoInstance {
     #[cfg(any(test, feature = "test-util"))]
     pub fn install_repo_interner_for_test(&self, manager: InternerManager) {
         assert!(
-            self.core.catalog.repo_interner.set(manager).is_ok(),
+            self.core
+                .catalog
+                .set_repo_interner_if_uninitialized(manager),
             "repo interner must be uninitialized before test injection",
         );
     }
@@ -367,26 +369,7 @@ impl RepoInstance {
     ///
     /// Returns total number of history entries deleted across all tables.
     pub async fn run_gc(&self) -> DbResult<usize> {
-        let mut stores: Vec<Arc<shamir_tx::MvccStore>> = Vec::new();
-        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
-        // H1+H2 commit `621776bd`): `iter_sync`, NOT `iter_async`. This is the
-        // SAME `per_table_mvcc` map `flush_all_history` (above) already scans
-        // with `iter_sync`, and that is also touched by `read_sync`
-        // (version_provider.rs, EVERY Serializable `validate_read_set`), `get_sync`
-        // (commit.rs pessimistic-lock release; rename-table) and EXCLUSIVELY by
-        // `insert_sync` (table attach) / `remove_sync` (drop table). `iter_async`'s
-        // wait is lock-HANDOFF: saa grants the bucket lock to the suspended
-        // iterator TASK, which then holds it while unpolled in tokio's run queue;
-        // a DDL exclusive writer (attach/drop) racing a GC tick can park every
-        // worker behind that unpolled iterator → whole-runtime deadlock. `iter_sync`
-        // only holds each bucket lock for a RUNNING thread's few instructions (an
-        // `Arc::clone` + push), bounding every wait. The fn stays `async` (the
-        // per-store `gc().await` below still legitimately suspends); this scan no
-        // longer suspends.
-        self.core.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
-            stores.push(Arc::clone(mvcc));
-            true
-        });
+        let stores = self.core.catalog.mvcc_snapshot();
 
         let mut total = 0usize;
         for mvcc in stores {

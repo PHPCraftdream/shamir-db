@@ -53,11 +53,11 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::index::write_barrier_flags::REGULAR_INDEX_CREATE;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::write_barrier_flags::REGULAR_INDEX_CREATE;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 /// Generous but bounded — long enough that a healthy (non-deadlocked) run

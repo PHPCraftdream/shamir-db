@@ -28,10 +28,10 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::super::cases::selectivity::Pcg;
 use crate::query::filter::eval_context::FilterContext;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers

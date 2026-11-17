@@ -26,7 +26,7 @@ use crate::index2::backend::{IndexQuery, IndexResult};
 use crate::repo::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::table::interner_manager::InternerManager;
 use crate::table::table_manager::TableManager;
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
 
 /// Mirrors `RepoInstance::create_table_context`'s exact 4 `store_get`
 /// calls (`repo_instance.rs` ~line 381-418), minus the MVCC/changefeed

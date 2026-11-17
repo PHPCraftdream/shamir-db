@@ -10,10 +10,10 @@
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::ReadQuery;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
+use shamir_engine_repo::repo_types::BoxRepoFactory;
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
 use shamir_query_builder::filter::{and, eq, gte, lte};
 use shamir_query_builder::Query;
 use shamir_query_types::filter::Filter;

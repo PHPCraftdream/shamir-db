@@ -53,11 +53,7 @@ impl RepoCore {
         // `read_sync`'s bucket lock is held only by a RUNNING thread for a few
         // instructions (a `String` clone), bounding every wait. The fn stays
         // `async`; this call no longer suspends.
-        match self
-            .catalog
-            .token_names
-            .read_sync(&token, |_, name| name.clone())
-        {
+        match self.catalog.token_name_for(token) {
             Some(name) => self.get_table_unfenced(&name).await.map(Some),
             None => Ok(None),
         }
@@ -72,10 +68,7 @@ impl RepoCore {
         self.durability_handle
             .write_domain
             .debug_check_permit(permit);
-        let name = self
-            .catalog
-            .token_names
-            .read_sync(&token, |_, name| name.clone());
+        let name = self.catalog.token_name_for(token);
         match name {
             Some(name) => self
                 .get_table_admitted_unfenced(&name, permit)
@@ -185,13 +178,7 @@ impl RepoCore {
         // parked at an `.await`, and a synchronous lock cannot yield. The
         // `OnceCell` itself provides the single-init serialization — the
         // shard lock only needs to protect the map insert, not the init.
-        let cell = Arc::clone(
-            self.catalog
-                .tables
-                .entry(table_name.to_string())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .value(),
-        );
+        let cell = self.catalog.insert_table_cell(table_name);
 
         // §B13: existence-check happens INSIDE the init closure, so it
         // is serialized with the actual context construction. Doing the
@@ -202,7 +189,7 @@ impl RepoCore {
         // cell empty so subsequent calls retry.
         let tbl = cell
             .get_or_try_init(|| async {
-                if !self.catalog.configs.contains_key(table_name) {
+                if !self.catalog.has_table(table_name) {
                     return Err(DbError::NotFound(format!(
                         "Table '{}' is not configured in this repository",
                         table_name
@@ -215,25 +202,19 @@ impl RepoCore {
 
         // Close the insertion-to-OnceCell-completion window against DROP.
         // No map guard survives an await; rollback can only evict our Arc.
-        let current = self.catalog.tables.get(table_name);
-        if !self.catalog.configs.contains_key(table_name)
-            || !current
-                .as_ref()
-                .is_some_and(|entry| Arc::ptr_eq(entry.value(), &cell))
-        {
-            if let Some(mvcc) = tbl.mvcc_store() {
-                let _ = self
-                    .catalog
-                    .per_table_mvcc
-                    .remove_if_sync(&table_token_for(table_name), |existing| {
-                        Arc::ptr_eq(existing, &mvcc)
-                    });
-            }
-            return Err(DbError::NotFound(format!(
-                "Table '{table_name}' was removed during initialization"
-            )));
-        }
-        Ok(tbl)
+        self.catalog
+            .with_current_cell(table_name, &cell, |is_current| {
+                if !is_current {
+                    if let Some(mvcc) = tbl.mvcc_store() {
+                        self.catalog
+                            .remove_mvcc_for_table_if_same(table_name, &mvcc);
+                    }
+                    return Err(DbError::NotFound(format!(
+                        "Table '{table_name}' was removed during initialization"
+                    )));
+                }
+                Ok(tbl)
+            })
     }
 
     /// cancel-safe: yes — all awaits precede MVCC publication. After insert,
@@ -244,16 +225,11 @@ impl RepoCore {
         cell: &Arc<OnceCell<TableManager>>,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        let config = self
-            .catalog
-            .configs
-            .get(table_name)
-            .map(|entry| entry.value().clone())
-            .ok_or_else(|| {
-                DbError::NotFound(format!(
-                    "Table '{table_name}' was removed during initialization"
-                ))
-            })?;
+        let config = self.catalog.table_config(table_name).ok_or_else(|| {
+            DbError::NotFound(format!(
+                "Table '{table_name}' was removed during initialization"
+            ))
+        })?;
         let id = config.store_id;
         let names = table_store_names(table_name, config.store_id.as_ref());
         let data_store: Arc<dyn Store> = self.repo.store_get(names.data).await?;
@@ -279,12 +255,7 @@ impl RepoCore {
         // open-time index rebuilds read the records through it, `__data__` is
         // inert here and would yield no rows.
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
-        if self
-            .catalog
-            .configs
-            .get(table_name)
-            .is_none_or(|current| current.value().store_id != id)
-        {
+        if !self.catalog.table_config_matches_store_id(table_name, &id) {
             return Err(DbError::NotFound(format!(
                 "Table '{table_name}' changed identity during initialization"
             )));
@@ -315,8 +286,7 @@ impl RepoCore {
         // retry re-attempts the attach cleanly.
         if self
             .catalog
-            .per_table_mvcc
-            .insert_sync(token, Arc::clone(&mvcc))
+            .attach_mvcc(table_name, Arc::clone(&mvcc))
             .is_err()
         {
             log::error!(
@@ -336,28 +306,24 @@ impl RepoCore {
 
         // DROP may have removed/replaced our OnceCell while setup awaited.
         // Existence alone is insufficient after DROP + CREATE of the same name.
-        let current = self.catalog.tables.get(table_name);
-        if !self.catalog.configs.contains_key(table_name)
-            || !current
-                .as_ref()
-                .is_some_and(|entry| Arc::ptr_eq(entry.value(), cell))
-        {
-            let _ = self
-                .catalog
-                .per_table_mvcc
-                .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
-            return Err(DbError::NotFound(format!(
-                "Table '{table_name}' was removed during initialization"
-            )));
-        }
-        let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
+        self.catalog
+            .with_current_cell(table_name, cell, |is_current| {
+                if !is_current {
+                    self.catalog
+                        .remove_mvcc_for_table_if_same(table_name, &mvcc);
+                    return Err(DbError::NotFound(format!(
+                        "Table '{table_name}' was removed during initialization"
+                    )));
+                }
+                let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
 
-        // Wire the non-tx write path to the per-repo gate so that
-        // Serializable transactions see non-tx writes in their Phase 2-bis
-        // predicate-conflict check. The table uses the SAME `gate` the tx
-        // commit pipeline uses, keeping non-tx and tx `commit_version`s on
-        // one monotonic sequence per repo.
-        Ok(tbl.with_changefeed(Arc::clone(&gate)))
+                // Wire the non-tx write path to the per-repo gate so that
+                // Serializable transactions see non-tx writes in their Phase 2-bis
+                // predicate-conflict check. The table uses the SAME `gate` the tx
+                // commit pipeline uses, keeping non-tx and tx `commit_version`s on
+                // one monotonic sequence per repo.
+                Ok(tbl.with_changefeed(Arc::clone(&gate)))
+            })
     }
 
     /// Catalogue read; see `TableCatalog`.

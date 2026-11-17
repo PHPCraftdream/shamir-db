@@ -1,3 +1,3 @@
-pub(crate) mod record_mutation;
-pub(crate) mod transaction;
-pub(crate) mod upsert;
+pub mod record_mutation;
+pub mod transaction;
+pub mod upsert;

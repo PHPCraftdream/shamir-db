@@ -14,13 +14,13 @@
 use std::time::Duration;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_engine_repo::repo_types::BoxRepoFactory;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
 
 /// Fresh in-memory DB with a `users` table carrying one regular index (on
 /// `city`) and a handful of seeded rows — enough for `repair()`'s

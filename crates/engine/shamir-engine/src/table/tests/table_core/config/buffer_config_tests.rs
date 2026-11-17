@@ -10,11 +10,11 @@
 use std::sync::Arc;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::buffer_config::{load, save};
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepoFactory;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_storage::types::{Repo, Store};

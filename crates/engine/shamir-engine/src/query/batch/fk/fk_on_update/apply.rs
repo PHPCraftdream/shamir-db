@@ -70,35 +70,26 @@ async fn update_child_field(
             code: Some("fk_on_update".to_string()),
         })?;
 
-    let interner = table
-        .interner()
-        .get()
+    let field_id = table
+        .info_store_read_view()
+        .interned_field_id(field)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
             message: format!("fk_on_update: interner: {e}"),
             code: Some("fk_on_update".to_string()),
+        })?
+        .ok_or_else(|| {
+            BatchError::query_coded(alias, "fk_on_update", format!("unknown field '{}'", field))
         })?;
 
-    let field_id = match interner.get_ind(field) {
-        Some(id) => id,
-        None => {
-            return Err(BatchError::query_coded(
-                alias,
-                "fk_on_update",
-                format!("unknown field '{}'", field),
-            ));
-        }
-    };
-
     let new_inner = qv_to_inner_scalar(new_value);
-    let new_bytes = replace_field(&old_bytes, field_id.id(), new_inner).map_err(|e| {
-        BatchError::QueryError {
+    let new_bytes =
+        replace_field(&old_bytes, field_id, new_inner).map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
             message: format!("fk_on_update: merge failed: {e}"),
             code: Some("fk_on_update".to_string()),
-        }
-    })?;
+        })?;
 
     // #1205: `replace_field` only overwrites an existing key's value (no
     // new map keys) — not captured at this call site regardless, so leave
@@ -141,28 +132,24 @@ async fn set_child_field_null(
             code: Some("fk_on_update".to_string()),
         })?;
 
-    let interner = table
-        .interner()
-        .get()
+    let field_id = table
+        .info_store_read_view()
+        .interned_field_id(field)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
             message: format!("fk_on_update: set_null interner: {e}"),
             code: Some("fk_on_update".to_string()),
-        })?;
-
-    let field_id = match interner.get_ind(field) {
-        Some(id) => id,
-        None => {
-            return Err(BatchError::query_coded(
+        })?
+        .ok_or_else(|| {
+            BatchError::query_coded(
                 alias,
                 "fk_on_update",
                 format!("set_null: unknown field '{}'", field),
-            ));
-        }
-    };
+            )
+        })?;
 
-    let new_bytes = replace_field(&old_bytes, field_id.id(), InnerValue::Null).map_err(|e| {
+    let new_bytes = replace_field(&old_bytes, field_id, InnerValue::Null).map_err(|e| {
         BatchError::QueryError {
             alias: alias.to_string(),
             message: format!("fk_on_update: set_null merge failed: {e}"),

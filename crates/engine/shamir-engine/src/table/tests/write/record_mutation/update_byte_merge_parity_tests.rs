@@ -30,10 +30,10 @@ use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::table::table_manager::TableManager;
 use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     insert_via_tx, setup_empty_table, update_via_tx,
 };
+use crate::table::TableManager;
 
 // ============================================================================
 // Helpers

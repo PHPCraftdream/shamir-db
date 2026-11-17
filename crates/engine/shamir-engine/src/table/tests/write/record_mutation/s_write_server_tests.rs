@@ -34,18 +34,18 @@ use shamir_types::types::value::InnerValue;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::read::ReadQuery;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::record_cow::RecordCow;
-use crate::table::table_manager::TableManager;
 use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::{
     insert_via_tx, setup_empty_table,
 };
 use crate::table::TableConfig;
+use crate::table::TableManager;
 use crate::validator::{
     RecordFields, RecordValidator, Validation, ValidatorBinding, ValidatorCtx, ValidatorRegistry,
     WriteOp,
 };
+use shamir_engine_repo::repo_types::BoxRepoFactory;
 use shamir_types::access::Actor;
 use shamir_types::mpack;
 use shamir_types::record_view::ScalarRef;
@@ -102,7 +102,7 @@ async fn make_table_with_validator(
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
-    crate::validator::persistence::save_validators_metadata(&bindings, &info)
+    shamir_engine_table::validator_bound::persistence::save_validators_metadata(&bindings, &info)
         .await
         .unwrap();
 

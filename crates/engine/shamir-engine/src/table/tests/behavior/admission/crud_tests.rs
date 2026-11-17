@@ -10,9 +10,9 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use tokio::sync::oneshot;
 
-use crate::repo::repo_types::BoxRepo;
 use crate::repo::RepoInstance;
 use crate::table::{TableConfig, TableManager, WriteOutcome};
+use shamir_engine_repo::repo_types::BoxRepo;
 
 const STATUS: VisibilityWait = VisibilityWait::Bounded { timeout_ms: 0 };
 const WRITES: [Write; 4] = [Write::Insert, Write::Many, Write::Delete, Write::Set];
@@ -160,7 +160,9 @@ async fn bounded_crud_preserves_positions_values_and_pending_prefix() {
             let lower = gate.assign_next_version_guarded();
             let barrier = if slow {
                 let (barrier, lock) = table
-                    .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
+                    .begin_write_barrier(
+                        shamir_index::base_index::write_barrier_flags::SCHEMA_ACTIVATION,
+                    )
                     .await
                     .unwrap();
                 drop(lock);
@@ -185,7 +187,9 @@ async fn bounded_crud_preserves_positions_values_and_pending_prefix() {
             assert_eq!(gate.completion().waiter_count(), 0);
             drop(barrier);
             let (replay, lock) = table
-                .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
+                .begin_write_barrier(
+                    shamir_index::base_index::write_barrier_flags::SCHEMA_ACTIVATION,
+                )
                 .await
                 .unwrap();
             drop(lock);
@@ -216,7 +220,9 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             let target = lower_version + width(write);
             let barrier = if slow {
                 let (barrier, lock) = table
-                    .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
+                    .begin_write_barrier(
+                        shamir_index::base_index::write_barrier_flags::SCHEMA_ACTIVATION,
+                    )
                     .await
                     .unwrap();
                 drop(lock);
@@ -251,7 +257,9 @@ async fn strict_observer_releases_all_crud_guards_and_preserves_recovery_on_canc
             drop(barrier);
             // Exact lower-replay protocol, while the Strict observer is parked.
             let (replay, lock) = table
-                .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
+                .begin_write_barrier(
+                    shamir_index::base_index::write_barrier_flags::SCHEMA_ACTIVATION,
+                )
                 .await
                 .unwrap();
             drop(lock);

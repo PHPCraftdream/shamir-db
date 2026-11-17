@@ -14,9 +14,9 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryRecord, QueryResult};
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::{TableConfig, TableManager};
+use shamir_engine_repo::repo_types::BoxRepo;
 
 async fn row(table: &TableManager, score: i64, vector: &[f32], keep: bool) -> InnerValue {
     let interner = table.interner().get().await.unwrap();
@@ -260,7 +260,7 @@ async fn snapshot_vector_inflight_allocation_rejects_live_graph() {
         let vb = lease
             .backend
             .as_any()
-            .downcast_ref::<crate::index2::vector::vector_backend::VectorBackend>()
+            .downcast_ref::<shamir_index::vector::vector_backend::VectorBackend>()
             .unwrap();
         vb.adapter_arc().delete(ids[0]).await.unwrap();
         assert_eq!(
@@ -305,7 +305,7 @@ async fn snapshot_vector_equal_projection_cannot_certify_identity() {
         let vb = lease
             .backend
             .as_any()
-            .downcast_ref::<crate::index2::vector::vector_backend::VectorBackend>()
+            .downcast_ref::<shamir_index::vector::vector_backend::VectorBackend>()
             .unwrap();
         // A stale graph now picks row 2 instead of row 1. Both rows project
         // the same keep=true, so as_value-only certification accepts it.
@@ -402,7 +402,7 @@ async fn snapshot_vector_nonfinite_batch_uses_total_order_before_topk() {
         let vb = lease
             .backend
             .as_any()
-            .downcast_ref::<crate::index2::vector::vector_backend::VectorBackend>()
+            .downcast_ref::<shamir_index::vector::vector_backend::VectorBackend>()
             .unwrap();
         let adapter = vb.adapter_arc();
         let hnsw = adapter.as_hnsw_adapter().unwrap();

@@ -25,6 +25,8 @@
 //!    still correctly identify the ONE staged row among several matched
 //!    rows.
 
+use shamir_index::backend::{IndexQuery, IndexResult};
+
 use std::sync::Arc;
 
 use shamir_query_builder::write;
@@ -37,14 +39,14 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index2::functional_backend::FunctionalBackend;
 use crate::query::filter::eval_context::FilterContext;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::functional_backend::FunctionalBackend;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -93,7 +95,6 @@ fn functional_lower_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
 }
 
 async fn functional_lookup(tbl: &TableManager, index_name_id: u64, lowered: &str) -> Vec<[u8; 16]> {
-    use crate::index2::backend::{IndexQuery, IndexResult};
     let backend = match tbl.index2_registry().get_by_name(index_name_id).await {
         Some(b) => b,
         None => return Vec::new(),

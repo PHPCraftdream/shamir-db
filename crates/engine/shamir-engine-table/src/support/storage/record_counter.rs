@@ -1,0 +1,348 @@
+//! Record counter for tracking number of records in a table.
+//!
+//! **Performance (Opt #3):** the counter lives as an in-memory
+//! `AtomicU64`; increments are a single `fetch_add`. The on-disk copy
+//! is rewritten lazily — only by `persist()` and only when the cache
+//! has actually changed since the previous write. Previously every
+//! `increment(1)` called the store twice (`get` + `set`) inside a
+//! mutex, costing ~2 µs each; in a bulk insert of N records that was
+//! 2N redundant store ops. After this change increments are
+//! free-modulo-an-atomic; the durable bump rides whatever periodic
+//! persist call the engine already makes (and is itself a no-op when
+//! nothing changed).
+
+use async_trait::async_trait;
+
+use crate::Persistable;
+use shamir_engine_repo::meta::MetaKey;
+use shamir_engine_repo::RepoWriteDomain;
+use shamir_engine_repo::RepoWritePermit;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::{RecordKey, Store};
+use shamir_types::codecs::basic::bincode;
+use shamir_types::types::record_id::RecordId;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
+
+/// Get the system record key for storing record count
+fn count_key() -> RecordId {
+    MetaKey::Count.as_record_id()
+}
+
+/// Manages record count in a table.
+///
+/// Increments/decrements run lock-free against an in-memory
+/// `AtomicU64`. The persistent copy in the info_store is only
+/// rewritten when `persist()` is called AND the in-memory value
+/// differs from the last persisted snapshot.
+pub struct RecordCounter {
+    info_store: Arc<dyn Store>,
+    /// Lazily-initialised on first access — reads the persisted count
+    /// from `info_store` into memory exactly once. Populated via
+    /// `get_or_try_init` (task-group-14 / #1's fix): a genuine
+    /// info_store error OR a corrupt persisted blob leaves the cell
+    /// UNINITIALISED and propagates the error, instead of silently
+    /// seeding the cache (and `last_persisted`) at `0`. Defaulting to
+    /// `0` on error used to be indistinguishable from a genuinely
+    /// fresh table and would let the very next `persist()` overwrite a
+    /// durable count with a bogus near-zero value — permanent data
+    /// loss invisible until a doctor `repair()` happened to run. Only
+    /// `DbError::NotFound` (key genuinely absent — fresh table) seeds
+    /// `0`; every other error, and every decode failure, propagates so
+    /// the caller sees the fault instead of the counter resetting.
+    cache: Arc<OnceCell<AtomicU64>>,
+    /// Value we last durably wrote to the info_store (or hydrated at
+    /// init). `persist()`/`set()` derive "is there unpersisted work"
+    /// directly by comparing `cache.load()` against this — there is no
+    /// separate dirty flag to fall out of sync (task-group-14 / #2's
+    /// fix): a boolean `dirty` flag needed a second atomic write
+    /// (`dirty.store(false)`) after every durable write, and a
+    /// concurrent `increment()` landing inside that write's `.await`
+    /// window could have its `dirty.store(true)` mark silently
+    /// overwritten back to `false`, losing visibility of its delta.
+    /// Deriving dirtiness from `cache != last_persisted` removes the
+    /// redundant state entirely, so there is nothing to fall out of
+    /// sync with.
+    last_persisted: Arc<AtomicU64>,
+    /// Guards `persist()`/`set()` so concurrent flushers don't race on
+    /// the `write_through` + `last_persisted` update pair.
+    persist_lock: Arc<Mutex<()>>,
+    /// S5c-X — the per-repo write-admission domain. Durable flushes
+    /// (`persist`/`set`/`set_to`) acquire the repo permit BEFORE sampling
+    /// the cache; `increment`/`get` stay lock-free with NO admission (the
+    /// leader write path must gain nothing).
+    write_domain: Arc<RepoWriteDomain>,
+}
+
+impl Clone for RecordCounter {
+    fn clone(&self) -> Self {
+        Self {
+            info_store: Arc::clone(&self.info_store),
+            cache: Arc::clone(&self.cache),
+            last_persisted: Arc::clone(&self.last_persisted),
+            persist_lock: Arc::clone(&self.persist_lock),
+            write_domain: Arc::clone(&self.write_domain),
+        }
+    }
+}
+
+impl RecordCounter {
+    /// Create a new record counter
+    pub fn new(info_store: Arc<dyn Store>) -> Self {
+        // S5c-X: standalone counters get a private domain — they participate
+        // in no repository, so admission is uncontended and free.
+        Self::new_with_domain(info_store, RepoWriteDomain::new("table-counter"))
+    }
+
+    /// S5c-X: create a counter sharing a caller-supplied per-repo
+    /// [`RepoWriteDomain`], so counter flushes serialize against every other
+    /// DDL/registry write in the same repository.
+    pub fn new_with_domain(info_store: Arc<dyn Store>, write_domain: Arc<RepoWriteDomain>) -> Self {
+        Self {
+            info_store,
+            cache: Arc::new(OnceCell::new()),
+            last_persisted: Arc::new(AtomicU64::new(0)),
+            persist_lock: Arc::new(Mutex::new(())),
+            write_domain,
+        }
+    }
+
+    /// S5c-X — acquire repo admission, mapped to the storage error type.
+    async fn admit(&self) -> DbResult<RepoWritePermit> {
+        self.write_domain
+            .admit()
+            .await
+            .map_err(|e| DbError::Internal(format!("repository write admission failed: {e}")))
+    }
+
+    /// Get current record count — reads the in-memory cache, lazily
+    /// hydrating from the info_store on first access.
+    pub async fn get(&self) -> DbResult<u64> {
+        let cache = self.ensure_cache().await?;
+        Ok(cache.load(Ordering::Acquire))
+    }
+
+    /// Set record count (useful for initialization or manual correction).
+    /// Writes through both cache and store synchronously.
+    pub async fn set(&self, count: u64) -> DbResult<()> {
+        // S5c-X: repo admission BEFORE sampling the cache.
+        let permit = self.admit().await?;
+        self.set_admitted(count, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn set_admitted(&self, count: u64, permit: &RepoWritePermit) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
+        let cache = self.ensure_cache().await?;
+        cache.store(count, Ordering::Release);
+        // Serialize against `persist()` so the two never race on
+        // `write_through` + `last_persisted` (see `last_persisted`'s
+        // doc for the race this closes).
+        let _guard = self.persist_lock.lock().await;
+        self.write_through(count).await?;
+        self.last_persisted.store(count, Ordering::Release);
+        Ok(())
+    }
+
+    /// Increment record count by delta. Lock-free against an atomic;
+    /// the store is NOT touched here — call `persist()` later (or
+    /// rely on the engine's existing post-write persist hook) to
+    /// flush the new value.
+    ///
+    /// Boundary semantics (both directions are checked CAS loops, a refused
+    /// call leaves the counter untouched): going past `u64::MAX` and going
+    /// below zero are `DbError::Internal`, never a silent wrap; `i64::MIN`
+    /// is handled through `unsigned_abs`, so it neither panics nor wraps.
+    pub async fn increment(&self, delta: i64) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        if delta == 0 {
+            return Ok(());
+        }
+        let mag = delta.unsigned_abs();
+        loop {
+            let cur = cache.load(Ordering::Acquire);
+            let new = if delta > 0 {
+                cur.checked_add(mag).ok_or_else(|| {
+                    DbError::Internal(format!(
+                        "Record count overflow: current={cur}, delta={delta}"
+                    ))
+                })?
+            } else {
+                cur.checked_sub(mag).ok_or_else(|| {
+                    DbError::Internal(format!(
+                        "Record count cannot go below zero: current={cur}, delta={delta}"
+                    ))
+                })?
+            };
+            if cache
+                .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Set the counter to an absolute value. Used by the doctor to
+    /// reconcile the cached counter with a fresh count of records
+    /// in the data store.
+    pub async fn set_to(&self, n: u64) -> DbResult<()> {
+        // S5c-X: ONE admission for the whole set+persist sequence.
+        let permit = self.admit().await?;
+        self.set_to_admitted(n, &permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn set_to_admitted(&self, n: u64, permit: &RepoWritePermit) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
+        let cache = self.ensure_cache().await?;
+        cache.store(n, Ordering::Release);
+        self.persist_admitted(permit).await
+    }
+
+    /// Flush the in-memory counter to the info_store if it differs
+    /// from the last persisted value. No-op otherwise.
+    ///
+    /// "Differs" is computed by directly comparing `cache` against
+    /// `last_persisted` — both before AND after taking `persist_lock`
+    /// — rather than consulting a separate dirty flag. This closes the
+    /// task-group-14 / #2 race: a concurrent `increment()` landing
+    /// while `write_through` is in-flight bumps `cache` with no flag
+    /// to lose track of, so the post-write re-check below reliably
+    /// notices it and leaves work for the next `persist()` call
+    /// instead of silently dropping the delta.
+    pub async fn persist(&self) -> DbResult<()> {
+        // S5c-X: repo admission BEFORE sampling the cache.
+        let permit = self.admit().await?;
+        self.persist_admitted(&permit).await
+    }
+
+    /// S5c-X admitted twin — caller already holds repo admission.
+    pub async fn persist_admitted(&self, permit: &RepoWritePermit) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
+        let cache = self.ensure_cache().await?;
+        if cache.load(Ordering::Acquire) == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.persist_lock.lock().await;
+        // Re-check inside the lock — another task may have flushed.
+        let cur = cache.load(Ordering::Acquire);
+        if cur == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.write_through(cur).await?;
+        // `cur` is exactly what we just wrote — record it as
+        // persisted regardless of what `cache` holds NOW (a
+        // concurrent `increment()` may have moved it further while
+        // `write_through` awaited). Nothing is lost: if `cache` has
+        // since diverged from `cur`, the next `persist()` call will
+        // see that divergence and flush the remainder.
+        self.last_persisted.store(cur, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn persist_unprotected_for_test(&self) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        if cache.load(Ordering::Acquire) == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.persist_lock.lock().await;
+        let cur = cache.load(Ordering::Acquire);
+        if cur == self.last_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.write_through(cur).await?;
+        self.last_persisted.store(cur, Ordering::Release);
+        Ok(())
+    }
+
+    /// S5c-X PR6b-2: adopt an ABSOLUTE durable count written by the follower
+    /// receipt atomic batch. Cache and `last_persisted` are set to `after`
+    /// under `persist_lock`, so the periodic `persist()` sees
+    /// cache == last_persisted and never overwrites the committed count with
+    /// a stale value.
+    #[allow(dead_code)] // wired by the PR6b-2 receipt-apply chunk (W3+)
+    #[doc(hidden)]
+    pub async fn adopt_absolute(&self, after: u64) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        let _guard = self.persist_lock.lock().await;
+        cache.store(after, Ordering::Release);
+        self.last_persisted.store(after, Ordering::Release);
+        Ok(())
+    }
+
+    /// Cheap, lock-free dirty check — NO admission, NO `ensure_cache`
+    /// (an uninitialized `OnceCell` cache means nothing has been written
+    /// since construction: every write path (`set`/`set_to`/`increment`)
+    /// initializes the cache first, so `None` implies clean).
+    ///
+    /// S5c-X: this keeps the `Persistable` impl (`flush_metadata`) off the
+    /// admission path when clean — `flush_metadata` runs POST-batch (it is
+    /// called after a batch's writes have landed, never per-write), and a
+    /// clean counter must not block on the repo domain.
+    pub(crate) fn is_dirty(&self) -> bool {
+        match self.cache.get() {
+            Some(cache) => {
+                cache.load(Ordering::Acquire) != self.last_persisted.load(Ordering::Acquire)
+            }
+            None => false,
+        }
+    }
+
+    async fn ensure_cache(&self) -> DbResult<&AtomicU64> {
+        if let Some(c) = self.cache.get() {
+            return Ok(c);
+        }
+        let info_store = Arc::clone(&self.info_store);
+        let last_persisted = Arc::clone(&self.last_persisted);
+        self.cache
+            .get_or_try_init(|| async move {
+                let key = RecordKey::from_slice(count_key().as_bytes());
+                let initial: u64 = match info_store.get(key).await {
+                    Ok(bytes) => bincode::from_bytes(&bytes).map_err(|e| {
+                        DbError::Codec(format!(
+                            "Record counter blob is corrupt — refusing to default to 0 \
+                             (that would let the next persist() overwrite the durable \
+                             count with a bogus near-zero value): {e}"
+                        ))
+                    })?,
+                    Err(DbError::NotFound(_)) => 0,
+                    Err(e) => return Err(e),
+                };
+                last_persisted.store(initial, Ordering::Release);
+                Ok(AtomicU64::new(initial))
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl Persistable for RecordCounter {
+    async fn persist(&self) -> DbResult<()> {
+        // S5c-X: the trait impl is the COLD-flush surface (`PersistRegistry`
+        // / `flush_metadata`, invoked post-batch — never on the per-write
+        // commit hot path). Short-circuit BEFORE paying admission when the
+        // counter is clean (`is_dirty` is a pair of atomic loads); only a
+        // genuinely dirty counter admits through the repo domain and then
+        // runs the admitted twin. Exactly-once durability is unchanged:
+        // `persist_admitted` re-checks dirtiness under `persist_lock`.
+        if !self.is_dirty() {
+            return Ok(());
+        }
+        let permit = self.admit().await?;
+        self.persist_admitted(&permit).await
+    }
+}
+
+impl RecordCounter {
+    async fn write_through(&self, count: u64) -> DbResult<()> {
+        let key = RecordKey::from_slice(count_key().as_bytes());
+        let bytes = bincode::to_bytes(&count)
+            .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
+        self.info_store.set(key, bytes).await?;
+        Ok(())
+    }
+}

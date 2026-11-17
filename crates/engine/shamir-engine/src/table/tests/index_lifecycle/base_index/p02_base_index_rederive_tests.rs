@@ -14,6 +14,8 @@
 //! - **2c retired ops**: a tx stages ops against an index that is DROP'd
 //!   before commit; the stale ops are retracted.
 
+use crate::tx::CommitError;
+
 use std::sync::Arc;
 
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -24,8 +26,8 @@ use shamir_types::types::value::InnerValue;
 
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
-use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
 
@@ -677,8 +679,6 @@ async fn p02_unique_multi_field_before_create_enforced() {
 /// acquisition and BEFORE Phase 2.6's re-validation loop.
 #[tokio::test]
 async fn p02_unique_staged_before_create_conflicts_with_preexisting_committed_row() {
-    use crate::tx::CommitError;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();

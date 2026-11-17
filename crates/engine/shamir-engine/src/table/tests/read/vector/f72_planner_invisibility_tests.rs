@@ -39,6 +39,8 @@
 //!    same query now DOES use the index and still returns the same complete
 //!    row set (the index is fully queryable once `Ready`).
 
+use crate::table::index2_backfill_hook::BackfillPauseHook;
+
 use std::sync::Arc;
 
 use shamir_types::core::interner::{InternerKey, TouchInd};
@@ -47,10 +49,10 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::ReadQuery;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_query_builder::Query;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::common::new_map;
@@ -111,8 +113,6 @@ async fn read_between_score(
 /// flips to `Ready`), the SAME query must then use the index.
 #[tokio::test]
 async fn f72_regular_index_planner_invisible_during_backfill() {
-    use crate::table::index2_backfill_hook::BackfillPauseHook;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
@@ -143,8 +143,7 @@ async fn f72_regular_index_planner_invisible_during_backfill() {
 
     // Install the pause hook on the TableManager's online-index path.
     let hook = Arc::new(BackfillPauseHook::new());
-    tbl.online_index_backfill_hook
-        .store(Some(Arc::clone(&hook)));
+    tbl.set_online_index_backfill_hook(Some(Arc::clone(&hook)));
 
     // Spawn the create; it registers the def at `Building`, then parks
     // mid-backfill (postings written, still `Building`, pre-`Ready`-flip).

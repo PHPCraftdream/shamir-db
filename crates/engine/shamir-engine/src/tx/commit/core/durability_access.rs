@@ -261,11 +261,7 @@ impl RepoCore {
     /// Best-effort over all tables: a per-store flush error is logged and the
     /// first one returned after attempting them all.
     pub(crate) async fn flush_all_history(&self) -> DbResult<()> {
-        let mut mvccs = Vec::new();
-        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
-            mvccs.push(Arc::clone(mvcc));
-            true
-        });
+        let mvccs = self.catalog.mvcc_snapshot();
         let mut first_err: Option<DbError> = None;
         let any = !mvccs.is_empty();
         for mvcc in mvccs {
@@ -414,18 +410,13 @@ impl RepoCore {
             // a full table open (keyspaces, indexes, validators) per table
             // inside the shutdown budget and register it for MVCC routing. The
             // map guard is dropped before any await.
-            let Some(table) = self
-                .catalog
-                .tables
-                .get(&table_name)
-                .and_then(|cell| cell.get().cloned())
-            else {
+            let Some(table) = self.catalog.initialized_table(&table_name) else {
                 continue;
             };
             if let Err(e) = timed_stage(
                 self.name(),
                 &format!("data_store {table_name}"),
-                table.data_store().flush_drain(),
+                table.data_store_read_view().flush_drain(),
             )
             .await
             {
@@ -442,7 +433,7 @@ impl RepoCore {
             if let Err(e) = timed_stage(
                 self.name(),
                 &format!("info_store {table_name}"),
-                table.info_store().flush_drain(),
+                table.info_store_read_view().flush_drain(),
             )
             .await
             {

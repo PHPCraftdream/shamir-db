@@ -17,15 +17,15 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::index::index_record_key::IndexRecordKey;
-use crate::index2::persistence::{
-    load_index_identity_version, load_legacy_index_version, INDEX_IDENTITY_VERSION,
-};
 use crate::table::tests::behavior::lifecycle::pipeline::p34_12_identity_migration_tests::{
     count_prefix, legacy_v3_key,
 };
-use crate::table::tests::behavior::schema::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableManager;
+use shamir_engine_table::test_support::schema_test_helpers::query_value_to_inner_tracked;
+use shamir_index::base_index::index_record_key::IndexRecordKey;
+use shamir_index::persistence::{
+    load_index_identity_version, load_legacy_index_version, INDEX_IDENTITY_VERSION,
+};
 
 /// Build shared in-memory stores, open a fresh table on them, create a
 /// regular and a unique index, seed a few records, and return
@@ -144,7 +144,7 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
 
     // A v2 orphan under the namespace `verify()` counts, so the table is
     // observably unhealthy before the migration.
-    let identity_key = crate::index::index_keys::build_index_key(
+    let identity_key = shamir_index::base_index::index_keys::build_index_key(
         false,
         def.name_interned,
         &[InnerValue::Int(9999)],

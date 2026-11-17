@@ -27,6 +27,11 @@
 //! before backfill. The regression test simulates crash-then-restart and
 //! asserts the interrupted id is never reallocated.
 
+use crate::table::{PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK};
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
+use tokio::sync::Notify;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,13 +43,13 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::index2::backend::{IndexQuery, IndexResult};
-use crate::index2::functional_backend::FunctionalBackend;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::index2_backfill_hook::BackfillPauseHook;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
+use shamir_index::backend::{IndexQuery, IndexResult};
+use shamir_index::functional_backend::FunctionalBackend;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {
@@ -293,26 +298,23 @@ async fn functional_backfill_indexes_preexisting_rows() {
 /// `load_index2_metadata` / `set_next_id` embody.
 #[tokio::test]
 async fn crashed_index2_id_is_not_reallocated_after_restart() {
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     // --- "process 1": allocate an id and reserve it durably (the fix). ---
-    let reg1 = crate::index2::IndexRegistry::new();
+    let reg1 = shamir_index::IndexRegistry::new();
     let crashed_id = reg1.allocate_id(); // e.g. 1
                                          // Finding-2 fix: persist the reserved next_id watermark BEFORE any
                                          // backfill/register would run.
-    crate::index2::persistence::save_index2_metadata(&reg1, &info_store)
+    shamir_index::persistence::save_index2_metadata(&reg1, &info_store)
         .await
         .unwrap();
     // ...then the process "crashes" — the new backend is NEVER inserted and the
     // FINAL save (post-register) never happens.
 
     // --- "process 2": restart restores next_id from persisted metadata. ---
-    let reg2 = crate::index2::IndexRegistry::new();
+    let reg2 = shamir_index::IndexRegistry::new();
     let (_envelope_version, persisted) =
-        crate::index2::persistence::load_index2_metadata(&info_store)
+        shamir_index::persistence::load_index2_metadata(&info_store)
             .await
             .unwrap()
             .expect("reserved metadata must have been persisted");
@@ -336,19 +338,16 @@ async fn crashed_index2_id_is_not_reallocated_after_restart() {
 /// (allocate, but do NOT persist before the crash) and showing the id repeats.
 #[tokio::test]
 async fn without_reserve_persist_crashed_id_would_be_reused() {
-    use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_storage::types::Store;
-
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     // Pre-fix sequence: allocate, then crash BEFORE persisting anything.
-    let reg1 = crate::index2::IndexRegistry::new();
+    let reg1 = shamir_index::IndexRegistry::new();
     let crashed_id = reg1.allocate_id();
     // (no save_index2_metadata here — this is the pre-fix window)
 
     // Restart: nothing persisted → next_id stays at its fresh default.
-    let reg2 = crate::index2::IndexRegistry::new();
-    let loaded = crate::index2::persistence::load_index2_metadata(&info_store)
+    let reg2 = shamir_index::IndexRegistry::new();
+    let loaded = shamir_index::persistence::load_index2_metadata(&info_store)
         .await
         .unwrap();
     assert!(loaded.is_none(), "nothing was persisted pre-fix");
@@ -631,11 +630,6 @@ async fn stage_and_commit_inside_window_now_indexes_new_index_part_b_closed() {
 
 #[tokio::test]
 async fn f56_create_index_v2_drains_inflight_fast_path_writer() {
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
-    use tokio::sync::Notify;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();

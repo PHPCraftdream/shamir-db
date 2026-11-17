@@ -1,15 +1,10 @@
 //! S5c-X PR6b-2a/2c: table-membership + table-open impl block, moved out of
 //! `repo_instance.rs` for the line ratchet.
 //!
-//! This file is wired as a DESCENDANT of the `repo_instance` module
-//! (declared by `repo_instance/catalog.rs`), so the private `RepoInstance`
-//! fields (`tables`, `configs`, `token_names`, `fk_reverse_cache`, ...) and
-//! the free fn `register_token` remain reachable.
-
-use std::sync::Arc;
+//! This file is wired as a descendant of `repo_instance`; membership state is
+//! mutated through `TableCatalog` while FK invalidation stays on `RepoCore`.
 
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::table::table_manager::table_token_for;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
 
@@ -92,15 +87,9 @@ impl RepoInstance {
     }
 
     fn add_table_inner(&self, config: TableConfig) {
-        // Same synchronous DDL lock order as remove_table. This closes the
-        // config/reverse-token re-add window without holding guards over await.
-        let _entry = self.core.catalog.tables.entry(config.name.clone());
-        crate::repo::version_provider::register_token(&self.core.catalog.token_names, &config.name);
-        self.core
-            .catalog
-            .configs
-            .insert(config.name.clone(), config);
-        self.core.fk_reverse_cache.invalidate();
+        self.core.catalog.register_table_with(config, || {
+            self.core.fk_reverse_cache.invalidate();
+        });
     }
 
     /// Remove a table from the repository.
@@ -120,34 +109,8 @@ impl RepoInstance {
     }
 
     fn remove_table_inner(&self, table_name: &str) -> bool {
-        // DDL-only synchronous critical section: tables -> configs -> scc.
-        // Keep the table shard exclusive until owned MVCC cleanup completes,
-        // so a replacement initializer cannot publish in the removal window.
-        let entry = self.core.catalog.tables.entry(table_name.to_string());
-        let removed = self.core.catalog.configs.remove(table_name).is_some();
-        if removed {
+        self.core.catalog.remove_table_with(table_name, || {
             self.core.fk_reverse_cache.invalidate();
-            let token = table_token_for(table_name);
-            let _ = self
-                .core
-                .catalog
-                .token_names
-                .remove_if_sync(&token, |existing| existing.as_str() == table_name);
-            if let dashmap::mapref::entry::Entry::Occupied(entry) = &entry {
-                if let Some(mvcc) = entry.get().get().and_then(TableManager::mvcc_store) {
-                    let _ = self
-                        .core
-                        .catalog
-                        .per_table_mvcc
-                        .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
-                }
-            }
-            // An empty/in-flight cell owns no published MVCC. Its initializer
-            // must detect retirement and roll back only its own registration.
-            if let dashmap::mapref::entry::Entry::Occupied(entry) = entry {
-                entry.remove();
-            }
-        }
-        removed
+        })
     }
 }

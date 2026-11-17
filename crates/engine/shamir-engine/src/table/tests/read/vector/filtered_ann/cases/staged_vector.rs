@@ -1,6 +1,6 @@
-use crate::index2::vector::hnsw_adapter::{CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES};
-use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableConfig;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_index::vector::hnsw_adapter::{CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES};
 use shamir_query_builder::filter as qf;
 use shamir_query_types::read::ReadQuery;
 use shamir_tx::IsolationLevel;
@@ -28,17 +28,20 @@ async fn vr5_cofilter_sees_staged_and_filters_residual() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("vecs"));
     let mut tbl = repo.get_table("vecs").await.unwrap();
-    assert_eq!(tbl.filtered_ann_thresholds, None);
-    tbl.filtered_ann_thresholds = Some((16, 0.15));
+    assert_eq!(tbl.filtered_ann_thresholds_for_test(), None);
+    tbl.set_filtered_ann_thresholds_for_test(Some((16, 0.15)));
     // A separately obtained manager keeps defaults: no async/global leakage.
     assert_eq!(
         repo.get_table("vecs")
             .await
             .unwrap()
-            .filtered_ann_thresholds,
+            .filtered_ann_thresholds_for_test(),
         None,
     );
-    assert_eq!(tbl.clone().filtered_ann_thresholds, Some((16, 0.15)));
+    assert_eq!(
+        tbl.clone().filtered_ann_thresholds_for_test(),
+        Some((16, 0.15))
+    );
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
     tbl.create_index("tag_idx", &["tag"]).await.unwrap();
 

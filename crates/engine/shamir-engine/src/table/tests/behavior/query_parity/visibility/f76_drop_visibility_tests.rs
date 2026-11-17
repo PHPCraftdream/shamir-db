@@ -14,6 +14,8 @@
 //! retirement and the posting sweep, and a concurrent read / planner probe
 //! is issued deterministically into that exact window.
 
+use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
+
 use std::sync::Arc;
 
 use shamir_query_types::admin::types::CreateIndexOp;
@@ -24,10 +26,10 @@ use shamir_types::types::value::InnerValue;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::ReadQuery;
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_query_builder::Query;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
@@ -98,8 +100,6 @@ fn functional_lower_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
 /// still returns the correct set via full scan (the index no longer exists).
 #[tokio::test]
 async fn f76_regular_hash_drop_invisible_during_sweep() {
-    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
@@ -303,8 +303,6 @@ async fn f76_index2_drop_invisible_during_sweep() {
 /// planner-routed read.)
 #[tokio::test]
 async fn f76_unique_hash_drop_retires_definition_before_sweep() {
-    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();

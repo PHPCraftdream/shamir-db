@@ -28,6 +28,9 @@
 //! parked → `is_finished()` is true → the blocking assertion FAILS. Post-fix
 //! the create blocks on the drain → `is_finished()` is false → PASSES.
 
+use crate::table::{PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK};
+use tokio::sync::Notify;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,10 +38,10 @@ use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
-use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn make_repo() -> RepoInstance {
@@ -70,11 +73,6 @@ fn record_with_str(key: u64, val: &str) -> InnerValue {
 /// `regular_index_create_barrier`, and blocks in `drain_writers()`.
 #[tokio::test]
 async fn f57_create_index_drains_inflight_fast_path_writer() {
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
-    use tokio::sync::Notify;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
@@ -195,11 +193,6 @@ async fn f57_create_index_drains_inflight_fast_path_writer() {
 /// in-flight writers.
 #[tokio::test]
 async fn f57_create_unique_index_drains_inflight_fast_path_writer_first_unique() {
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
-    use tokio::sync::Notify;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
@@ -328,11 +321,6 @@ async fn f57_create_unique_index_drains_inflight_fast_path_writer_first_unique()
 /// backfill — the snapshot is a true point-in-time view.
 #[tokio::test]
 async fn f57_create_sorted_index_drains_inflight_fast_path_writer() {
-    use crate::table::table_manager_crud::{
-        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
-    };
-    use tokio::sync::Notify;
-
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("nums"));
     let tbl = repo.get_table("nums").await.unwrap();

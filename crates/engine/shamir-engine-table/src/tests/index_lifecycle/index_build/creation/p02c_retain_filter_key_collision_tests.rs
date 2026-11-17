@@ -1,0 +1,147 @@
+//! Regression test for the v2 keyspace boundaries used by index-op filtering.
+//!
+//! The old v1 namespace is retained for drop/recovery sweeps; v2 postings
+//! use namespaces 0x02/0x03 and variable-length canonical identities.
+
+use shamir_types::types::record_id::RecordId;
+
+use shamir_index::base_index::index_record_key::IndexRecordKey;
+use shamir_index::{build_posting_key, type_tag};
+
+/// Current key layouts: v2 regular `[0x02][name LE][I][rid]`, v2 unique
+/// `[0x03][name LE][I]`, and legacy `[0x00|0x01][name][hashes]` for migration.
+fn is_base_index_retain_candidate(key: &[u8]) -> bool {
+    (key.len() == 41 || key.len() == 25) && key.first().is_some_and(|&b| b <= 1)
+}
+
+/// SORTED_TAG as defined in
+/// `shamir_index::base_index::sorted_index_definition`.
+/// It is `pub(crate)` there so we duplicate the value here with a comment
+/// pointing to its source.
+const SORTED_TAG: u8 = 0x80;
+
+/// Lock in the key-length / first-byte facts for every existing backend that
+/// produces posting ops, proving none outside base_index falls into the
+/// retain filter's danger zone.
+#[test]
+fn retain_filter_key_collision_safety() {
+    let rid = RecordId::new();
+
+    // ══════════════════════════════════════════════════════════════════════
+    // base_index regular — identity v2 (P34-12 S2).
+    // Format: [ns=0x02:1][name_interned:8LE][I:var][rid:16] — VARIABLE
+    // length, first byte 0x02. This documents WHY the historical 41/25
+    // + ns<=1 danger-zone heuristic (kept below as the local mirror) would
+    // MISS every v2 key: identity-based retraction is decided by PROVENANCE
+    // (name_interned, instance_epoch) since R0-B, never by byte shape.
+    // ══════════════════════════════════════════════════════════════════════
+    let regular_irk = IndexRecordKey::new(false, 42).with_identity(vec![
+        0x02, 0, 0, 0, 0, 0, 0, 0, 7, // canonical Int(7)
+    ]);
+    let mut regular_key = regular_irk.to_bytes().to_vec();
+    regular_key.extend_from_slice(rid.as_bytes());
+    assert_eq!(
+        regular_key.len(),
+        9 + 9 + 16,
+        "regular posting key = 9-byte prefix + 9-byte identity + rid"
+    );
+    assert_eq!(
+        regular_key[0], 0x02,
+        "regular key first byte is the v2 regular namespace"
+    );
+    assert!(
+        !is_base_index_retain_candidate(&regular_key),
+        "a v2 regular key is OUTSIDE the historical heuristic's danger zone — \
+         retraction is provenance-based (R0-B), not byte-shape-based"
+    );
+
+    let legacy_key = IndexRecordKey::legacy_v1(true, 42)
+        .with_identity(vec![0xAA; 16])
+        .to_bytes();
+    assert_eq!(legacy_key.len(), 25);
+    assert!(is_base_index_retain_candidate(&legacy_key));
+
+    let unique_v2_key = IndexRecordKey::new(true, 42)
+        .with_identity(vec![0x02, 0, 0, 0, 0, 0, 0, 0, 7])
+        .to_bytes();
+    assert_eq!(unique_v2_key.len(), 18);
+    assert_eq!(unique_v2_key[0], 0x03);
+    assert!(!is_base_index_retain_candidate(&unique_v2_key));
+
+    let unique_v2_digest_key = IndexRecordKey::new(true, 42)
+        .with_identity(vec![0xFF; 33])
+        .to_bytes()
+        .to_vec();
+    assert_eq!(unique_v2_digest_key.len(), 42);
+    assert!(!is_base_index_retain_candidate(&unique_v2_digest_key));
+
+    // ══════════════════════════════════════════════════════════════════════
+    // sorted — safe via FIRST-BYTE guard (not length).
+    // Format: [SORTED_TAG=0x80:1][name_interned:8BE][encoded_value:var][rid:16].
+    // We deliberately construct a key of EXACTLY 25 bytes (empty
+    // encoded_value) to prove the first-byte guard — not the length — is
+    // what saves sorted from misidentification.
+    // ══════════════════════════════════════════════════════════════════════
+    let sorted_25_key = {
+        let mut buf = Vec::with_capacity(25);
+        buf.push(SORTED_TAG); // 0x80 — always > 1
+        buf.extend_from_slice(&42u64.to_be_bytes());
+        // No encoded_value (0 bytes) — forces the 25-byte boundary length
+        buf.extend_from_slice(rid.as_bytes());
+        buf
+    };
+    assert_eq!(sorted_25_key.len(), 25);
+    assert!(
+        !is_base_index_retain_candidate(&sorted_25_key),
+        "sorted posting key must NOT be in the danger zone — \
+         first byte 0x80 > 1 saves it even at the 25-byte boundary length"
+    );
+
+    // ══════════════════════════════════════════════════════════════════════
+    // FTS — safe via LENGTH guard (not first byte).
+    // Format: build_posting_key = [index_id:4LE][type_tag:1][token_hash:8LE][rid:16] = 29 bytes.
+    // With index_id=1, byte[0] = 0x01 (low byte of the u32 LE id) which IS
+    // <= 1 — but the 29-byte length saves it.
+    // ══════════════════════════════════════════════════════════════════════
+    let fts_key = build_posting_key(1, type_tag::FTS, &0u64.to_le_bytes(), &rid);
+    assert_eq!(fts_key.len(), 29, "FTS posting key must be 29 bytes");
+    assert_eq!(fts_key[0], 1, "FTS key[0] is low byte of index_id=1");
+    assert!(
+        !is_base_index_retain_candidate(&fts_key),
+        "FTS posting key must NOT be in the danger zone — \
+         29-byte length saves it even though key[0]=1"
+    );
+
+    // ══════════════════════════════════════════════════════════════════════
+    // FTS-ranked — same key format as FTS (29 bytes, type_tag::FTS).
+    // Different index_id (2) for coverage; byte[0]=2 > 1, so it's doubly safe.
+    // ══════════════════════════════════════════════════════════════════════
+    let fts_ranked_key = build_posting_key(2, type_tag::FTS, &0u64.to_le_bytes(), &rid);
+    assert_eq!(fts_ranked_key.len(), 29);
+    assert!(
+        !is_base_index_retain_candidate(&fts_ranked_key),
+        "FTS-ranked posting key must NOT be in the danger zone"
+    );
+
+    // ══════════════════════════════════════════════════════════════════════
+    // functional — safe via LENGTH guard (not first byte).
+    // Format: [index_id:4LE][type_tag:1][value_hash:16][rid:16] = 37 bytes.
+    // With index_id=1, byte[0] = 0x01 which IS <= 1 — but the 37-byte length
+    // saves it.
+    // ══════════════════════════════════════════════════════════════════════
+    let func_key = build_posting_key(1, type_tag::FUNCTIONAL, &[0xAB; 16], &rid);
+    assert_eq!(
+        func_key.len(),
+        37,
+        "functional posting key must be 37 bytes"
+    );
+    assert_eq!(
+        func_key[0], 1,
+        "functional key[0] is low byte of index_id=1"
+    );
+    assert!(
+        !is_base_index_retain_candidate(&func_key),
+        "functional posting key must NOT be in the danger zone — \
+         37-byte length saves it even though key[0]=1"
+    );
+}

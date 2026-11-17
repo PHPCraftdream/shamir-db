@@ -9,9 +9,9 @@ use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
 use tokio::sync::oneshot;
 
-use crate::repo::repo_types::BoxRepo;
 use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+use shamir_engine_repo::repo_types::BoxRepo;
 
 async fn parked_insert(abort_lower: bool) {
     let repo = RepoInstance::new(
@@ -55,7 +55,7 @@ async fn parked_insert(abort_lower: bool) {
     // A lower orphan's posting replay uses this exact barrier protocol.
     // Acquiring it while ack is pending proves the writer drain was released.
     let (barrier, lock) = table
-        .begin_write_barrier(crate::index::write_barrier_flags::SCHEMA_ACTIVATION)
+        .begin_write_barrier(shamir_index::base_index::write_barrier_flags::SCHEMA_ACTIVATION)
         .await
         .unwrap();
     drop(lock);

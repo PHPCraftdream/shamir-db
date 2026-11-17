@@ -1,8 +1,13 @@
+use crate::table::interner_manager::InternerManager;
+use crate::table::record_counter::RecordCounter;
+use crate::table::table::Table;
+use shamir_index::base_index::index_manager::IndexManager;
+
 use crate::db_instance::db_instance::DbInstance;
-use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
 use crate::table::TableManager;
+use shamir_engine_repo::repo_types::BoxRepoFactory;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Repo;
 use shamir_types::types::common::new_map;
@@ -28,7 +33,7 @@ async fn cached_token_preserves_hash_across_construction_clone_and_reopen() {
         .await
         .unwrap();
     assert_eq!(reopened.table_token(), expected);
-    let domain = crate::repo::RepoWriteDomain::new("repo".to_string());
+    let domain = shamir_engine_repo::RepoWriteDomain::new("repo".to_string());
     let permit = domain.admit().await.unwrap();
     let admitted = TableManager::create_with_domain_admitted(
         name.to_string(),
@@ -55,17 +60,12 @@ async fn test_table_manager_creation() {
     let data_store: Arc<dyn shamir_storage::types::Store> = data_store;
     let info_store: Arc<dyn shamir_storage::types::Store> = info_store;
 
-    use crate::index::index_manager::IndexManager;
-    use crate::table::interner_manager::InternerManager;
-    use crate::table::record_counter::RecordCounter;
-
     let interner = InternerManager::new(Arc::clone(&info_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
     let index_manager = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
         .await
         .unwrap();
 
-    use crate::table::Table;
     let table = Table::new(Arc::clone(&data_store));
 
     let ctx = TableManager::new("test".to_string(), table, interner, counter, index_manager);
@@ -148,8 +148,6 @@ async fn test_table_manager_insert_many_no_index() {
 
 #[tokio::test]
 async fn test_table_manager_insert_many_with_unique_index() {
-    use shamir_types::types::common::new_map;
-
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
@@ -194,7 +192,6 @@ async fn test_insert_many_rejects_within_batch_duplicate_unique() {
     // `validate_unique_for_create` only checks already-persisted
     // state and cannot see the prior element of the same batch on
     // its own.
-    use shamir_types::types::common::new_map;
 
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
