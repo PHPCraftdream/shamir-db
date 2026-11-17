@@ -2,7 +2,6 @@ mod support;
 
 pub(crate) use support::guards::migration_freeze_guard;
 pub use support::guards::{in_flight_create_guard, writer_drain_barrier};
-pub use support::index_metrics;
 pub use support::model::{buffer_config, table, table_config};
 pub use support::storage::fk_reverse_cache;
 pub use support::storage::{interner_manager, persistable, record_counter, record_cow};
@@ -17,7 +16,7 @@ pub use support::validator_bound;
 pub use shamir_index::base_index::ddl_op_log;
 mod read;
 pub mod table_manager;
-pub use table_manager::diagnostics::{degraded_index_count, doctor};
+pub use table_manager::diagnostics::{degraded_index_count, doctor, index_metrics};
 mod write;
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
