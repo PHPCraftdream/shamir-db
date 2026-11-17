@@ -141,7 +141,7 @@ fn run_pass(
     options: &CopyOptions,
     stage: BackupStage,
 ) -> Result<CopyPassResult, OnlineBackupError> {
-    copy_engine::run_copy_pass(source, dest, skip, cancel, options)
+    copy_engine::run_copy_pass(source, dest, skip, &[], cancel, options)
         .map_err(|error| copy_failed(stage, error))
 }
 
@@ -283,6 +283,12 @@ fn run_steps(
     let repos = port
         .catalogue()
         .map_err(|error| failed(BackupStage::Preparing, error))?;
+    // WAL dirs are copied by their own passes (before stores); the store
+    // pass must not copy them again, or later bytes would overwrite them.
+    let wal_dirs: Vec<PathBuf> = repos
+        .iter()
+        .filter_map(|repo| repo.wal_dir.clone())
+        .collect();
     port.acquire_pins()
         .map_err(|error| failed(BackupStage::Preparing, error))?;
     let dest_dir = to.join(utc_timestamp());
@@ -319,8 +325,15 @@ fn run_steps(
         options,
         BackupStage::Copying,
     )?;
-    copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
-        .map_err(|error| copy_failed(BackupStage::Copying, error))?;
+    copy_engine::run_copy_pass(
+        source_root,
+        &dest_dir,
+        SKIP_TOP_LEVEL_DIRS,
+        &wal_dirs,
+        cancel,
+        options,
+    )
+    .map_err(|error| copy_failed(BackupStage::Copying, error))?;
 
     // E. Seal barrier: V* per repo, then the seal re-copy (WAL then
     // stores) whose final hashes define the snapshot.
@@ -344,9 +357,15 @@ fn run_steps(
         options,
         BackupStage::Sealing,
     )?;
-    let store_final =
-        copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
-            .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+    let store_final = copy_engine::run_copy_pass(
+        source_root,
+        &dest_dir,
+        SKIP_TOP_LEVEL_DIRS,
+        &wal_dirs,
+        cancel,
+        options,
+    )
+    .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
 
     // F. Verify + manifest: manifest from the final pass, written last
     // with fsync, then self-verification.

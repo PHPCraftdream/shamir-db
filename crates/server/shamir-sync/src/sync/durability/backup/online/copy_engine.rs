@@ -194,11 +194,13 @@ fn list_files(source_root: &Path, skip_top_level_dirs: &[&str]) -> std::io::Resu
 /// retry, then a second hash pass over every SOURCE file that defines the
 /// snapshot. A source file changed between copy and hash is re-copied up
 /// to twice more; one still mismatching fails the pass. A source file
-/// deleted mid-copy is excluded from the result.
+/// deleted mid-copy is excluded from the result. Files under any of
+/// `exclude_dirs` (absolute source paths) are left to their own pass.
 pub fn run_copy_pass(
     source_root: &Path,
     dest_root: &Path,
     skip_top_level_dirs: &[&str],
+    exclude_dirs: &[PathBuf],
     cancel: &CancelFlag,
     options: &CopyOptions,
 ) -> Result<CopyPassResult, CopyError> {
@@ -213,6 +215,9 @@ pub fn run_copy_pass(
     for source_path in listing {
         if cancel.is_cancelled() {
             return Err(CopyError::Cancelled);
+        }
+        if exclude_dirs.iter().any(|dir| source_path.starts_with(dir)) {
+            continue;
         }
         let rel = match source_path.strip_prefix(source_root) {
             Ok(rel) => rel,
