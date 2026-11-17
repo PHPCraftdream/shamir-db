@@ -314,7 +314,10 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         | AlterSubscription(_)
         | ListPublications(_)
         | ListSubscriptions(_)
-        | ReplicationStatus(_) => HmacPolicy::NotGated,
+        | ReplicationStatus(_)
+        // R1c: application-schema ops are not destructive-HMAC gated; the
+        // apply step enforces its own integrity via the body checksum.
+        | ApplicationSchema(_) => HmacPolicy::NotGated,
     }
 }
 /// Canonical bytes for a whole operation; every applicable DTO is destructured without `..`.

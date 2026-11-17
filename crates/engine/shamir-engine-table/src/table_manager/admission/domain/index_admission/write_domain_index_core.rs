@@ -4,6 +4,9 @@ use shamir_engine_repo::RepoWritePermit;
 use shamir_storage::error::DbResult;
 use shamir_types::time::unix_millis;
 use shamir_types::types::record_id::RecordId;
+use std::time::Instant;
+
+use crate::index_metrics::{observe_build, IndexMetricKind};
 
 impl TableManager {
     pub async fn create_index_admitted(
@@ -14,6 +17,8 @@ impl TableManager {
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
         self.ensure_attached()?;
+        // Metrics: the whole create (online or barrier path) is one build.
+        let build_start = Instant::now();
         let mut index_def = self.build_index_definition(name, paths).await?;
         // #1003: mark THIS index's name as in-flight for the rest of the
         // method body (RAII guard, dropped on every exit path including an
@@ -48,7 +53,7 @@ impl TableManager {
         // writers to proceed. If the table has no changefeed wired (e.g. a system
         // table or a directly-constructed test table), fall back to the whole-barrier
         // path below.
-        match self
+        let result = match self
             .phase_b_a_backfill(name, index_def.clone(), 1000, permit)
             .await?
         {
@@ -120,7 +125,19 @@ impl TableManager {
                     .create_index_from_stream(index_def, stream)
                     .await
             }
+        };
+        // One observe per COMPLETED build; a failed create leaves no live
+        // index and is not observed. Rename re-creates land here too and
+        // count as builds (new index identity).
+        if result.is_ok() {
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Regular,
+                false,
+                build_start,
+            );
         }
+        result
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.
@@ -247,7 +264,7 @@ impl TableManager {
              unique family materializes all rows, no streaming)",
             index_def.name_interned
         );
-        let backfill_start = std::time::Instant::now();
+        let backfill_start = Instant::now();
         let records = self.collect_all_current_records().await?;
         log::info!(
             "CREATE UNIQUE INDEX '{}': scanned {} records in {:.1}s, \
@@ -256,9 +273,21 @@ impl TableManager {
             records.len(),
             backfill_start.elapsed().as_secs_f64()
         );
-        self.index_manager
+        let result = self
+            .index_manager
             .create_unique_index_from_records(index_def, records)
-            .await
+            .await;
+        // One observe per COMPLETED build (success only — see
+        // `create_index_admitted`).
+        if result.is_ok() {
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Regular,
+                false,
+                backfill_start,
+            );
+        }
+        result
     }
 
     /// S5c-X admitted twin — caller already holds repo admission.

@@ -501,6 +501,11 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "replication inspection",
                 ))
             }
+            BatchOp::ApplicationSchema(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "application-schema admin operation",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

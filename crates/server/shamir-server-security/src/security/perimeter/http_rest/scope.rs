@@ -252,6 +252,8 @@ fn classify_batch(
             | BatchOp::AlterSubscription(_)
             | BatchOp::ListPublications(_)
             | BatchOp::ListSubscriptions(_)
+            // R1c: token requests may not run application-schema operations.
+            | BatchOp::ApplicationSchema(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

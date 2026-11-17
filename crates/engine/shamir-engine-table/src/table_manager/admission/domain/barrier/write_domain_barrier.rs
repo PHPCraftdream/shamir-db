@@ -232,6 +232,7 @@ impl TableManager {
             detached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: crate::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: crate::in_flight_create_guard::InFlightCreateSet::new(),
+            index_metrics: Arc::new(std::sync::OnceLock::new()),
             index2_registry: Arc::new(shamir_index::IndexRegistry::new()),
             #[cfg(any(test, feature = "test-util"))]
             filtered_ann_thresholds: None,

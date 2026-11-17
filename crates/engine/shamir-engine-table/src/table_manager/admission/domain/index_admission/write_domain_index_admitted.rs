@@ -10,6 +10,9 @@ use shamir_index::kind::{
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::TouchInd;
 use smallvec::SmallVec;
+use std::time::Instant;
+
+use crate::index_metrics::{observe_build, IndexMetricKind};
 
 impl TableManager {
     /// S5c-X admitted twin — caller already holds repo admission.
@@ -159,6 +162,10 @@ impl TableManager {
 
         let id = self.index2_registry.allocate_id();
 
+        // Metrics clock: started once the backend is about to be built; read
+        // only on the FTS success path below.
+        let build_start = Instant::now();
+
         let name_key = match interner
             .touch_ind(&op.create_index)
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
@@ -179,6 +186,8 @@ impl TableManager {
         let first_path = interned_paths.first().cloned().unwrap_or_default();
 
         let (_kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
+            // Metrics: only the FTS family is observed (kind fts); functional
+            // and vector backends are outside the index-metrics kind set.
             "fts" => {
                 // DSL names for fts_tokenizer:
                 //   "whitespace"          → plain whitespace split
@@ -425,23 +434,26 @@ impl TableManager {
             hook.wait_at_window().await;
         }
 
-        self.index2_registry.insert(backend).await.map_err(|e| {
-            let detail = format!(
-                "CREATE INDEX '{}': the index was durably persisted as \
+        self.index2_registry
+            .insert(backend.clone())
+            .await
+            .map_err(|e| {
+                let detail = format!(
+                    "CREATE INDEX '{}': the index was durably persisted as \
                      Building and the backfill completed, but registering the \
                      backend in the live registry failed: {e}. The index is \
                      NOT queryable in THIS process — on restart, the table-open \
                      self-heal will detect the Building state and re-backfill. \
                      Call TableManager::verify() to confirm state, or \
                      TableManager::repair() to rebuild it.",
-                op.create_index
-            );
-            log::error!("{}", detail);
-            shamir_index::backend::contextualize_db_error(
-                shamir_storage::error::DbError::from(e),
-                detail,
-            )
-        })?;
+                    op.create_index
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(
+                    shamir_storage::error::DbError::from(e),
+                    detail,
+                )
+            })?;
 
         // #1003 test-only pause point: park here (backend now LIVE in the
         // registry, still `Building`) if a test installed the hook. This is
@@ -485,6 +497,18 @@ impl TableManager {
                 log::error!("{}", detail);
                 shamir_index::backend::contextualize_db_error(e, detail)
             })?;
+
+        // Metrics: observe the completed FTS build once, after the backend is
+        // registered and durably Ready (success path only; failed builds leave
+        // a permanently-Building index and are not observed).
+        if matches!(backend.descriptor().kind, IndexKind::Fts { .. }) {
+            observe_build(
+                self.index_build_observer().as_ref(),
+                IndexMetricKind::Fts,
+                false,
+                build_start,
+            );
+        }
 
         Ok(())
     }

@@ -16,7 +16,7 @@ pub use support::validator_bound;
 pub use shamir_index::base_index::ddl_op_log;
 mod read;
 pub mod table_manager;
-pub use table_manager::diagnostics::{degraded_index_count, doctor};
+pub use table_manager::diagnostics::{degraded_index_count, doctor, index_metrics};
 mod write;
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]

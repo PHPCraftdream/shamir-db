@@ -73,7 +73,10 @@ mod read;
 pub use batch::visibility;
 pub use read::{cursor, filter, query, select, val};
 pub use wire::response;
-pub use wire::schema_migration::{SchemaMigration, SchemaMigrationSet};
+pub use wire::schema_migration::{
+    application_schema_plan, application_schema_status, apply_application_schema_migration,
+    SchemaMigration, SchemaMigrationSet,
+};
 pub use wire::token_admin;
 
 // Re-export the headline type for convenience.

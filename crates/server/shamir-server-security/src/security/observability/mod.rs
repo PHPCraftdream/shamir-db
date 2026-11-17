@@ -77,7 +77,8 @@ use export::functions::{record_functions_metrics, register_functions_metrics};
 use export::replication::{record_replication_metrics, register_replication_metrics};
 use export::{
     record_engine_metrics, record_storage_metrics, record_transactions_metrics,
-    register_engine_metrics, register_storage_metrics, register_transactions_metrics,
+    register_engine_metrics, register_index_interner_metrics, register_storage_metrics,
+    register_transactions_metrics, sample_index_interner_metrics,
 };
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
@@ -469,6 +470,9 @@ pub async fn spawn_with_byte_budget(
     register_storage_metrics();
     register_functions_metrics();
     register_engine_metrics();
+    // R4a PR-4 §2.5/§2.6: index build/rebuild histograms, entry gauges,
+    // interner gauges and the cardinality companion gauges.
+    register_index_interner_metrics();
     register_replication_metrics();
     register_transactions_metrics();
 
@@ -612,6 +616,7 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
         Some(h) => {
             if let Some(db) = &s.db {
                 sample_gate_metrics(db);
+                sample_index_interner_metrics(db).await;
             }
             record_functions_metrics();
             record_replication_metrics();

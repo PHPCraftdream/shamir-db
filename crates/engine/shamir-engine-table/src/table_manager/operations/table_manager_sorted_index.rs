@@ -2,6 +2,7 @@ use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 
+use crate::index_metrics::{observe_build, IndexMetricKind};
 use crate::table_manager::TableManager;
 use shamir_engine_repo::RepoWritePermit;
 use shamir_index::base_index::sorted_index_manager::SortedIndexDefinition;
@@ -328,6 +329,14 @@ impl TableManager {
             index_name,
             sorted_count,
             backfill_start.elapsed().as_secs_f64()
+        );
+        // Metrics: one observe per completed sorted-index build; the success
+        // path is the only one that leaves the index Ready.
+        observe_build(
+            self.index_build_observer().as_ref(),
+            IndexMetricKind::Sorted,
+            false,
+            backfill_start,
         );
         Ok(())
     }

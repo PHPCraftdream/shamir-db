@@ -89,6 +89,7 @@ define_op_kinds! {
     ListPublications => "list_publications",
     ListSubscriptions => "list_subscriptions",
     ReplicationStatus => "replication_status",
+    ApplicationSchema => "application_schema",
     Call => "call",
     ForEach => "for_each",
     Batch => "batch",

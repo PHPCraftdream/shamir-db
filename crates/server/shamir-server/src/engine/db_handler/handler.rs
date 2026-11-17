@@ -681,12 +681,25 @@ impl ShamirDbHandler {
         // through. `is_write()` is exhaustive, so any new `BatchOp` variant
         // is automatically classified and the author must decide read vs
         // write. This is a no-op when `node_mode == ReadWrite` (the default).
-        // R1: include leader_addr for client redirect.
+        // R1: include leader_addr for client redirect. R1c (§4.5): a
+        // follower has no consistent journal+schema view, so EVERY
+        // application-schema arm (status included) is refused first with
+        // the stable `schema_migration_follower_read_only` code.
         if self.node_mode == NodeMode::ReadOnly {
             for visit in
                 BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
             {
                 let (alias, entry) = (visit.alias, visit.entry);
+                if matches!(entry.op, BatchOp::ApplicationSchema(_)) {
+                    return DbResponse::Error {
+                        code: "schema_migration_follower_read_only".into(),
+                        message: format!(
+                            "query '{}': application-schema operations are refused on a \
+                             follower/read replica (no consistent journal+schema view)",
+                            alias
+                        ),
+                    };
+                }
                 if entry.op.is_write() {
                     return DbResponse::Error {
                         code: "read_only_replica".into(),

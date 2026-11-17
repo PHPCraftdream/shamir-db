@@ -113,6 +113,12 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::PurgeHistory(_) => self.handle_purge_history(op).await,
             op @ BatchOp::ChangesSince(_) => self.handle_changes_since(op).await,
 
+            // ── Application schema migrations (R1c 2b-1) ───────────────
+            // Routed through a boxed dispatcher so the status arm's await
+            // state stays out of `execute_admin`'s own future (Windows
+            // nested-Batch stack overflow; same mechanism as dispatch_repl).
+            op @ BatchOp::ApplicationSchema(_) => Self::dispatch_schema_migration(self, op).await,
+
             // ── Replication DDL (386-a) ────────────────────────────────
             // Round-14: routed through `dispatch_repl` so the replication
             // arms' await state stays out of `execute_admin`'s own future
@@ -176,6 +182,23 @@ impl ShamirAdminExecutor {
                 _ => Err(BatchError::QueryError {
                     alias: String::new(),
                     message: "Not a replication operation".to_string(),
+                    code: None,
+                }),
+            }
+        })
+    }
+
+    /// R1c 2b-1: application-schema migration dispatcher, boxed for the same
+    /// reason as `dispatch_repl` — the status arm's durable-journal reads
+    /// must not grow `execute_admin`'s own state machine.
+    #[inline(never)]
+    fn dispatch_schema_migration<'a>(&'a self, op: &'a BatchOp) -> AdminDispatchFuture<'a> {
+        Box::pin(async move {
+            match op {
+                BatchOp::ApplicationSchema(_) => self.handle_application_schema(op).await,
+                _ => Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "Not an application-schema operation".to_string(),
                     code: None,
                 }),
             }

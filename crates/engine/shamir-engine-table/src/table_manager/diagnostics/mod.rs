@@ -6,3 +6,4 @@
 
 pub mod degraded_index_count;
 pub mod doctor;
+pub mod index_metrics;

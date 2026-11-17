@@ -286,6 +286,12 @@ pub struct TableManager {
     /// clones via `Arc` (same rationale as the sibling barrier/counter
     /// fields).
     pub(super) in_flight_creates: super::in_flight_create_guard::InFlightCreateSet,
+    /// Index build/rebuild metrics sink (see `support::index_metrics`).
+    /// Shared across clones; installed at most once via
+    /// `set_index_build_observer`. Empty until the instance layer wires it —
+    /// observations are skipped while unset.
+    pub(super) index_metrics:
+        Arc<std::sync::OnceLock<Arc<dyn super::index_metrics::IndexBuildObserver>>>,
     pub(super) index2_registry: Arc<shamir_index::IndexRegistry>,
     /// Per-manager planner thresholds for cheap filtered-ANN tests. Set before
     /// reads; copied by Clone, with no global or thread-local async state.
@@ -524,6 +530,7 @@ impl Clone for TableManager {
             // clone must be visible to `degraded_index_count()` called on
             // another.
             in_flight_creates: self.in_flight_creates.clone(),
+            index_metrics: Arc::clone(&self.index_metrics),
             index2_registry: Arc::clone(&self.index2_registry),
             #[cfg(any(test, feature = "test-util"))]
             filtered_ann_thresholds: self.filtered_ann_thresholds,
@@ -696,6 +703,7 @@ impl TableManager {
             detached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
+            index_metrics: Arc::new(std::sync::OnceLock::new()),
             index2_registry: Arc::new(shamir_index::IndexRegistry::new()),
             #[cfg(any(test, feature = "test-util"))]
             filtered_ann_thresholds: None,

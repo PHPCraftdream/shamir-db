@@ -285,6 +285,25 @@ impl TableManager {
         &self.index2_registry
     }
 
+    /// Install the index build/rebuild metrics sink (see
+    /// `crate::index_metrics`). Idempotent: the first installation wins;
+    /// later calls return `false` and change nothing. Because the slot lives
+    /// in a shared `Arc<OnceLock<_>>`, installing on any clone of this
+    /// manager covers all of them.
+    pub fn set_index_build_observer(
+        &self,
+        observer: Arc<dyn crate::index_metrics::IndexBuildObserver>,
+    ) -> bool {
+        self.index_metrics.set(observer).is_ok()
+    }
+
+    /// Current metrics sink, if one was installed.
+    pub(crate) fn index_build_observer(
+        &self,
+    ) -> Option<Arc<dyn crate::index_metrics::IndexBuildObserver>> {
+        self.index_metrics.get().cloned()
+    }
+
     pub fn unique_write_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.unique_write_lock)
     }
