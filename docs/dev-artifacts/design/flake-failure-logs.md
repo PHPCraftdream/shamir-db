@@ -79,6 +79,7 @@ diagnostics stay because the class (timing, ports, OS differences) can recur.
 | `recall_sq8_vs_f32_within_two_percent`, `recall_at_10_on_1k_vectors` | shamir-index `src/vector/tests/...` | statistical: log seed, dataset size, measured recall |
 | e2e-login subscription test | shamir-client-ts `__tests__/connection/token/e2e-login.test.ts` | already failure-only (timeline + server log in the error) |
 | browser-login "settles promptly on abort while fetch is pending..." | shamir-client-ts `src/login/__tests__/browser-login.test.ts` | timing |
+| `token_ws_execute_writes_and_reads` (token matrix boot) | shamir-e2e `tests/matrix/token/common.rs` | launcher boot hit `FjallError: Locked` on ubuntu: the seed's dropped stores release their fjall locks from background handles; the boot now retries on `Locked` like the shamir-server `http_rest` harness, and the guard marks each retry |
 
 A test is added to the table when it flakes; the fix for a new flake includes adopting the
 guard.

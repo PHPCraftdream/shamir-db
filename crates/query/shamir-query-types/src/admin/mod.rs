@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod types;
+pub use types::schema_migration;
 
 #[cfg(test)]
 mod tests;
