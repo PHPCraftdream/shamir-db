@@ -97,15 +97,16 @@ async fn follower_refuses_application_schema_status_as_stale() {
 /// Plan-for-apply is primary-only (design §4.5): the same single
 /// `BatchOp::ApplicationSchema` gate refuses it on a ReadOnly node.
 fn plan_batch() -> shamir_query_builder::BatchRequest {
-    let identity = "0197f36a-1b2c-7cc3-8a44-3d6f5a9b0e17";
     let mut b = Batch::new();
     b.op(
         "plan",
         application_schema_plan(SchemaMigrationPlanRequest {
             protocol_version: 1,
             target: SchemaMigrationTarget {
-                database_identity: shamir_types::types::record_id::RecordId::from_str(identity)
-                    .expect("test identity parses"),
+                database_identity: shamir_types::types::record_id::RecordId::from_ts_seq(
+                    1_700_000_000_000_000,
+                    7,
+                ),
             },
             expected_predecessor: SchemaMigrationPredecessor {
                 migration_id: None,
