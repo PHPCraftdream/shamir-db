@@ -439,6 +439,22 @@ impl SystemStore {
         table.data_store_read_view().flush().await
     }
 
+    /// Capture the logical-export read facade without exposing a writable
+    /// system-repository handle. Caller must hold exclusive offline ownership
+    /// (or fence every mutation source) and prepare tables before the freeze.
+    pub async fn capture_logical_export<'a>(
+        &self,
+        db: &DbInstance,
+        guard: &'a crate::engine::db_instance::logical_export::MaintenanceGuard,
+    ) -> DbResult<crate::engine::db_instance::logical_export::LogicalExport<'a>> {
+        crate::engine::db_instance::logical_export::LogicalExport::capture(
+            db,
+            &self.system_repo()?,
+            guard,
+        )
+        .await
+    }
+
     /// Resolve the SYSTEM_REPO [`RepoInstance`].
     ///
     /// F5a: system-store DELETEs route through the repo's implicit-tx

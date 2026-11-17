@@ -97,6 +97,9 @@ enum Subcmd {
         service: bool,
     },
 
+    /// Export a stopped database's supported logical scope; fails on unsupported content.
+    LogicalExport(shamir_server::logical_dump::LogicalExportArgs),
+
     /// Export one stopped repository as a logical replication seed.
     ReplicationSeedExport {
         #[arg(long)]
@@ -347,6 +350,26 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.
     match cli.command {
+        Some(Subcmd::LogicalExport(args)) => {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let operation =
+                shamir_server::logical_dump::export(&config.data_dir, &args, cancel.clone());
+            tokio::pin!(operation);
+            let report = tokio::select! {
+                result = &mut operation => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancel.cancel();
+                    // Join, never detach offline recovery or lose its lock.
+                    operation.await?
+                }
+            };
+            println!(
+                "logical-export verified: {} items, {} bytes",
+                report.items, report.bytes
+            );
+            return Ok(0);
+        }
         Some(Subcmd::ReplicationSeedExport { db, repo, out }) => {
             let digest =
                 shamir_server::replication_seed::export(&config.data_dir, &db, &repo, &out).await?;
