@@ -169,27 +169,30 @@ pub async fn build_fixture(root: &Path) -> Fixture {
         .unwrap();
 
     let mut batch = Batch::new();
-    batch.op(
-        "put",
-        write::Insert::with_repo("main", "rows").row(doc! {
-            "s" => "ambiguous",
-            "i" => -42_i64,
-            "f" => QueryValue::F64(2.5),
-            "b" => QueryValue::Bin(vec![0, 0xff, 0x7f]),
-            "z" => QueryValue::Null,
-            "flag" => true,
-            "l" => QueryValue::List(vec![
-                QueryValue::Int(1),
-                QueryValue::Str("two".into()),
-            ]),
-            "m" => {
-                let mut nested = shamir_types::types::common::new_map();
-                nested.insert("z".to_string(), QueryValue::Int(1));
-                nested.insert("a".to_string(), QueryValue::Str("x".into()));
-                QueryValue::Map(nested)
-            }
-        }),
-    );
+    {
+        // Nested list/map values cannot travel through the `doc!` builder
+        // (its `FilterValue` conversion refuses them), so the row value is
+        // built as a `QueryValue` map directly.
+        let mut l = shamir_types::types::common::new_map();
+        l.insert("s".to_string(), QueryValue::Str("ambiguous".into()));
+        l.insert("i".to_string(), QueryValue::Int(-42));
+        l.insert("f".to_string(), QueryValue::F64(2.5));
+        l.insert("b".to_string(), QueryValue::Bin(vec![0, 0xff, 0x7f]));
+        l.insert("z".to_string(), QueryValue::Null);
+        l.insert("flag".to_string(), QueryValue::Bool(true));
+        l.insert(
+            "l".to_string(),
+            QueryValue::List(vec![QueryValue::Int(1), QueryValue::Str("two".into())]),
+        );
+        let mut nested = shamir_types::types::common::new_map();
+        nested.insert("z".to_string(), QueryValue::Int(1));
+        nested.insert("a".to_string(), QueryValue::Str("x".into()));
+        l.insert("m".to_string(), QueryValue::Map(nested));
+        batch.op(
+            "put",
+            write::Insert::with_repo("main", "rows").row(QueryValue::Map(l)),
+        );
+    }
     batch.op(
         "put",
         write::Insert::with_repo("main", "rows").row(doc! { "s" => "second" }),
@@ -375,6 +378,8 @@ pub fn handcrafted_bytes(database_owner: Option<&str>, record_key: Option<Vec<u8
         encryption: EncryptionMode::None,
         sections,
     };
+    // Every `SectionKind::ORDERED` section must be written in order, the
+    // empty ones included, or the reader refuses the section order.
     let items: Vec<(SectionKind, Vec<PortableItem>)> = vec![
         (
             SectionKind::Identities,
@@ -420,6 +425,11 @@ pub fn handcrafted_bytes(database_owner: Option<&str>, record_key: Option<Vec<u8
                 mode: 0o600,
             })],
         ),
+        (SectionKind::PortableSchemas, Vec::new()),
+        (SectionKind::ValidatorsAndFunctions, Vec::new()),
+        (SectionKind::GuestWasmModules, Vec::new()),
+        (SectionKind::Bindings, Vec::new()),
+        (SectionKind::IndexDescriptors, Vec::new()),
         (SectionKind::Acls, Vec::new()),
         (
             SectionKind::Records,

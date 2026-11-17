@@ -56,15 +56,15 @@ async fn fixture(root: &Path, strings: bool) {
     home.add_table("app", "main", "rows", false).await.unwrap();
     let mut batch = Batch::new();
     if strings {
+        let mut row = shamir_types::types::common::new_map();
+        row.insert("value".to_string(), QueryValue::Str("ambiguous".into()));
+        row.insert(
+            "list".to_string(),
+            QueryValue::List(vec![QueryValue::Int(1), QueryValue::Str("two".into())]),
+        );
         batch.op(
             "put",
-            write::Insert::with_repo("main", "rows").row(doc! {
-                "value" => "ambiguous",
-                "list" => QueryValue::List(vec![
-                    QueryValue::Int(1),
-                    QueryValue::Str("two".into()),
-                ])
-            }),
+            write::Insert::with_repo("main", "rows").row(QueryValue::Map(row)),
         );
     } else {
         batch.op(
@@ -190,7 +190,10 @@ fn stored_strings_and_lists_export_with_stored_tags_then_schema_only_succeeds() 
         ])
     );
     drop(reader);
-    let mut options = args(&output);
+    // The exporter refuses to replace an existing output by design, so the
+    // schema-only pass writes to its own fresh path.
+    let schema_output = dir.path().join("schema.mpack");
+    let mut options = args(&schema_output);
     options.schema_only = true;
     let report = runtime()
         .block_on(export(dir.path(), &options, CancellationToken::new()))

@@ -93,10 +93,14 @@ fn missing_disabled_marker_decodes_enabled_round_trip_identical() {
 fn imported_credential_material_differs_between_imports() {
     fn import_and_read_material() -> (TempDir, [u8; 16], [u8; 32], [u8; 32]) {
         let temp = TempDir::new().expect("tempdir");
-        let directory = FjallUserDirectory::open(temp.path()).expect("open directory");
-        directory
-            .insert_disabled_import("imported".to_string(), None)
-            .expect("import user");
+        {
+            // Scope the handle: the directory is exclusive, so it must be
+            // closed before the raw reopen below.
+            let directory = FjallUserDirectory::open(temp.path()).expect("open directory");
+            directory
+                .insert_disabled_import("imported".to_string(), None)
+                .expect("import user");
+        }
         let blob = read_imported_blob(temp.path(), "imported");
         (
             temp,

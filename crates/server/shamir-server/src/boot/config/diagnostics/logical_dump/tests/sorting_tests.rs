@@ -5,13 +5,12 @@ use tokio_util::sync::CancellationToken;
 
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
-use shamir_types::types::common::TSet;
+use shamir_types::types::common::{new_map, TSet};
 use shamir_types::types::value::QueryValue;
 
 use super::super::projection::record_value;
 use super::super::sorting::{next_item, Sorter};
 use super::super::staging::Stage;
-use shamir_query_builder::doc;
 
 fn row(key: Vec<u8>) -> PortableItem {
     PortableItem::Record(RecordItem {
@@ -85,15 +84,19 @@ fn publish_conflict_never_replaces_racing_destination() {
 
 #[test]
 fn stored_strings_and_lists_convert_recursively_but_ambiguous_kinds_refuse() {
-    let value = record_value(
-        &doc! { "text" => "stored", "list" => QueryValue::List(vec![
+    let mut outer = new_map();
+    outer.insert("text".to_string(), QueryValue::Str("stored".into()));
+    let mut inner = new_map();
+    inner.insert("inner".to_string(), QueryValue::Bool(true));
+    outer.insert(
+        "list".to_string(),
+        QueryValue::List(vec![
             QueryValue::Int(1),
             QueryValue::Str("nested".into()),
-            doc! { "inner" => true }.build(),
-        ])}
-        .into(),
-    )
-    .unwrap();
+            QueryValue::Map(inner),
+        ]),
+    );
+    let value = record_value(&QueryValue::Map(outer)).unwrap();
     assert_eq!(
         value,
         LogicalValue::Map(vec![
@@ -121,8 +124,10 @@ fn record_budget_still_refuses_deep_or_oversized_stored_values() {
     for _ in 0..64 {
         deep = QueryValue::List(vec![deep]);
     }
-    assert!(record_value(&doc! { "deep" => deep }.build()).is_err());
-    assert!(
-        record_value(&doc! { "bin" => QueryValue::Bin(vec![7; 512 * 1024 + 1]) }.build()).is_err()
-    );
+    let mut outer = new_map();
+    outer.insert("deep".to_string(), deep);
+    assert!(record_value(&QueryValue::Map(outer)).is_err());
+    let mut outer = new_map();
+    outer.insert("bin".to_string(), QueryValue::Bin(vec![7; 512 * 1024 + 1]));
+    assert!(record_value(&QueryValue::Map(outer)).is_err());
 }
