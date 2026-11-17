@@ -65,7 +65,7 @@ use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::ShamirDb;
 use thiserror::Error;
 
-use crate::backup::{self, copy_dir_recursive, BackupError};
+use super::offline::{self as backup, copy_dir_recursive, BackupError};
 use crate::format_stamp::{restore_snapshot_gate, EpochPolicy};
 use crate::meta_port::MetaError;
 use crate::user_directory::FjallUserDirectory;

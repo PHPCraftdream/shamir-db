@@ -1,0 +1,400 @@
+//! Online backup protocol (design `online-backup.md` 4.2): steps A-G over
+//! the port, WAL copied before stores, a second pass at the seal barrier,
+//! the manifest written last with fsync, self-verification before
+//! success. Cancellation is checked at every stage boundary and between
+//! files; a failed or cancelled run removes the destination directory and
+//! releases the pins.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult};
+use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
+use super::progress::{BackupProgress, BackupStage, CancelFlag};
+use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
+use crate::sync::durability::backup::{utc_timestamp, ManifestFileEntry};
+
+/// Directory skipped at the top level of the data-dir copy (offline
+/// backup precedent).
+const SKIP_TOP_LEVEL_DIRS: &[&str] = &["cache"];
+
+/// One in-process backup permit (design 4.4 / D9): a second concurrent
+/// online backup is refused.
+#[derive(Debug, Default)]
+pub struct BackupPermit(AtomicBool);
+
+impl BackupPermit {
+    pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    pub fn try_acquire(&self) -> Option<BackupPermitGuard<'_>> {
+        self.0
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| BackupPermitGuard(self))
+    }
+}
+
+/// Held permit; releases on drop.
+#[derive(Debug)]
+pub struct BackupPermitGuard<'a>(&'a BackupPermit);
+
+impl Drop for BackupPermitGuard<'_> {
+    fn drop(&mut self) {
+        self.0 .0.store(false, Ordering::Release);
+    }
+}
+
+/// Failure causes of an online backup run.
+#[derive(Debug, thiserror::Error)]
+pub enum OnlineBackupFailure {
+    #[error(transparent)]
+    Port(#[from] PortError),
+    #[error(transparent)]
+    Copy(#[from] CopyError),
+    #[error(transparent)]
+    Manifest(#[from] manifest::ManifestError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("snapshot self-verification failed: {0}")]
+    Verify(String),
+}
+
+/// Protocol failure carrying the stage it failed at.
+#[derive(Debug, thiserror::Error)]
+pub enum OnlineBackupError {
+    #[error("another online backup is in progress")]
+    Busy,
+    #[error("backup cancelled at stage {stage:?}")]
+    Cancelled { stage: BackupStage },
+    #[error("backup failed at stage {stage:?}")]
+    Failed {
+        stage: BackupStage,
+        #[source]
+        source: OnlineBackupFailure,
+    },
+}
+
+impl OnlineBackupError {
+    pub fn stage(&self) -> BackupStage {
+        match self {
+            OnlineBackupError::Busy => BackupStage::Preparing,
+            OnlineBackupError::Cancelled { stage } => *stage,
+            OnlineBackupError::Failed { stage, .. } => *stage,
+        }
+    }
+}
+
+/// Successful run summary.
+#[derive(Debug, Clone)]
+pub struct BackupReport {
+    pub dest_dir: PathBuf,
+    pub files_hashed: u64,
+    pub total_bytes: u64,
+}
+
+fn failed(stage: BackupStage, source: impl Into<OnlineBackupFailure>) -> OnlineBackupError {
+    OnlineBackupError::Failed {
+        stage,
+        source: source.into(),
+    }
+}
+
+/// Destination directory for a repo's WAL: the wal dir's path relative to
+/// the data dir, or `<repo>.shamirwal` as a fallback for out-of-tree WALs.
+fn wal_dest_dir(source_root: &Path, dest_dir: &Path, repo: &RepoSource) -> PathBuf {
+    match repo
+        .wal_dir
+        .as_ref()
+        .and_then(|wal| wal.strip_prefix(source_root).ok())
+    {
+        Some(rel) => dest_dir.join(rel),
+        None => dest_dir.join(format!("{}.shamirwal", repo.name)),
+    }
+}
+
+fn rel_slash(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// One copy pass mapped onto a stage-tagged protocol error.
+fn run_pass(
+    source: &Path,
+    dest: &Path,
+    skip: &'static [&'static str],
+    cancel: &CancelFlag,
+    options: &CopyOptions,
+    stage: BackupStage,
+) -> Result<CopyPassResult, OnlineBackupError> {
+    copy_engine::run_copy_pass(source, dest, skip, cancel, options)
+        .map_err(|error| failed(stage, error))
+}
+
+/// WAL copy passes for every file-backed repo, WAL before stores
+/// (design 4.2 step C). Returns (repo name, snapshot-relative dir,
+/// files relative to the WAL dir).
+fn copy_wal_dirs(
+    repos: &[RepoSource],
+    source_root: &Path,
+    dest_dir: &Path,
+    cancel: &CancelFlag,
+    options: &CopyOptions,
+    stage: BackupStage,
+) -> Result<Vec<(String, String, Vec<CopiedFile>)>, OnlineBackupError> {
+    let mut copied = Vec::new();
+    for repo in repos {
+        if let Some(wal) = &repo.wal_dir {
+            let dest_wal = wal_dest_dir(source_root, dest_dir, repo);
+            let result = run_pass(wal, &dest_wal, &[], cancel, options, stage)?;
+            let dir_rel = dest_wal
+                .strip_prefix(dest_dir)
+                .map(rel_slash)
+                .unwrap_or_else(|_| format!("{}.shamirwal", repo.name));
+            copied.push((repo.name.clone(), dir_rel, result.files));
+        }
+    }
+    Ok(copied)
+}
+
+/// Build one repo's `wal` manifest entry from the final WAL pass files
+/// (paths relative to the WAL dir).
+fn build_wal_dir_entry(repo: &str, dir_rel: &str, files: &[CopiedFile]) -> WalDirEntry {
+    let mut segments = Vec::new();
+    for file in files {
+        let name = file.rel_path.rsplit('/').next().unwrap_or(&file.rel_path);
+        let Some(stem) = name.strip_suffix(".wal") else {
+            continue;
+        };
+        let Ok(seq) = stem.parse::<u64>() else {
+            continue;
+        };
+        let sidecar_rel = format!(
+            "{}.meta",
+            file.rel_path.strip_suffix(".wal").unwrap_or(&file.rel_path)
+        );
+        let sidecar = files
+            .iter()
+            .find(|candidate| candidate.rel_path == sidecar_rel);
+        segments.push(WalSegmentEntry {
+            seq,
+            file: file.rel_path.clone(),
+            sidecar: sidecar.map(|entry| entry.rel_path.clone()),
+            sha256: file.sha256.clone(),
+            size: file.size_bytes,
+        });
+    }
+    segments.sort_by_key(|entry| entry.seq);
+    WalDirEntry {
+        repo: repo.to_string(),
+        dir: dir_rel.to_string(),
+        segments,
+    }
+}
+
+/// Self-verification before success (design 4.2 step F): re-hash every
+/// file the manifest describes against the snapshot on disk.
+fn self_verify(dest_dir: &Path, raw: &str) -> Result<(), OnlineBackupFailure> {
+    let decoded = manifest::decode(raw)?;
+    for entry in &decoded.files {
+        let path = dest_dir.join(&entry.path);
+        let (sha256, size) = copy_engine::hash_file(&path)
+            .map_err(|error| OnlineBackupFailure::Verify(format!("{}: {error}", entry.path)))?;
+        if sha256 != entry.sha256 || size != entry.size_bytes {
+            return Err(OnlineBackupFailure::Verify(format!(
+                "{}: hash mismatch",
+                entry.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run the online backup protocol steps A-G (design 4.2).
+pub fn run_online_backup(
+    port: &dyn OnlineBackupPort,
+    source_root: &Path,
+    to: &Path,
+    cancel: &CancelFlag,
+    progress: &mut BackupProgress,
+    options: &CopyOptions,
+) -> Result<BackupReport, OnlineBackupError> {
+    let mut dest_dir: Option<PathBuf> = None;
+    let result = run_steps(
+        port,
+        source_root,
+        to,
+        &mut dest_dir,
+        cancel,
+        progress,
+        options,
+    );
+    match result {
+        Ok(report) => {
+            port.release_pins();
+            progress.set_stage(BackupStage::Done);
+            Ok(report)
+        }
+        Err(error) => {
+            if let Some(dir) = &dest_dir {
+                let _ = fs::remove_dir_all(dir);
+            }
+            port.release_pins();
+            progress.record_failure(error.stage(), &error);
+            Err(error)
+        }
+    }
+}
+
+fn run_steps(
+    port: &dyn OnlineBackupPort,
+    source_root: &Path,
+    to: &Path,
+    dest_dir_slot: &mut Option<PathBuf>,
+    cancel: &CancelFlag,
+    progress: &mut BackupProgress,
+    options: &CopyOptions,
+) -> Result<BackupReport, OnlineBackupError> {
+    // A. Prepare: catalogue snapshot, pins, atomic destination create.
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Preparing,
+        });
+    }
+    let repos = port
+        .catalogue()
+        .map_err(|error| failed(BackupStage::Preparing, error))?;
+    port.acquire_pins()
+        .map_err(|error| failed(BackupStage::Preparing, error))?;
+    let dest_dir = to.join(utc_timestamp());
+    fs::create_dir(&dest_dir).map_err(|error| failed(BackupStage::Preparing, error))?;
+    *dest_dir_slot = Some(dest_dir.clone());
+
+    // B. Capture barrier: per-repo flushed positions + system store.
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Captured,
+        });
+    }
+    for repo in &repos {
+        let _point = port
+            .capture_point(&repo.name)
+            .map_err(|error| failed(BackupStage::Captured, error))?;
+        progress.note_repo_progress(&repo.name, 0, 0);
+    }
+    let system_store_version = port
+        .capture_system_store()
+        .map_err(|error| failed(BackupStage::Captured, error))?;
+
+    // C+D. Copy WAL first, then the whole data dir (writers running).
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Copying,
+        });
+    }
+    copy_wal_dirs(
+        &repos,
+        source_root,
+        &dest_dir,
+        cancel,
+        options,
+        BackupStage::Copying,
+    )?;
+    copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
+        .map_err(|error| failed(BackupStage::Copying, error))?;
+
+    // E. Seal barrier: V* per repo, then the seal re-copy (WAL then
+    // stores) whose final hashes define the snapshot.
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Sealing,
+        });
+    }
+    let mut seal_points: Vec<(String, CapturedPoint)> = Vec::with_capacity(repos.len());
+    for repo in &repos {
+        let point = port
+            .seal_point(&repo.name)
+            .map_err(|error| failed(BackupStage::Sealing, error))?;
+        seal_points.push((repo.name.clone(), point));
+    }
+    let wal_final = copy_wal_dirs(
+        &repos,
+        source_root,
+        &dest_dir,
+        cancel,
+        options,
+        BackupStage::Sealing,
+    )?;
+    let store_final =
+        copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
+            .map_err(|error| failed(BackupStage::Sealing, error))?;
+
+    // F. Verify + manifest: manifest from the final pass, written last
+    // with fsync, then self-verification.
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Verifying,
+        });
+    }
+    let per_repo: BTreeMap<String, _> = seal_points
+        .iter()
+        .map(|(repo, point)| (repo.clone(), point.to_consistency(repo)))
+        .collect();
+    let consistency = ConsistencySection {
+        per_repo,
+        system_store_version,
+    };
+    let dirs = wal_final
+        .iter()
+        .map(|(repo, dir_rel, files)| build_wal_dir_entry(repo, dir_rel, files))
+        .collect();
+    let wal = WalSection { dirs };
+    let mut files: Vec<ManifestFileEntry> = store_final
+        .files
+        .iter()
+        .map(|file| ManifestFileEntry {
+            path: file.rel_path.clone(),
+            sha256: file.sha256.clone(),
+            size_bytes: file.size_bytes,
+        })
+        .collect();
+    for (_, dir_rel, wal_files) in &wal_final {
+        for file in wal_files {
+            files.push(ManifestFileEntry {
+                path: format!("{dir_rel}/{}", file.rel_path),
+                sha256: file.sha256.clone(),
+                size_bytes: file.size_bytes,
+            });
+        }
+    }
+    let total_bytes = files.iter().map(|entry| entry.size_bytes).sum::<u64>();
+    let files_hashed = files.len() as u64;
+    let manifest = manifest::build_v2(
+        progress.started_at_unix_ns,
+        files,
+        None,
+        None,
+        consistency,
+        wal,
+    );
+    let encoded =
+        manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
+    manifest::write_manifest(&dest_dir, &encoded)
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    manifest::write_backup_meta(&dest_dir)
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    let raw = fs::read_to_string(dest_dir.join("manifest.json"))
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    self_verify(&dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
+
+    Ok(BackupReport {
+        dest_dir,
+        files_hashed,
+        total_bytes,
+    })
+}

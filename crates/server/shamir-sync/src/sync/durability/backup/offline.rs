@@ -42,8 +42,9 @@ use thiserror::Error;
 
 use shamir_collections::new_fx_set_wc;
 
+use super::online::manifest::{self as online_manifest, BackupKind};
+use super::restore::fsync_dir;
 use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation};
-use crate::restore::fsync_dir;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
 /// through — chosen so a large fjall SST/journal file is hashed without
@@ -125,6 +126,18 @@ pub enum BackupError {
     /// have one entry's checksum shadow another's expectations.
     #[error("duplicate manifest entry: {0}")]
     DuplicateManifestEntry(String),
+    /// `verify_manifest`: WAL segment sequence numbers are not contiguous
+    /// from zero for a repo (a copied history hole — never acceptable).
+    #[error("wal sequence gap for repo {repo}: expected {expected}, found {found}")]
+    WalSeqGap {
+        repo: String,
+        expected: u64,
+        found: u64,
+    },
+    /// `verify_manifest`: an online manifest is missing its consistency or
+    /// wal section.
+    #[error("online manifest missing required section: {0}")]
+    MissingOnlineSection(&'static str),
     /// `backup()`: the destination (`to`, or its `<timestamp>` subdir) is
     /// inside (or equal to) the source `data_dir` — backing up would
     /// recursively copy the backup's own destination into itself.
@@ -414,6 +427,9 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         return Err(BackupError::ManifestMissing(manifest_path));
     }
     let raw = fs::read(&manifest_path)?;
+    if peek_manifest_format_version(&raw) == Some(online_manifest::MANIFEST_FORMAT_VERSION_V2) {
+        return verify_manifest_v2(snapshot_dir, &raw);
+    }
     let manifest: Manifest = serde_json::from_slice(&raw).map_err(|e| {
         BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
     })?;
@@ -651,4 +667,132 @@ pub(crate) fn copy_dir_recursive(
     // copy too, since it shares this function.
     fsync_dir(dst);
     Ok(())
+}
+
+/// Cheap format-version peek so v2 snapshots route to the v2 verifier
+/// while the v1 path stays byte-identical (design 4.5).
+fn peek_manifest_format_version(raw: &[u8]) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    value
+        .get("format_version")?
+        .as_u64()
+        .map(|version| version as u32)
+}
+
+/// Full offline verify of a v2 snapshot (design section 5, "Offline
+/// verify"): kind + required sections, WAL seq contiguity and segment
+/// re-hash, then the same file rules as v1 (cache, unsafe, duplicate,
+/// re-hash, unmanifested refusal — `manifest.json` and
+/// `backup.meta.json` are the two accounted non-listed files).
+fn verify_manifest_v2(
+    snapshot_dir: &Path,
+    raw: &[u8],
+) -> Result<ManifestVerifyReport, BackupError> {
+    let text =
+        std::str::from_utf8(raw).map_err(|e| BackupError::ManifestInvalid(format!("utf8: {e}")))?;
+    let decoded =
+        online_manifest::decode(text).map_err(|e| BackupError::ManifestInvalid(format!("{e}")))?;
+    if decoded.format_version != online_manifest::MANIFEST_FORMAT_VERSION_V2 {
+        return Err(BackupError::UnsupportedManifestFormatVersion {
+            found: decoded.format_version,
+            expected: online_manifest::MANIFEST_FORMAT_VERSION_V2,
+        });
+    }
+    if matches!(decoded.kind, BackupKind::Online) {
+        if decoded.consistency.is_none() {
+            return Err(BackupError::MissingOnlineSection("consistency"));
+        }
+        if decoded.wal.is_none() {
+            return Err(BackupError::MissingOnlineSection("wal"));
+        }
+    }
+
+    // WAL listing: contiguous seqs from zero per repo, every segment file
+    // (and sidecar presence) re-checked on disk.
+    if let Some(wal) = &decoded.wal {
+        for dir in &wal.dirs {
+            for (expected_seq, segment) in dir.segments.iter().enumerate() {
+                let expected_seq = expected_seq as u64;
+                if segment.seq != expected_seq {
+                    return Err(BackupError::WalSeqGap {
+                        repo: dir.repo.clone(),
+                        expected: expected_seq,
+                        found: segment.seq,
+                    });
+                }
+                let (digest, size) = hash_file_streaming(&snapshot_dir.join(&segment.file))
+                    .map_err(|e| {
+                        BackupError::Io(std::io::Error::new(
+                            e.kind(),
+                            format!("wal segment {}: {e}", segment.file),
+                        ))
+                    })?;
+                let actual = hex::encode(digest);
+                if actual != segment.sha256 || size != segment.size {
+                    return Err(BackupError::ChecksumMismatch {
+                        path: snapshot_dir.join(&segment.file),
+                        expected_sha256: segment.sha256.clone(),
+                        expected_size_bytes: segment.size,
+                        actual_sha256: actual,
+                        actual_size_bytes: size,
+                    });
+                }
+                if let Some(sidecar) = &segment.sidecar {
+                    if !snapshot_dir.join(sidecar).is_file() {
+                        return Err(BackupError::UnmanifestedFile(snapshot_dir.join(sidecar)));
+                    }
+                }
+            }
+        }
+    }
+
+    // File set: same rules as v1.
+    if let Some(entry) = decoded
+        .files
+        .iter()
+        .find(|entry| is_cache_manifest_path(&entry.path))
+    {
+        return Err(BackupError::CacheManifestPath(entry.path.clone()));
+    }
+    let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
+    let mut total_bytes = 0u64;
+    for entry in &decoded.files {
+        reject_unsafe_manifest_path(&entry.path)?;
+        if accounted.contains(&entry.path) {
+            return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
+        }
+        let file_path = snapshot_dir.join(&entry.path);
+        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
+            BackupError::Io(std::io::Error::new(
+                e.kind(),
+                format!("manifest entry {}: {e}", entry.path),
+            ))
+        })?;
+        let actual_sha256 = hex::encode(digest);
+        if actual_size != entry.size_bytes || actual_sha256 != entry.sha256 {
+            return Err(BackupError::ChecksumMismatch {
+                path: file_path,
+                expected_sha256: entry.sha256.clone(),
+                expected_size_bytes: entry.size_bytes,
+                actual_sha256,
+                actual_size_bytes: actual_size,
+            });
+        }
+        total_bytes += actual_size;
+        accounted.insert(entry.path.clone());
+    }
+    let mut on_disk = Vec::new();
+    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    for rel in on_disk {
+        if rel == MANIFEST_FILE_NAME || rel == online_manifest::BACKUP_META_FILE_NAME {
+            continue;
+        }
+        if !accounted.contains(&rel) {
+            return Err(BackupError::UnmanifestedFile(snapshot_dir.join(&rel)));
+        }
+    }
+    Ok(ManifestVerifyReport {
+        files_checked: decoded.files.len() as u64,
+        total_bytes,
+    })
 }
