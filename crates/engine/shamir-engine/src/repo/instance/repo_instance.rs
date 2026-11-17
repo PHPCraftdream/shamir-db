@@ -132,6 +132,7 @@ impl RepoInstance {
             catalog,
             durability_handle,
             horizon,
+            truncation_pins: Arc::new(crate::tx::drain::truncation_pin::TruncationPin::new()),
             live_weak: Arc::downgrade(&live),
             rename_fence: crate::tx::commit::rename_fence::RenameFenceView::new(
                 Arc::clone(&rename_fence),

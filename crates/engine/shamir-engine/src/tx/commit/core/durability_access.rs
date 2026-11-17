@@ -4,6 +4,8 @@ use crate::repo::changelog_store::write_domain::RepoWriteDomain;
 use crate::repo::durability_policy::DurabilityPolicy;
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use crate::repo::RepoWritePermit;
+use crate::tx::drain::truncation_lease::TruncationLease;
+use crate::tx::drain::truncation_pin_guard::TruncationPinGuard;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo as _, Store};
 use std::future::Future;
@@ -65,6 +67,16 @@ pub(crate) async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F
 }
 
 impl RepoCore {
+    /// Retain WAL versions >= floor for a later db_instance capture. Use zero
+    /// to retain all currently available history. Cannot restore older deletes.
+    pub(crate) async fn pin_wal_history(&self, floor: u64) -> DbResult<TruncationPinGuard> {
+        self.truncation_pins.acquire(floor).await
+    }
+
+    /// Atomically clamp deletion and admit its lease, only after all preparation.
+    pub(crate) fn try_begin_truncate(&self, ceiling: u64) -> Option<TruncationLease> {
+        self.truncation_pins.try_begin_truncate(ceiling)
+    }
     /// S5c-X PR6b-2a: this repository's write-admission domain (one per
     /// repository instance, shared by every clone).
     pub(crate) fn write_domain(&self) -> &Arc<RepoWriteDomain> {

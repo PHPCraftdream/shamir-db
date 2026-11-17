@@ -74,17 +74,24 @@ pub(crate) async fn enforce_retention(
             return Ok(RetentionAction::Refused);
         }
         gate.record_declare_gap();
-        // Durable gap + allocation floor certify loss for versions through last.
-        // Unlink only through the history/interner-safe ceiling supplied by drainer.
-        if safe_ceiling >= last {
-            let wal = repo.repo_wal().await?;
-            repo.flush_all_history().await?;
-            wal.truncate_below(last).await?;
-            let remaining = group.sealed_retained_bytes().await?;
-            if remaining <= cap {
-                gate.clear_refuse_if_set();
-                return Ok(RetentionAction::NoOverflow);
-            }
+    }
+    // A previous pass may already have certified this range but retained its
+    // segments for a live pin. Retry unlink even without a new certification.
+    let delete_through = last.min(feed.clean_horizon());
+    if delete_through > 0 {
+        let wal = repo.repo_wal().await?;
+        repo.flush_all_history().await?;
+        #[cfg(test)]
+        super::checkpoint::test_seam::before_delete(repo).await;
+        // Pin publication may have raced any of the certification/flush
+        // awaits above. Sample and admit only here, never from `last` alone.
+        if let Some(lease) = repo.try_begin_truncate(delete_through) {
+            lease.truncate(wal).await?;
+        }
+        let remaining = group.sealed_retained_bytes().await?;
+        if remaining <= cap {
+            gate.clear_refuse_if_set();
+            return Ok(RetentionAction::NoOverflow);
         }
     }
     // No covered retained range is currently safe to unlink; retry later.

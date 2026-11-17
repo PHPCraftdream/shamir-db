@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::oneshot;
+
 use crate::tx::commit::core::RepoCore;
 
 #[derive(Default)]
@@ -8,6 +10,7 @@ pub(crate) struct State {
     pub(crate) bypass_checkpoint: bool,
     pub(crate) order: Vec<&'static str>,
     pub(crate) on_sample_w: Option<Box<dyn FnOnce() + Send>>,
+    pub(crate) before_delete: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 
 pub(crate) fn with_state<T>(repo: &RepoCore, action: impl FnOnce(&mut State) -> T) -> T {
@@ -22,6 +25,16 @@ pub(crate) fn bypass(repo: &RepoCore) -> bool {
 
 pub(crate) fn should_fail(repo: &RepoCore) -> bool {
     with_state(repo, |state| state.fail_checkpoint)
+}
+
+/// Pause after preparation, before deletion admission. Channels establish the
+/// interleaving without a timing sleep; no seam mutex survives the await.
+pub(crate) async fn before_delete(repo: &RepoCore) {
+    let pause = with_state(repo, |state| state.before_delete.take());
+    if let Some((entered, resume)) = pause {
+        entered.send(()).expect("deletion observer alive");
+        resume.await.expect("deletion resumer alive");
+    }
 }
 
 pub(crate) fn record(repo: &RepoCore, phase: &'static str) {
