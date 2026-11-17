@@ -135,15 +135,14 @@ impl CommitAdmissionGate {
         }
     }
 
-    /// State-word access for sibling RAII types (`lease.rs` releases the
-    /// count; the close owner clears the closed bits) — the word itself
-    /// never leaves the admission module.
-    pub(super) fn state(&self) -> &AtomicUsize {
-        &self.state
-    }
-
-    pub(super) fn notify_waiters(&self) {
-        self.notify.notify_waiters();
+    /// Release one lease (called from the lease's `Drop`): `fetch_sub(1,
+    /// Release)`. The wake keys on the ACTIVE count reaching zero, NOT on the
+    /// whole word equalling 1: under a closed gate the CLOSED and CLOSE_TAKEN
+    /// bits are set, and the close owner parked on zero must still be woken.
+    pub(super) fn release(&self) {
+        if self.state.fetch_sub(1, Ordering::Release) & ACTIVE_MASK == 1 {
+            self.notify.notify_waiters();
+        }
     }
 
     /// Test-gated: no production consumer until the seal step.
