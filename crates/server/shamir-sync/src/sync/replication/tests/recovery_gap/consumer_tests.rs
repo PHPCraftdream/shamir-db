@@ -1,6 +1,7 @@
 //! S5c consumer contracts over raw fjall + runtime teardown, not simulated gaps.
 //! A separate durable marker fixture retains consumer/supervisor gap refusal.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,12 @@ use super::converge::{
 
 fn runtime() -> Runtime {
     Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+// The whole-server futures driven here are large; keep them on the heap so a
+// current-thread `block_on` does not overflow the 2 MiB test-thread stack.
+fn block_on_boxed<F: Future>(rt: &Runtime, fut: F) -> F::Output {
+    rt.block_on(Box::pin(fut))
 }
 
 // The catalogue is fresh on each boot; the DATA repo is the same raw fjall
@@ -162,7 +169,7 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leader");
     let rt = runtime();
-    let h = rt.block_on(async {
+    let h = block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         write(&leader, "before-crash").await
     });
@@ -170,7 +177,7 @@ fn cold_reopen_reconciles_events_for_consumer_and_supervisor() {
     drop(rt);
 
     let rt = runtime();
-    rt.block_on(async {
+    block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         let source = InProcessReplSource::new(leader.clone());
         let reply = source.pull("app", "main", 1, 100, None).await.unwrap();
@@ -223,14 +230,14 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leader");
     let rt = runtime();
-    let h = rt.block_on(async {
+    let h = block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         write(&leader, "before-gap").await
     });
     drop(rt);
 
     let rt = runtime();
-    rt.block_on(async {
+    block_on_boxed(&rt, async {
         let backing = FjallRepo::new(&path).expect("open stopped raw repository");
         let store = backing.store_get("__changelog__").await.unwrap();
         store
@@ -247,7 +254,7 @@ fn explicit_persisted_gap_stops_consumer_and_supervisor_but_not_beyond_h() {
     drop(rt);
 
     let rt = runtime();
-    rt.block_on(async {
+    block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         let source = InProcessReplSource::new(leader.clone());
         let reply = source.pull("app", "main", 1, 100, None).await.unwrap();
@@ -378,7 +385,7 @@ fn clean_reopen_allows_follower_at_head() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leader");
     let rt = runtime();
-    let h = rt.block_on(async {
+    let h = block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         let h = write(&leader, "clean").await;
         repo(&leader)
@@ -390,7 +397,7 @@ fn clean_reopen_allows_follower_at_head() {
     drop(rt);
 
     let rt = runtime();
-    rt.block_on(async {
+    block_on_boxed(&rt, async {
         let leader = open(Some(&path)).await;
         assert_eq!(
             repo(&leader)
