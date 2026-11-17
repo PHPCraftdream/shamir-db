@@ -202,17 +202,7 @@ pub fn fixture_items() -> Vec<(SectionKind, Vec<PortableItem>)> {
                 rules: vec![schema_rule],
             }),
         ),
-        (
-            SectionKind::ValidatorsAndFunctions,
-            PortableItem::Validator(ValidatorItem {
-                name: "v1".into(),
-                kind: ValidatorKind::Declarative,
-                source: None,
-                owner: None,
-                group: None,
-                mode: 0o644,
-            }),
-        ),
+        // Canonical order is by (name, kind tag): "f1" < "v1", so Function first.
         (
             SectionKind::ValidatorsAndFunctions,
             PortableItem::Function(FunctionItem {
@@ -227,6 +217,17 @@ pub fn fixture_items() -> Vec<(SectionKind, Vec<PortableItem>)> {
                     secret_grants: Vec::new(),
                     network_grants: Vec::new(),
                 },
+                owner: None,
+                group: None,
+                mode: 0o644,
+            }),
+        ),
+        (
+            SectionKind::ValidatorsAndFunctions,
+            PortableItem::Validator(ValidatorItem {
+                name: "v1".into(),
+                kind: ValidatorKind::Declarative,
+                source: None,
                 owner: None,
                 group: None,
                 mode: 0o644,

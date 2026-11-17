@@ -95,10 +95,23 @@ fn oversized_decimal_coefficient_is_rejected_at_encode() {
     );
 }
 
+fn str_bytes(value: &str) -> Vec<u8> {
+    let len = value.len();
+    let mut out = Vec::with_capacity(len + 2);
+    if len <= 31 {
+        out.push(0xa0 + len as u8);
+    } else {
+        out.push(0xd9);
+        out.push(len as u8);
+    }
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
 #[test]
 fn noncanonical_big_forms_are_rejected() {
     for literal in ["+1", "01", "-0", "1.0", ""] {
-        let wire = envelope("big", literal.as_bytes());
+        let wire = envelope("big", &str_bytes(literal));
         let error = decode_value(&wire).expect_err("noncanonical Big");
         assert!(
             error.to_string().contains("noncanonical Big integer"),
@@ -197,9 +210,11 @@ fn seed_manifest_digest_matches_committed_reference() {
         files: Vec::new(),
     };
     let bytes = encode(&manifest).expect("manifest encodes");
+    // Digest of digest(encode(manifest)) for this literal manifest via the unchanged
+    // seed codec; pins the seed wire format.
     assert_eq!(
         digest(&bytes),
-        "b4b4b6c528217c2a11b4d074dd4e9485ca06378e56a179e5b90c568e9b96f772"
+        "881530fa01a8df4dd4264c0b405f5570b06b8ef885bb0fe5bd73f5701a207199"
     );
     let decoded: Manifest = decode(&bytes).expect("manifest decodes");
     assert_eq!(

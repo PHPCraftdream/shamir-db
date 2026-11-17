@@ -85,18 +85,15 @@ impl DumpState {
         if self.active.is_some() {
             return Err(invalid("a logical-dump section is already open"));
         }
-        if self.next_kind() != Some(section) {
-            return Err(invalid("logical-dump section order is invalid"));
-        }
         if section == SectionKind::End && expected_items != Some(0) {
             return Err(invalid("End section must declare zero items"));
+        }
+        if self.next_kind() != Some(section) {
+            return Err(invalid("logical-dump section order is invalid"));
         }
         let inventory = &self.header.sections[self.next_section];
         if inventory.expected_items != expected_items {
             return Err(invalid("section start count differs from header inventory"));
-        }
-        if section == SectionKind::End && expected_items != Some(0) {
-            return Err(invalid("End section must declare zero items"));
         }
         self.active = Some(SectionState {
             kind: section,
