@@ -151,13 +151,14 @@ async fn plan_requires_manage_and_is_refused_with_read_only() {
         vec![submission(&body("alpha-001", 1))],
     );
 
-    // The owner with a read-only mode holds Read but not Manage.
+    // A non-owner reaching the database through the "other" read bit holds
+    // Read but not Manage (Manage is the owner/admin-only class).
     db.set_resource_meta(
         &ResourcePath::database("testdb"),
         &ResourceMeta {
             owner: Actor::User(7),
             group: None,
-            mode: 0o400,
+            mode: 0o004,
         },
     )
     .await
@@ -166,7 +167,7 @@ async fn plan_requires_manage_and_is_refused_with_read_only() {
     denied_batch.op("plan", application_schema_plan(request.clone()));
     let denied_request = denied_batch.to_request_via_msgpack().unwrap();
     let denied = db
-        .execute_as(Actor::User(7), "testdb", &denied_request)
+        .execute_as(Actor::User(8), "testdb", &denied_request)
         .await
         .expect_err("a Read-only caller must be refused");
     assert_eq!(
@@ -186,7 +187,12 @@ async fn plan_requires_manage_and_is_refused_with_read_only() {
     )
     .await
     .unwrap();
-    run_plan(&db, request).await.expect("Manage admits plan");
+    let mut allowed_batch = Batch::new();
+    allowed_batch.op("plan", application_schema_plan(request));
+    let allowed_request = allowed_batch.to_request_via_msgpack().unwrap();
+    db.execute_as(Actor::User(7), "testdb", &allowed_request)
+        .await
+        .expect("the owner holds Manage and plan is admitted");
 }
 
 #[tokio::test]
