@@ -152,10 +152,7 @@ fn full_run_produces_a_verifiable_snapshot() {
     assert!(report.dest_dir.join("backup.meta.json").is_file());
     let meta = fs::read_to_string(report.dest_dir.join("backup.meta.json")).expect("meta");
     assert!(meta.contains("\"encryption\": \"none\""));
-    assert!(
-        verify_manifest(&report.dest_dir).is_ok(),
-        "snapshot must self-verify"
-    );
+    verify_manifest(&report.dest_dir).expect("snapshot must self-verify");
     assert_eq!(port.pins_held.load(Ordering::SeqCst), 1);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
@@ -175,7 +172,7 @@ fn file_mutated_at_seal_is_re_copied_into_the_manifest() {
     let report = run(&port, &source, &to, &cancel).expect("run");
     let copied = fs::read(report.dest_dir.join("repos/alpha/store.bin")).expect("copied file");
     assert_eq!(copied, b"mutated-at-seal", "seal re-copy must win");
-    assert!(verify_manifest(&report.dest_dir).is_ok());
+    verify_manifest(&report.dest_dir).expect("snapshot must verify");
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
 }
@@ -196,7 +193,7 @@ fn file_deleted_mid_copy_is_absent_from_the_manifest() {
         !manifest.contains("store.bin"),
         "deleted file must not be in the manifest"
     );
-    assert!(verify_manifest(&report.dest_dir).is_ok());
+    verify_manifest(&report.dest_dir).expect("snapshot must verify");
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
 }
@@ -243,7 +240,7 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
 
-    // Hook cancels during the seal barrier.
+    // Hook cancels during the seal barrier; the seal re-copy observes it.
     let source = temp_dir("cancel_seal_source");
     let to = temp_dir("cancel_seal_to");
     TestPort::source_with_data(&source);
@@ -256,7 +253,7 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     assert!(matches!(
         error,
         OnlineBackupError::Cancelled {
-            stage: BackupStage::Verifying
+            stage: BackupStage::Sealing
         }
     ));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);

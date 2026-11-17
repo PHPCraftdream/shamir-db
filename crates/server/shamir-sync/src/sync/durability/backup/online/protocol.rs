@@ -14,7 +14,7 @@ use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResul
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
 use super::progress::{BackupProgress, BackupStage, CancelFlag};
 use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
-use crate::sync::durability::backup::{utc_timestamp, ManifestFileEntry};
+use crate::sync::durability::backup::{utc_timestamp, verify_manifest, ManifestFileEntry};
 
 /// Directory skipped at the top level of the data-dir copy (offline
 /// backup precedent).
@@ -123,6 +123,15 @@ fn rel_slash(path: &Path) -> String {
         .join("/")
 }
 
+/// A copy error as a stage-tagged protocol error; a cancellation observed
+/// between files is `Cancelled`, not a failure.
+fn copy_failed(stage: BackupStage, error: CopyError) -> OnlineBackupError {
+    match error {
+        CopyError::Cancelled => OnlineBackupError::Cancelled { stage },
+        other => failed(stage, other),
+    }
+}
+
 /// One copy pass mapped onto a stage-tagged protocol error.
 fn run_pass(
     source: &Path,
@@ -133,7 +142,7 @@ fn run_pass(
     stage: BackupStage,
 ) -> Result<CopyPassResult, OnlineBackupError> {
     copy_engine::run_copy_pass(source, dest, skip, cancel, options)
-        .map_err(|error| failed(stage, error))
+        .map_err(|error| copy_failed(stage, error))
 }
 
 /// WAL copy passes for every file-backed repo, WAL before stores
@@ -181,10 +190,12 @@ fn build_wal_dir_entry(repo: &str, dir_rel: &str, files: &[CopiedFile]) -> WalDi
         let sidecar = files
             .iter()
             .find(|candidate| candidate.rel_path == sidecar_rel);
+        // Segment and sidecar paths are snapshot-relative: the verifier
+        // resolves them against the snapshot root.
         segments.push(WalSegmentEntry {
             seq,
-            file: file.rel_path.clone(),
-            sidecar: sidecar.map(|entry| entry.rel_path.clone()),
+            file: format!("{dir_rel}/{}", file.rel_path),
+            sidecar: sidecar.map(|entry| format!("{dir_rel}/{}", entry.rel_path)),
             sha256: file.sha256.clone(),
             size: file.size_bytes,
         });
@@ -212,6 +223,9 @@ fn self_verify(dest_dir: &Path, raw: &str) -> Result<(), OnlineBackupFailure> {
             )));
         }
     }
+    // The same verifier `verify` runs on a finished snapshot (WAL listing,
+    // unmanifested files), so a snapshot that reports success also verifies.
+    verify_manifest(dest_dir).map_err(|error| OnlineBackupFailure::Verify(error.to_string()))?;
     Ok(())
 }
 
@@ -306,7 +320,7 @@ fn run_steps(
         BackupStage::Copying,
     )?;
     copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
-        .map_err(|error| failed(BackupStage::Copying, error))?;
+        .map_err(|error| copy_failed(BackupStage::Copying, error))?;
 
     // E. Seal barrier: V* per repo, then the seal re-copy (WAL then
     // stores) whose final hashes define the snapshot.
@@ -332,7 +346,7 @@ fn run_steps(
     )?;
     let store_final =
         copy_engine::run_copy_pass(source_root, &dest_dir, SKIP_TOP_LEVEL_DIRS, cancel, options)
-            .map_err(|error| failed(BackupStage::Sealing, error))?;
+            .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
 
     // F. Verify + manifest: manifest from the final pass, written last
     // with fsync, then self-verification.
