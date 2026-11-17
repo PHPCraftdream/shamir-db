@@ -3,7 +3,6 @@
 pub mod maintenance_lock;
 
 pub mod backup;
-pub mod restore;
 pub mod tx_registry;
 
 mod config;
@@ -11,4 +10,5 @@ mod config;
 #[cfg(test)]
 mod tests;
 
+pub use backup::restore;
 pub use config::DurabilityConfig;
