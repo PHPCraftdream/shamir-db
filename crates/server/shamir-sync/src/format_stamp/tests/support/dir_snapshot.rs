@@ -108,7 +108,9 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
         } else {
             EntryKind::File
         };
-        let meta = match entry.metadata() {
+        // Fresh metadata: on Windows `DirEntry::metadata` comes from the
+        // enumeration cache and can lag behind the file.
+        let meta = match fs::symlink_metadata(entry.path()) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -120,11 +122,16 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Entry>) {
         } else {
             None
         };
-        let mtime_ns = meta.modified().ok().map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        });
+        // Directory mtimes are skipped: NTFS updates them lazily, and the
+        // listing already records every entry created or removed inside.
+        let mtime_ns = (kind != EntryKind::Dir)
+            .then(|| meta.modified().ok())
+            .flatten()
+            .map(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            });
         out.push(Entry {
             rel,
             kind,
