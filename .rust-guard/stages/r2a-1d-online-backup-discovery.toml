@@ -4,4 +4,4 @@
 # [[renamed]] declarations are needed; no test losses or ignore changes.
 # The loader requires `base`; it cannot be verified here (list-file
 # comparison), the CI job pins it to the merge base.
-base = "80175e0167ea9d1eddc09a0a897236059ff311f9"
+base = "5ecd718b83dca5b7e3b52d669e6e0638ca9587fb"

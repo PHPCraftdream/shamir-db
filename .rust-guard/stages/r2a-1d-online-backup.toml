@@ -34,7 +34,7 @@
 # (skipped by check_new_file). No new #[allow] attributes, so no
 # ALLOW_ADDED entries. Counts: 16 allow_widen.
 
-base = "80175e0167ea9d1eddc09a0a897236059ff311f9"
+base = "5ecd718b83dca5b7e3b52d669e6e0638ca9587fb"
 
 [[allow_widen]]
 path = "crates/engine/shamir-engine/src/tx/drain/truncation_pin_guard.rs"
@@ -136,4 +136,532 @@ owner = "<r2a-1d>"
 path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/close_helpers.rs"
 item = "close"
 reason = "Shared close-owner test helper for the barrier gate suites (close-owner RAII is the crate's reuse pattern)."
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::BARRIER_ZERO_LEASE_CAP"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::OnlineBackupError"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::map_admission"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::SealHold"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::SealHold::position"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::SealHold::held_since"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::ONLINE_BACKUP_STEP_HOOK"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::set_online_backup_step_hook"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::fire_step"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::capture_point"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::seal_point"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::acquire_truncation_pin"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::barrier_owner"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::drain_to_settled"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/online_backup.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::online_backup::RepoInstance::settled_under_pause"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/close_owner.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::close_owner::CommitAdmissionCloseOwner::wait_zero"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/error.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::error::CommitAdmissionError"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/gate.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::gate::CLOSE_TAKEN"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/gate.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::gate::CommitAdmissionGate::begin_close"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/gate.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::gate::CommitAdmissionGate::close"
+reason = "R2a-1d: the test-gated close() is replaced by the synchronous begin_close() + CloseOwner::wait_zero()"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/gate.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::gate::CommitAdmissionGate::wait_zero"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/mod.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::close_owner"
+reason = "R2a-1d: commit admission close API enabled for the seal (un-gated from cfg(test))"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/close_helpers.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::close_helpers::close"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/gate_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::gate_tests::admit_release_counts_are_exact_and_reopen_leaks_no_count"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/gate_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::gate_tests::closed_gate_refuses_immediately_without_side_effect"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/gate_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::gate_tests::second_closer_gets_busy_and_owner_drop_reopens"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/mod.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::close_helpers"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/wait_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::wait_tests::leader_waits_closed_then_admits_after_reopen"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/wait_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::wait_tests::close_waits_for_pre_close_leases_then_zero_gap_free"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/admission/tests/wait_tests.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::admission::tests::wait_tests::close_vs_acquire_boundary_never_leaves_an_uncounted_lease"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseBusy"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseState"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseState::new"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseState::is_held"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseState::acquire"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::PauseAttempt"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::PauseAttempt::Output"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::PauseAttempt::poll"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::PauseAttempt::drop"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseGuard"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drain_pause.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause::DrainPauseGuard::drop"
+reason = "R2a-1d: drain pause and per-repo capture/seal"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer"
+reason = "R2a-1d: the replaying lock becomes Arc-shared so the drain pause guard can own it"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::new"
+reason = "R2a-1d: the replaying lock becomes Arc-shared so the drain pause guard can own it"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::pause"
+reason = "R2a-1d: the replaying lock becomes Arc-shared so the drain pause guard can own it"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::pause_held"
+reason = "R2a-1d: the replaying lock becomes Arc-shared so the drain pause guard can own it"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
+item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::pending_window_len"
+reason = "R2a-1d: the replaying lock becomes Arc-shared so the drain pause guard can own it"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/drain/mod.rs"
+item = "shamir-engine::lib::tx::drain::drain_pause"
+reason = "R2a-1d: the truncation pin guard becomes nameable across the crate edge for the R2a-3 adapter"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/mod.rs"
+item = "shamir-engine::lib::tx::drain::truncation_pin_guard"
+reason = "R2a-1d: the truncation pin guard becomes nameable across the crate edge for the R2a-3 adapter"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/drain/truncation_pin_guard.rs"
+item = "shamir-engine::lib::tx::drain::truncation_pin_guard::TruncationPinGuard"
+reason = "R2a-1d: the truncation pin guard becomes nameable across the crate edge for the R2a-3 adapter"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/commit/lifecycle/commit_admission_refusal_tests.rs"
+item = "shamir-engine::lib::tx::tests::commit::lifecycle::commit_admission_refusal_tests::close_refuses_overlay_only_leader"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::drainer_tests::support"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::CANCEL_BUDGET"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::ALL_STEPS"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::STEP_HOOK_RECORDED"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::STEP_HOOK_ARMED"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::step_hook"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::arm_step"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::fixture_with_committed_data"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/cancellation_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests::cancel_barrier_at"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::BARRIER_BUDGET"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::COMMITTERS"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::COMMITS_PER_COMMITTER"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::CommitterOutcomes"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::overlay_only_tx"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::seeded_repo"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::spawn_committers"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/capture_seal_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests::assert_refusals_only_ok_or_refused"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/fail_closed_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::fail_closed_tests::REFUSAL_BUDGET"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::cancellation_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::capture_seal_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::fail_closed_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pause_guard_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pin_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/mod.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::seal_hold_tests"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pause_guard_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pause_guard_tests::RELEASE_BUDGET"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pause_guard_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pause_guard_tests::poll_pending_once"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pause_guard_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pause_guard_tests::seed_one_visible_commit"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pin_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pin_tests::disk_repo"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pin_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pin_tests::seed"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pin_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pin_tests::segment_count"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pin_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::pin_tests::retained_versions"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/seal_hold_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::seal_hold_tests::APPLY_BUDGET"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/seal_hold_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::seal_hold_tests::commit_insert"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/tests/replication/apply/admission_gate_tests.rs"
+item = "shamir-engine::lib::tx::tests::replication::apply::admission_gate_tests::follower_apply_respects_gate"
+reason = "R2a-1d: test item of the drain pause / capture-seal step"
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/drainer_tests/mod.rs"
+item = "support"
+reason = "The shared drain test helpers are used by the online-backup tests."
+owner = "<r2a-1d>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/pause_guard_tests.rs"
+item = "poll_pending_once"
+reason = "Test helper shared by the online-backup test files."
 owner = "<r2a-1d>"
