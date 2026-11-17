@@ -108,6 +108,15 @@ pub(crate) struct PersistedUser {
     /// that was never actually enforceable before this task).
     #[serde(default)]
     pub(crate) database: Option<String>,
+    /// Imported-identity disabled marker (release-1 offline logical import).
+    /// `#[serde(default)]`: pre-marker blobs (no field) decode as ENABLED.
+    /// `skip_serializing_if` omits the field when `false`, so every existing
+    /// record and every reference-catalogue byte stays byte-identical.
+    /// Set only by `FjallUserDirectory::insert_disabled_import`; there is no
+    /// production path that flips it back (an imported user stays disabled
+    /// until an operator provisions credentials in a later shell command).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) disabled: bool,
 }
 
 impl PersistedUser {
@@ -128,8 +137,38 @@ impl PersistedUser {
             tickets_invalid_before_ns: record.tickets_invalid_before_ns,
             superuser,
             replicator: false,
+            disabled: false,
             database,
         }
+    }
+
+    /// Build the DISABLED, credential-free-by-construction record for an
+    /// imported identity (release-1 offline logical import): `salt`/
+    /// `stored_key`/`server_key` are filled from the OS CSPRNG (16/32/32
+    /// random bytes — never zeros or placeholders, so no password can ever
+    /// match) and the KDF parameters are the directory's server defaults
+    /// ([`KdfParams::DEFAULT`]). `disabled` is always `true`.
+    pub(crate) fn from_imported_disabled(
+        user_id: [u8; 16],
+        database: Option<String>,
+    ) -> shamir_connect::common::error::Result<Self> {
+        let salt: [u8; 16] = shamir_connect::common::crypto::try_random_array()?;
+        let stored_key: [u8; 32] = shamir_connect::common::crypto::try_random_array()?;
+        let mut server_key = Zeroizing::new([0u8; 32]);
+        *server_key = shamir_connect::common::crypto::try_random_array()?;
+        Ok(Self {
+            user_id: user_id.to_vec(),
+            salt: salt.to_vec(),
+            stored_key: stored_key.to_vec(),
+            server_key: server_key.as_slice().to_vec(),
+            kdf_params: (&KdfParams::DEFAULT).into(),
+            roles: Vec::new(),
+            tickets_invalid_before_ns: 0,
+            superuser: false,
+            replicator: false,
+            disabled: true,
+            database,
+        })
     }
 
     pub(crate) fn to_record(&self) -> Option<UserRecord> {

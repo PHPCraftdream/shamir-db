@@ -44,6 +44,9 @@ without a directory-sync guarantee; power-loss durability remains limited.
 * Selected resource owner identities resolve by principal64 to authoritative
   directory usernames. Only name/kind/disabled-on-import is emitted, never
   credentials, roles, superuser/replicator state, ticket epochs or user IDs.
+  Imported directory users are created disabled and credential-free-by-construction
+  (CSPRNG salt/stored/server key fill, default KDF params) and stay disabled until an
+  operator provisions credentials; ownership remains reassignable with existing chown/chgrp.
   System ownership is null, requiring importer policy rather than an implicit
   privilege grant. Unresolved owners refuse. Group metadata refuses.
 * Root and function-namespace ACL settings carry logical owner/group names and
@@ -55,10 +58,19 @@ without a directory-sync guarantee; power-loss durability remains limited.
 
 ## Deliberate fail-closed limitations / follow-up families
 
-* **All string-shaped record values refuse**, including ordinary Str: persisted
-  Dec/Big are flattened to strings and cannot be distinguished. **All array-shaped
-  record values refuse**, including ordinary List: persisted Set is flattened to
-  List. No storage codec changes or full-kind fidelity claim.
+* **Stored-shape fidelity for strings and arrays (settled decision).** Persisted
+  Dec/Big are flattened to strings and persisted Set to lists, so the storage
+  codec cannot distinguish them and no storage codec change is made. The export
+  emits exactly what is stored: a stored string as `str`, a stored list as
+  `list`, recursively inside nested maps and lists, within the existing record
+  budgets (2048 nodes / 512 KiB / depth 64). The artifact round-trips the
+  stored bytes exactly; `Dec`/`Big` come back as `str` and `Set` as `list`.
+  The import accepts every tag of the value envelope (`null`, `bool`, `int64`,
+  `f64`, `dec`, `big`, `str`, `bin`, `list`, `set`, `map`) and converts through
+  the normal logical-value-to-stored-value path, so a future exporter that
+  tags `dec`/`big`/`set` needs no import change. `Dec`/`Big`/`Set` values
+  themselves still refuse (the storage codec never produces them; the refusal
+  keeps the envelope honest).
 * All portable schema rules/schema versions/schema validator IDs, validators,
   functions (all languages/artifact kinds), function folders, guest WASM and
   validator/transform/FK bindings remain unimplemented. Any function, validator,

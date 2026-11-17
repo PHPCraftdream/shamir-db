@@ -100,6 +100,9 @@ enum Subcmd {
     /// Export a stopped database's supported logical scope; fails on unsupported content.
     LogicalExport(shamir_server::logical_dump::LogicalExportArgs),
 
+    /// Import a verified logical dump into a NEW server data directory.
+    LogicalImport(shamir_server::logical_import::LogicalImportArgs),
+
     /// Export one stopped repository as a logical replication seed.
     ReplicationSeedExport {
         #[arg(long)]
@@ -367,6 +370,32 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             println!(
                 "logical-export verified: {} items, {} bytes",
                 report.items, report.bytes
+            );
+            return Ok(0);
+        }
+        Some(Subcmd::LogicalImport(args)) => {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let operation = shamir_server::logical_import::import(args, cancel.clone());
+            tokio::pin!(operation);
+            let report = tokio::select! {
+                result = &mut operation => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancel.cancel();
+                    // Join, never detach the staged import or lose its lock.
+                    operation.await?
+                }
+            };
+            println!(
+                "logical-import {} published: {} items, {} bytes{}",
+                report.database,
+                report.items,
+                report.bytes,
+                if report.published {
+                    ""
+                } else {
+                    " (idempotent retry)"
+                }
             );
             return Ok(0);
         }
