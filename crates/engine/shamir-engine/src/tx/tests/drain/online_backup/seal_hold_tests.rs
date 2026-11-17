@@ -11,7 +11,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::repo::instance::repo_instance::OnlineBackupError;
 use crate::table::TableConfig;
-use crate::tx::tests::drain::drainer_tests::support::{make_repo, rid};
+use crate::tx::tests::drain::drainer_tests::support::make_repo;
 use crate::tx::CommitError;
 
 /// Harness cap; the handshakes are the hold lifecycle itself.
@@ -37,10 +37,13 @@ async fn commit_insert(repo: &crate::repo::RepoInstance, value: &str) {
 /// `Err(CommitError::WalDurability { .. })` (WAL uncertainty). BOTH are
 /// accepted: neither un-commits the write, whose WAL entry is asserted
 /// directly below.
-async fn commit_insert_under_hold(repo: &crate::repo::RepoInstance, value: &str) {
+async fn commit_insert_under_hold(
+    repo: &crate::repo::RepoInstance,
+    value: &str,
+) -> shamir_types::types::record_id::RecordId {
     let table = repo.get_table("t").await.unwrap();
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-    table
+    let id = table
         .insert_tx(&InnerValue::Str(value.into()), Some(&mut tx))
         .await
         .unwrap();
@@ -51,6 +54,7 @@ async fn commit_insert_under_hold(repo: &crate::repo::RepoInstance, value: &str)
         Ok(_) | Err(CommitError::WalDurability { .. }) => {}
         Err(error) => panic!("under-hold commit failed unexpectedly: {error}"),
     }
+    id
 }
 
 #[tokio::test]
@@ -88,7 +92,7 @@ async fn seal_hold_keeps_committed_after_v_star_data_out_of_stores_until_drop() 
     // advances to 2 DURING the hold. What stays out of the stores is
     // DRAIN-durability: `mark_durable` fires only in the drainer's replay,
     // which the hold pauses.
-    commit_insert_under_hold(&repo, "after").await;
+    let after_id = commit_insert_under_hold(&repo, "after").await;
 
     // The commit is WAL-durable; its entry (version taken FROM THE WAL, not
     // from the early acknowledgement) survives for the post-hold replay.
@@ -136,7 +140,7 @@ async fn seal_hold_keeps_committed_after_v_star_data_out_of_stores_until_drop() 
         2,
         "the post-V* commit stays published across the drain"
     );
-    let got = table.get(rid(2)).await.unwrap();
+    let got = table.get(after_id).await.unwrap();
     assert!(
         matches!(got, InnerValue::Str(ref s) if s == "after"),
         "post-V* data applied after the hold drops, got {got:?}"

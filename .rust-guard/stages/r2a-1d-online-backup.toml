@@ -671,3 +671,9 @@ path = "crates/engine/shamir-engine/src/tx/drain/drainer/state.rs"
 item = "shamir-engine::lib::tx::drain::drainer::state::Drainer::test_replaying_lock"
 reason = "R2a-1d: test-only accessor that holds the replaying lock to simulate an in-flight drain pass"
 owner = "<r2a-1d>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/tx/tests/drain/online_backup/seal_hold_tests.rs"
+item = "shamir-engine::lib::tx::tests::drain::online_backup::seal_hold_tests::commit_insert_under_hold"
+reason = "R2a-1d: test helper that commits under a live seal hold with a bounded visibility wait"
+owner = "<r2a-1d>"
