@@ -326,6 +326,15 @@ pub async fn apply_replicated_batch(
     bookmark: u64,
     policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
+    // R2a 1c (design Q13): the follower apply is a SEPARATE commit entry that
+    // never routes through `commit_tx`, so it admits through the SAME
+    // per-repo admission gate — at the top, BEFORE the receipt pipeline's
+    // write-domain admission. A closed gate refuses IMMEDIATELY (typed,
+    // retryable, no side effect — nothing was applied); it never waits,
+    // unlike the leader path.
+    let _admission_lease = repo.commit_admission().try_acquire().map_err(|_| {
+        DbError::Conflict("commit admission closed; follower apply refused".to_string())
+    })?;
     let info = repo.tx_info_store().await?;
     apply_batch_receipt(repo, info, events.to_vec(), bookmark, policy).await
 }

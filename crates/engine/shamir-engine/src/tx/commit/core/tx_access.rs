@@ -4,6 +4,7 @@ use crate::meta::repl::gate_provenance::with_follower_provenance as provenance_g
 use crate::repo::meta::repo_identity::repo_token;
 use crate::repo::RepoWritePermit;
 use crate::table::interner_manager::InternerManager;
+use crate::tx::commit::pipeline::admission::gate::CommitAdmissionGate;
 use crate::tx::preparation::repo_version_provider::RepoVersionProvider;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{AtomicBatch, Repo as _, Store};
@@ -90,6 +91,13 @@ impl RepoCore {
 
     pub(crate) fn commit_tail(&self) -> &Arc<crate::tx::CommitTailBarrier> {
         self.horizon.commit_tail()
+    }
+
+    /// R2a 1c: the repo's commit admission gate — leader commits wait on
+    /// it inside `commit_tx_inner`; follower apply refuses on it at the top
+    /// of `apply_replicated_batch`.
+    pub(crate) fn commit_admission(&self) -> &Arc<CommitAdmissionGate> {
+        self.horizon.commit_admission()
     }
 
     pub(crate) fn commit_visibility_wait(&self) -> shamir_query_types::batch::VisibilityWait {

@@ -6,6 +6,7 @@ pub use crate::repo::version_provider::repo_token;
 use crate::repo::DurabilityHandle;
 use crate::table::{TableCatalog, TableConfig, TableManager};
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
+use crate::tx::commit::pipeline::admission::gate::CommitAdmissionGate;
 use crate::tx::CommitTailBarrier;
 use shamir_query_types::batch::VisibilityWait;
 #[cfg(test)]
@@ -133,6 +134,7 @@ impl RepoInstance {
             Arc::new(OnceCell::new()),
             Arc::new(shamir_tx::TxMetrics::new()),
             Arc::new(CommitTailBarrier::default()),
+            Arc::new(CommitAdmissionGate::default()),
             Arc::new(std::sync::OnceLock::new()),
             VisibilityWait::Strict,
         );
