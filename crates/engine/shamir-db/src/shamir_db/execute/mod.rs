@@ -60,6 +60,8 @@ mod admin_replication;
 
 #[path = "admin_db/schema_migration.rs"]
 mod admin_db_schema_migration;
+#[path = "admin_db/schema_migration_plan.rs"]
+mod admin_db_schema_migration_plan;
 
 #[path = "admin_db/visibility_sample/mod.rs"]
 mod visibility_sample;
