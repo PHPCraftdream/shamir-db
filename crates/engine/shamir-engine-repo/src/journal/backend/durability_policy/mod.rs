@@ -40,7 +40,7 @@ pub use durability_metrics::{DurabilityMetrics, DurabilityMetricsSnapshot};
 // through the facade chain (`shamir_db::engine::repo::durability_policy`)
 // can name it.
 pub use durability_policy::effective_wal_segment_bytes;
-pub use shamir_metrics::HistogramSnapshot;
+pub use shamir_metrics::{Histogram, HistogramSnapshot, LATENCY_NS_BOUNDS};
 // Test-only seam (the facade's durability tests need it): also exported
 // when the engine forwards its `test-util` feature.
 #[cfg(all(feature = "fjall", any(test, feature = "test-util")))]

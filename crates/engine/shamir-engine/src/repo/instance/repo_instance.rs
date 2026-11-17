@@ -1,4 +1,5 @@
 use crate::repo::fk_reverse_cache::FkReverseCache;
+use crate::repo::instance::support::metrics::{EngineMetrics, EngineMetricsSnapshot};
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use crate::repo::repo_types::BoxRepo;
 pub use crate::repo::version_provider::repo_token;
@@ -42,6 +43,7 @@ pub struct RepoInstance {
         Arc<scc::HashMap<String, crate::tx::commit::rename_fence::RenameFenceEntry, THasher>>,
     /// O(1) count of owned source fence entries.
     rename_fence_len: Arc<AtomicUsize>,
+    metrics: Arc<EngineMetrics>,
 }
 
 impl Clone for RepoInstance {
@@ -55,11 +57,22 @@ impl Clone for RepoInstance {
             core: self.core.clone(),
             rename_fence: Arc::clone(&self.rename_fence),
             rename_fence_len: Arc::clone(&self.rename_fence_len),
+            metrics: Arc::clone(&self.metrics),
         }
     }
 }
 
 impl RepoInstance {
+    /// Cold-path copy of this repository's query telemetry.
+    pub fn query_metrics_snapshot(&self) -> EngineMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Shared per-repository metrics for downward query-path instrumentation.
+    pub fn query_metrics(&self) -> &Arc<EngineMetrics> {
+        &self.metrics
+    }
+
     /// Construct an unregistered low-level handle. Reused backing stores MUST
     /// run recover_v2_inflight before any caller serves reads/writes. Registry
     /// entry points enforce that ordering; this synchronous fixture constructor
@@ -158,6 +171,7 @@ impl RepoInstance {
             core,
             rename_fence,
             rename_fence_len,
+            metrics: Arc::new(EngineMetrics::default()),
         }
     }
 }

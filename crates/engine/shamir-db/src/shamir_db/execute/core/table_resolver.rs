@@ -5,7 +5,9 @@ use crate::engine::table::TableManager;
 use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::DbResult;
+use shamir_engine::repo::instance::support::metrics::QueryMetrics;
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use std::sync::Arc;
 
 /// TableResolver that resolves TableRef within a DbInstance.
 ///
@@ -58,5 +60,9 @@ impl BatchResolver for DbTableResolver {
             crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))
         })?;
         Ok(repo.core().clone())
+    }
+
+    fn query_metrics(&self, repo_name: &str) -> Option<Arc<dyn QueryMetrics>> {
+        self.db.query_metrics(repo_name)
     }
 }

@@ -1,7 +1,11 @@
 use metrics_exporter_prometheus::PrometheusBuilder;
 use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
+use shamir_tx::TxMetrics;
 
 use super::super::durability_export::{record_durability_metrics, register_durability_metrics};
+use super::super::export::transactions::{
+    record_transactions_metrics, register_transactions_metrics,
+};
 
 #[test]
 fn durability_export_uses_repo_labels_and_absolute_snapshots_without_double_counting() {
@@ -50,4 +54,79 @@ fn durability_export_uses_repo_labels_and_absolute_snapshots_without_double_coun
         );
     }
     assert!(rendered.contains("shamir_wal_first_pending_age_ns{"));
+}
+
+#[test]
+fn transactions_export_renders_zero_touch_absolute_unlabelled_counters() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let snapshot = |unique, phantom, deferred, orphans| {
+        let metrics = TxMetrics::new();
+        metrics
+            .txs_aborted_unique
+            .store(unique, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .txs_aborted_phantom
+            .store(phantom, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .txs_materialization_deferred
+            .store(deferred, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .post_wal_orphans_total
+            .store(orphans, std::sync::atomic::Ordering::Relaxed);
+        metrics.snapshot()
+    };
+    let first = snapshot(3, 5, 7, 11);
+    let older = snapshot(2, 4, 6, 10);
+    metrics::with_local_recorder(&recorder, register_transactions_metrics);
+    let registered = handle.render();
+    for name in [
+        "shamir_tx_aborted_unique_total",
+        "shamir_tx_aborted_phantom_total",
+        "shamir_tx_materialization_deferred_total",
+        "shamir_tx_post_wal_orphans_total",
+    ] {
+        assert!(
+            registered.lines().any(|line| line == format!("{name} 0")),
+            "missing zero-touch {name}: {registered}"
+        );
+    }
+    metrics::with_local_recorder(&recorder, || {
+        record_transactions_metrics(&first);
+        record_transactions_metrics(&first);
+        record_transactions_metrics(&older);
+    });
+
+    let rendered = handle.render();
+    let samples: Vec<_> = rendered
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect();
+    assert_eq!(
+        samples.len(),
+        4,
+        "unexpected transaction series: {rendered}"
+    );
+    for (name, expected) in [
+        ("shamir_tx_aborted_unique_total", "3"),
+        ("shamir_tx_aborted_phantom_total", "5"),
+        ("shamir_tx_materialization_deferred_total", "7"),
+        ("shamir_tx_post_wal_orphans_total", "11"),
+    ] {
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == format!("# TYPE {name} counter")),
+            "missing counter TYPE for {name}: {rendered}"
+        );
+        let line = samples
+            .iter()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("missing unlabelled counter {name}: {rendered}"));
+        assert!(
+            line.ends_with(&format!(" {expected}")),
+            "wrong snapshot value for {name}: {line}"
+        );
+        assert!(!line.contains('{'), "unexpected labels: {line}");
+    }
 }

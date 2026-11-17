@@ -177,6 +177,9 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
             for (id, cow) in batch {
                 match cow {
                     RecordCow::Borrowed(b) => {
@@ -209,7 +212,10 @@ impl TableManager {
                                     ));
                                 };
                                 let qv = projection.project_value(&view, interner)?;
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge(ValueBytes::row_bytes(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
@@ -220,7 +226,10 @@ impl TableManager {
                                 // Meter the retained raw intermediate: 16-byte
                                 // list entry + 16-byte id + 24-byte byte slot
                                 // + encoded length. It grants no output credit.
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge(56u64.saturating_add(b.len() as u64))?;
                                 }
                                 raw_acc.push((id, b));
@@ -232,7 +241,10 @@ impl TableManager {
                                 let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner)?,
                                 );
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge_record(&row)?;
                                 }
                                 rec_acc.push(row);
@@ -258,7 +270,10 @@ impl TableManager {
                                     ));
                                 };
                                 let qv = projection.project_value(&record, interner)?;
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge(ValueBytes::row_bytes(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
@@ -270,7 +285,10 @@ impl TableManager {
                                 // arm avoids the re-encode).
                                 match record.to_bytes() {
                                     Ok(bytes) => {
-                                        if let Some(meter) = ctx.row_byte_meter {
+                                        if let Some(meter) = ctx
+                                            .row_byte_meter
+                                            .filter(|meter| meter.byte_policy_enabled())
+                                        {
                                             meter
                                                 .charge(56u64.saturating_add(bytes.len() as u64))?;
                                         }
@@ -293,7 +311,10 @@ impl TableManager {
                                 let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner)?,
                                 );
-                                if let Some(meter) = ctx.row_byte_meter {
+                                if let Some(meter) = ctx
+                                    .row_byte_meter
+                                    .filter(|meter| meter.byte_policy_enabled())
+                                {
                                     meter.charge_record(&row)?;
                                 }
                                 rec_acc.push(row);
@@ -401,7 +422,10 @@ impl TableManager {
             .collect();
 
         if !needs_raw {
-            if let Some(meter) = ctx.row_byte_meter {
+            if let Some(meter) = ctx
+                .row_byte_meter
+                .filter(|meter| meter.byte_policy_enabled())
+            {
                 meter.credit_survivors(&final_records);
             }
         }

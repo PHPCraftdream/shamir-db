@@ -314,3 +314,21 @@ impl ExecutionDeadline {
         }
     }
 }
+
+/// A single op taking longer than this is logged (#1019): the cooperative
+/// deadline (see this module's doc, "Deliberate non-goal") cannot interrupt
+/// a stall INSIDE one op's `.await` — it only notices the overrun at the
+/// NEXT checkpoint, once the stalled op finally returns. That makes a
+/// single-op stall indistinguishable, from the error alone, from "many
+/// small ops accumulated past the budget" — this warning exists so a future
+/// occurrence is diagnosable (which alias, how long) straight from the log
+/// instead of only a wall-clock/budget mismatch in the error message.
+const SLOW_OP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Log a warning if a single op's execution took longer than
+/// [`SLOW_OP_WARN_THRESHOLD`]. See its doc comment for why this exists.
+pub(in crate::query::batch) fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
+    if elapsed > SLOW_OP_WARN_THRESHOLD {
+        log::warn!("batch op '{alias}' took {elapsed:?} to execute (exceeds the {SLOW_OP_WARN_THRESHOLD:?} slow-op logging threshold)");
+    }
+}

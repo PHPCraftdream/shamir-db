@@ -11,6 +11,52 @@ use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_storage::error::DbResult;
 use shamir_types::types::value::QueryValue;
 
+use crate::repo::instance::support::metrics::{EngineMetrics, QueryMetrics};
+use std::sync::Arc;
+
+/// A resolver variant that exposes the real repo metrics to batch reads.
+pub(super) struct MetricsResolver {
+    pub(super) db: DbInstance,
+    pub(super) repo: String,
+    pub(super) metrics: Arc<EngineMetrics>,
+}
+
+#[async_trait::async_trait]
+impl TableResolver for MetricsResolver {
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.db.get_table(&self.repo, &table_ref.table).await
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for MetricsResolver {
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        self.db
+            .get_repo(&self.repo)
+            .map(|repo| repo.core.clone())
+            .ok_or_else(|| shamir_storage::error::DbError::NotFound("repo missing".into()))
+    }
+
+    fn query_metrics(&self, _repo_name: &str) -> Option<Arc<dyn QueryMetrics>> {
+        Some(self.metrics.clone())
+    }
+}
+
+pub(super) async fn setup_metrics_resolver() -> MetricsResolver {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("users")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let metrics = Arc::clone(db.get_repo("default").unwrap().query_metrics());
+    MetricsResolver {
+        db,
+        repo: "default".to_string(),
+        metrics,
+    }
+}
+
 /// Simple resolver that wraps a DbInstance + repo name.
 pub(super) struct TestResolver {
     pub(super) db: DbInstance,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchLimits, ExecutionDeadline};
-use crate::query::filter::read_budget::{ReadByteMeter, ReadVisibilityScope};
+use crate::query::filter::read_budget::{QueryMetrics, ReadByteMeter, ReadVisibilityScope};
 use crate::query::read::{QueryRecord, QueryResult};
 use shamir_engine_query::query::read::value_bytes::ValueBytes;
 use shamir_query_types::batch::RequestMetadata;
@@ -16,13 +16,17 @@ use shamir_storage::error::DbError;
 /// are credited against the result envelope at completion.
 pub(crate) struct ScopeRowMeter<'a> {
     scope: &'a ExecScope,
+    metrics: Option<&'a dyn QueryMetrics>,
+    viewed: AtomicU64,
     credited: AtomicU64,
 }
 
 impl<'a> ScopeRowMeter<'a> {
-    pub(crate) fn new(scope: &'a ExecScope) -> Option<Self> {
-        scope.enforce_result_size().then(|| Self {
+    pub(crate) fn new(scope: &'a ExecScope, metrics: Option<&'a dyn QueryMetrics>) -> Option<Self> {
+        (metrics.is_some() || scope.enforce_result_size()).then(|| Self {
             scope,
+            metrics,
+            viewed: AtomicU64::new(0),
             credited: AtomicU64::new(0),
         })
     }
@@ -48,6 +52,9 @@ impl<'a> ScopeRowMeter<'a> {
     }
 
     pub(crate) fn charge_record(&self, record: &QueryRecord) -> Result<(), DbError> {
+        if !self.scope.enforce_result_size() {
+            return Ok(());
+        }
         let bytes = Self::record_size(record);
         self.charge(bytes)?;
         self.credited.fetch_add(bytes, Ordering::Relaxed);
@@ -55,16 +62,45 @@ impl<'a> ScopeRowMeter<'a> {
     }
 
     pub(crate) fn credit_survivors(&self, records: &[QueryRecord]) {
+        if !self.scope.enforce_result_size() {
+            return;
+        }
         let bytes = records.iter().fold(0u64, |total, record| {
             total.saturating_add(Self::record_size(record))
         });
         self.credited.store(bytes, Ordering::Relaxed);
     }
 
+    pub(crate) fn viewed(&self, rows: u64) {
+        if rows == 0 {
+            return;
+        }
+        self.viewed.fetch_add(rows, Ordering::Relaxed);
+        if let Some(metrics) = self.metrics {
+            metrics.record_rows(rows, 0);
+        }
+    }
+
+    pub(crate) fn finish_rows(&self, returned: u64) {
+        if returned != 0 {
+            if let Some(metrics) = self.metrics {
+                metrics.record_rows(0, returned);
+            }
+        }
+    }
+
+    /// True when scan sites have already accounted for examined rows.
+    pub(crate) fn has_viewed_rows(&self) -> bool {
+        self.viewed.load(Ordering::Relaxed) != 0
+    }
+
     /// Total = all materialized rows + result estimate - surviving row credit.
     /// Raw aggregate inputs have no output credit; the aggregate result pays
     /// in full. Shortcut reads with no sink charges also pay in full here.
     pub(crate) fn finish(&self, result: &QueryResult) -> Result<(), BatchError> {
+        if !self.scope.enforce_result_size() {
+            return Ok(());
+        }
         self.scope.charge_bytes(
             ResultSize::result(result).saturating_sub(self.credited.load(Ordering::Relaxed)),
         )
@@ -292,5 +328,17 @@ impl ReadByteMeter for ScopeRowMeter<'_> {
 
     fn credit_survivors(&self, records: &[QueryRecord]) {
         Self::credit_survivors(self, records);
+    }
+
+    fn byte_policy_enabled(&self) -> bool {
+        self.scope.enforce_result_size()
+    }
+
+    fn viewed(&self, rows: u64) {
+        Self::viewed(self, rows);
+    }
+
+    fn finish_rows(&self, returned: u64) {
+        Self::finish_rows(self, returned);
     }
 }

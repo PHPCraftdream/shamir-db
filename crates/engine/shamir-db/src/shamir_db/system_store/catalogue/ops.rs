@@ -1,14 +1,27 @@
+use std::path::Path;
+
 use crate::{DbError, DbResult};
+use futures::StreamExt;
 use shamir_types::access::ResourceMeta;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::access::Actor;
 use crate::engine::repo::RenamePersistOutcome;
+use crate::engine::table::record_cow::RecordCow;
 
 use super::super::store::{qv_map1, qv_map2, TABLE_DATABASES, TABLE_REPOSITORIES, TABLE_TABLES};
 use super::super::SystemStore;
 use super::rename_key::TableRenameKey;
+
+/// The `identity` field of a database row, or `None` when absent. A legacy row
+/// has no identity: a projection may report it as Null while the full row omits
+/// the field — both mean "absent".
+fn present_identity(record: Option<&QueryValue>) -> Option<&QueryValue> {
+    record
+        .and_then(|record| record.get("identity"))
+        .filter(|identity| !matches!(identity, QueryValue::Null))
+}
 
 fn table_catalogue_key(db_name: &str, repo_name: &str, table_name: &str) -> QueryValue {
     let mut key = new_map();
@@ -82,6 +95,64 @@ impl SystemStore {
             .collect())
     }
 
+    // Repository paths: catalogued relative to the data directory
+
+    /// Catalogue form of a repository path: relative to the data directory
+    /// (`/`-separated) when it lies under it, so a moved or restored data
+    /// directory still opens its own stores; other paths stay as given.
+    fn catalogue_repo_path(&self, path: &str) -> String {
+        let Some(base) = self.base_dir.as_deref() else {
+            return path.to_string();
+        };
+        match Path::new(path).strip_prefix(base) {
+            Ok(rel) if rel.as_os_str().is_empty() => path.to_string(),
+            Ok(rel) => rel
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Err(_) => path.to_string(),
+        }
+    }
+
+    /// Runtime form of a catalogued repository path: a relative path is
+    /// resolved against the data directory; an absolute one is kept.
+    fn resolved_repo_path(&self, stored: &str) -> String {
+        match self.base_dir.as_deref() {
+            // Join component by component so the platform separator is used.
+            Some(base) if Path::new(stored).is_relative() => stored
+                .split('/')
+                .fold(base.to_path_buf(), |path, part| path.join(part))
+                .to_string_lossy()
+                .into_owned(),
+            _ => stored.to_string(),
+        }
+    }
+
+    /// Repository record with its `path` in catalogue form.
+    fn catalogue_repo_record(&self, record: QueryValue) -> QueryValue {
+        self.map_repo_path(record, |store, path| store.catalogue_repo_path(path))
+    }
+
+    /// Repository record with its `path` in runtime form.
+    fn resolve_repo_record(&self, record: QueryValue) -> QueryValue {
+        self.map_repo_path(record, |store, path| store.resolved_repo_path(path))
+    }
+
+    fn map_repo_path(
+        &self,
+        mut record: QueryValue,
+        convert: impl Fn(&Self, &str) -> String,
+    ) -> QueryValue {
+        if let QueryValue::Map(map) = &mut record {
+            if let Some(QueryValue::Str(path)) = map.get("path") {
+                let converted = convert(self, path);
+                map.insert("path".to_string(), QueryValue::Str(converted));
+            }
+        }
+        record
+    }
+
     // Repository metadata
 
     /// Save repository metadata. Injects `owner`/`group`/`mode` from `meta`
@@ -97,8 +168,14 @@ impl SystemStore {
         durability: Option<&shamir_query_types::durability::DurabilityOverride>,
     ) -> DbResult<()> {
         self.catalogue_write_fault_gate()?;
+        let catalogued = path.map(|path| self.catalogue_repo_path(path));
         let record = crate::shamir_db::repo_durability::repository_record(
-            db_name, repo_name, engine, path, meta, durability,
+            db_name,
+            repo_name,
+            engine,
+            catalogued.as_deref(),
+            meta,
+            durability,
         );
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
@@ -161,7 +238,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| r.as_value().into_owned())
+            .map(|r| self.resolve_repo_record(r.as_value().into_owned()))
             .collect())
     }
 
@@ -491,6 +568,94 @@ impl SystemStore {
     // Record lookups
     // ---------------------------------------------------------------------------
 
+    /// Read a database catalogue row with its stable primary key and MVCC version.
+    pub(crate) async fn database_row_with_version(
+        &self,
+        name: &str,
+    ) -> DbResult<(
+        Option<QueryValue>,
+        Option<shamir_types::types::record_id::RecordId>,
+        u64,
+    )> {
+        let table = self.table(TABLE_DATABASES).await?;
+        let refs = crate::types::common::new_map();
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
+        let mut query = crate::query::read::ReadQuery::new(TABLE_DATABASES).filter(
+            crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        );
+        query.with_version = true;
+        query.select = crate::query::read::Select::fields(["name", "identity"]);
+        let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() || result.records.len() > 1 {
+            return Err(DbError::Internal(format!(
+                "corrupt database '{name}' catalogue records"
+            )));
+        }
+        let projected = result
+            .records
+            .first()
+            .map(|row| row.as_value().into_owned());
+        let versions = result.versions.as_ref().ok_or_else(|| {
+            DbError::Internal(format!(
+                "database '{name}' catalogue read returned no MVCC versions"
+            ))
+        })?;
+        let version = match versions.as_slice() {
+            [version] if projected.is_some() => *version,
+            [] if projected.is_none() => 0,
+            _ => {
+                return Err(DbError::Internal(format!(
+                    "corrupt database '{name}' catalogue version rows"
+                )))
+            }
+        };
+        let interner = table.info_store_read_view().interner_read_view().await?;
+        let mut stream = Box::pin(table.list_stream(256));
+        while let Some(batch) = stream.next().await {
+            for (record_id, row) in batch? {
+                let value = match row {
+                    RecordCow::Borrowed(bytes) => {
+                        let inner = shamir_types::types::value::InnerValue::from_bytes(bytes)
+                            .map_err(|error| {
+                                DbError::Internal(format!(
+                                    "corrupt database catalogue row {record_id}: {error}"
+                                ))
+                            })?;
+                        interner.inner_to_query_value(&inner).map_err(|error| {
+                            DbError::Internal(format!(
+                                "corrupt database catalogue row {record_id}: {error}"
+                            ))
+                        })?
+                    }
+                    RecordCow::Owned(inner) => {
+                        interner.inner_to_query_value(&inner).map_err(|error| {
+                            DbError::Internal(format!(
+                                "corrupt database catalogue row {record_id}: {error}"
+                            ))
+                        })?
+                    }
+                };
+                if value.get("name").and_then(QueryValue::as_str) != Some(name) {
+                    continue;
+                }
+                if projected.as_ref().and_then(|record| record.get("name")) != value.get("name")
+                    || present_identity(projected.as_ref()) != present_identity(Some(&value))
+                {
+                    return Err(DbError::Validation(format!(
+                        "database '{name}' catalogue row changed during identity lookup"
+                    )));
+                }
+                return Ok((Some(value), Some(record_id), version));
+            }
+        }
+        Err(DbError::Validation(format!(
+            "database '{name}' disappeared during identity lookup"
+        )))
+    }
+
     /// Load a single database record by name.
     pub async fn load_database(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
@@ -550,7 +715,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| r.as_value().into_owned()))
+            .map(|r| self.resolve_repo_record(r.as_value().into_owned())))
     }
 
     /// Load a single table catalogue record by (db, repo, table).
@@ -614,6 +779,7 @@ impl SystemStore {
 
     /// Persist a replacement repository record (for `set_resource_meta`).
     pub async fn save_repository_meta(&self, record: &QueryValue) -> DbResult<()> {
+        let record = &self.catalogue_repo_record(record.clone());
         let db_name = record
             .get("db_name")
             .and_then(|v| v.as_str())

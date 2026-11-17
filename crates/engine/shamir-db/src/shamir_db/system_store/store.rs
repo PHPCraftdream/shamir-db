@@ -56,6 +56,8 @@ pub(super) const TABLE_PUBLICATIONS: &str = "publications";
 /// carries `upstream`/`publication`/`profile`/`state` (386-a). The follower
 /// pull-loop that consumes these is 386-b.
 pub(super) const TABLE_SUBSCRIPTIONS: &str = "subscriptions";
+/// Append-only application schema migration event records.
+pub(super) const TABLE_SCHEMA_MIGRATION_EVENTS: &str = "schema_migration_events";
 
 /// Configuration for the system store.
 #[derive(Clone)]
@@ -70,11 +72,22 @@ pub enum SystemStoreConfig {
 #[derive(Clone)]
 pub struct SystemStore {
     db: DbInstance,
+    /// Data directory holding the durable system store (`None` in memory).
+    /// Repository paths under it are catalogued relative to it, so a moved
+    /// or restored data directory still opens its own stores.
+    pub(super) base_dir: Option<std::path::PathBuf>,
+    durable_journal: bool,
+    /// Shared admin-operation admission for cloned SystemStore handles. This does not serialize
+    /// migrations across databases or processes; the durable per-database CAS control record is
+    /// the fencing authority. Server-wide lifetime admission belongs to step 2b.
+    schema_migration_admin: Arc<tokio::sync::Mutex<()>>,
     /// Test seam: a 1-indexed countdown — `arm(n)` makes the n-th SUBSEQUENT
     /// gated catalogue write fail (see `catalogue_write_fault_gate`); armed by
     /// catalogue fault-injection tests.
     catalogue_write_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     durability_tail_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test seam: durable tails that pass before `durability_tail_faults` starts failing.
+    durability_tail_skips: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     table_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -124,7 +137,30 @@ impl SystemStore {
             .store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Let the next `skip` durable tails pass, then fail the following `n` of them.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn arm_durability_tail_faults_after(&self, skip: usize, n: usize) {
+        self.durability_tail_skips
+            .store(skip, std::sync::atomic::Ordering::SeqCst);
+        self.arm_durability_tail_faults(n);
+    }
+
     fn durability_tail_fault_gate(&self) -> DbResult<()> {
+        let mut skips = self
+            .durability_tail_skips
+            .load(std::sync::atomic::Ordering::SeqCst);
+        while skips != 0 {
+            match self.durability_tail_skips.compare_exchange(
+                skips,
+                skips - 1,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => skips = actual,
+            }
+        }
         let mut remaining = self
             .durability_tail_faults
             .load(std::sync::atomic::Ordering::SeqCst);
@@ -144,6 +180,23 @@ impl SystemStore {
         Ok(())
     }
 
+    /// Create the journal's unique record-key index when it is missing. Boxed at
+    /// the call site: the index-creation future must not widen the init future.
+    async fn ensure_journal_index(db: &DbInstance) -> DbResult<()> {
+        let journal = db
+            .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
+            .await?;
+        if !journal
+            .unique_index_exists("schema_migration_record_key")
+            .await
+        {
+            journal
+                .create_unique_index("schema_migration_record_key", &["record_key"])
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Initialize system store with the given config.
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
         Self::init_with_durability(config, DurabilityPolicy::default()).await
@@ -155,7 +208,12 @@ impl SystemStore {
         policy: DurabilityPolicy,
     ) -> DbResult<Self> {
         let db = DbInstance::new();
+        let base_dir = match &config {
+            SystemStoreConfig::Fjall(path) => path.parent().map(std::path::Path::to_path_buf),
+            SystemStoreConfig::InMemory => None,
+        };
 
+        let durable_journal = matches!(&config, SystemStoreConfig::Fjall(_));
         let factory = match config {
             SystemStoreConfig::InMemory => BoxRepoFactory::in_memory(),
             #[cfg(feature = "fjall")]
@@ -181,15 +239,21 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_FUNCTION_FOLDERS))
             .add_table(TableConfig::new(TABLE_REPLICATION_PROFILES))
             .add_table(TableConfig::new(TABLE_PUBLICATIONS))
-            .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS));
+            .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS))
+            .add_table(TableConfig::new(TABLE_SCHEMA_MIGRATION_EVENTS).with_indexes());
 
         // DbInstance recovers/certifies before exposing the system repo.
         db.add_repo_with_durability(repo_config, policy).await?;
+        Box::pin(Self::ensure_journal_index(&db)).await?;
 
         let store = Self {
             db,
+            base_dir,
+            durable_journal,
+            schema_migration_admin: Arc::new(tokio::sync::Mutex::new(())),
             catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             durability_tail_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            durability_tail_skips: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             table_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -439,6 +503,22 @@ impl SystemStore {
         table.data_store_read_view().flush().await
     }
 
+    /// Capture the logical-export read facade without exposing a writable
+    /// system-repository handle. Caller must hold exclusive offline ownership
+    /// (or fence every mutation source) and prepare tables before the freeze.
+    pub async fn capture_logical_export<'a>(
+        &self,
+        db: &DbInstance,
+        guard: &'a crate::engine::db_instance::logical_export::MaintenanceGuard,
+    ) -> DbResult<crate::engine::db_instance::logical_export::LogicalExport<'a>> {
+        crate::engine::db_instance::logical_export::LogicalExport::capture(
+            db,
+            &self.system_repo()?,
+            guard,
+        )
+        .await
+    }
+
     /// Resolve the SYSTEM_REPO [`RepoInstance`].
     ///
     /// F5a: system-store DELETEs route through the repo's implicit-tx
@@ -525,6 +605,47 @@ impl SystemStore {
             Box::pin(async move {
                 owned_table
                     .execute_set_tx(&owned_op, tx, None, &Actor::System)
+                    .await
+            })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))
+    }
+
+    /// Refuse schema-migration journal writes on an in-memory system store.
+    pub(crate) fn require_durable_schema_migration_store(&self) -> DbResult<()> {
+        if self.durable_journal {
+            Ok(())
+        } else {
+            Err(DbError::Storage(
+                "schema migration journal requires a persistent system store".into(),
+            ))
+        }
+    }
+
+    pub(crate) async fn schema_migration_admin_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.schema_migration_admin.lock().await
+    }
+
+    /// Route a single non-tx UPDATE through the implicit-tx file-WAL
+    /// path. Maps the [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
+    pub(crate) async fn update_via_implicit_tx(
+        &self,
+        table: &TableManager,
+        op: &crate::query::write::UpdateOp,
+    ) -> DbResult<crate::query::write::WriteResult> {
+        let repo = self.system_repo()?;
+        let owned_op = op.clone();
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move {
+                let refs = crate::types::common::new_map();
+                let ctx = owned_table
+                    .info_store_read_view()
+                    .filter_context(&refs)
+                    .await?;
+                owned_table
+                    .execute_update_tx(&owned_op, &ctx, tx, None, &Actor::System)
                     .await
             })
         })

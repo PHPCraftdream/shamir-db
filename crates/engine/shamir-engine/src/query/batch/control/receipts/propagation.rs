@@ -20,9 +20,13 @@ impl QueryRunner<'_> {
         entry: &QueryEntry,
         refs: &TMap<String, QueryResult>,
     ) -> Result<QueryResult, BatchError> {
+        let started = std::time::Instant::now();
         // Boxed: the per-op future is large and must not be copied by value
         // through the task-local wrapper at every recursion level.
-        super::dependency::scope(Box::pin(self.run_with_wait(alias, entry, refs, None))).await
+        let result =
+            super::dependency::scope(Box::pin(self.run_with_wait(alias, entry, refs, None))).await;
+        self.observe_op(entry, started.elapsed(), result.as_ref().err());
+        result
     }
 }
 
@@ -165,7 +169,9 @@ pub(in crate::query::batch) async fn execute_plan(
             };
             let _guard = crate::query::batch::op_watchdog::register_op_watchdog(alias);
             let started = std::time::Instant::now();
-            let result = runner.run_with_wait(alias, entry, &refs, wait).await?;
+            let outcome = runner.run_with_wait(alias, entry, &refs, wait).await;
+            runner.observe_op(entry, started.elapsed(), outcome.as_ref().err());
+            let result = outcome?;
             if started.elapsed() > std::time::Duration::from_secs(1) {
                 log::warn!("batch op '{alias}' exceeded the one-second slow-op threshold");
             }

@@ -25,7 +25,8 @@ pub(crate) use boot::maintenance_lock;
 pub use boot::tokens;
 pub(crate) use boot::transactions_config;
 pub use boot::{
-    access_tree, bootstrap, config, observability, restore, runtime, scheduler, service, version,
+    access_tree, bootstrap, config, logical_dump, observability, restore, runtime, scheduler,
+    service, version,
 };
 pub use connection::conn_limiter;
 pub use durability::{backup, tx_registry};

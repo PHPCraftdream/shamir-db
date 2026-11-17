@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use shamir_collections::TFxSet;
+use shamir_engine_query::query::filter::read_budget::{QueryMetrics, QueryOp};
 use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
 use shamir_types::access::{Actor, ResourcePath};
@@ -72,6 +75,70 @@ impl<'a> QueryRunner<'a> {
             table: table_ref.table.clone(),
         }
     }
+    /// Record one op's duration and error code into its repository's query
+    /// metrics. Synchronous and small on purpose: the per-op future is large,
+    /// so no extra async layer may sit on the recursion path.
+    pub(in crate::query::batch) fn observe_op(
+        &self,
+        entry: &QueryEntry,
+        elapsed: Duration,
+        error: Option<&BatchError>,
+    ) {
+        let (op, repo_name) = match &entry.op {
+            BatchOp::Read(query) => (QueryOp::Read, query.from.repo.as_str()),
+            BatchOp::Insert(op) => (QueryOp::Write, op.insert_into.repo.as_str()),
+            BatchOp::Update(op) => (QueryOp::Write, op.update.repo.as_str()),
+            BatchOp::Delete(op) => (QueryOp::Write, op.delete_from.repo.as_str()),
+            BatchOp::Set(op) => (QueryOp::Write, op.set.repo.as_str()),
+            BatchOp::Call(op) => (QueryOp::Function, op.repo.as_str()),
+            _ => return,
+        };
+        if let Some(sink) = self.resolver.query_metrics(repo_name) {
+            sink.record_duration(op, elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            if let Some(error) = error {
+                sink.record_error(error.code());
+            }
+        }
+    }
+
+    /// Query-metrics sinks of the repositories a request declares.
+    pub(in crate::query::batch) fn batch_sinks<'r>(
+        resolver: &dyn BatchResolver,
+        repos: impl IntoIterator<Item = &'r String>,
+    ) -> Vec<std::sync::Arc<dyn QueryMetrics>> {
+        repos
+            .into_iter()
+            .filter_map(|repo_name| resolver.query_metrics(repo_name))
+            .collect()
+    }
+
+    /// Record a whole-request span into each declared repository's metrics.
+    pub(in crate::query::batch) fn observe_batch(
+        sinks: Vec<std::sync::Arc<dyn QueryMetrics>>,
+        elapsed: Duration,
+    ) {
+        let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        for sink in sinks {
+            sink.record_duration(QueryOp::Batch, elapsed_ns);
+        }
+    }
+
+    /// Record a transaction commit span, and its failure, into the repository's
+    /// query metrics.
+    pub(in crate::query::batch) fn observe_commit(
+        resolver: &dyn BatchResolver,
+        repo_name: &str,
+        elapsed: Duration,
+        failed: bool,
+    ) {
+        if let Some(sink) = resolver.query_metrics(repo_name) {
+            sink.record_duration(QueryOp::Tx, elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            if failed {
+                sink.record_error(None);
+            }
+        }
+    }
+
     /// Execute a single query entry.
     ///
     /// Dispatches by `BatchOp` variant. When `self.tx.is_some()`,

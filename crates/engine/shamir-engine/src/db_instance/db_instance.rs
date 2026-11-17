@@ -188,6 +188,18 @@ impl DbInstance {
         self.repos.get(repo_name).map(|r| r.clone())
     }
 
+    /// Clone only the repository telemetry sink without cloning the
+    /// `RepoInstance` handle (and its owned name) on per-operation lookups.
+    pub fn query_metrics(
+        &self,
+        repo_name: &str,
+    ) -> Option<Arc<dyn shamir_engine_query::query::filter::read_budget::QueryMetrics>> {
+        self.repos.get(repo_name).map(|repo| {
+            Arc::clone(repo.query_metrics())
+                as Arc<dyn shamir_engine_query::query::filter::read_budget::QueryMetrics>
+        })
+    }
+
     /// Remove a repository from the instance
     pub async fn remove_repo(&self, repo_name: &str) -> bool {
         self.repos.remove(repo_name).is_some()

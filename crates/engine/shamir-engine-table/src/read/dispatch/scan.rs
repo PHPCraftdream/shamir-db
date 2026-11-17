@@ -185,8 +185,12 @@ impl TableManager {
             .list_stream_tx_after_predicate(tx, shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
-            'rows: for (id, cow) in batch? {
-                scanned += 1;
+            let batch = batch?;
+            scanned += batch.len() as u64;
+            if let Some(meter) = ctx.row_byte_meter {
+                meter.viewed(batch.len() as u64);
+            }
+            'rows: for (id, cow) in batch {
                 let record = match cow.into_inner() {
                     Ok(record) => record,
                     Err(_) => {
