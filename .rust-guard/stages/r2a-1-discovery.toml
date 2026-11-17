@@ -1,3 +1,3 @@
 # R2a-1 pin tests are additions only; no test identity moves, losses or ignore changes.
 # discovery accepts head-only tests without allowances; keep this delta base-only.
-base = "bb06ce738e0aaa67cd7f9e0e5774bc9b146eda04"
+base = "27912778a66478e4324c8c2b4e3508999f16fff9"

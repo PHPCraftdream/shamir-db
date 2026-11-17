@@ -15,7 +15,7 @@
 # those 11 tests are inventoried below as comments, never unused allowances.
 # Counts: 9 allow_widen + 30 added + 6 changed; 11 new tests (inventory only).
 # Static source inspection only; rust-guard execution and behavioural tests are CI-only.
-base = "bb06ce738e0aaa67cd7f9e0e5774bc9b146eda04"
+base = "27912778a66478e4324c8c2b4e3508999f16fff9"
 
 [[allow_widen]]
 path = "crates/engine/shamir-engine/src/tx/drain/truncation_lease.rs"
