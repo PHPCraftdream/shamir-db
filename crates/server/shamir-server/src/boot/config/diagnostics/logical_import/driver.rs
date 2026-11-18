@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use sha2::Digest;
 use shamir_db::{ShamirDb, SystemStoreConfig};
@@ -22,6 +23,13 @@ use super::reader::CancelledRead;
 use super::stage::dir::{prepare_target_name, ImportStage};
 use super::stage::lock::ImportLock;
 use super::stage::receipt::{Receipt, RECEIPT_NAME};
+use crate::engine::server::wait_stores_released;
+
+/// Same bound as the server's shutdown barrier
+/// (`engine::server::server_handle::STORE_RELEASE_TIMEOUT`, private there, so
+/// mirrored here): how long we poll for every fjall store under a directory
+/// to drop its lock before failing closed.
+const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Summary of a completed (or idempotently accepted) import.
 #[derive(Clone, Debug)]
@@ -62,7 +70,7 @@ pub async fn import(
     let stage = ImportStage::prepare(&args.target)?;
     let outcome = import_into_stage(&stage, &args, &preflight, &cancel).await;
     match outcome {
-        Ok(report) => match stage.publish(&args.target) {
+        Ok(report) => match stage.publish(&args.target, &cancel).await {
             Ok(()) => {
                 drop(lock);
                 progress(&format!("published {}", args.target.display()));
@@ -71,6 +79,22 @@ pub async fn import(
             Err(e) => Err(e),
         },
         Err(e) => {
+            // The staged engines were dropped on the error path (and flushed
+            // before that); wait for their detached flusher tasks to release
+            // the stage's fjall locks so the discard's remove cannot hit a
+            // locked file on Windows. Fail closed: discard aborted on timeout.
+            wait_stores_released(stage.path(), STORE_RELEASE_TIMEOUT)
+                .await
+                .map_err(|locked| {
+                    LogicalImportError::Stage(format!(
+                        "staged stores still locked before discard: {}",
+                        locked
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                })?;
             stage.discard()?;
             Err(e)
         }
@@ -102,6 +126,22 @@ async fn import_into_stage(
     // BEFORE the publish rename, exactly once per instance — no database may
     // survive a publish or the next open of the directory fails on the lock.
     drop(loaded.home);
+    // Deterministic close: the loading engine's detached flusher tasks may
+    // still hold the stage's fjall locks (users subdir included); wait until
+    // every store is lock-free BEFORE the fresh validation open, so the open
+    // can never race a live store. Fail closed on timeout.
+    wait_stores_released(stage.path(), STORE_RELEASE_TIMEOUT)
+        .await
+        .map_err(|locked| {
+            LogicalImportError::Stage(format!(
+                "staged stores still locked after drop: {}",
+                locked
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     // Stage validation reads from a FRESH open of the staged directory, so
     // "validation passed" can never again mean "the loading engine still had
     // the records in memory".
@@ -120,6 +160,21 @@ async fn import_into_stage(
     )
     .await?;
     drop(reopened);
+    // Deterministic close (root-cause fix for the Windows rename): wait until
+    // every staged store (shamir_db + users) is lock-free BEFORE the stamp,
+    // receipt and publish — the rename below can never hit a locked file.
+    wait_stores_released(stage.path(), STORE_RELEASE_TIMEOUT)
+        .await
+        .map_err(|locked| {
+            LogicalImportError::Stage(format!(
+                "staged stores still locked after validation: {}",
+                locked
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     progress("validated against the artifact");
     let epoch = match inspect(stage.path()) {
         StampState::Valid(stamp) => stamp.format_epoch(),
@@ -216,6 +271,21 @@ async fn retry_existing(
         .await
         .map_err(|e| {
             LogicalImportError::Receipt(format!("target no longer matches the artifact: {e}"))
+        })?;
+    drop(home);
+    // Deterministic close: the published target must be lock-free when this
+    // returns — test helpers and later runs re-open it immediately.
+    wait_stores_released(&args.target, STORE_RELEASE_TIMEOUT)
+        .await
+        .map_err(|locked| {
+            LogicalImportError::Receipt(format!(
+                "target stores still locked after validation: {}",
+                locked
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
         })?;
     Ok(Some(ImportReport {
         database: db_name,

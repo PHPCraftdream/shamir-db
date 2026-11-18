@@ -8,6 +8,7 @@
 //! retry ONLY when this receipt matches the artifact digest and the
 //! effective options AND an integrity check passes.
 
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,13 @@ impl Receipt {
         let path = dir.join(RECEIPT_NAME);
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| receipt_err(format!("cannot encode receipt: {e}")))?;
-        std::fs::write(&path, json)
+        // Open → write → sync_all → drop, no handle kept anywhere: a
+        // buffered receipt file would make the publish rename race an
+        // open handle (Windows sharing violation) and lose durability.
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| receipt_err(format!("cannot write {}: {e}", path.display())))?;
+        file.write_all(json.as_bytes())
+            .and_then(|()| file.sync_all())
             .map_err(|e| receipt_err(format!("cannot write {}: {e}", path.display())))
     }
 
