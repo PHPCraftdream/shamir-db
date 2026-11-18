@@ -17,7 +17,9 @@
 //! [`crate::WalGroupCommit`] (see `shamir-engine`'s repo-instance
 //! transaction bootstrap).
 
-use std::fs::{metadata, remove_file};
+use std::fmt;
+use std::fs::{metadata, remove_file, File};
+use std::path::Path;
 pub(super) use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
@@ -25,9 +27,65 @@ pub(super) use std::sync::{Arc, Mutex};
 pub(super) use shamir_storage::error::{DbError, DbResult};
 pub(super) use tokio::task::spawn_blocking;
 
+use crate::segment::frame_reader::{FrameRead, FrameReader};
 pub(super) use crate::segment::wal_sink::WalSink;
 pub(super) use crate::wal_entry_v2::WalEntryV2;
 pub(super) use crate::wal_segment::{wal_io_error, WalSegment};
+
+/// A failure while reading an offline WAL without crash-tail tolerance.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum WalStrictReadError {
+    /// A partial frame header, payload, or checksum at the given frame start.
+    IncompleteFrame { path: PathBuf, offset: u64 },
+    /// A checksum-valid frame whose payload failed to decode.
+    Decode {
+        path: PathBuf,
+        offset: u64,
+        source: DbError,
+    },
+    /// Discovery, file I/O, frame size, checksum, or blocking task failure.
+    Other(DbError),
+}
+
+impl fmt::Display for WalStrictReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IncompleteFrame { path, offset } => {
+                write!(
+                    f,
+                    "Incomplete WAL frame in {path:?} at byte offset {offset}"
+                )
+            }
+            Self::Decode {
+                path,
+                offset,
+                source,
+            } => {
+                write!(
+                    f,
+                    "WAL decode failed in {path:?} at byte offset {offset}: {source}"
+                )
+            }
+            Self::Other(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for WalStrictReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::IncompleteFrame { .. } => None,
+            Self::Decode { source, .. } | Self::Other(source) => Some(source),
+        }
+    }
+}
+
+impl From<DbError> for WalStrictReadError {
+    fn from(error: DbError) -> Self {
+        Self::Other(error)
+    }
+}
 
 /// Metadata for one sealed (closed) segment. Its file is fully written
 /// (no torn tail) and may be replayed or deleted but never appended.
@@ -108,6 +166,33 @@ fn parse_seg_seq(name: &str) -> Option<u64> {
     (seg_file_name(seq) == name).then_some(seq)
 }
 
+fn discover_segment_seqs(scan_dir: &Path) -> DbResult<Vec<u64>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(scan_dir)
+        .map_err(|e| wal_io_error(format!("SegmentSet read_dir {scan_dir:?}"), e))?
+    {
+        let entry = entry.map_err(|e| wal_io_error("SegmentSet dir entry".into(), e))?;
+        if let Some(name) = entry.file_name().to_str() {
+            if let Some(seq) = parse_seg_seq(name) {
+                out.push(seq);
+            } else if let Some(stem) = name.strip_suffix(".wal") {
+                if stem.parse::<u64>().is_ok() {
+                    return Err(DbError::Storage(format!(
+                        "SegmentSet discovered non-canonical segment name {name:?} in {scan_dir:?}; refusing to open (possible sequence alias)"
+                    )));
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    if out.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(DbError::Storage(
+            "SegmentSet contains multiple filenames for the same segment sequence".into(),
+        ));
+    }
+    Ok(out)
+}
+
 fn retention_summary(entries: &[WalEntryV2]) -> (u64, bool) {
     (
         entries.iter().map(|e| e.commit_version).max().unwrap_or(0),
@@ -127,34 +212,9 @@ impl SegmentSet {
     pub async fn open(dir: PathBuf, max_bytes: u64) -> DbResult<Self> {
         let scan_dir = dir.clone();
         let mut seqs: Vec<u64> = spawn_blocking(move || -> DbResult<Vec<u64>> {
-            std::fs::create_dir_all(&scan_dir).map_err(|e| {
-                wal_io_error(format!("SegmentSet create_dir {scan_dir:?}"), e)
-            })?;
-            let mut out = Vec::new();
-            for entry in std::fs::read_dir(&scan_dir)
-                .map_err(|e| wal_io_error(format!("SegmentSet read_dir {scan_dir:?}"), e))?
-            {
-                let entry =
-                    entry.map_err(|e| wal_io_error("SegmentSet dir entry".into(), e))?;
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Some(seq) = parse_seg_seq(name) {
-                        out.push(seq);
-                    } else if let Some(stem) = name.strip_suffix(".wal") {
-                        if stem.parse::<u64>().is_ok() {
-                            return Err(DbError::Storage(format!(
-                                "SegmentSet discovered non-canonical segment name {name:?} in {scan_dir:?}; refusing to open (possible sequence alias)"
-                            )));
-                        }
-                    }
-                }
-            }
-            out.sort_unstable();
-            if out.windows(2).any(|pair| pair[0] == pair[1]) {
-                return Err(DbError::Storage(
-                    "SegmentSet contains multiple filenames for the same segment sequence".into(),
-                ));
-            }
-            Ok(out)
+            std::fs::create_dir_all(&scan_dir)
+                .map_err(|e| wal_io_error(format!("SegmentSet create_dir {scan_dir:?}"), e))?;
+            discover_segment_seqs(&scan_dir)
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
@@ -784,6 +844,69 @@ impl SegmentSet {
     pub(crate) fn active_segment_for_test(&self) -> Arc<WalSegment> {
         let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
         Arc::clone(&g.active)
+    }
+
+    /// Read every discovered segment in sequence and frame order, ignoring sidecars.
+    ///
+    /// The caller must keep the directory offline and stable during the read.
+    /// A missing directory, no segments, or a missing discovered file is an error.
+    /// This does not open an append handle or create, repair, or seal anything.
+    /// Cancel-safe: yes; the blocking task may finish after cancellation, but only reads.
+    pub async fn read_entries_strict(dir: &Path) -> Result<Vec<WalEntryV2>, WalStrictReadError> {
+        let dir = dir.to_path_buf();
+        spawn_blocking(move || {
+            let seqs = discover_segment_seqs(&dir)?;
+            if seqs.is_empty() {
+                return Err(DbError::NotFound(format!("No WAL segments in {dir:?}")).into());
+            }
+
+            let mut entries = Vec::new();
+            for seq in seqs {
+                let path = dir.join(seg_file_name(seq));
+                let file = File::open(&path)
+                    .map_err(|e| wal_io_error(format!("Strict WAL read open {path:?}"), e))?;
+                let meta = file
+                    .metadata()
+                    .map_err(|e| wal_io_error(format!("Strict WAL read metadata {path:?}"), e))?;
+                if !meta.is_file() {
+                    return Err(DbError::Storage(format!("Not a WAL file: {path:?}")).into());
+                }
+                let mut reader =
+                    FrameReader::new(file, meta.len(), format!("Strict WAL read {path:?}"));
+                loop {
+                    match reader.next()? {
+                        FrameRead::End => break,
+                        FrameRead::Incomplete { offset, .. } => {
+                            return Err(WalStrictReadError::IncompleteFrame { path, offset });
+                        }
+                        FrameRead::Frame {
+                            offset,
+                            payload,
+                            crc_ok,
+                            ..
+                        } => {
+                            if !crc_ok {
+                                return Err(DbError::Storage(format!(
+                                    "Strict WAL read {path:?}: CRC mismatch at byte offset {offset}"
+                                ))
+                                .into());
+                            }
+                            let entry = WalEntryV2::decode(&payload).map_err(|source| {
+                                WalStrictReadError::Decode {
+                                    path: path.clone(),
+                                    offset,
+                                    source,
+                                }
+                            })?;
+                            entries.push(entry);
+                        }
+                    }
+                }
+            }
+            Ok(entries)
+        })
+        .await
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?
     }
 
     /// fsync the active segment (sealed segments are already fully on disk).

@@ -76,7 +76,7 @@ pub use segment::wal_sink;
 pub use segment::wal_ticket;
 
 pub use event_header::{WalEventHeader, WalExtraChange};
-pub use segment_set::SegmentSet;
+pub use segment_set::{SegmentSet, WalStrictReadError};
 pub use wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};
 pub use wal_group_commit::{WalDurability, WalGroupCommit};
 pub use wal_segment::WalSegment;

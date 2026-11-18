@@ -15,11 +15,27 @@
 use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey};
-use shamir_tx::CompletionState;
-use shamir_wal::WalOpV2;
+use shamir_tx::{CompletionState, RepoTxGate, RepoWalManager};
+use shamir_wal::{WalEntryV2, WalOpV2};
 
 use crate::repo::RepoWritePermit;
 use crate::tx::commit::core::RepoCore;
+use crate::tx::pre_commit::unexpected_repo_interner_scope;
+
+use super::index_scope::validate_posting;
+
+fn unresolved_table(token: u64) -> DbError {
+    DbError::Validation(format!("strict WAL replay: unresolved table token {token}"))
+}
+
+fn check_index_route(idx_id: u32) -> DbResult<()> {
+    if idx_id != 0 {
+        return Err(DbError::Validation(format!(
+            "strict WAL replay: unsupported index route {idx_id}"
+        )));
+    }
+    Ok(())
+}
 
 /// Test-only injection (CRIT-1 / #435): when set to a non-zero `txn_id`,
 /// `seed_version_cache_for_entry` returns a synthetic error for the matching
@@ -65,7 +81,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoCore) -> DbResult<()> {
     // → `create_table_context` → `create_with_domain_admitted` inline). The
     // `#[inline(never)]` boxed dispatcher keeps that await state on the heap,
     // off every caller frame along the resume/recovery poll chain.
-    Box::pin(replay_v2_op_admitted(op, repo, &permit)).await
+    Box::pin(replay_v2_op_admitted(op, repo, &permit, false)).await
 }
 
 #[inline(never)]
@@ -73,14 +89,16 @@ fn replay_v2_op_admitted<'a>(
     op: &'a WalOpV2,
     repo: &'a RepoCore,
     permit: &'a RepoWritePermit,
+    strict: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
-    Box::pin(replay_v2_op_admitted_inner(op, repo, permit))
+    Box::pin(replay_v2_op_admitted_inner(op, repo, permit, strict))
 }
 
 async fn replay_v2_op_admitted_inner(
     op: &WalOpV2,
     repo: &RepoCore,
     permit: &RepoWritePermit,
+    strict: bool,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);
     match op {
@@ -94,6 +112,7 @@ async fn replay_v2_op_admitted_inner(
                 .await?
             {
                 Some(t) => t,
+                None if strict => return Err(unresolved_table(*table_id_interned)),
                 None => {
                     log::warn!(
                         "replay_v2_op Put: table token {} not found in repo {}; \
@@ -125,6 +144,7 @@ async fn replay_v2_op_admitted_inner(
                 .await?
             {
                 Some(t) => t,
+                None if strict => return Err(unresolved_table(*table_id_interned)),
                 None => {
                     log::warn!(
                         "replay_v2_op Delete: table token {} not found; skipping",
@@ -153,9 +173,17 @@ async fn replay_v2_op_admitted_inner(
             Ok(())
         }
         WalOpV2::CounterDelta {
-            table_id_interned: _,
-            delta: _,
+            table_id_interned, ..
         } => {
+            if strict
+                && (*table_id_interned == 0
+                    || repo
+                        .table_by_token_admitted(*table_id_interned, permit)
+                        .await?
+                        .is_none())
+            {
+                return Err(unresolved_table(*table_id_interned));
+            }
             // CRIT-3 idempotency (Option A):
             //
             // The happy-path commit (`commit::commit_tx_inner` Phase 5b)
@@ -181,16 +209,20 @@ async fn replay_v2_op_admitted_inner(
         }
         WalOpV2::IndexPut {
             table_id_interned,
-            idx_id: _,
+            idx_id,
             key,
             value,
         } => {
+            if strict {
+                check_index_route(*idx_id)?;
+            }
             if *table_id_interned != 0 {
                 let tbl = match repo
                     .table_by_token_admitted(*table_id_interned, permit)
                     .await?
                 {
                     Some(t) => t,
+                    None if strict => return Err(unresolved_table(*table_id_interned)),
                     None => {
                         log::warn!(
                             "replay_v2_op IndexPut: table token {} not found",
@@ -199,6 +231,9 @@ async fn replay_v2_op_admitted_inner(
                         return Ok(());
                     }
                 };
+                if strict {
+                    Box::pin(validate_posting(&tbl, key)).await?;
+                }
                 tbl.info_store()
                     .set(key.clone().into(), value.clone())
                     .await?;
@@ -214,9 +249,16 @@ async fn replay_v2_op_admitted_inner(
             // return, mirroring the `flush_buffers` / `seed_version_cache_
             // for_entry` first-err pattern already used in this crate.
             let mut first_err: Option<DbError> = None;
-            for name in repo.list_table_names() {
+            let names = repo.list_table_names();
+            if strict && names.is_empty() {
+                return Err(unresolved_table(0));
+            }
+            for name in names {
                 match repo.get_table_admitted(&name, permit).await {
                     Ok(tbl) => {
+                        if strict {
+                            Box::pin(validate_posting(&tbl, key)).await?;
+                        }
                         if let Err(e) = tbl
                             .info_store()
                             .set(key.clone().into(), value.clone())
@@ -231,6 +273,7 @@ async fn replay_v2_op_admitted_inner(
                             }
                         }
                     }
+                    Err(e) if strict => return Err(e),
                     Err(e) => {
                         log::warn!(
                             "replay_v2_op broadcast IndexPut: get_table failed for \
@@ -246,15 +289,19 @@ async fn replay_v2_op_admitted_inner(
         }
         WalOpV2::IndexDel {
             table_id_interned,
-            idx_id: _,
+            idx_id,
             key,
         } => {
+            if strict {
+                check_index_route(*idx_id)?;
+            }
             if *table_id_interned != 0 {
                 let tbl = match repo
                     .table_by_token_admitted(*table_id_interned, permit)
                     .await?
                 {
                     Some(t) => t,
+                    None if strict => return Err(unresolved_table(*table_id_interned)),
                     None => {
                         log::warn!(
                             "replay_v2_op IndexDel: table token {} not found",
@@ -263,6 +310,9 @@ async fn replay_v2_op_admitted_inner(
                         return Ok(());
                     }
                 };
+                if strict {
+                    Box::pin(validate_posting(&tbl, key)).await?;
+                }
                 // Idempotent like Delete: a missing posting is benign,
                 // but a real storage error must propagate rather than be
                 // swallowed as a phantom success.
@@ -276,12 +326,22 @@ async fn replay_v2_op_admitted_inner(
             // from every table's info_store. Most tables never held it, so
             // NotFound is the expected norm and benign — but a genuine I/O
             // error on any table propagates.
-            for name in repo.list_table_names() {
+            let names = repo.list_table_names();
+            if strict && names.is_empty() {
+                return Err(unresolved_table(0));
+            }
+            for name in names {
                 match repo.get_table_admitted(&name, permit).await {
-                    Ok(tbl) => match tbl.info_store().remove(key.clone().into()).await {
-                        Ok(_) | Err(DbError::NotFound(_)) => {}
-                        Err(e) => return Err(e),
-                    },
+                    Ok(tbl) => {
+                        if strict {
+                            Box::pin(validate_posting(&tbl, key)).await?;
+                        }
+                        match tbl.info_store().remove(key.clone().into()).await {
+                            Ok(_) | Err(DbError::NotFound(_)) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Err(e) if strict => return Err(e),
                     Err(e) => {
                         log::warn!(
                             "replay_v2_op broadcast IndexDel: get_table failed for \
@@ -372,11 +432,81 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
     repo.write_domain().debug_check_permit(permit);
     // Step 1: build the gate before replay so its version floor is seeded
     // from the inflight commit_versions while the markers still exist.
-    let gate = repo.tx_gate().await?;
+    let gate = Box::pin(repo.tx_gate()).await?;
 
-    let wal = repo.repo_wal().await?;
+    let wal = Box::pin(repo.repo_wal()).await?;
     let mut entries = wal.recover().await?;
     entries.sort_by_key(|e| e.commit_version);
+    let count = Box::pin(recover_entries(
+        repo,
+        permit,
+        &entries,
+        &gate,
+        Some(&wal),
+        None,
+    ))
+    .await?;
+
+    // PR8 completed_reseed chunk 2: cold-start history-epoch bump. An Armed
+    // lifecycle record with no later Clean certificate means the previous
+    // serve period ended uncleanly — the bump costs followers a re-seed,
+    // regardless of the CURRENT serve mode (review finding 2a: the Armed
+    // obligation survives a config change to `durable`). A failed
+    // bump/flush propagates and blocks admission.
+    Box::pin(repo.note_unclean_open_bump(permit)).await?;
+    Ok(count)
+}
+
+/// Replay the facade's validated entries on an exclusively opened offline copy.
+/// Does not retire WAL entries or perform the boot-only history epoch bump.
+/// The caller must prepare the exact gate and an offline WAL configuration
+/// before calling; cold certification can consult the repo's WAL group.
+/// cancel-safe: NO
+pub(crate) async fn recover_inflight_v2_strict(
+    repo: &RepoCore,
+    permit: &RepoWritePermit,
+    mut entries: Vec<WalEntryV2>,
+    v_star: u64,
+) -> DbResult<usize> {
+    repo.write_domain().debug_check_permit(permit);
+    let gate = repo.initialized_tx_gate().ok_or_else(|| {
+        DbError::Validation("strict WAL replay: offline transaction gate not initialized".into())
+    })?;
+    check_gate_version(gate, v_star)?;
+    entries.sort_by_key(|entry| entry.commit_version);
+    let count = Box::pin(recover_entries(
+        repo,
+        permit,
+        &entries,
+        gate,
+        None,
+        Some(v_star),
+    ))
+    .await?;
+    check_gate_version(gate, v_star)?;
+    Ok(count)
+}
+
+fn check_gate_version(gate: &RepoTxGate, v_star: u64) -> DbResult<()> {
+    let committed = gate.last_committed();
+    let allocated = gate.version_allocation_high_water_mark();
+    if committed != v_star || allocated != v_star {
+        return Err(DbError::Validation(format!(
+            "strict WAL replay: expected version {v_star}, got committed {committed}, allocated {allocated}"
+        )));
+    }
+    Ok(())
+}
+
+async fn recover_entries(
+    repo: &RepoCore,
+    permit: &RepoWritePermit,
+    entries: &[WalEntryV2],
+    gate: &RepoTxGate,
+    boot_wal: Option<&RepoWalManager>,
+    strict_point: Option<u64>,
+) -> DbResult<usize> {
+    let strict = strict_point.is_some();
     let count = entries.len();
 
     // Track the highest replayed commit_version for logging / assertion.
@@ -426,9 +556,9 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
     // entry for Phase C so we don't need to hold the entries themselves.
     let mut finalized: Vec<(u64 /* txn_id */, u64 /* commit_version */)> =
         Vec::with_capacity(entries.len());
-    for entry in &entries {
+    for entry in entries {
         max_replayed = max_replayed.max(entry.commit_version);
-        replay_v2_entry_admitted(entry, repo, permit).await?;
+        replay_v2_entry_admitted(entry, repo, permit, strict).await?;
         finalized.push((entry.txn_id, entry.commit_version));
     }
 
@@ -446,7 +576,7 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
     // change.
     let mut replayed_index_tables: Vec<u64> = Vec::new();
     let mut replayed_index_broadcast = false;
-    for entry in &entries {
+    for entry in entries {
         for op in &entry.ops {
             match op {
                 WalOpV2::IndexPut {
@@ -469,7 +599,7 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
     }
     if replayed_index_broadcast || !replayed_index_tables.is_empty() {
         for name in repo.list_table_names() {
-            let tbl = repo.get_table_admitted(&name, permit).await?;
+            let tbl = Box::pin(repo.get_table_admitted(&name, permit)).await?;
             let targeted =
                 replayed_index_broadcast || replayed_index_tables.contains(&tbl.table_token());
             if targeted && tbl.identity_migrated_this_open() {
@@ -477,8 +607,8 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
                     "post-replay identity re-run: table '{name}' received a replayed \
                      pre-upgrade index op after migrating this open; rebuilding"
                 );
-                tbl.rerun_identity_migration_admitted(permit).await?;
-                tbl.rerun_index2_identity_migration().await?;
+                Box::pin(tbl.rerun_identity_migration_admitted(permit)).await?;
+                Box::pin(tbl.rerun_index2_identity_migration()).await?;
             }
         }
     }
@@ -525,7 +655,9 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
         }
         // No-op: there are no per-entry markers; the segment is cleaned by
         // F6 truncation and replay is idempotent.
-        wal.commit(txn_id).await?;
+        if let Some(wal) = boot_wal {
+            wal.commit(txn_id).await?;
+        }
     }
 
     if count > 0 {
@@ -537,6 +669,9 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
         // restart — which sees no inflight markers — still seeds the gate
         // above the recovered commit versions. `gate.last_committed()`
         // already reflects max(marker, max_inflight) from step 1.
+        if let Some(v_star) = strict_point {
+            check_gate_version(gate, v_star)?;
+        }
         let floor = gate.last_committed();
         let info_store = repo.tx_info_store().await?;
         crate::meta::recovery_marker::save_last_committed(&info_store, floor).await?;
@@ -549,14 +684,7 @@ pub async fn recover_inflight_v2(repo: &RepoCore, permit: &RepoWritePermit) -> D
             floor
         );
     }
-    repo.certify_cold_start(&entries, permit).await?;
-    // PR8 completed_reseed chunk 2: cold-start history-epoch bump. An Armed
-    // lifecycle record with no later Clean certificate means the previous
-    // serve period ended uncleanly — the bump costs followers a re-seed,
-    // regardless of the CURRENT serve mode (review finding 2a: the Armed
-    // obligation survives a config change to `durable`). A failed
-    // bump/flush propagates and blocks admission.
-    repo.note_unclean_open_bump(permit).await?;
+    Box::pin(repo.certify_cold_start(entries, permit)).await?;
     Ok(count)
 }
 
@@ -581,7 +709,7 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoCore) ->
         .await
         .map_err(|error| DbError::Internal(error.to_string()))?;
     // Round-11 (stack layout): same heap-pinning rationale as `replay_v2_op`.
-    Box::pin(replay_v2_entry_admitted(entry, repo, &permit)).await
+    Box::pin(replay_v2_entry_admitted(entry, repo, &permit, false)).await
 }
 
 #[inline(never)]
@@ -589,14 +717,16 @@ fn replay_v2_entry_admitted<'a>(
     entry: &'a shamir_wal::WalEntryV2,
     repo: &'a RepoCore,
     permit: &'a RepoWritePermit,
+    strict: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = DbResult<()>> + Send + 'a>> {
-    Box::pin(replay_v2_entry_admitted_inner(entry, repo, permit))
+    Box::pin(replay_v2_entry_admitted_inner(entry, repo, permit, strict))
 }
 
 async fn replay_v2_entry_admitted_inner(
     entry: &shamir_wal::WalEntryV2,
     repo: &RepoCore,
     permit: &RepoWritePermit,
+    strict: bool,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);
     // A4-recovery + Stage I keystone: apply the interner delta BEFORE
@@ -607,13 +737,20 @@ async fn replay_v2_entry_admitted_inner(
     // table), so the old per-token routing (`repo.table_by_token(token)` →
     // `tbl.interner()`) collapses to a SINGLE resolution of the repo
     // interner. The first `u64` of each triple is now a repo-scope constant
-    // (see `REPO_INTERNER_SCOPE`) and is ignored here. This is the
-    // correctness keystone: every replayed record byte encodes ids from
-    // THIS ONE interner, regardless of which table the op targets.
+    // (see `REPO_INTERNER_SCOPE`); boot ignores it, while strict replay
+    // requires the repo scope. Every replayed record byte encodes ids from
+    // this one interner, regardless of which table the op targets.
     if !entry.interner_delta.is_empty() {
         let repo_interner = repo.repo_interner().await?;
         let interner = repo_interner.get().await?;
-        for (_scope, name, id) in &entry.interner_delta {
+        for (scope, name, id) in &entry.interner_delta {
+            let expected_scope = unexpected_repo_interner_scope(*scope).filter(|_| strict);
+            if let Some(expected) = expected_scope {
+                return Err(DbError::Validation(format!(
+                    "strict WAL replay: tx {} interner scope {scope}, expected {expected}",
+                    entry.txn_id
+                )));
+            }
             interner.touch_with_id(name, *id).map_err(|e| {
                 DbError::Internal(format!(
                     "replay tx {} interner delta failed: {}",
@@ -624,14 +761,16 @@ async fn replay_v2_entry_admitted_inner(
     }
 
     for op in &entry.ops {
-        replay_v2_op_admitted(op, repo, permit).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
-                "replay tx {} op failed: {}",
-                entry.txn_id, e
-            ))
-        })?;
+        replay_v2_op_admitted(op, repo, permit, strict)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "replay tx {} op failed: {}",
+                    entry.txn_id, e
+                ))
+            })?;
     }
-    seed_version_cache_for_entry(entry, repo, permit).await?;
+    Box::pin(seed_version_cache_for_entry(entry, repo, permit, strict)).await?;
     Ok(())
 }
 
@@ -677,6 +816,7 @@ async fn seed_version_cache_for_entry(
     entry: &shamir_wal::WalEntryV2,
     repo: &RepoCore,
     permit: &RepoWritePermit,
+    strict: bool,
 ) -> DbResult<()> {
     repo.write_domain().debug_check_permit(permit);
     let v = entry.commit_version;
@@ -722,6 +862,7 @@ async fn seed_version_cache_for_entry(
     // failing entry is marked `Materialized` / `mark_durable`, so the durable
     // watermark stays below it and F6 truncation cannot unlink the WAL
     // segment holding its only copy.
+    // A missing MVCC target is a refusal during strict replay.
     let mut first_err: Option<DbError> = None;
     for (table_id, ops) in by_table {
         // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
@@ -791,6 +932,8 @@ async fn seed_version_cache_for_entry(
                     first_err = Some(e);
                 }
             }
+        } else if strict {
+            return Err(unresolved_table(table_id));
         }
     }
     if let Some(e) = first_err {
@@ -801,8 +944,10 @@ async fn seed_version_cache_for_entry(
     // already advances it for MVCC tables; this is the catch-all. Monotonic
     // fetch_max — safe to call redundantly.
     if v > 0 {
-        if let Ok(gate) = repo.tx_gate().await {
-            gate.raise_published(v);
+        match repo.tx_gate().await {
+            Ok(gate) => gate.raise_published(v),
+            Err(e) if strict => return Err(e),
+            Err(_) => {}
         }
     }
     Ok(())

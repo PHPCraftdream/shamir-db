@@ -7,6 +7,7 @@ use shamir_query_types::{DurabilityOverride, ReplicationServe};
 
 use super::super::RepoInstance;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::Repo as _;
 use std::sync::Arc;
 
 #[cfg(all(test, feature = "fjall"))]
@@ -77,6 +78,82 @@ impl RepoInstance {
         instance.recover_v2_inflight_admitted(&permit).await?;
         drop(permit);
         Ok(instance)
+    }
+
+    /// Replay validated WAL entries while holding the ordinary exclusive store lock.
+    /// The caller must use an unbuffered disk factory and keep its sibling WAL
+    /// offline and unchanged after staging: normal gate initialization opens it
+    /// to seed the version floor. Replay does not retire the staged WAL.
+    ///
+    /// `Err((true, error))` means the exclusive store open failed. All later
+    /// failures are `Err((false, error))` and may leave changes on the copy.
+    /// Cancel-safe: no; dropping the future can leave partial replay effects
+    /// and leave the changefeed writer holding the store lock.
+    pub(crate) async fn replay_staged_wal(
+        name: String,
+        factory: BoxRepoFactory,
+        configs: Vec<TableConfig>,
+        entries: Vec<shamir_wal::WalEntryV2>,
+        v_star: u64,
+    ) -> Result<usize, (bool, DbError)> {
+        let instance = Box::pin(Self::from_factory_unrecovered(name, factory, configs))
+            .await
+            .map_err(|error| (true, error))?;
+        let after_open = |error| (false, error);
+        {
+            let info = Box::pin(instance.tx_info_store())
+                .await
+                .map_err(after_open)?;
+            let follower_state = Box::pin(
+                crate::meta::repl::bookmark_v3::classify_follower_bookmark(&info),
+            )
+            .await
+            .map_err(after_open)?;
+            // Normal boot may complete receipts from the store; strict replay
+            // must not apply work outside the staged WAL or possibly above V*.
+            if matches!(
+                follower_state,
+                crate::meta::repl::FollowerBookmarkState::Native(bookmark)
+                    if bookmark.outstanding_receipt.is_some()
+            ) {
+                return Err(after_open(DbError::Storage(
+                    "strict WAL replay refuses an outstanding follower receipt".into(),
+                )));
+            }
+        }
+        let permit = instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|error| after_open(DbError::Internal(error.to_string())))?;
+        Box::pin(instance.repo_identity_admitted(&permit))
+            .await
+            .map_err(after_open)?;
+        Box::pin(instance.tx_gate()).await.map_err(after_open)?;
+        let replay = Box::pin(crate::tx::recovery::recover_inflight_v2_strict(
+            &instance.core,
+            &permit,
+            entries,
+            v_star,
+        ))
+        .await;
+        // Cold certification may have started a writer that holds the store
+        // lock after instance drop. Join it even if replay failed.
+        let shutdown = match instance.core.durability_handle.changefeed.get() {
+            Some(handle) => Box::pin(handle.feed.shutdown_and_wait()).await,
+            None => Ok(()),
+        };
+        let count = replay.map_err(after_open)?;
+        shutdown.map_err(after_open)?;
+        // Persist the unbuffered stores without flush_buffers, which drains
+        // the WAL and can truncate it. Keep the instance alive for the barrier.
+        instance
+            .core
+            .repo
+            .persist_once()
+            .await
+            .map_err(after_open)?;
+        Ok(count)
     }
 
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
