@@ -22,11 +22,11 @@ flags = ["ts"]
 reason = "TypeScript wire-op parity tests read this shared fixture"
 
 [[edge]]
-paths = ["crates/query/shamir-query-builder/tests/fixtures/create_index_matrix.json", "crates/query/shamir-query-builder/tests/fixtures/vector_filter_msgpack.json", "crates/query/shamir-query-builder/tests/fixtures/repl_ddl_msgpack.json"]
+paths = ["crates/query/shamir-query-builder/tests/fixtures/create_index_matrix.json", "crates/query/shamir-query-builder/tests/fixtures/vector_filter_msgpack.json", "crates/query/shamir-query-builder/tests/fixtures/repl_ddl_msgpack.json", "crates/query/shamir-query-builder/tests/fixtures/schema_migration_canonical_vectors.json"]
 crates = []
 propagate = "tests"
 flags = ["ts"]
-reason = "three TypeScript parity suites consume shared Rust builder byte fixtures"
+reason = "four TypeScript parity suites consume shared Rust builder byte fixtures"
 
 [[edge]]
 paths = ["crates/query/shamir-query-types/test-vectors/**"]

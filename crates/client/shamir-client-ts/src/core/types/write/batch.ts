@@ -33,6 +33,7 @@ import type { AdminOp } from '../access/admin.js';
 import type { CallOp } from './call.js';
 import type { FilterValue, Filter } from '../read/filter.js';
 import type { SubscribeOp, UnsubscribeOp } from '../stream/subscribe.js';
+import type { ApplicationSchemaEntry } from '../schema/migration-protocol.js';
 
 // ── Sub-batch operation ─────────────────────────────────────────────
 
@@ -77,7 +78,14 @@ export type BatchOpInput =
   | SubBatchOp
   | ForEachOp
   | SubscribeOp
-  | UnsubscribeOp;
+  | UnsubscribeOp
+  /**
+   * Application-schema migration admin ops (R1c step 3b) — the three-key
+   * `{ application_schema: true, operation, payload }` map emitted by
+   * `BatchOp::ApplicationSchema`'s custom Serialize. Built only by
+   * `../../builders/admin/schema-migration/wire.ts`.
+   */
+  | ApplicationSchemaEntry;
 
 // ── QueryEntry ──────────────────────────────────────────────────────
 

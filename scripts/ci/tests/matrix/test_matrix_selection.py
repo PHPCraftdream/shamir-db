@@ -136,6 +136,33 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
         self.assertEqual([item["name"] for item in query_types["crates"]], ["shamir-query-types"])
         self.assertTrue(query_types["flags"]["ts"])
 
+    def test_migration_fixture_sets_ts_flag_but_builder_source_does_not(self):
+        # A schema_migration_canonical_vectors.json change must set the ts flag
+        # (so the TS parity suite cannot be skipped) while staying bounded, and
+        # an ordinary src/lib.rs change in the same crate must not set it.
+        config = load_edges(open(os.path.join(os.path.dirname(__file__), "../../matrix/edges.toml"), encoding="utf-8").read())
+        builder = pkg("shamir-query-builder", directory="crates/query/shamir-query-builder")
+        fixture = select(["crates/query/shamir-query-builder/tests/fixtures/schema_migration_canonical_vectors.json"],
+                         [builder], config)
+        self.assertTrue(fixture["flags"]["ts"])
+        self.assertNotEqual(fixture["scope"], "all")
+        self.assertEqual([item["name"] for item in fixture["crates"]], ["shamir-query-builder"])
+        source = select(["crates/query/shamir-query-builder/src/lib.rs"], [builder], config)
+        self.assertFalse(source["flags"]["ts"])
+        self.assertNotEqual(source["scope"], "all")
+
+    def test_migration_ts_flag_depends_on_declared_edge(self):
+        # With the fixture edge removed, the ts flag must disappear: the flag is
+        # carried ONLY by the declared edge, not implied by the path or package.
+        config = load_edges(open(os.path.join(os.path.dirname(__file__), "../../matrix/edges.toml"), encoding="utf-8").read())
+        trimmed = {"edge": [edge for edge in config["edge"]
+                            if not any("schema_migration_canonical_vectors.json" in glob for glob in edge["paths"])],
+                   "canary": config["canary"]}
+        builder = pkg("shamir-query-builder", directory="crates/query/shamir-query-builder")
+        result = select(["crates/query/shamir-query-builder/tests/fixtures/schema_migration_canonical_vectors.json"],
+                        [builder], trimmed)
+        self.assertFalse(result["flags"]["ts"])
+
     def test_path_table_flags_and_fail_safe_fallback(self):
         cases = [(["Cargo.lock"], "all", {}), (["Cargo.toml"], "all", {}),
                  (["rust-toolchain.toml"], "all", {}), ([".cargo/config.toml"], "all", {}),
