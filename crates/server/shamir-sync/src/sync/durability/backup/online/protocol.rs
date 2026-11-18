@@ -543,11 +543,15 @@ fn run_steps(
     }
     let total_bytes = files.iter().map(|entry| entry.size_bytes).sum::<u64>();
     let files_hashed = files.len() as u64;
+    let copied_stamp_epoch = match crate::format_stamp::inspect(dest_dir) {
+        crate::format_stamp::StampState::Valid(stamp) => Some(stamp.format_epoch()),
+        _ => None,
+    };
     let manifest = manifest::build_v2(
         progress.started_at_unix_ns,
         files,
-        None,
-        None,
+        copied_stamp_epoch,
+        Some(env!("CARGO_PKG_VERSION").to_string()),
         consistency,
         wal,
     );

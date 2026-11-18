@@ -1,0 +1,368 @@
+//! Online-copy restore tests over the real engine facade, the real
+//! `EngineBackupPort` capture/seal and the real production `restore`
+//! (R2a step 3b-2).
+//!
+//! Proven, one test per acceptance row:
+//! * happy path — the copy (store staged BEFORE a between-copy commit,
+//!   WAL staged at the seal point) replays to `V*` on a FRESH target
+//!   (clean-machine case) and boots: the probe set equals the sealed
+//!   source oracle captured by the fixture (`Snapshot::sealed_rows`) and
+//!   the post-seal source-only write is absent;
+//! * created-after-capture — a repo registered after the catalogue
+//!   capture is reported in `RestoreReport::excluded_repositories` and is
+//!   NOT registered on the restored boot;
+//! * `EntryAboveVStar` — a manifest recording one-below the captured WAL's
+//!   highest entry (files untouched, verifier still accepts) is refused
+//!   with the typed replay error naming the repo; the PRE-EXISTING target
+//!   content is left byte-identical (read-only online target path, run
+//!   with `force = false` and a PANICKING legacy probe — proof the online
+//!   path bypasses the caller probe) with no staged/rollback sibling;
+//! * `MissingTableRoute` — omitting the committed `rows` route from the
+//!   snapshot's system catalogue (public `SystemStore::remove_table`,
+//!   keeping the `extra` table) is refused as an unresolved table token
+//!   under the same pre-populated-target/panic-probe contract;
+//! * missing captured repository directory — ONLY the store directory
+//!   removed (WAL and its manifest listing kept), manifest re-hashed,
+//!   refused by the consistency check (typed
+//!   `RestoreError::Consistency { repo, reason }`) on a fresh target.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use shamir_db::engine::db_instance::replay_to::{ReplayScopeError, ReplayToError};
+use shamir_db::{ShamirDb, SystemStoreConfig};
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::Query;
+
+use super::fixture::{on_big_stack, Fixture};
+use crate::sync::durability::backup::restore::{restore_with_probe, RestoreError, RestoreReport};
+
+const SYSTEM_DIR: &str = "shamir_db_meta.redb";
+
+/// Deterministic pre-existing target content for the replay-refusal
+/// tests: nested marker files under the restore target `data` dir, so the
+/// read-only online refusal path is exercised against a NON-empty target.
+const SEED_MARKERS: &[&str] = &["repos/nested/marker.dat", "stamp.preexisting"];
+
+/// Run the synchronous production restore on the (roomy) test thread: the
+/// production restore owns its internal deep stacks, so no detached test
+/// thread is needed. Online restores bypass the caller probe entirely
+/// (read-only target path), so the probe PANICS — if the legacy path ever
+/// ran, the test would fail loudly; `force = false` keeps the real gate.
+fn run_restore(fixture: &Fixture) -> Result<RestoreReport, RestoreError> {
+    let from = fixture.dest_root.join("online");
+    let target = fixture.target_data_dir();
+    restore_with_probe(&from, &target, false, |_path| {
+        panic!("legacy liveness probe must not run for an online snapshot");
+    })
+}
+
+/// Boot the restored `data` directory the way the next boot performs (the
+/// same init the fixture used) and return the sorted probe set.
+fn boot_probe_rows(fixture: &Fixture) -> Vec<String> {
+    let target = fixture.target_data_dir();
+    let db = fixture
+        .runtime
+        .block_on(super::fixture::bounded(
+            "boot restored data dir",
+            ShamirDb::init(SystemStoreConfig::Fjall(target.join(SYSTEM_DIR))),
+        ))
+        .expect("boot restored engine");
+    let mut batch = Batch::new();
+    batch.query("probe", Query::with_repo("main", "rows"));
+    let response = fixture
+        .runtime
+        .block_on(super::fixture::bounded("restored probe read", async {
+            db.execute("app", &batch.build()).await
+        }))
+        .expect("restored probe batch");
+    let mut names: Vec<String> = response.results["probe"]
+        .records
+        .iter()
+        .map(|row| row.get_value_str("name").unwrap().to_owned())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// The registered repos of `app` on the restored boot (sorted).
+fn boot_repo_names(fixture: &Fixture) -> Vec<String> {
+    let target = fixture.target_data_dir();
+    let db = fixture
+        .runtime
+        .block_on(super::fixture::bounded(
+            "boot restored data dir",
+            ShamirDb::init(SystemStoreConfig::Fjall(target.join(SYSTEM_DIR))),
+        ))
+        .expect("boot restored engine");
+    let mut names = db
+        .get_db("app")
+        .expect("restored app database")
+        .list_repos();
+    names.sort();
+    names
+}
+
+/// Deterministic bytes for one seeded marker file.
+fn marker_bytes(rel: &str) -> Vec<u8> {
+    format!("pre-existing target marker: {rel}\n").into_bytes()
+}
+
+/// Full relative-path -> bytes map of the target `data` directory.
+fn target_byte_map(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut map = BTreeMap::new();
+    collect_target_files(root, root, &mut map);
+    map
+}
+
+fn collect_target_files(root: &Path, dir: &Path, map: &mut BTreeMap<String, Vec<u8>>) {
+    for entry in fs::read_dir(dir).expect("walk target dir") {
+        let entry = entry.expect("target dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_target_files(root, &path, map);
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .expect("relative target path")
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        map.insert(rel, fs::read(&path).expect("read target file"));
+    }
+}
+
+/// Pre-populate the restore target `data` directory with the deterministic
+/// nested markers and return the full byte map for the untouched check.
+fn seed_existing_target(fixture: &Fixture) -> BTreeMap<String, Vec<u8>> {
+    let data = fixture.target_data_dir();
+    for rel in SEED_MARKERS {
+        let path = data.join(rel);
+        fs::create_dir_all(path.parent().expect("seed parent")).expect("seed parent dir");
+        fs::write(&path, marker_bytes(rel)).expect("seed marker file");
+    }
+    target_byte_map(&data)
+}
+
+/// A refused online restore must leave the PRE-EXISTING target content
+/// byte-identical and must not leave a staged `*.restore_tmp_*` or a
+/// rollback `.pre_restore_backup_*` sibling next to the target.
+fn assert_existing_target_untouched(fixture: &Fixture, before: &BTreeMap<String, Vec<u8>>) {
+    let data = fixture.target_data_dir();
+    let after = target_byte_map(&data);
+    assert_eq!(
+        after, *before,
+        "the online refusal path must not touch the existing target `data` dir"
+    );
+    assert_no_stage_or_rollback_sibling(fixture);
+}
+
+/// A refused online restore on a fresh target must leave the target absent
+/// and must not leave a staged or rollback sibling behind.
+fn assert_clean_refusal(fixture: &Fixture) {
+    assert!(
+        !fixture.target_data_dir().exists(),
+        "the live target tree must be untouched by a refused restore"
+    );
+    assert_no_stage_or_rollback_sibling(fixture);
+}
+
+fn assert_no_stage_or_rollback_sibling(fixture: &Fixture) {
+    let staged: Vec<PathBuf> = fs::read_dir(&fixture.target_root)
+        .expect("target root")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            name.contains("restore_tmp") || name.contains("pre_restore_backup")
+        })
+        .collect();
+    assert!(
+        staged.is_empty(),
+        "a refused restore must leave no staged/rollback sibling: {staged:?}"
+    );
+}
+
+/// Happy path on a FRESH target (clean-machine case): the sealed copy
+/// replays to `V*` and boots to the sealed source state (asserted against
+/// the fixture's sealed oracle AND the expected vector); the post-seal
+/// source-only write is absent from the restore.
+#[test]
+fn restored_online_copy_matches_source_at_seal_on_fresh_target() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        assert_eq!(
+            fixture.probe_rows(),
+            ["after_seal", "before_capture", "before_seal"],
+            "source oracle: post-seal write is live only"
+        );
+        snapshot.assert_verifies();
+
+        let report = run_restore(&fixture).expect("online restore must succeed");
+        assert!(
+            report.files_restored > 0,
+            "the restore must copy the snapshot files"
+        );
+        assert_eq!(
+            report.pre_restore_backup, None,
+            "a fresh target has no pre-restore backup"
+        );
+        assert!(
+            report.excluded_repositories.is_empty(),
+            "no repo was created after capture: {:?}",
+            report.excluded_repositories
+        );
+
+        let boot = boot_probe_rows(&fixture);
+        assert_eq!(
+            boot, snapshot.sealed_rows,
+            "the restored boot must equal the fixture's sealed probe oracle"
+        );
+        assert_eq!(
+            boot,
+            ["before_capture", "before_seal"],
+            "the restore must land at the seal point; `after_seal` is source-only"
+        );
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// A repo registered after the catalogue capture is copied (its files and
+/// catalogue row are in the snapshot) but is excluded from the captured
+/// set: reported in the restore and NOT registered on the restored boot.
+#[test]
+fn repo_created_after_capture_is_excluded_and_not_registered_on_boot() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(true);
+        snapshot.assert_verifies();
+
+        let report = run_restore(&fixture).expect("online restore must succeed");
+        assert!(
+            report
+                .excluded_repositories
+                .iter()
+                .any(|entry| entry.starts_with("app/late")),
+            "the late repo must be named in excluded_repositories: {:?}",
+            report.excluded_repositories
+        );
+
+        let repos = boot_repo_names(&fixture);
+        assert!(
+            repos.contains(&"main".to_string()),
+            "the captured repo must be registered: {repos:?}"
+        );
+        assert!(
+            !repos.contains(&"late".to_string()),
+            "the created-after-capture repo must NOT be registered on boot: {repos:?}"
+        );
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// The manifest records one BELOW the captured WAL's highest entry (files
+/// untouched, verifier still accepts): replay refuses with the typed
+/// `EntryAboveVStar` error naming the repo; the pre-populated target stays
+/// byte-identical with no staged/rollback sibling.
+#[test]
+fn wal_entry_above_recorded_point_refuses_replay_naming_the_repo() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        let _recorded_point = snapshot.decrement_captured_point();
+        snapshot.assert_verifies();
+        let seeded = seed_existing_target(&fixture);
+
+        match run_restore(&fixture) {
+            Ok(report) => {
+                panic!("replay of an entry above the recorded point must refuse: {report:?}")
+            }
+            Err(RestoreError::Replay { repo, source }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+                assert!(
+                    matches!(*source, ReplayToError::EntryAboveVStar { .. }),
+                    "expected EntryAboveVStar, got: {source}"
+                );
+            }
+            Err(other) => panic!("expected RestoreError::Replay, got: {other}"),
+        }
+        assert_existing_target_untouched(&fixture, &seeded);
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// The committed `rows` table route is omitted from the snapshot's system
+/// catalogue (public `SystemStore::remove_table`; the kept `extra` table
+/// prevents `EmptyTableScope`): replay refuses with the typed unresolved
+/// token error; the pre-populated target stays byte-identical with no
+/// staged/rollback sibling.
+#[test]
+fn unresolved_table_token_refuses_replay_as_missing_table_route() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        snapshot.remove_probe_table_route(&fixture);
+        snapshot.assert_verifies();
+        let seeded = seed_existing_target(&fixture);
+
+        match run_restore(&fixture) {
+            Ok(report) => panic!("replay without a table route must refuse: {report:?}"),
+            Err(RestoreError::Replay { repo, source }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+                assert!(
+                    matches!(
+                        *source,
+                        ReplayToError::Scope(ReplayScopeError::MissingTableRoute { .. })
+                    ),
+                    "expected MissingTableRoute, got: {source}"
+                );
+            }
+            Err(other) => panic!("expected RestoreError::Replay, got: {other}"),
+        }
+        assert_existing_target_untouched(&fixture, &seeded);
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// The captured repository's store directory is missing from the snapshot
+/// (ONLY the store removed — the WAL directory and its manifest listing
+/// stay; the manifest is re-hashed so verification passes): the
+/// consistency check refuses with the typed `RestoreError::Consistency`,
+/// and the fresh target stays absent with staging cleaned.
+#[test]
+fn missing_captured_store_dir_refuses_consistency() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        snapshot.drop_captured_store_dir();
+        snapshot.assert_verifies();
+
+        match run_restore(&fixture) {
+            Ok(report) => panic!("a missing captured repo directory must refuse: {report:?}"),
+            Err(RestoreError::Consistency { repo, .. }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+            }
+            Err(other) => panic!("expected RestoreError::Consistency, got: {other}"),
+        }
+        assert_clean_refusal(&fixture);
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}

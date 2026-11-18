@@ -10,7 +10,7 @@ use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, ConsistencySection, ManifestV2, RepoConsistency, WalDirEntry, WalSection,
     WalSegmentEntry,
 };
-use crate::sync::durability::backup::verify_manifest;
+use crate::sync::durability::backup::{verify_manifest, BackupError};
 
 /// Unique temp dir per test; cleaned up best-effort.
 fn temp_dir(name: &str) -> PathBuf {
@@ -340,4 +340,414 @@ fn v2_verify_refusals() {
         "unexpected error: {error}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ---- v2 verify: report metadata, stamp cross-check, path confinement ----
+
+/// Test-scoped temp-dir guard: removes the directory when dropped, so a
+/// panicking test cannot leak its fixture.
+struct DirGuard(PathBuf);
+
+impl DirGuard {
+    fn new(name: &str) -> Self {
+        Self(temp_dir(name))
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for DirGuard {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn write_stamp(dir: &Path, epoch: u64) {
+    let stamp = crate::format_stamp::FormatStamp::with_epoch(epoch, "test", 0);
+    let bytes = crate::format_stamp::codec::encode(&stamp).expect("encode stamp");
+    fs::write(dir.join(crate::format_stamp::STAMP_FILE_NAME), bytes).expect("write stamp");
+}
+
+/// Hash `rel` (relative, forward-slash) into the manifest `files` array so
+/// the on-disk file stays accounted for.
+fn add_file_entry(dir: &Path, rel: &str) {
+    let abs = dir.join(rel);
+    let (sha256, size_bytes) = hash_file(&abs).expect("hash");
+    set_manifest_fields(dir, |decoded| {
+        decoded
+            .files
+            .push(crate::sync::durability::backup::ManifestFileEntry {
+                path: rel.to_string(),
+                sha256,
+                size_bytes,
+            })
+    });
+}
+
+fn set_manifest_fields(dir: &Path, edit: impl FnOnce(&mut ManifestV2)) {
+    let raw = fs::read_to_string(dir.join("manifest.json")).expect("read manifest");
+    let mut decoded = manifest::decode(&raw).expect("decode manifest");
+    edit(&mut decoded);
+    fs::write(
+        dir.join("manifest.json"),
+        manifest::encode(&decoded).expect("encode"),
+    )
+    .expect("write manifest");
+}
+
+fn wal_segment_paths() -> [&'static str; 2] {
+    ["repos/alpha/store.bin", "backup.meta.json"]
+}
+
+#[test]
+fn v2_verify_report_carries_kind_epoch_version_and_positions() {
+    let dir = DirGuard::new("verify_report");
+    build_snapshot(&dir.0);
+    write_stamp(&dir.0, 3);
+    add_file_entry(&dir.0, "format.stamp");
+    set_manifest_fields(&dir.0, |decoded| {
+        decoded.format_epoch = Some(3);
+        decoded.binary_version = Some("9.9.9".to_string());
+    });
+    let report = verify_manifest(&dir.0).expect("matching epoch must verify");
+    assert!(matches!(report.kind, BackupKind::Online));
+    assert_eq!(report.format_epoch, Some(3));
+    assert_eq!(report.binary_version.as_deref(), Some("9.9.9"));
+    let consistency = report.consistency.as_ref().expect("consistency");
+    let alpha = consistency.per_repo.get("alpha").expect("alpha");
+    assert_eq!(alpha.wal_position, 2);
+    assert_eq!(alpha.store_dir, "repos/alpha");
+    assert_eq!(alpha.schema_version, 1);
+    assert_eq!(consistency.system_store_version, 3);
+    assert_eq!(report.files_checked, 5);
+}
+
+#[test]
+fn v1_verify_report_is_offline_with_no_v2_fields() {
+    let dir = DirGuard::new("verify_report_v1");
+    let file = dir.0.join("data.bin");
+    write_file(&file, b"v1-report");
+    let (sha256, size_bytes) = hash_file(&file).expect("hash");
+    let raw = format!(
+        r#"{{ "format_version": 1, "created_at_unix_ns": 1, "files": [
+            {{ "path": "data.bin", "sha256": "{sha256}", "size_bytes": {size_bytes} }} ] }}"#
+    );
+    fs::write(dir.0.join("manifest.json"), raw).expect("write v1 manifest");
+    let report = verify_manifest(&dir.0).expect("v1 must verify");
+    assert!(matches!(report.kind, BackupKind::Offline));
+    assert!(report.format_epoch.is_none());
+    assert!(report.binary_version.is_none());
+    assert!(report.consistency.is_none());
+}
+
+#[test]
+fn v2_verify_refuses_manifest_stamp_epoch_mismatch() {
+    let dir = DirGuard::new("verify_epoch_mismatch");
+    build_snapshot(&dir.0);
+    write_stamp(&dir.0, 4);
+    add_file_entry(&dir.0, "format.stamp");
+    set_manifest_fields(&dir.0, |decoded| decoded.format_epoch = Some(3));
+    let error = verify_manifest(&dir.0).expect_err("mismatched epoch must fail");
+    assert!(
+        matches!(
+            error,
+            BackupError::ManifestStampEpochMismatch {
+                manifest_epoch: 3,
+                stamp_epoch: 4
+            }
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_missing_epoch_with_valid_stamp() {
+    // A valid snapshot stamp with an absent manifest `format_epoch` refuses
+    // typed: a manifest/stamp pair that cannot be proven consistent is
+    // corrupt (the producer wires the epoch into `build_v2`).
+    let dir = DirGuard::new("verify_epoch_absent");
+    build_snapshot(&dir.0);
+    write_stamp(&dir.0, 3);
+    add_file_entry(&dir.0, "format.stamp");
+    let error = verify_manifest(&dir.0).expect_err("absent epoch with stamp must fail");
+    assert!(
+        matches!(error, BackupError::MissingManifestEpoch { stamp_epoch: 3 }),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_corrupt_stamp() {
+    let dir = DirGuard::new("verify_stamp_corrupt");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| decoded.format_epoch = Some(3));
+    fs::write(
+        dir.0.join(crate::format_stamp::STAMP_FILE_NAME),
+        b"not-a-stamp",
+    )
+    .expect("corrupt stamp");
+    let error = verify_manifest(&dir.0).expect_err("corrupt stamp must fail");
+    assert!(
+        matches!(error, BackupError::InvalidSnapshotStamp(_)),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_tolerates_epoch_without_stamp() {
+    let dir = DirGuard::new("verify_epoch_no_stamp");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| decoded.format_epoch = Some(3));
+    assert!(
+        verify_manifest(&dir.0).is_ok(),
+        "absent stamp keeps today's rule"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_noncanonical_wal_segment_path() {
+    // A segment file that is not the canonical direct
+    // `<wal-dir>/<seq:08>.wal` name refuses typed — whether it points
+    // outside the declared dir or merely renames the segment.
+    for seg in wal_segment_paths() {
+        let dir = DirGuard::new("verify_wal_outside");
+        build_snapshot(&dir.0);
+        set_manifest_fields(&dir.0, |decoded| {
+            let wal = decoded.wal.as_mut().expect("wal");
+            wal.dirs[0].segments[0].file = seg.to_string();
+        });
+        let error = verify_manifest(&dir.0).expect_err("non-canonical wal name must fail");
+        assert!(
+            matches!(error, BackupError::NonCanonicalWalName { .. }),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn v2_verify_refuses_non_canonical_wal_segment_name() {
+    let dir = DirGuard::new("verify_wal_noncanonical");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let wal = decoded.wal.as_mut().expect("wal");
+        wal.dirs[0].segments[1].file = "repos/alpha.shamirwal/1.wal".to_string();
+    });
+    let error = verify_manifest(&dir.0).expect_err("non-canonical name must fail");
+    assert!(
+        matches!(error, BackupError::NonCanonicalWalName { .. }),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_undeclared_direct_wal_file() {
+    // Replay reads every direct `.wal` under the declared dir; an on-disk
+    // segment the listing omits must refuse.
+    let dir = DirGuard::new("verify_wal_undeclared");
+    build_snapshot(&dir.0);
+    write_file(&dir.0.join("repos/alpha.shamirwal/00000002.wal"), b"sneaky");
+    let error = verify_manifest(&dir.0).expect_err("undeclared wal file must fail");
+    assert!(
+        matches!(error, BackupError::UndeclaredWalFile { ref file, .. } if file == "00000002.wal"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_wal_listing_without_segments() {
+    // Even a `V*` of zero produces an empty segment file, so a wal dir
+    // listing with zero segments is a truncated capture and refuses typed.
+    let dir = DirGuard::new("verify_wal_empty_listing");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let wal = decoded.wal.as_mut().expect("wal");
+        wal.dirs[0].segments.clear();
+    });
+    let error = verify_manifest(&dir.0).expect_err("empty wal listing must fail");
+    assert!(
+        matches!(
+            error,
+            BackupError::WalListingEmpty {
+                ref repo,
+                ref dir
+            } if repo == "alpha" && dir == "repos/alpha.shamirwal"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_wal_listing_missing_for_captured_repo() {
+    // Captured repos and listed wal dirs must be a bijection: a repo in
+    // `consistency.per_repo` with no wal dir listing refuses typed.
+    let dir = DirGuard::new("verify_wal_missing_repo");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let consistency = decoded.consistency.as_mut().expect("consistency");
+        consistency.per_repo.insert(
+            "beta".to_string(),
+            RepoConsistency {
+                wal_position: 0,
+                store_dir: "repos/beta".to_string(),
+                schema_version: 1,
+            },
+        );
+    });
+    let error = verify_manifest(&dir.0).expect_err("missing wal listing must fail");
+    assert!(
+        matches!(
+            error,
+            BackupError::WalListingMissingForRepo { ref repo } if repo == "beta"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_wal_listing_for_uncaptured_repo() {
+    // A wal dir listing naming a repo absent from `consistency.per_repo`
+    // refuses typed (bijection, other direction).
+    let dir = DirGuard::new("verify_wal_uncaptured_repo");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let consistency = decoded.consistency.as_mut().expect("consistency");
+        consistency.per_repo.remove("alpha");
+    });
+    let error = verify_manifest(&dir.0).expect_err("uncaptured wal repo must fail");
+    assert!(
+        matches!(
+            error,
+            BackupError::WalListingForUncapturedRepo { ref repo } if repo == "alpha"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_tolerates_harmless_ancillary_files_in_wal_dir() {
+    // A direct undeclared file in a declared wal dir refuses ONLY when it
+    // is a numeric `.wal` file. Fully hashed ancillary files
+    // (`NNNNNNNN.meta.tmp`) and an orphan `NNNNNNNN.meta` the WAL treats as
+    // harmless are tolerated — once accounted in the manifest `files`
+    // array, which the global file-set check still enforces.
+    let dir = DirGuard::new("verify_wal_ancillary");
+    build_snapshot(&dir.0);
+    write_file(
+        &dir.0.join("repos/alpha.shamirwal/00000000.meta.tmp"),
+        b"tmp",
+    );
+    write_file(
+        &dir.0.join("repos/alpha.shamirwal/00000007.meta"),
+        b"orphan",
+    );
+    add_file_entry(&dir.0, "repos/alpha.shamirwal/00000000.meta.tmp");
+    add_file_entry(&dir.0, "repos/alpha.shamirwal/00000007.meta");
+    assert!(
+        verify_manifest(&dir.0).is_ok(),
+        "hashed ancillary files must not refuse the wal-dir scan"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_wal_dir_not_store_dir_shamirwal() {
+    // The listed wal dir must be the canonical `<store_dir>.shamirwal`
+    // sibling of the repo's `store_dir` — replay derives the WAL directory
+    // exactly this way, so a deviation refuses typed at verify time. No
+    // physical store directory is required for this refusal.
+    let dir = DirGuard::new("verify_wal_path_mismatch");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let consistency = decoded.consistency.as_mut().expect("consistency");
+        consistency
+            .per_repo
+            .get_mut("alpha")
+            .expect("alpha")
+            .store_dir = "repos/gamma".to_string();
+    });
+    let error = verify_manifest(&dir.0).expect_err("wal dir/store_dir mismatch must fail");
+    assert!(
+        matches!(
+            error,
+            BackupError::WalListingPathMismatch {
+                ref repo,
+                ref found,
+                ref expected
+            } if repo == "alpha"
+                && found == "repos/alpha.shamirwal"
+                && expected == "repos/gamma.shamirwal"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_duplicate_wal_dir() {
+    let dir = DirGuard::new("verify_wal_dup_dir");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let wal = decoded.wal.as_mut().expect("wal");
+        let clone = wal.dirs[0].clone();
+        wal.dirs.push(clone);
+    });
+    let error = verify_manifest(&dir.0).expect_err("duplicate wal dir must fail");
+    assert!(
+        matches!(error, BackupError::DuplicateWalDir { .. }),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_unlisted_wal_file() {
+    let dir = DirGuard::new("verify_wal_unlisted");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let drop_path = "repos/alpha.shamirwal/00000001.wal".to_string();
+        decoded.files.retain(|entry| entry.path != drop_path);
+    });
+    let error = verify_manifest(&dir.0).expect_err("unlisted wal file must fail");
+    assert!(
+        matches!(error, BackupError::WalFileUnmanifested(_)),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_unconfined_wal_segment_path() {
+    // Windows drive letter + absolute path smuggled through a forward-slash
+    // manifest: must be refused BEFORE any open (the target does not exist).
+    let dir = DirGuard::new("verify_wal_unconfined");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let wal = decoded.wal.as_mut().expect("wal");
+        wal.dirs[0].segments[0].file = "C:/evil/00000000.wal".to_string();
+    });
+    let error = verify_manifest(&dir.0).expect_err("drive-letter path must fail");
+    assert!(
+        matches!(error, BackupError::UnconfinedManifestPath(_)),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_verify_refuses_unsafe_consistency_store_dir() {
+    let dir = DirGuard::new("verify_store_dir");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        let consistency = decoded.consistency.as_mut().expect("consistency");
+        consistency
+            .per_repo
+            .get_mut("alpha")
+            .expect("alpha")
+            .store_dir = "../elsewhere".to_string();
+    });
+    let error = verify_manifest(&dir.0).expect_err("unsafe store_dir must fail");
+    assert!(
+        matches!(error, BackupError::UnsafeStoreDir { ref repo, .. } if repo == "alpha"),
+        "unexpected error: {error}"
+    );
 }

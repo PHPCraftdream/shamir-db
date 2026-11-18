@@ -7,4 +7,5 @@ mod table_catalogue_config;
 pub mod schema_migrations;
 
 pub(crate) use rename_key::TableRenameKey;
+pub use table_catalogue_config::load_replay_scopes;
 pub(crate) use table_catalogue_config::table_config_from_catalogue_record;

@@ -66,9 +66,17 @@ use shamir_db::ShamirDb;
 use thiserror::Error;
 
 use super::offline::{self as backup, copy_dir_recursive, BackupError};
+use super::online::manifest::{self as online_manifest, BackupKind, ManifestV2};
 use crate::format_stamp::{restore_snapshot_gate, EpochPolicy};
 use crate::meta_port::MetaError;
 use crate::user_directory::FjallUserDirectory;
+
+mod catalogue;
+mod fjall_locks;
+mod online;
+#[cfg(test)]
+mod tests;
+mod wire_registry;
 
 #[derive(Debug, Error)]
 pub enum RestoreError {
@@ -127,6 +135,24 @@ pub enum RestoreError {
     Identity(#[from] shamir_db::DbError),
     #[error("invalidating tickets in restored user directory failed: {0}")]
     Invalidate(#[from] shamir_connect::common::error::Error),
+    /// Online restore only: replaying one captured repository to its
+    /// recorded point `V*` refused or failed. `data_dir` is untouched; the
+    /// staged copy is cleaned up by the caller.
+    #[error("replaying repository '{repo}' to its captured point failed: {source}")]
+    Replay {
+        repo: String,
+        #[source]
+        source: Box<shamir_db::engine::db_instance::replay_to::ReplayToError>,
+    },
+    /// Online restore only: the staged catalogue/consistency pass refused
+    /// (captured set vs staged rows/directories, reserved or ambiguous
+    /// destinations, boot-time set mismatch). Names the repository.
+    #[error("staged online restore consistency check refused for '{repo}': {reason}")]
+    Consistency { repo: String, reason: String },
+    /// Online restore only: opening or mutating the STAGED system catalogue
+    /// failed. Never implies anything about `data_dir`.
+    #[error("staged system catalogue access failed: {0}")]
+    Catalogue(shamir_db::DbError),
 }
 
 /// Outcome of a successful restore.
@@ -142,6 +168,12 @@ pub struct RestoreReport {
     /// PRE-restore `data_dir` contents (`None` if there was no pre-existing
     /// `data_dir` to preserve — e.g. restoring into a fresh target).
     pub pre_restore_backup: Option<PathBuf>,
+    /// Online restores only: repositories (`db/repo`) that were part of the
+    /// staged catalogue but NOT part of the manifest's captured set — their
+    /// persisted rows were removed from the STAGED catalogue (files stay as
+    /// inert orphans) and in-memory rows are reported without being opened
+    /// (design Q8). Empty for offline/v1 restores.
+    pub excluded_repositories: Vec<String>,
 }
 
 /// Run the canonical restore procedure using the supplied liveness probe.
@@ -149,6 +181,22 @@ pub struct RestoreReport {
 /// See the module doc for the full step-by-step procedure. `force` skips
 /// the supplied probe in step 1 — use only when certain no server process
 /// holds `data_dir`.
+///
+/// Kind-aware (design `online-backup.md` §5): a v2 ONLINE manifest runs
+/// the online pipeline (staged replay + consistency, `restore/online.rs`)
+/// and BYPASSES the supplied probe in favor of the read-only
+/// `backup::probe_source_stopped` source-lock probe, because the caller's
+/// probe (the server's liveness wrapper) can MUTATE the target on refusal
+/// and must not touch `data_dir` for a valid online snapshot. For a v1 or
+/// v2-offline manifest the supplied probe is invoked exactly as before,
+/// first, byte-for-byte today's order.
+///
+/// Operator prerequisites, holding for the WHOLE command: `data_dir`'s
+/// server stays STOPPED (no handler is ever started against the live
+/// target; the online path additionally re-probes the source lock just
+/// before the swap) and the snapshot directory stays IMMUTABLE — the
+/// verified manifest and the staged bytes are only trustworthy while the
+/// source cannot change underneath the restore.
 ///
 /// `from` and `data_dir` MUST be on the same filesystem as `data_dir`'s
 /// parent directory, since step 3/5 relies on `fs::rename` being atomic
@@ -164,14 +212,64 @@ pub fn restore_with_probe<F>(
 where
     F: FnOnce(&Path) -> Result<(), RestoreError>,
 {
-    // ---- Step 1: liveness probe ----
-    if !force {
-        probe(data_dir)?;
-    }
+    // ---- Step 0: classify the snapshot kind from the raw manifest (pure
+    // read, FAIL-CLOSED). A recognized v1 or v2-offline header stays on the
+    // v1 path below with EXACTLY today's order — probe first, verify second.
+    // An online v2 manifest runs the online procedure: full verify FIRST
+    // (read-only; includes the manifest/stamp epoch cross-check), then a
+    // READ-ONLY source-lock probe — the caller-supplied probe is bypassed
+    // because the server's liveness wrapper MUTATES the target on refusal
+    // and must not touch `data_dir` for a valid online snapshot (see the
+    // server-side integration note in `restore_with_probe`'s doc). Anything
+    // UNCLASSIFIABLE — unreadable, unparseable, or an unknown
+    // version/kind header — refuses with the verify-side error semantics
+    // BEFORE any probe callback runs, so a corrupt snapshot can never
+    // trigger the legacy probe's target mutation (P1, R2a 3b-2 review).
+    let online_classified = matches!(classify_snapshot_kind(from)?, SnapshotKind::Online);
 
-    // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
-    // data_dir at all. ----
-    backup::verify_manifest(from)?;
+    // ---- Step 1: liveness probe ----
+    // ONLINE (classified from the raw manifest): verify FIRST and consume
+    // ONLY the manifest this verification returns — the classifier's decode
+    // is never trusted beyond the boolean probe-path choice. The source
+    // manifest is assumed FIXED for the duration of the command (documented
+    // operator prerequisite: a snapshot directory is immutable while being
+    // restored); the staged bytes are the copy of those verified bytes and
+    // are NOT re-hashed.
+    let online_manifest: Option<ManifestV2> = if online_classified {
+        let (report, manifest) = backup::verify_manifest_for_restore(from)?;
+        if !matches!(report.kind, BackupKind::Online) {
+            // Classified online but verified as something else: the
+            // classification decode is stale — refuse as corrupt rather
+            // than guessing which decode to trust.
+            return Err(RestoreError::ManifestVerification(
+                BackupError::ManifestInvalid(
+                    "manifest kind changed between classification and verification".into(),
+                ),
+            ));
+        }
+        manifest
+    } else {
+        None
+    };
+    if online_manifest.is_some() {
+        if !force {
+            backup::probe_source_stopped(data_dir).map_err(|e| match e {
+                BackupError::SourceRunning(_) => {
+                    RestoreError::ServerRunning(data_dir.to_path_buf())
+                }
+                BackupError::Io(io) => RestoreError::Io(io),
+                other => RestoreError::ManifestVerification(other),
+            })?;
+        }
+    } else {
+        if !force {
+            probe(data_dir)?;
+        }
+
+        // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
+        // data_dir at all. ----
+        backup::verify_manifest(from)?;
+    }
 
     // ---- Step 2b: verify the SOURCE snapshot's format stamp (design 3.5).
     // Newer, corrupt or newer-layout refuses; absent or older is allowed
@@ -223,6 +321,21 @@ where
         return Err(RestoreError::Io(e));
     }
 
+    // ---- Step 3b (online kind only): replay + staged-catalogue consistency
+    // inside the staged copy. Every refusal propagates after best-effort
+    // cleanup of the staged directory; `data_dir` is untouched. ----
+    let excluded_repositories = if let Some(manifest) = &online_manifest {
+        match online::run(&temp_dir, manifest) {
+            Ok(excluded) => excluded,
+            Err(e) => {
+                cleanup_staged_temp_dir(&temp_dir);
+                return Err(e);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     // ---- Step 4: invalidate sessions IN THE STAGED COPY, before the swap.
     // A failure here (e.g. a corrupt/unopenable `users` store in the
     // snapshot) leaves `data_dir` completely untouched, since the swap
@@ -246,6 +359,26 @@ where
     // marker copied from a backup: each restore has a new OS-random operation.
     // Failure leaves the live directory untouched and staging available.
     write_restore_marker(&temp_dir)?;
+
+    // ---- Step 4b (online kind only, unless force): read-only re-probe of
+    // the source lock just before the swap. The verification and staging
+    // above take time; without this re-probe a server that started against
+    // `data_dir` mid-restore would only hit fjall's OS lock at boot, after
+    // the swapped-in copy is already live. Refusal cleans the staged copy —
+    // `data_dir` is untouched. `force` skips this too, matching the caller's
+    // explicit certainty. ----
+    if online_manifest.is_some() && !force {
+        if let Err(e) = backup::probe_source_stopped(data_dir) {
+            cleanup_staged_temp_dir(&temp_dir);
+            return Err(match e {
+                BackupError::SourceRunning(_) => {
+                    RestoreError::ServerRunning(data_dir.to_path_buf())
+                }
+                BackupError::Io(io) => RestoreError::Io(io),
+                other => RestoreError::ManifestVerification(other),
+            });
+        }
+    }
 
     // ---- Step 5: atomic swap ----
     let pre_restore_backup = if data_dir.exists() {
@@ -320,12 +453,96 @@ where
         None
     };
 
-    Ok(RestoreReport {
+    let report = RestoreReport {
         files_restored: files,
         bytes_restored: bytes,
         users_invalidated,
         pre_restore_backup,
-    })
+        excluded_repositories,
+    };
+    // Only AFTER the swap succeeded — before it, a refusal must stay silent
+    // about an outcome that never happened; the v1/offline list is always
+    // empty, so this logs nothing on the legacy path.
+    if !report.excluded_repositories.is_empty() {
+        tracing::warn!(
+            repos = ?report.excluded_repositories,
+            "restore: repositories created after capture were EXCLUDED from the \
+             restored catalogue (their staged rows were removed; files remain \
+             as inert orphans)"
+        );
+    }
+    Ok(report)
+}
+
+/// Snapshot kind as classified from the raw manifest header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotKind {
+    /// v2 manifest with `kind = "online"`: run the online pipeline, bypass
+    /// the supplied probe.
+    Online,
+    /// v1 manifest, or a v2 manifest with `kind = "offline"`: today's
+    /// legacy order (probe first, verify second).
+    Legacy,
+}
+
+/// Fallible kind classification from the raw manifest header. Reuses the
+/// verify-side error semantics ([`BackupError::ManifestMissing`],
+/// [`BackupError::Io`], [`BackupError::ManifestInvalid`] wrapped in
+/// [`RestoreError::ManifestVerification`]) so an unclassifiable or malformed
+/// snapshot refuses BEFORE any probe callback runs — in particular before
+/// the legacy server liveness probe, which MUTATES the target on refusal
+/// and must never fire for a corrupt source (P1). Only a header that is
+/// both readable and recognized (v1, or v2 with a known `kind`) yields a
+/// classification; the manifest actually consumed later still comes
+/// exclusively from `verify_manifest`/`verify_manifest_for_restore`.
+fn classify_snapshot_kind(from: &Path) -> Result<SnapshotKind, RestoreError> {
+    let manifest_path = from.join(backup::MANIFEST_FILE_NAME);
+    let refuse = |e| RestoreError::ManifestVerification(e);
+    let raw = fs::read_to_string(&manifest_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            refuse(BackupError::ManifestMissing(manifest_path.clone()))
+        } else {
+            refuse(BackupError::Io(e))
+        }
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        refuse(BackupError::ManifestInvalid(format!(
+            "decode {}: {e}",
+            manifest_path.display()
+        )))
+    })?;
+    let version = value
+        .get("format_version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            refuse(BackupError::ManifestInvalid(
+                "manifest is missing a numeric format_version".into(),
+            ))
+        })?;
+    match version {
+        1 => Ok(SnapshotKind::Legacy),
+        v if v == online_manifest::MANIFEST_FORMAT_VERSION_V2 as u64 => {
+            // Match the production `ManifestV2` decoder's compatibility rule:
+            // an ABSENT `kind` field decodes there to `Offline` (serde
+            // `#[serde(default = "offline_kind")]`), so classification must
+            // treat it the same way and stay on the legacy path. A PRESENT
+            // but non-string or unknown `kind` (including JSON null) is not
+            // something the decoder tolerates for routing, so refuse —
+            // fail-closed before any probe callback.
+            match value.get("kind") {
+                Some(serde_json::Value::String(s)) if s == "online" => Ok(SnapshotKind::Online),
+                Some(serde_json::Value::String(s)) if s == "offline" => Ok(SnapshotKind::Legacy),
+                None => Ok(SnapshotKind::Legacy),
+                other => Err(refuse(BackupError::ManifestInvalid(format!(
+                    "v2 manifest has no known kind (online|offline), found: {other:?}"
+                )))),
+            }
+        }
+        found => Err(refuse(BackupError::ManifestInvalid(format!(
+            "decode {}: unsupported manifest format_version: found {found}",
+            manifest_path.display()
+        )))),
+    }
 }
 
 const RESTORE_MARKER: &str = ".shamir_restore_epoch";

@@ -42,9 +42,12 @@ use thiserror::Error;
 
 use shamir_collections::new_fx_set_wc;
 
-use super::online::manifest::{self as online_manifest, BackupKind};
+use super::online::manifest::{self as online_manifest, BackupKind, ManifestV2};
 use super::restore::fsync_dir;
-use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation};
+use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation, StampError};
+
+mod source_lock;
+mod v2_verify;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
 /// through — chosen so a large fjall SST/journal file is hashed without
@@ -146,6 +149,104 @@ pub enum BackupError {
          from={from} to={to}"
     )]
     DestinationInsideSource { from: PathBuf, to: PathBuf },
+    /// `backup()`: a lock artifact of the source `data_dir` is held by a
+    /// running server — an offline stop-and-copy would race live writers
+    /// (brief 47-r2a-3b2 §5, Q5). Stop the server, or use the online
+    /// `StartBackup` admin operation instead.
+    #[error(
+        "source data_dir is held by a running server: {0} — stop it, or use \
+         the online `StartBackup` admin operation"
+    )]
+    SourceRunning(PathBuf),
+    /// `verify_manifest` (v2): the manifest's `format_epoch` and the
+    /// snapshot's copied `format.stamp` disagree — the pair is treated as
+    /// corrupt (design `online-backup.md` §5 "Stamp refusal").
+    #[error(
+        "manifest format_epoch {manifest_epoch} does not match the snapshot stamp epoch {stamp_epoch}"
+    )]
+    ManifestStampEpochMismatch {
+        manifest_epoch: u64,
+        stamp_epoch: u64,
+    },
+    /// `verify_manifest` (v2): the manifest omits `format_epoch` while the
+    /// snapshot carries a VALID stamp — the producer fills both fields, so
+    /// the absence means a tampered or foreign manifest.
+    #[error("manifest omits format_epoch while the snapshot stamp has epoch {stamp_epoch}")]
+    MissingManifestEpoch { stamp_epoch: u64 },
+    /// `verify_manifest` (v2): the snapshot's copied `format.stamp` is
+    /// corrupt or uses a newer layout — its epoch cannot be determined, so
+    /// the manifest/stamp cross-check is impossible and the snapshot is
+    /// refused (fail closed, independent of the restore-side gate).
+    #[error("snapshot format stamp is invalid")]
+    InvalidSnapshotStamp(#[source] StampError),
+    /// `verify_manifest` (v2): a manifest-controlled path resolves outside
+    /// the snapshot directory (Windows drive / device prefix, NTFS
+    /// alternate-data-stream `:` component, backslash or `..` component, or
+    /// a symlink / non-directory component on the fixed snapshot). No byte
+    /// of such a target is ever opened.
+    #[error("manifest-controlled path is not confined to the snapshot directory: {0}")]
+    UnconfinedManifestPath(String),
+    /// `verify_manifest` (v2): a manifest-controlled path names something
+    /// that is not a regular file (device, FIFO, socket).
+    #[error("manifest path is not a regular file: {0}")]
+    ManifestPathNotRegularFile(String),
+    /// `verify_manifest` (v2): a WAL segment file or sidecar is not inside
+    /// the wal directory its manifest entry names.
+    #[error("non-canonical wal name: found {found}, expected {expected}")]
+    NonCanonicalWalName { found: String, expected: String },
+    /// `verify_manifest` (v2): a direct numeric `.wal` file sits under a
+    /// declared wal directory but is absent from the `wal` listing — replay
+    /// would read or diagnose it as a candidate segment while the manifest
+    /// does not account for it. Non-`.wal` direct entries are not this
+    /// error: they fall to the global file-set check.
+    #[error("undeclared direct wal file {file} under manifest wal directory {dir}")]
+    UndeclaredWalFile { dir: String, file: String },
+    /// `verify_manifest` (v2): a WAL segment file or sidecar named in the
+    /// `wal` section is absent from the manifest `files` array — the two
+    /// listings must agree.
+    #[error("wal file is absent from the manifest file list: {0}")]
+    WalFileUnmanifested(String),
+    /// `verify_manifest` (v2): a WAL segment file or sidecar is not inside
+    /// the wal directory its manifest entry names.
+    #[error("wal file {path} is outside its manifest wal directory {dir}")]
+    WalFileOutsideDir { path: String, dir: String },
+    /// `verify_manifest` (v2): the same wal directory or repo appears more
+    /// than once in the `wal` section.
+    #[error("duplicate wal directory in manifest: repo {repo} dir {dir}")]
+    DuplicateWalDir { repo: String, dir: String },
+    /// `verify_manifest` (v2): the `consistency.per_repo` map captures a
+    /// repository the `wal` section has no directory listing for — replay
+    /// could not run for it, so the listings must be a bijection.
+    #[error("online manifest wal section has no directory listing for captured repo {repo}")]
+    WalListingMissingForRepo { repo: String },
+    /// `verify_manifest` (v2): the `wal` section lists a repository that is
+    /// not captured in `consistency.per_repo` — the listings must be a
+    /// bijection.
+    #[error(
+        "online manifest wal section lists repo {repo}, which is absent from \
+         the consistency section"
+    )]
+    WalListingForUncapturedRepo { repo: String },
+    /// `verify_manifest` (v2): a wal directory listing contains zero
+    /// segments — even a `V*` of zero produces an empty segment file, so an
+    /// empty listing is a truncated capture.
+    #[error("wal directory listing for repo {repo} ({dir}) contains no segments")]
+    WalListingEmpty { repo: String, dir: String },
+    /// `verify_manifest` (v2): a listed wal directory is not the canonical
+    /// `<store_dir>.shamirwal` sibling of that repo's `consistency.per_repo`
+    /// `store_dir` — replay derives the WAL directory exactly this way and
+    /// would refuse later; verify refuses typed up front.
+    #[error("wal directory for repo {repo} is {found}, expected {expected}")]
+    WalListingPathMismatch {
+        repo: String,
+        found: String,
+        expected: String,
+    },
+    /// `verify_manifest` (v2): a per-repo `store_dir` in the consistency
+    /// section is absolute or contains `..` — restore would join it under
+    /// the snapshot, so refuse it at verify time.
+    #[error("unsafe consistency store_dir for repo {repo}: {path}")]
+    UnsafeStoreDir { repo: String, path: String },
 }
 
 /// Outcome of a successful backup.
@@ -195,6 +296,18 @@ pub struct ManifestVerifyReport {
     pub files_checked: u64,
     /// Sum of `size_bytes` across every checked file.
     pub total_bytes: u64,
+    /// Manifest kind: [`BackupKind::Offline`] for every v1 manifest and for
+    /// a v2 manifest with `kind = "offline"`.
+    pub kind: BackupKind,
+    /// v2 only: the manifest's recorded format epoch (`None` for v1 and
+    /// for v2 manifests that omit the field — the current online producer
+    /// still records `None`).
+    pub format_epoch: Option<u64>,
+    /// v2 only: the capturing binary's version, when recorded.
+    pub binary_version: Option<String>,
+    /// v2 only: the captured consistency section (per-repo `wal_position`
+    /// / `store_dir` / `schema_version`, system-store version).
+    pub consistency: Option<online_manifest::ConsistencySection>,
 }
 
 /// Recursively copy `from` → `to/<timestamp>/`. The timestamp is
@@ -237,6 +350,13 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     }
     reject_destination_inside_source(from, to)?;
 
+    // Refuse a live source (brief 47-r2a-3b2 §5, Q5) BEFORE the stamp
+    // observation, the destination creation or any copy. The shared locks
+    // are retained for the whole copy: a server starting mid-backup blocks
+    // on its exclusive acquisition (the stopped-source restart race), and
+    // the lock artifacts themselves still copy as plain bytes.
+    let _source_locks = source_lock::lock_backup_source(from)?;
+
     // Observe the stamp before the copy (design 3.5). Read-only; the byte
     // copy below brings the stamp itself along.
     let format_stamp = observe_stamp_for_backup(from);
@@ -269,6 +389,14 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
         manifest_path,
         format_stamp,
     })
+}
+
+/// Liveness probe for the online restore path: report whether `root` is
+/// held by a running server. The verdict is the typed refusal (or `Ok`);
+/// the acquired shared locks are dropped immediately — the probe must not
+/// keep artifacts locked, it must only classify the source.
+pub(super) fn probe_source_stopped(root: &Path) -> Result<(), BackupError> {
+    source_lock::lock_backup_source(root).map(drop)
 }
 
 /// Reject `to` (the backup destination root) when it is inside, or equal
@@ -422,13 +550,34 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
 /// unmanifested file are all hard errors — a corrupted or tampered snapshot
 /// must never be silently accepted.
 pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
+    verify_manifest_impl(snapshot_dir).map(|(report, _)| report)
+}
+
+/// Internal full verify that ALSO returns the exact decoded v2 manifest, so
+/// restore can consume the already-verified manifest without parsing
+/// `manifest.json` a second time. `Some` only for a v2 manifest that fully
+/// verified; `None` for every v1 manifest (restore's v1 path needs nothing
+/// beyond the report). `pub(crate)` — restore.rs is the intended caller.
+pub(crate) fn verify_manifest_for_restore(
+    snapshot_dir: &Path,
+) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
+    verify_manifest_impl(snapshot_dir)
+}
+
+/// Shared implementation behind the two wrappers. Dispatches on the cheap
+/// format-version peek: v2 snapshots route to the child module's
+/// [`v2_verify::verify_manifest_v2`], the v1 path stays byte-identical.
+fn verify_manifest_impl(
+    snapshot_dir: &Path,
+) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
     let manifest_path = snapshot_dir.join(MANIFEST_FILE_NAME);
     if !manifest_path.exists() {
         return Err(BackupError::ManifestMissing(manifest_path));
     }
     let raw = fs::read(&manifest_path)?;
     if peek_manifest_format_version(&raw) == Some(online_manifest::MANIFEST_FORMAT_VERSION_V2) {
-        return verify_manifest_v2(snapshot_dir, &raw);
+        let (report, manifest) = v2_verify::verify_manifest_v2(snapshot_dir, &raw)?;
+        return Ok((report, Some(manifest)));
     }
     let manifest: Manifest = serde_json::from_slice(&raw).map_err(|e| {
         BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
@@ -483,9 +632,10 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
     }
 
     // Every file physically present under snapshot_dir (except the
-    // manifest itself) must be accounted for in the manifest.
+    // manifest itself) must be accounted for in the manifest. Walker is
+    // shared with the v2 child module.
     let mut on_disk = Vec::new();
-    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    v2_verify::collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
     for rel in on_disk {
         if rel == MANIFEST_FILE_NAME {
             continue;
@@ -495,10 +645,17 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         }
     }
 
-    Ok(ManifestVerifyReport {
-        files_checked: manifest.files.len() as u64,
-        total_bytes,
-    })
+    Ok((
+        ManifestVerifyReport {
+            files_checked: manifest.files.len() as u64,
+            total_bytes,
+            kind: BackupKind::Offline,
+            format_epoch: None,
+            binary_version: None,
+            consistency: None,
+        },
+        None,
+    ))
 }
 
 /// Return whether a manifest path addresses the top-level `cache` subtree,
@@ -524,27 +681,6 @@ fn reject_unsafe_manifest_path(entry_path: &str) -> Result<(), BackupError> {
     }
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(BackupError::UnsafeManifestPath(entry_path.to_string()));
-    }
-    Ok(())
-}
-
-/// Recursively collect every regular file under `dir` (rooted at `root`) as
-/// a `root`-relative, forward-slash path. Used by [`verify_manifest`] to
-/// detect extra unmanifested files.
-fn collect_relative_file_paths(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<String>,
-) -> Result<(), BackupError> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            collect_relative_file_paths(root, &path, out)?;
-        } else if ft.is_file() {
-            out.push(relative_slash_path(root, &path));
-        }
     }
     Ok(())
 }
@@ -677,122 +813,4 @@ fn peek_manifest_format_version(raw: &[u8]) -> Option<u32> {
         .get("format_version")?
         .as_u64()
         .map(|version| version as u32)
-}
-
-/// Full offline verify of a v2 snapshot (design section 5, "Offline
-/// verify"): kind + required sections, WAL seq contiguity and segment
-/// re-hash, then the same file rules as v1 (cache, unsafe, duplicate,
-/// re-hash, unmanifested refusal — `manifest.json` and
-/// `backup.meta.json` are the two accounted non-listed files).
-fn verify_manifest_v2(
-    snapshot_dir: &Path,
-    raw: &[u8],
-) -> Result<ManifestVerifyReport, BackupError> {
-    let text =
-        std::str::from_utf8(raw).map_err(|e| BackupError::ManifestInvalid(format!("utf8: {e}")))?;
-    let decoded =
-        online_manifest::decode(text).map_err(|e| BackupError::ManifestInvalid(format!("{e}")))?;
-    if decoded.format_version != online_manifest::MANIFEST_FORMAT_VERSION_V2 {
-        return Err(BackupError::UnsupportedManifestFormatVersion {
-            found: decoded.format_version,
-            expected: online_manifest::MANIFEST_FORMAT_VERSION_V2,
-        });
-    }
-    if matches!(decoded.kind, BackupKind::Online) {
-        if decoded.consistency.is_none() {
-            return Err(BackupError::MissingOnlineSection("consistency"));
-        }
-        if decoded.wal.is_none() {
-            return Err(BackupError::MissingOnlineSection("wal"));
-        }
-    }
-
-    // WAL listing: contiguous seqs from zero per repo, every segment file
-    // (and sidecar presence) re-checked on disk.
-    if let Some(wal) = &decoded.wal {
-        for dir in &wal.dirs {
-            for (expected_seq, segment) in dir.segments.iter().enumerate() {
-                let expected_seq = expected_seq as u64;
-                if segment.seq != expected_seq {
-                    return Err(BackupError::WalSeqGap {
-                        repo: dir.repo.clone(),
-                        expected: expected_seq,
-                        found: segment.seq,
-                    });
-                }
-                let (digest, size) = hash_file_streaming(&snapshot_dir.join(&segment.file))
-                    .map_err(|e| {
-                        BackupError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!("wal segment {}: {e}", segment.file),
-                        ))
-                    })?;
-                let actual = hex::encode(digest);
-                if actual != segment.sha256 || size != segment.size {
-                    return Err(BackupError::ChecksumMismatch {
-                        path: snapshot_dir.join(&segment.file),
-                        expected_sha256: segment.sha256.clone(),
-                        expected_size_bytes: segment.size,
-                        actual_sha256: actual,
-                        actual_size_bytes: size,
-                    });
-                }
-                if let Some(sidecar) = &segment.sidecar {
-                    if !snapshot_dir.join(sidecar).is_file() {
-                        return Err(BackupError::UnmanifestedFile(snapshot_dir.join(sidecar)));
-                    }
-                }
-            }
-        }
-    }
-
-    // File set: same rules as v1.
-    if let Some(entry) = decoded
-        .files
-        .iter()
-        .find(|entry| is_cache_manifest_path(&entry.path))
-    {
-        return Err(BackupError::CacheManifestPath(entry.path.clone()));
-    }
-    let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
-    let mut total_bytes = 0u64;
-    for entry in &decoded.files {
-        reject_unsafe_manifest_path(&entry.path)?;
-        if accounted.contains(&entry.path) {
-            return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
-        }
-        let file_path = snapshot_dir.join(&entry.path);
-        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
-            BackupError::Io(std::io::Error::new(
-                e.kind(),
-                format!("manifest entry {}: {e}", entry.path),
-            ))
-        })?;
-        let actual_sha256 = hex::encode(digest);
-        if actual_size != entry.size_bytes || actual_sha256 != entry.sha256 {
-            return Err(BackupError::ChecksumMismatch {
-                path: file_path,
-                expected_sha256: entry.sha256.clone(),
-                expected_size_bytes: entry.size_bytes,
-                actual_sha256,
-                actual_size_bytes: actual_size,
-            });
-        }
-        total_bytes += actual_size;
-        accounted.insert(entry.path.clone());
-    }
-    let mut on_disk = Vec::new();
-    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
-    for rel in on_disk {
-        if rel == MANIFEST_FILE_NAME || rel == online_manifest::BACKUP_META_FILE_NAME {
-            continue;
-        }
-        if !accounted.contains(&rel) {
-            return Err(BackupError::UnmanifestedFile(snapshot_dir.join(&rel)));
-        }
-    }
-    Ok(ManifestVerifyReport {
-        files_checked: decoded.files.len() as u64,
-        total_bytes,
-    })
 }
