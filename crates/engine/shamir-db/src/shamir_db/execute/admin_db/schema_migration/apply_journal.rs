@@ -63,6 +63,7 @@ pub(super) async fn append_step(
 pub(super) async fn record_in_doubt(
     executor: &ShamirAdminExecutor,
     journal: &JournalRef<'_>,
+    index: u32,
     evidence: String,
 ) -> BatchError {
     let _ = append_step(
@@ -70,7 +71,7 @@ pub(super) async fn record_in_doubt(
         journal,
         SchemaMigrationStep {
             kind: JournalEventKind::InDoubt,
-            operation_index: None,
+            operation_index: Some(index),
             evidence: Some(evidence.clone()),
         },
     )
@@ -93,6 +94,7 @@ pub(super) async fn record_in_doubt(
 pub(super) async fn record_postcondition_failure(
     executor: &ShamirAdminExecutor,
     journal: &JournalRef<'_>,
+    index: u32,
     evidence: String,
 ) -> BatchError {
     let _ = append_step(
@@ -100,7 +102,7 @@ pub(super) async fn record_postcondition_failure(
         journal,
         SchemaMigrationStep {
             kind: JournalEventKind::InDoubt,
-            operation_index: None,
+            operation_index: Some(index),
             evidence: Some(evidence.clone()),
         },
     )

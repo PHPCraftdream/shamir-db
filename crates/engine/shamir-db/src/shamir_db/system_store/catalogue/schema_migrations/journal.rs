@@ -455,6 +455,29 @@ impl SystemStore {
         Ok(generation)
     }
 
+    /// Open-time fence snapshot (R1c step 2b-3b): the durable generation of
+    /// the partition's fence iff the control record still OWNS it and the
+    /// journal has an unresolved entry — the state a crashed runner or a
+    /// server restart leaves behind. `None` when the fence is free or the
+    /// journal carries nothing unresolved. One-shot read for
+    /// `ShamirDb::init_inner`; never on the batch path.
+    pub async fn owned_schema_migration_fence(
+        &self,
+        identity: DatabaseIdentity,
+    ) -> DbResult<Option<u64>> {
+        let Some(control) = self.load_control(identity).await? else {
+            return Ok(None);
+        };
+        if control.state != "owned" {
+            return Ok(None);
+        }
+        let history = self.read_schema_migration_history(identity).await?;
+        if history.unresolved.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(control.generation))
+    }
+
     async fn flush_journal_tail(&self) -> DbResult<()> {
         let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
         self.persist_table_interner(&table, None).await?;

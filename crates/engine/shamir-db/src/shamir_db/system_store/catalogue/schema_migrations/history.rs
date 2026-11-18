@@ -165,7 +165,8 @@ pub(super) fn validate_history(
                     || state.completed >= state.body.operations.len()
                     || event.operation_index != Some(expected_index)
                     || event.fence_generation != state.generation
-                    || event.evidence.is_some()
+                // Intent evidence is optional pre-state recording (R1c 2b-3b
+                // resume reconcile); None stays valid for legacy journals.
                 {
                     return Err(corrupt(
                         row_id,

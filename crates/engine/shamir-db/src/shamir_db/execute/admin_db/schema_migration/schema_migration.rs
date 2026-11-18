@@ -229,6 +229,21 @@ fn applied_fields(
             "status".to_string(),
             QueryValue::Str(event_kind_str(event.kind).to_string()),
         );
+        // R1c step 2b-3b: surface the recorded evidence of an in-doubt or
+        // failed unresolved event. Additive: the key is present only when
+        // the event carries evidence, so the wire shape is otherwise
+        // unchanged.
+        if matches!(
+            event.kind,
+            JournalEventKind::InDoubt | JournalEventKind::Failed
+        ) {
+            if let Some(evidence) = &event.evidence {
+                map.insert(
+                    "in_doubt_reason".to_string(),
+                    QueryValue::Str(evidence.clone()),
+                );
+            }
+        }
         QueryValue::Map(map)
     });
     (

@@ -185,6 +185,10 @@ pub struct ShamirDb {
     /// Lock-free (`DashMap` entries, admin/DDL frequency only); the ONLY
     /// accessors are in `execute/admin_db/schema_migration/fence.rs`.
     pub(in crate::shamir_db) schema_migration_gate: Arc<DashMap<String, u64, THasher>>,
+    /// R1c step 2b-3b — open-time in-doubt fence marker (db name → durable
+    /// owned generation); refusals then carry `schema_migration_in_doubt`
+    /// until a resumed runner's `hold` clears it. In-memory only, not durable.
+    pub(in crate::shamir_db) schema_migration_gate_in_doubt: Arc<DashMap<String, u64, THasher>>,
     /// R1c §4.5 — engine-side read-only (follower) flag lowered by the server
     /// at launch (`set_node_read_only`); application-schema apply fails closed
     /// on it. One `AtomicBool`, written once at boot, read per admission.
@@ -369,6 +373,7 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
             schema_migration_gate: Arc::new(DashMap::with_hasher(THasher::default())),
+            schema_migration_gate_in_doubt: Arc::new(DashMap::with_hasher(THasher::default())),
             node_read_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
             changelog_receivers: Arc::new(
@@ -412,11 +417,26 @@ impl ShamirDb {
         }
         // Load existing databases from system store
         let db_records = shamir.system_store.load_databases().await?;
+        let mut db_identities = Vec::new();
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {
                 if name != SYSTEM_DB_NAME {
                     // Boxed: keeps the backfill future out of this large init future.
-                    Box::pin(ensure_database_identity(&shamir.system_store, name)).await?;
+                    let identity =
+                        Box::pin(ensure_database_identity(&shamir.system_store, name)).await?;
+                    db_identities.push((name.to_string(), identity));
+                }
+            }
+        }
+        // R1c step 2b-3b: one-time open-time seed of the in-doubt marker
+        // (durable fence owned + unresolved journal).
+        if shamir.system_store().schema_migration_journal_durable() {
+            let in_doubt = &shamir.schema_migration_gate_in_doubt;
+            for (name, identity) in &db_identities {
+                let store = shamir.system_store();
+                let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await?;
+                if let Some(generation) = owned {
+                    in_doubt.insert(name.clone(), generation);
                 }
             }
         }
