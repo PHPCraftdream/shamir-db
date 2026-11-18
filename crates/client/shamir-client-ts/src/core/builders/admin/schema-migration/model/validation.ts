@@ -9,10 +9,13 @@
  *     `depends_on` names, per-operation validation; EMPTY `operations`
  *     list is allowed, exactly as in Rust)
  *   - `model/operation.rs::SchemaMigrationOp::validate`
- *     (only the 19 admitted kinds; functional-index builtin allowlist;
- *     index type / vector metric / quantization families; exactly one
- *     of source/wasm for function/validator creation and check; 16 MiB
- *     UTF-8 code-size bound; lang/optimize/security/visibility families)
+ *     (only the 19 admitted kinds; functional-index builtin allowlist —
+ *     exactly `lower | upper | trim | length`, the operations the server's
+ *     functional-index backend builds directly — and refusal of ANY supplied
+ *     `functional_args`; index type / vector metric / quantization families;
+ *     exactly one of source/wasm for function/validator creation and check;
+ *     16 MiB UTF-8 code-size bound; lang/optimize/security/visibility
+ *     families)
  *   - `model/admission.rs`
  *     (schema rules: no registered scalar, no cross-field compare, no
  *     dynamic default, explicit null default disallowed, finite numeric
@@ -44,16 +47,18 @@ const MAX_VALUE_DEPTH = 64;
 const MAX_VALUE_NODES = 65_536;
 const MAX_VALUE_BYTES = 16 * 1024 * 1024; // 16 MiB
 
-/** Functional-index builtin allowlist (`model/operation.rs`). */
+/**
+ * Functional-index builtin allowlist (`model/operation.rs`), narrowed to
+ * exactly the operations the server's index backend builds directly
+ * (`write_domain_index_admitted.rs`: the `"functional"` arm matches only
+ * `lower | upper | trim | length`; anything else needs a trusted indexable
+ * scalar the migration model cannot vouch for).
+ */
 const FUNCTIONAL_INDEX_OPS: ReadonlySet<string> = new Set([
   'lower',
   'upper',
   'trim',
   'length',
-  'substring',
-  'mod',
-  'coalesce',
-  'concat',
 ]);
 
 const INDEX_TYPES: ReadonlySet<string> = new Set(['btree', 'fts', 'functional', 'vector']);
@@ -410,68 +415,36 @@ function validateFunctionDefaults(
 // ── create_index validation ─────────────────────────────────────────
 
 /**
- * Expected EXPLICIT extra arguments (`functional_args` length) per
- * functional-index builtin, mirroring the `shamir-funclib` scalar registry
- * arity where the indexed field is always the FIRST operand (canonical
- * format v1):
- *   - `lower`/`upper`/`trim`/`length` are unary  → 0 extras
- *   - `substring(s, start, len)` (3 total)        → exactly 2 extras
- *   - `mod(x, divisor)` (2 total)                 → exactly 1 extra
- *   - `concat`/`coalesce` register `min_args = 1, max_args = None`
- *     (1..unbounded TOTAL including the field)    → NO maximum on extras;
- *     the field itself satisfies the min, so zero extras is admitted.
+ * Functional-option guards for one migration `create_index` payload, in the
+ * exact landed Rust order (`SchemaMigrationOp::validate`, `CreateIndex` arm):
+ * wrong/omitted family first; then — only for `index_type: 'functional'` —
+ * missing op, name outside the built-in allowlist (`lower | upper | trim |
+ * length`, what the server's index backend builds directly), then ANY
+ * supplied `functional_args` (any value, including `[]`: the server never
+ * reads them, so they must not enter the canonical checksum).
  *
- * NOTE: the server index backend (`write_domain_index_admitted.rs`) does not
- * consume `functional_args` today and directly handles only the unary names;
- * this is a pre-send arity check of the migration model's canonical grammar
- * and the funclib registry bounds, not a claim about backend evaluation of
- * explicit args.
+ * Internal only (not re-exported through the barrel): shared verbatim by
+ * `validateMigrationIndex` and the DDL-wrapper module, which calls it BEFORE
+ * the plain `createIndex` builder so the diagnostics and their order match.
  */
-function validateFunctionalArgArity(
-  op: string,
-  args: readonly unknown[] | undefined,
+export function validateFunctionalIndexOptions(
+  index_type: string | undefined,
+  functional_op: string | undefined,
+  functional_args: readonly unknown[] | undefined,
 ): void {
-  const actual = args?.length ?? 0;
-  // Exact extras per fixed-arity builtin; concat/coalesce are variadic
-  // with no max.
-  switch (op) {
-    case 'substring': {
-      if (actual !== 2) {
-        fail(
-          `migration create_index: functional 'substring' takes exactly 2 explicit ` +
-            `arguments beyond the indexed field (the field is the first operand), ` +
-            `got ${actual}`,
-        );
-      }
-      return;
+  if (index_type !== 'functional' && (functional_op !== undefined || functional_args !== undefined)) {
+    fail("functional_op/functional_args are only valid for 'functional' indexes");
+  }
+  if (index_type === 'functional') {
+    if (functional_op === undefined) {
+      fail('functional index requires an explicit built-in operation');
     }
-    case 'mod': {
-      if (actual !== 1) {
-        fail(
-          `migration create_index: functional 'mod' takes exactly 1 explicit ` +
-            `argument beyond the indexed field (the field is the first operand), ` +
-            `got ${actual}`,
-        );
-      }
-      return;
+    if (!FUNCTIONAL_INDEX_OPS.has(functional_op)) {
+      fail('index function is outside the built-in functional-index allowlist');
     }
-    case 'lower':
-    case 'upper':
-    case 'trim':
-    case 'length': {
-      if (actual !== 0) {
-        fail(
-          `migration create_index: functional '${op}' is unary and takes no explicit ` +
-            `arguments beyond the indexed field (the field is the first operand), ` +
-            `got ${actual}`,
-        );
-      }
-      return;
+    if (functional_args !== undefined) {
+      fail('functional_args are not admitted because functional indexes do not use them');
     }
-    default:
-      // 'concat' | 'coalesce' (allowlist exhaustive): variadic, no max;
-      // the registry min (1 total) is met by the field.
-      return;
   }
 }
 
@@ -482,32 +455,24 @@ function validateFunctionalArgArity(
  * module calls it directly).
  *
  * Three layers:
- * 1. ALL migration index semantic checks (`model/operation.rs`
- *    `SchemaMigrationOp::validate`, `CreateIndex` arm), shared verbatim by
- *    the `validateOp` `create_index` arm and the DDL-wrapper module:
- *    builtin allowlist, explicit-op requirement, index type / vector metric /
- *    quantization families, `functional_args` literal bounds, and static
- *    arity of the explicit functional arguments (field = first operand).
- * 2. The existing plain `createIndex` builder's cross-family rules (unique/
- *    sorted combination, empty fields, option-per-type families, sorted
- *    single-field, include rules) are REUSED by calling the builder on the
- *    payload's options — never copied. The builder throws a plain `Error`,
- *    which is re-wrapped as a typed {@link MigrationError} (`'invalid_set'`).
- *    When the payload carries `functional_args`, a PRESENCE-ONLY empty array
- *    is passed so the builder's functional-option family checks still fire
- *    without re-validating the literal values (those are migration literals,
- *    validated above by `validateQueryValues`).
- * 3. Static arity of the explicit functional arguments (field = first
- *    operand), per {@link validateFunctionalArgArity}.
+ * 1. The functional-option guards, in the landed Rust order, via
+ *    {@link validateFunctionalIndexOptions}.
+ * 2. The unrelated index families (`model/operation.rs`).
+ * 3. The existing plain `createIndex` builder's cross-family rules (unique/sorted
+ *    combination, empty fields, option-per-type families, sorted single-field,
+ *    include rules) — REUSED by calling the builder on the payload's options,
+ *    never copied; a plain `Error` from the builder is re-wrapped as a typed
+ *    {@link MigrationError} (`'invalid_set'`).
  */
 export function validateMigrationIndex(payload: MigrationCreateIndexPayload): void {
-  // 2a. Migration index families (`model/operation.rs`).
-  if (payload.functional_op !== undefined && !FUNCTIONAL_INDEX_OPS.has(payload.functional_op)) {
-    fail('index function is outside the built-in functional-index allowlist');
-  }
-  if (payload.index_type === 'functional' && payload.functional_op === undefined) {
-    fail('functional index requires an explicit built-in operation');
-  }
+  // 1. Functional-option guards (exact Rust order).
+  validateFunctionalIndexOptions(
+    payload.index_type,
+    payload.functional_op,
+    payload.functional_args,
+  );
+
+  // 2. Unrelated index families (`model/operation.rs`).
   if (payload.index_type !== undefined && !INDEX_TYPES.has(payload.index_type)) {
     fail('unsupported index type is not admitted');
   }
@@ -520,24 +485,6 @@ export function validateMigrationIndex(payload: MigrationCreateIndexPayload): vo
   ) {
     fail('unsupported vector quantization is not admitted');
   }
-  // Boundary type check FIRST: a non-array functional_args must surface as a
-  // typed invalid_set, not a raw TypeError from the literal walker below.
-  if (payload.functional_args !== undefined) {
-    if (!Array.isArray(payload.functional_args)) {
-      fail('migration create_index: functional_args must be an array of literals');
-    }
-    validateQueryValues(payload.functional_args);
-  }
-  if (payload.functional_op === undefined) {
-    if (payload.functional_args !== undefined && payload.functional_args.length > 0) {
-      fail(
-        'migration create_index: functional_args require an explicit functional_op',
-      );
-    }
-  } else {
-    // 2c. Static arity of the explicit functional args (field = first operand).
-    validateFunctionalArgArity(payload.functional_op, payload.functional_args);
-  }
 
   // 3. Reuse the plain builder's validation without copying its rules.
   try {
@@ -549,8 +496,6 @@ export function validateMigrationIndex(payload: MigrationCreateIndexPayload): vo
       fts_tokenizer: payload.fts_tokenizer,
       fts_language: payload.fts_language,
       functional_op: payload.functional_op,
-      functional_args:
-        payload.functional_args !== undefined ? [] : undefined,
       vector_dim: payload.vector_dim,
       vector_metric: payload.vector_metric,
       vector_quantization: payload.vector_quantization,
@@ -592,8 +537,8 @@ function validateOp(op: SchemaMigrationOp): void {
       return;
     }
     case 'create_index': {
-      // All semantic checks (families, allowlist, `functional_args` literals
-      // and arity) live in `validateMigrationIndex`, shared with the
+      // All semantic checks (families, allowlist, `functional_args`
+      // refusal, explicit-op requirement) live in `validateMigrationIndex`, shared with the
       // DDL-wrapper module so both paths validate identically.
       validateMigrationIndex(op.payload);
       return;

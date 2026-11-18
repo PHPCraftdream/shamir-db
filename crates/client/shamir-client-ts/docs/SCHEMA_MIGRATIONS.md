@@ -47,6 +47,20 @@ reported checksum is never proof). A body is immutable once applied: changing
 it changes its checksum — drift, refused before any apply. Correct a released
 migration with a new **forward** migration, never by editing the old body.
 
+### Functional indexes in migrations
+
+`migrationDdl.createIndex` admits functional indexes only with
+`index_type: 'functional'` and a `functional_op` of exactly
+`lower | upper | trim | length` — the built-ins the server's index backend
+constructs directly. Any other name is refused locally with a typed
+`MigrationError('invalid_set')` ("outside the built-in functional-index
+allowlist"), as is `functional_op`/`functional_args` on any other (or
+omitted) index type, a functional index without an explicit op, and ANY
+supplied `functional_args` — including `[]` — because the server builds the
+index expression from the indexed field and the op alone and never reads the
+arguments. `length` counts UTF-8 bytes of a string (element count of a
+list), not Unicode characters.
+
 ## Status, plan, applyNext
 
 The migration client is composed over a connected client and a **target**:

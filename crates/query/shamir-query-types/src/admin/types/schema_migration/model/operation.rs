@@ -41,29 +41,29 @@ impl SchemaMigrationOp {
                 super::validate_schema_rules(std::slice::from_ref(&operation.rule))?;
             }
             Self::CreateIndex(operation) => {
-                if let Some(functional_op) = operation.functional_op.as_deref() {
-                    if !matches!(
-                        functional_op,
-                        "lower"
-                            | "upper"
-                            | "trim"
-                            | "length"
-                            | "substring"
-                            | "mod"
-                            | "coalesce"
-                            | "concat"
-                    ) {
+                if operation.index_type.as_deref() != Some("functional")
+                    && (operation.functional_op.is_some() || operation.functional_args.is_some())
+                {
+                    return Err(SchemaMigrationError::UnsafeOperation(
+                        "functional_op/functional_args are only valid for 'functional' indexes",
+                    ));
+                }
+                if operation.index_type.as_deref() == Some("functional") {
+                    let Some(functional_op) = operation.functional_op.as_deref() else {
+                        return Err(SchemaMigrationError::UnsafeOperation(
+                            "functional index requires an explicit built-in operation",
+                        ));
+                    };
+                    if !matches!(functional_op, "lower" | "upper" | "trim" | "length") {
                         return Err(SchemaMigrationError::UnsafeOperation(
                             "index function is outside the built-in functional-index allowlist",
                         ));
                     }
-                }
-                if operation.index_type.as_deref() == Some("functional")
-                    && operation.functional_op.is_none()
-                {
-                    return Err(SchemaMigrationError::UnsafeOperation(
-                        "functional index requires an explicit built-in operation",
-                    ));
+                    if operation.functional_args.is_some() {
+                        return Err(SchemaMigrationError::UnsafeOperation(
+                            "functional_args are not admitted because functional indexes do not use them",
+                        ));
+                    }
                 }
                 if operation
                     .index_type
@@ -91,9 +91,6 @@ impl SchemaMigrationOp {
                     return Err(SchemaMigrationError::UnsafeOperation(
                         "unsupported vector quantization is not admitted",
                     ));
-                }
-                if let Some(arguments) = &operation.functional_args {
-                    super::validate_query_values(arguments)?;
                 }
             }
             Self::CheckFunction(operation) => validate_function_spec(&operation.check_function)?,

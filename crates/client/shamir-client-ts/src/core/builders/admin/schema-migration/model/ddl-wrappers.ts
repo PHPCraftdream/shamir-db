@@ -32,7 +32,6 @@ import type {
   MigrationFieldRuleDto,
   MigrationNumBound,
   MigrationLiteral,
-  MigrationCreateIndexPayload,
   MigrationCreateTablePayload,
   MigrationSetTableSchemaPayload,
   MigrationAddSchemaRulePayload,
@@ -53,7 +52,7 @@ import type {
 import type { MigrationFloat } from './float.js';
 import { MigrationError } from '../client/error.js';
 import { markBuilderMigrationOp } from './operation-provenance.js';
-import { validateMigrationIndex } from './validation.js';
+import { validateMigrationIndex, validateFunctionalIndexOptions } from './validation.js';
 import {
   createTable,
   dropTable,
@@ -146,10 +145,10 @@ export interface MigrationSetTableSchemaOptions {
 
 /**
  * `create_index` options at the migration boundary. Same as the plain
- * `createIndex` builder options except `functional_args` accept the wider
- * {@link MigrationLiteral} forms; the wrapper drops the builder's plain slot
- * and reattaches the migration-widened value type-safely (the canonical
- * encoder inspects the admitted literal forms at runtime).
+ * `createIndex` builder options; `functional_args` remain ACCEPTED here so
+ * the typed refusal is observable, but ANY supplied `functional_args` —
+ * including `[]` — yields a typed `MigrationError` (the server never reads
+ * them, so they must not enter the canonical checksum).
  */
 export interface MigrationCreateIndexOptions {
   unique?: boolean;
@@ -225,7 +224,7 @@ export const migrationDdl = {
 
   // ── index ───────────────────────────────────────────────────────
 
-  /** `create_index` — composed with the existing `createIndex` builder; `functional_args` accept {@link MigrationLiteral}. */
+  /** `create_index` — composed with the existing `createIndex` builder; migration-wide validation runs first. */
   createIndex(
     name: string,
     table: string,
@@ -233,34 +232,22 @@ export const migrationDdl = {
     opts?: MigrationCreateIndexOptions,
   ): SchemaMigrationOp {
     const { functional_args, ...rest } = opts ?? {};
-    // The builder's plain `functional_args` slot accepts only wire values;
-    // pass a presence-only `[]` when migration-widened args were supplied so
-    // the builder sees the key present (and runs its own guards) without
-    // inspecting the widened values, then drop the builder slot and
-    // re-attach the migration-widened args on the payload below.
+    // Validate before the plain builder so ignored arguments are refused
+    // rather than dropped.
+    validateFunctionalIndexOptions(rest.index_type, rest.functional_op, functional_args);
     let base;
     try {
-      base = createIndex(
-        name,
-        table,
-        fields,
-        functional_args !== undefined ? { ...rest, functional_args: [] } : rest,
-      );
+      base = createIndex(name, table, fields, rest);
     } catch (error) {
-      // Typed at the migration boundary: the builder's guard failures
-      // (unique+sorted, empty fields, vector/FTS arity, …) surface as
-      // `MigrationError('invalid_set', …)`, not a generic `Error`.
       throw new MigrationError(
         'invalid_set',
         `create_index: ${(error as Error).message}`,
       );
     }
-    const { functional_args: _plainArgs, ...withoutArgs } = base;
-    const payload: MigrationCreateIndexPayload = { ...withoutArgs };
-    if (functional_args !== undefined) payload.functional_args = functional_args;
-    // Enforce the migration-wide guards too (built-in functional-op
-    // allowlist, functional operand arity, index type / vector metric /
-    // quantization families) on the final payload — same typed failure.
+    // The guards above prove `functional_args` are absent, so dropping the
+    // builder's plain slot structurally yields exactly the migration payload
+    // type — no cast.
+    const { functional_args: _plainArgs, ...payload } = base;
     validateMigrationIndex(payload);
     return markBuilderMigrationOp({ operation: 'create_index', payload });
   },
