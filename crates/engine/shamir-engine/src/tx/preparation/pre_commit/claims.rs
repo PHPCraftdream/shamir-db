@@ -93,6 +93,11 @@ pub(super) async fn fire_post_prelock_pre_materialize_test_hook() {
 /// nonzero per-table token if a hybrid scheme ever returns.
 pub(crate) const REPO_INTERNER_SCOPE: u64 = 0;
 
+/// Return the expected scope if the supplied WAL interner scope is not repository-wide.
+pub(crate) fn unexpected_repo_interner_scope(scope: u64) -> Option<u64> {
+    (scope != REPO_INTERNER_SCOPE).then_some(REPO_INTERNER_SCOPE)
+}
+
 /// SSI fix S2 — atomically CLAIM every data write-set key of `tx` on its
 /// per-table `MvccStore` cell, BEFORE the version is assigned and the WAL
 /// entry is written (Phase 4). This moves the "who won the write-write race"

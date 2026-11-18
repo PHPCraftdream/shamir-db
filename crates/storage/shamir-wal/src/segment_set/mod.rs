@@ -7,4 +7,4 @@ mod sync_snapshot;
 #[cfg(test)]
 pub(crate) mod sync_test_seam;
 
-pub use set::SegmentSet;
+pub use set::{SegmentSet, WalStrictReadError};
