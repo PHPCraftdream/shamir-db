@@ -9,14 +9,18 @@ use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
 use super::helpers::{
     apply_request, assert_code, crash_started_only_and_reopen, empty_predecessor, field, identity,
-    persistent_owner_db, reopen_owner_db, run_apply, run_status, str_field, submission,
+    journal_prefix, persistent_owner_db, reopen_owner_db, run_apply, run_status, str_field,
+    submission,
 };
+use crate::shamir_db::system_store::JournalEventKind;
 
 async fn create_table(db: &crate::ShamirDb, name: &str) {
     let mut b = Batch::new();
     b.op("ct", ddl::create_table(name).build());
     let request = b.to_request_via_msgpack().unwrap();
-    db.execute("testdb", &request).await.unwrap();
+    db.execute_as(super::helpers::OWNER, "testdb", &request)
+        .await
+        .unwrap();
 }
 
 /// A single rename of an externally pre-created table (the chunk-1
@@ -43,18 +47,25 @@ async fn status_reports_in_doubt_reason_for_unresolved_migration() {
     let (dir, db) = persistent_owner_db().await;
     create_table(&db, "items_1").await;
     let migration = rename_body();
-    let target = identity(&db).await;
 
-    // Crash after the rename effect but before its completion append
-    // (append 3 → tick 5): source gone, destination created.
-    db.system_store().arm_durability_tail_faults_after(4, 1);
-    let error = run_apply(
+    // Crash after the rename effect but before its completion append, built
+    // directly in the journal (see `journal_prefix`): source gone, destination
+    // created.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[(JournalEventKind::OperationIntent, 0, None)],
+    )
+    .await;
+    let mut effect = Batch::new();
+    effect.op("rn", ddl::rename_table("items_1", "renamed_items").build());
+    db.execute_as(
+        super::helpers::OWNER,
+        "testdb",
+        &effect.to_request_via_msgpack().unwrap(),
     )
     .await
-    .expect_err("the failed completion append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
+    .unwrap();
 
     drop(db);
     let db = reopen_owner_db(&dir).await;

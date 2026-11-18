@@ -15,7 +15,8 @@ use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
 use super::helpers::{
     apply_request, assert_code, completions_for, empty_predecessor, field, identity, journal_kinds,
-    journal_rows, persistent_owner_db, reopen_owner_db, run_apply, str_field, submission,
+    journal_prefix, journal_rows, persistent_owner_db, reopen_owner_db, run_apply, str_field,
+    submission,
 };
 use crate::shamir_db::system_store::JournalEventKind;
 use crate::shamir_db::ShamirDb;
@@ -24,7 +25,9 @@ async fn create_table(db: &ShamirDb, name: &str) {
     let mut b = Batch::new();
     b.op("ct", ddl::create_table(name).build());
     let request = b.to_request_via_msgpack().unwrap();
-    db.execute("testdb", &request).await.unwrap();
+    db.execute_as(super::helpers::OWNER, "testdb", &request)
+        .await
+        .unwrap();
 }
 
 /// A two-operation body: create a table, then an index on it.
@@ -125,25 +128,25 @@ async fn crash_after_started_resumes_and_runs_first_operation() {
 #[tokio::test]
 async fn crash_after_create_effect_before_completion_resumes_without_replaying() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     let migration = super::super::helpers::body("alpha-001", 1);
 
-    // Crash after the DDL effect but before the completion append (append 3
-    // -> tick 5): the table already exists and the intent recorded
-    // `pre_state=absent`. The fence blocked every other writer since, so the
-    // table is the effect of this operation.
-    db.system_store().arm_durability_tail_faults_after(4, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash after the DDL effect but before the completion append: the intent
+    // recorded `pre_state=absent` and the table exists. The fence blocked every
+    // other writer since, so the table is the effect of this operation.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[(
+            JournalEventKind::OperationIntent,
+            0,
+            Some("pre_state=absent"),
+        )],
     )
-    .await
-    .expect_err("the failed completion append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
-    assert!(
-        db.get_db("testdb").unwrap().has_table("main", "items_1"),
-        "the effect was executed before the crash point"
-    );
+    .await;
+    create_table(&db, "items_1").await;
+    assert!(db.get_db("testdb").unwrap().has_table("main", "items_1"));
     drop(db);
 
     // A replay would create a table that already exists and fail, so an Ok
@@ -185,7 +188,6 @@ async fn crash_after_create_effect_before_completion_resumes_without_replaying()
 #[tokio::test]
 async fn crash_after_index_effect_before_completion_resumes_without_replaying() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     create_table(&db, "items_1").await;
     let migration = SchemaMigration::new("alpha-001", 1, "index migration")
         .op(ddl::create_index("ix_items_name", "items_1")
@@ -195,16 +197,34 @@ async fn crash_after_index_effect_before_completion_resumes_without_replaying() 
         .build()
         .expect("test migration body is valid");
 
-    // Crash after the index exists but before the completion append (append 3
-    // -> tick 5); the intent recorded `pre_state=absent`.
-    db.system_store().arm_durability_tail_faults_after(4, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash after the index exists but before the completion append; the
+    // intent recorded `pre_state=absent`.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[(
+            JournalEventKind::OperationIntent,
+            0,
+            Some("pre_state=absent"),
+        )],
+    )
+    .await;
+    let mut effect = Batch::new();
+    effect.op(
+        "ix",
+        ddl::create_index("ix_items_name", "items_1")
+            .field("name")
+            .build(),
+    );
+    db.execute_as(
+        super::helpers::OWNER,
+        "testdb",
+        &effect.to_request_via_msgpack().unwrap(),
     )
     .await
-    .expect_err("the failed completion append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
+    .unwrap();
     drop(db);
 
     // A replay would create an index that already exists and fail, so an Ok
@@ -243,7 +263,6 @@ async fn crash_after_index_effect_before_completion_resumes_without_replaying() 
 #[tokio::test]
 async fn crash_after_rename_effect_resumes_and_appends_the_completion_without_replaying() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     create_table(&db, "items_1").await;
     let migration = SchemaMigration::new("alpha-001", 1, "rename migration")
         .op(ddl::rename_table("items_1", "renamed_items").build())
@@ -251,18 +270,26 @@ async fn crash_after_rename_effect_resumes_and_appends_the_completion_without_re
         .build()
         .expect("test migration body is valid");
 
-    // Crash after the rename effect executed but before its completion
-    // append (append 3 → tick 5). A replay would rename a source that no
-    // longer exists and fail — so an Ok resume with exactly one completion
-    // proves the effect was NOT replayed.
-    db.system_store().arm_durability_tail_faults_after(4, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash after the rename effect executed but before its completion append.
+    // A replay would rename a source that no longer exists and fail, so an Ok
+    // resume with exactly one completion proves the effect was NOT replayed.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[(JournalEventKind::OperationIntent, 0, None)],
+    )
+    .await;
+    let mut effect = Batch::new();
+    effect.op("rn", ddl::rename_table("items_1", "renamed_items").build());
+    db.execute_as(
+        super::helpers::OWNER,
+        "testdb",
+        &effect.to_request_via_msgpack().unwrap(),
     )
     .await
-    .expect_err("the failed completion append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
+    .unwrap();
     let instance = db.get_db("testdb").unwrap();
     assert!(!instance.has_table("main", "items_1"));
     assert!(instance.has_table("main", "renamed_items"));
@@ -319,29 +346,30 @@ async fn crash_after_rename_effect_resumes_and_appends_the_completion_without_re
 #[tokio::test]
 async fn crash_between_operations_resumes_completed_op_without_replay_and_runs_the_next() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     let migration = multi_op_body();
 
-    // Crash at the SECOND intent append (append 4 → tick 7): operation 0 is
-    // durably completed, operation 1 was never attempted.
-    db.system_store().arm_durability_tail_faults_after(6, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash before the SECOND intent: operation 0 is durably completed (its
+    // table exists), operation 1 was never attempted.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-    )
-    .await
-    .expect_err("the failed second intent append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
-    assert_eq!(
-        journal_kinds(&db).await,
-        vec![
-            JournalEventKind::Started,
-            JournalEventKind::OperationIntent,
-            JournalEventKind::OperationComplete,
+        &migration,
+        &[
+            (
+                JournalEventKind::OperationIntent,
+                0,
+                Some("pre_state=absent"),
+            ),
+            (
+                JournalEventKind::OperationComplete,
+                0,
+                Some("created table 'main/items_1'"),
+            ),
         ],
-        "the journal holds operation 0 completed only"
-    );
-
+    )
+    .await;
+    create_table(&db, "items_1").await;
     drop(db);
     let db = reopen_owner_db(&dir).await;
     let target = identity(&db).await;
@@ -391,19 +419,30 @@ async fn crash_between_operations_resumes_completed_op_without_replay_and_runs_t
 #[tokio::test]
 async fn crash_after_last_completion_resumes_by_appending_only_the_applied_event() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     let migration = super::super::helpers::body("alpha-001", 1);
 
-    // Crash at the `applied` append (append 4 → tick 7): every operation is
-    // durably completed, only the applied event is missing.
-    db.system_store().arm_durability_tail_faults_after(6, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash before the `applied` append: every operation is durably
+    // completed, only the applied event is missing.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[
+            (
+                JournalEventKind::OperationIntent,
+                0,
+                Some("pre_state=absent"),
+            ),
+            (
+                JournalEventKind::OperationComplete,
+                0,
+                Some("created table 'main/items_1'"),
+            ),
+        ],
     )
-    .await
-    .expect_err("the failed applied append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
+    .await;
+    create_table(&db, "items_1").await;
     assert_eq!(
         journal_kinds(&db).await,
         vec![
@@ -412,7 +451,6 @@ async fn crash_after_last_completion_resumes_by_appending_only_the_applied_event
             JournalEventKind::OperationComplete,
         ],
     );
-
     drop(db);
     let db = reopen_owner_db(&dir).await;
     let target = identity(&db).await;
@@ -453,21 +491,28 @@ async fn crash_after_last_completion_resumes_by_appending_only_the_applied_event
 #[tokio::test]
 async fn unprovable_rename_stays_in_doubt_and_blocks_later_operations() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     create_table(&db, "items_1").await;
     let migration = rename_then_create_body();
 
-    // Crash after the rename effect but before its completion (append 3 →
-    // tick 5): source gone, destination created.
-    db.system_store().arm_durability_tail_faults_after(4, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash after the rename effect but before its completion: source gone,
+    // destination created.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[(JournalEventKind::OperationIntent, 0, None)],
+    )
+    .await;
+    let mut effect = Batch::new();
+    effect.op("rn", ddl::rename_table("items_1", "renamed_items").build());
+    db.execute_as(
+        super::helpers::OWNER,
+        "testdb",
+        &effect.to_request_via_msgpack().unwrap(),
     )
     .await
-    .expect_err("the failed completion append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
-
+    .unwrap();
     drop(db);
     let db = reopen_owner_db(&dir).await;
     // Externally re-create the SOURCE with its original name (a direct
@@ -539,20 +584,29 @@ async fn unprovable_rename_stays_in_doubt_and_blocks_later_operations() {
 #[tokio::test]
 async fn drifted_completed_operation_is_refused_without_a_write() {
     let (dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
     let migration = super::super::helpers::body("alpha-001", 1);
 
-    // Crash after operation 0's durable completion (append 4, the applied
-    // event → tick 7).
-    db.system_store().arm_durability_tail_faults_after(6, 1);
-    let error = run_apply(
+    // Crash built directly in the journal (see `journal_prefix`): the crash
+    // point must not depend on how many durable tails a DDL effect spends.
+    // Crash after operation 0's durable completion, before `applied`.
+    journal_prefix(
         &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        &migration,
+        &[
+            (
+                JournalEventKind::OperationIntent,
+                0,
+                Some("pre_state=absent"),
+            ),
+            (
+                JournalEventKind::OperationComplete,
+                0,
+                Some("created table 'main/items_1'"),
+            ),
+        ],
     )
-    .await
-    .expect_err("the failed applied append stops the run in doubt");
-    assert_code(error, "schema_migration_in_doubt");
-
+    .await;
+    create_table(&db, "items_1").await;
     drop(db);
     let db = reopen_owner_db(&dir).await;
     // Externally DROP the completed operation's table (direct DbInstance

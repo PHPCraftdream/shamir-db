@@ -27,7 +27,9 @@ async fn create_table(db: &ShamirDb, name: &str) {
     let mut b = Batch::new();
     b.op("ct", ddl::create_table(name).build());
     let request = b.to_request_via_msgpack().unwrap();
-    db.execute("testdb", &request).await.unwrap();
+    db.execute_as(super::helpers::OWNER, "testdb", &request)
+        .await
+        .unwrap();
 }
 
 fn write_batch() -> Batch {

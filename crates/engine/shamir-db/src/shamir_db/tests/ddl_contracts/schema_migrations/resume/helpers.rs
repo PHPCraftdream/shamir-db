@@ -253,3 +253,48 @@ pub(super) async fn run_status(
         .as_value()
         .into_owned()
 }
+
+/// Leave the journal exactly as a crash after the given steps would: the
+/// fence is acquired (generation 1) and the steps are appended. Built through
+/// the step-2a store API instead of the durable-tail fault seam, so the crash
+/// point never depends on how many durable tails a DDL effect spends. The
+/// caller performs the effect itself.
+pub(super) async fn journal_prefix(
+    db: &ShamirDb,
+    migration: &SchemaMigrationBody,
+    steps: &[(JournalEventKind, u32, Option<&str>)],
+) {
+    let target = identity(db).await;
+    let store = db.system_store();
+    let context = super::super::helpers::context();
+    let digest = super::super::helpers::checksum(migration);
+    let metadata = migration.metadata.clone();
+    let generation = store
+        .acquire_schema_migration_fence(
+            target,
+            0,
+            metadata.clone(),
+            migration.clone(),
+            false,
+            &context,
+        )
+        .await
+        .expect("the fence is acquired");
+    for (kind, index, evidence) in steps {
+        store
+            .append_schema_migration_event(
+                target,
+                generation,
+                metadata.clone(),
+                digest,
+                crate::shamir_db::system_store::SchemaMigrationStep {
+                    kind: *kind,
+                    operation_index: Some(*index),
+                    evidence: evidence.map(str::to_string),
+                },
+                &context,
+            )
+            .await
+            .expect("the journal step is appended");
+    }
+}

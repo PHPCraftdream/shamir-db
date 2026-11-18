@@ -135,200 +135,34 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
         // Resume reconcile: act on what the journal proves the previous
         // runner already did (never re-run completed work, never conceal
         // drift). An in-doubt classification blocks every later operation.
+        // Each step is its own boxed future: a Windows debug test thread has
+        // a small stack and this runner state machine must stay small.
         if let Some(states) = &resume_states {
             let (state, intent_evidence) = &states[position];
-            match state {
-                JournalOpState::Completed => {
-                    // Durable completion: only re-verify; drift is refused
-                    // with no write and no re-run.
-                    if let Err(error) =
-                        Box::pin(verify_postcondition(executor, db, operation, true)).await
-                    {
-                        return Err(coded(
-                            "schema_migration_postcondition_failed",
-                            format!(
-                                "operation {index} is durably completed but its \
-                                 postcondition no longer holds: {error}"
-                            ),
-                        ));
-                    }
-                    continue;
-                }
-                JournalOpState::IntentPending => {
-                    match Box::pin(reconcile_pending(
-                        executor,
-                        db,
-                        &journal,
-                        operation,
-                        index,
-                        intent_evidence.as_deref(),
-                    ))
-                    .await?
-                    {
-                        ReconcileOutcome::AlreadyApplied(evidence) => {
-                            append_step(
-                                executor,
-                                &journal,
-                                SchemaMigrationStep {
-                                    kind: JournalEventKind::OperationComplete,
-                                    operation_index: Some(index),
-                                    evidence: Some(evidence),
-                                },
-                            )
-                            .await
-                            .map_err(|error| durability_error(error, true))?;
-                            continue;
-                        }
-                        ReconcileOutcome::ExecuteOnce(created_from_absent) => {
-                            if let Err(error) =
-                                Box::pin(execute_operation(executor, operation)).await
-                            {
-                                return Err(record_in_doubt(
-                                    executor,
-                                    &journal,
-                                    index,
-                                    format!(
-                                        "operation {index} failed while finishing a \
-                                         resume execution: {error}"
-                                    ),
-                                )
-                                .await);
-                            }
-                            let evidence = match Box::pin(verify_postcondition(
-                                executor,
-                                db,
-                                operation,
-                                created_from_absent,
-                            ))
-                            .await
-                            {
-                                Ok(evidence) => evidence,
-                                Err(error) => {
-                                    return Err(record_postcondition_failure(
-                                        executor,
-                                        &journal,
-                                        index,
-                                        format!(
-                                            "operation {index} postcondition failed \
-                                             during resume: {error}"
-                                        ),
-                                    )
-                                    .await)
-                                }
-                            };
-                            append_step(
-                                executor,
-                                &journal,
-                                SchemaMigrationStep {
-                                    kind: JournalEventKind::OperationComplete,
-                                    operation_index: Some(index),
-                                    evidence: Some(evidence),
-                                },
-                            )
-                            .await
-                            .map_err(|error| durability_error(error, true))?;
-                            continue;
-                        }
-                    }
-                }
-                JournalOpState::NotStarted => {}
-            }
-        }
-
-        // Create postconditions need the pre-image: a pre-existing object is
-        // a conflict (§4.2), never an `if_not_exists` success. The pre-image
-        // is recorded in the intent's evidence so a later resume can decide
-        // the restart case (R1c step 2b-3b).
-        let created_from_absent = match operation {
-            SchemaMigrationOp::CreateTable(op) => {
-                !table_exists(&executor.shamir, db, &op.repo, &op.create_table)
-            }
-            SchemaMigrationOp::CreateIndex(op) => {
-                !Box::pin(index_exists(
-                    executor,
-                    &op.repo,
-                    &op.table,
-                    &op.create_index,
-                ))
-                .await
-            }
-            _ => true,
-        };
-        let intent_evidence = match operation {
-            SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
-                Some(if created_from_absent {
-                    "pre_state=absent".to_string()
-                } else {
-                    "pre_state=present".to_string()
-                })
-            }
-            _ => None,
-        };
-
-        // Persist + sync the operation intent BEFORE the effect (§4.1).
-        append_step(
-            executor,
-            &journal,
-            SchemaMigrationStep {
-                kind: JournalEventKind::OperationIntent,
-                operation_index: Some(index),
-                evidence: intent_evidence,
-            },
-        )
-        .await
-        .map_err(|error| durability_error(error, intents_durable))?;
-        intents_durable = true;
-
-        // Execute exactly one bounded DDL operation through the EXISTING
-        // handler paths — existing validation, per-target authorization and
-        // HMAC gates apply unchanged. Box::pin keeps each handler's future
-        // off this runner's own state machine.
-        if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
-            // The effect's outcome is uncertain: record in doubt (best
-            // effort) and stop before the next effect, journal resumable.
-            return Err(record_in_doubt(
+            if let ResumeStep::Done = Box::pin(resume_operation(
                 executor,
+                db,
                 &journal,
+                operation,
                 index,
-                format!("operation {index} failed before its postcondition: {error}"),
-            )
-            .await);
+                *state,
+                intent_evidence.as_deref(),
+            ))
+            .await?
+            {
+                continue;
+            }
         }
 
-        // Verify the exact postcondition; a failure records no completion.
-        let evidence = match Box::pin(verify_postcondition(
+        Box::pin(run_operation(
             executor,
             db,
-            operation,
-            created_from_absent,
-        ))
-        .await
-        {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                return Err(record_postcondition_failure(
-                    executor,
-                    &journal,
-                    index,
-                    format!("operation {index} postcondition failed: {error}"),
-                )
-                .await);
-            }
-        };
-
-        // Persist + sync the operation completion only after the observed
-        // postcondition (never record complete before it is observed).
-        append_step(
-            executor,
             &journal,
-            SchemaMigrationStep {
-                kind: JournalEventKind::OperationComplete,
-                operation_index: Some(index),
-                evidence: Some(evidence),
-            },
-        )
-        .await
-        .map_err(|error| durability_error(error, intents_durable))?;
+            operation,
+            index,
+            &mut intents_durable,
+        ))
+        .await?;
     }
 
     // End-state invariants: every operation's postcondition still holds.
@@ -337,7 +171,7 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
     }
 
     // Durable `applied` — only after all completions and final checks.
-    let applied_event = append_step(
+    let applied_event = Box::pin(append_step(
         executor,
         &journal,
         SchemaMigrationStep {
@@ -348,16 +182,21 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
                 body.operations.len()
             )),
         },
-    )
+    ))
     .await
     .map_err(|error| durability_error(error, intents_durable))?;
 
     // Release the durable fence through the step-2a API (it appends the
     // FenceReleased event and CASes the control record to `released`).
-    store
-        .release_schema_migration_fence(serving, generation, metadata.clone(), checksum, context)
-        .await
-        .map_err(|error| durability_error(error, intents_durable))?;
+    Box::pin(store.release_schema_migration_fence(
+        serving,
+        generation,
+        metadata.clone(),
+        checksum,
+        context,
+    ))
+    .await
+    .map_err(|error| durability_error(error, intents_durable))?;
 
     Ok(applied_value(
         protocol_version,
@@ -367,6 +206,211 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
         applied_event.timestamp_unix_micros,
         generation,
     ))
+}
+
+/// What the resume pass did for one operation index.
+enum ResumeStep {
+    /// Completed or reconciled from the journal: nothing left to run.
+    Done,
+    /// No durable intent: run the operation through the normal path.
+    RunNormally,
+}
+
+/// Resume reconcile of ONE operation index (design 4.2 restart cases).
+async fn resume_operation(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    journal: &JournalRef<'_>,
+    operation: &SchemaMigrationOp,
+    index: u32,
+    state: JournalOpState,
+    intent_evidence: Option<&str>,
+) -> Result<ResumeStep, BatchError> {
+    match state {
+        JournalOpState::Completed => {
+            // Durable completion: only re-verify; drift is refused with no
+            // write and no re-run.
+            if let Err(error) = Box::pin(verify_postcondition(executor, db, operation, true)).await
+            {
+                return Err(coded(
+                    "schema_migration_postcondition_failed",
+                    format!(
+                        "operation {index} is durably completed but its postcondition no longer holds: {error}"
+                    ),
+                ));
+            }
+            Ok(ResumeStep::Done)
+        }
+        JournalOpState::IntentPending => {
+            let evidence = match Box::pin(reconcile_pending(
+                executor,
+                db,
+                journal,
+                operation,
+                index,
+                intent_evidence,
+            ))
+            .await?
+            {
+                ReconcileOutcome::AlreadyApplied(evidence) => evidence,
+                ReconcileOutcome::ExecuteOnce(created_from_absent) => {
+                    if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
+                        return Err(Box::pin(record_in_doubt(
+                            executor,
+                            journal,
+                            index,
+                            format!(
+                                "operation {index} failed while finishing a resume execution: {error}"
+                            ),
+                        ))
+                        .await);
+                    }
+                    match Box::pin(verify_postcondition(
+                        executor,
+                        db,
+                        operation,
+                        created_from_absent,
+                    ))
+                    .await
+                    {
+                        Ok(evidence) => evidence,
+                        Err(error) => {
+                            return Err(Box::pin(record_postcondition_failure(
+                                executor,
+                                journal,
+                                index,
+                                format!(
+                                    "operation {index} postcondition failed during resume: {error}"
+                                ),
+                            ))
+                            .await)
+                        }
+                    }
+                }
+            };
+            Box::pin(append_step(
+                executor,
+                journal,
+                SchemaMigrationStep {
+                    kind: JournalEventKind::OperationComplete,
+                    operation_index: Some(index),
+                    evidence: Some(evidence),
+                },
+            ))
+            .await
+            .map_err(|error| durability_error(error, true))?;
+            Ok(ResumeStep::Done)
+        }
+        JournalOpState::NotStarted => Ok(ResumeStep::RunNormally),
+    }
+}
+
+/// The normal path of ONE operation: intent, one bounded DDL, exact
+/// postcondition, completion (design 4.1).
+async fn run_operation(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    journal: &JournalRef<'_>,
+    operation: &SchemaMigrationOp,
+    index: u32,
+    intents_durable: &mut bool,
+) -> Result<(), BatchError> {
+    // Create postconditions need the pre-image: a pre-existing object is a
+    // conflict (4.2), never an `if_not_exists` success. The pre-image is
+    // recorded in the intent evidence so a later resume can decide the
+    // restart case (R1c step 2b-3b).
+    let created_from_absent = match operation {
+        SchemaMigrationOp::CreateTable(op) => {
+            !table_exists(&executor.shamir, db, &op.repo, &op.create_table)
+        }
+        SchemaMigrationOp::CreateIndex(op) => {
+            !Box::pin(index_exists(
+                executor,
+                &op.repo,
+                &op.table,
+                &op.create_index,
+            ))
+            .await
+        }
+        _ => true,
+    };
+    let intent_evidence = match operation {
+        SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
+            Some(if created_from_absent {
+                "pre_state=absent".to_string()
+            } else {
+                "pre_state=present".to_string()
+            })
+        }
+        _ => None,
+    };
+
+    // Persist + sync the operation intent BEFORE the effect (4.1). After the
+    // first durable intent a later journal failure means an effect may
+    // already have occurred: in doubt, never plain unavailability.
+    Box::pin(append_step(
+        executor,
+        journal,
+        SchemaMigrationStep {
+            kind: JournalEventKind::OperationIntent,
+            operation_index: Some(index),
+            evidence: intent_evidence,
+        },
+    ))
+    .await
+    .map_err(|error| durability_error(error, *intents_durable))?;
+    *intents_durable = true;
+
+    // Execute exactly one bounded DDL operation through the EXISTING handler
+    // paths: existing validation, per-target authorization and HMAC gates
+    // apply unchanged.
+    if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
+        // The effect outcome is uncertain: record in doubt (best effort) and
+        // stop before the next effect, journal resumable.
+        return Err(Box::pin(record_in_doubt(
+            executor,
+            journal,
+            index,
+            format!("operation {index} failed before its postcondition: {error}"),
+        ))
+        .await);
+    }
+
+    // Verify the exact postcondition; a failure records no completion.
+    let evidence = match Box::pin(verify_postcondition(
+        executor,
+        db,
+        operation,
+        created_from_absent,
+    ))
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(Box::pin(record_postcondition_failure(
+                executor,
+                journal,
+                index,
+                format!("operation {index} postcondition failed: {error}"),
+            ))
+            .await);
+        }
+    };
+
+    // Persist + sync the operation completion only after the observed
+    // postcondition (never record complete before it is observed).
+    Box::pin(append_step(
+        executor,
+        journal,
+        SchemaMigrationStep {
+            kind: JournalEventKind::OperationComplete,
+            operation_index: Some(index),
+            evidence: Some(evidence),
+        },
+    ))
+    .await
+    .map_err(|error| durability_error(error, *intents_durable))?;
+    Ok(())
 }
 
 /// Execute exactly one bounded DDL operation by delegating to the existing
