@@ -9,11 +9,11 @@ use shamir_query_types::WriteOp;
 use super::super::helpers::{checksum, on_big_stack};
 use super::helpers::{
     apply_request, body, bounded, create_function, create_validator, history, identity,
-    persistent_owner_db, run_apply, run_op, DB, OWNER, REPO,
+    init_waiting_for_locks, persistent_owner_db, run_apply, run_op, DB, OWNER, REPO,
 };
 use crate::shamir_db::execute::admin_db_schema_migration::{test_capture_intent, test_verify};
 use crate::shamir_db::system_store::{
-    FormatEpoch, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep, SystemStoreConfig,
+    FormatEpoch, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
 };
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
@@ -112,11 +112,7 @@ async fn journal_prefix(
 async fn reopen(dir: &tempfile::TempDir, db: ShamirDb) -> ShamirDb {
     bounded(db.flush_all_for_test()).await.unwrap();
     drop(db);
-    let db = bounded(ShamirDb::init(SystemStoreConfig::Fjall(
-        dir.path().join("system"),
-    )))
-    .await
-    .unwrap();
+    let db = init_waiting_for_locks(dir.path().join("system")).await;
     assert_eq!(db.schema_migration_gate_in_doubt_generation(DB), Some(1));
     db
 }

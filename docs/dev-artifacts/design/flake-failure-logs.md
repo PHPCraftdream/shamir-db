@@ -80,6 +80,7 @@ diagnostics stay because the class (timing, ports, OS differences) can recur.
 | e2e-login subscription test | shamir-client-ts `__tests__/connection/token/e2e-login.test.ts` | already failure-only (timeline + server log in the error) |
 | browser-login "settles promptly on abort while fetch is pending..." | shamir-client-ts `src/login/__tests__/browser-login.test.ts` | timing |
 | `token_ws_execute_writes_and_reads` (token matrix boot) | shamir-e2e `tests/matrix/token/common.rs` | launcher boot hit `FjallError: Locked` on ubuntu: the seed's dropped stores release their fjall locks from background handles; the boot now retries on `Locked` like the shamir-server `http_rest` harness, and the guard marks each retry |
+| `synthetic_pending_bind_is_deferred_before_replay_and_next_effect` (function-family crash tests, `reopen`) | shamir-db `src/shamir_db/tests/ddl_contracts/schema_migrations/function_family/crash_tests.rs` | the reopen after dropping the first engine hit `FjallError: Locked` on windows: the dropped engine's background handles still held the system store's fjall lock; the reopen now retries that one error for a bounded time (`init_waiting_for_locks` in the folder's `helpers.rs`); any other error still fails at once, so no extra marks are needed |
 
 A test is added to the table when it flakes; the fix for a new flake includes adopting the
 guard.

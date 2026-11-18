@@ -14,7 +14,7 @@ use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 use super::super::helpers::{checksum, persistent_db};
 use crate::engine::repo::{repo_types::BoxRepoFactory, RepoConfig};
 use crate::query::batch::{BatchError, BatchResponse};
-use crate::shamir_db::system_store::{DatabaseIdentity, MigrationHistory};
+use crate::shamir_db::system_store::{DatabaseIdentity, MigrationHistory, SystemStoreConfig};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
@@ -28,6 +28,30 @@ pub(super) async fn bounded<T>(step: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(30), Box::pin(step))
         .await
         .expect("function-family fixture step timed out")
+}
+
+/// Reopen the persistent system store. A just-dropped engine can keep its
+/// fjall lock until its background tasks finish (`FjallError: Locked`, seen on
+/// Windows), so retry that one error for a bounded time; any other error
+/// fails at once.
+pub(super) async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> ShamirDb {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match bounded(ShamirDb::init(SystemStoreConfig::Fjall(
+            system_path.clone(),
+        )))
+        .await
+        {
+            Ok(db) => return db,
+            Err(error)
+                if error.to_string().contains("Locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("reopen the system store: {error}"),
+        }
+    }
 }
 
 pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
