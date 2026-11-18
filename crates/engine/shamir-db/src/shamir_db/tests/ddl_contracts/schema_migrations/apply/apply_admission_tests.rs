@@ -162,6 +162,11 @@ async fn function_and_validator_operations_are_refused_with_the_documented_reaso
         // Documented reason, no stable code: the refusal message starts with
         // the fixed documented `schema_migration_operation_deferred: `
         // prefix and names the deferred family explicitly.
+        // Documented reason, no stable code: the refusal message carries the
+        // fixed documented `schema_migration_operation_deferred: ` prefix and
+        // names the deferred family explicitly. `BatchError` exposes only a
+        // `code()` accessor — no inner-message accessor — so the handler's own
+        // message is asserted via `contains` on its `Display`.
         assert_eq!(
             error.code(),
             None,
@@ -169,7 +174,7 @@ async fn function_and_validator_operations_are_refused_with_the_documented_reaso
         );
         let message = error.to_string();
         assert!(
-            message.starts_with("schema_migration_operation_deferred: "),
+            message.contains("schema_migration_operation_deferred: "),
             "documented refusal prefix must be present: {error}"
         );
         assert!(
@@ -181,6 +186,41 @@ async fn function_and_validator_operations_are_refused_with_the_documented_reaso
         journal_rows(&db).await,
         pristine,
         "the family refusal writes nothing"
+    );
+    assert!(db.schema_migration_gate_generation("testdb").is_none());
+}
+
+#[tokio::test]
+async fn a_body_naming_a_missing_repository_is_refused_before_the_journal_is_touched() {
+    let (_dir, db) = persistent_owner_db().await;
+    let target = identity(&db).await;
+
+    // The repository a body names is knowable at admission: the refusal must
+    // happen BEFORE the durable `started` event would strand the journal in
+    // the uncertain window.
+    let migration = SchemaMigration::new("alpha-ghost", 1, "names a missing repository")
+        .op(ddl::create_table("items_1").repo("ghost_repo").build())
+        .expect("typed create-table operation is admitted")
+        .build()
+        .expect("test migration body is valid");
+
+    let pristine = journal_rows(&db).await;
+    let error = run_apply(
+        &db,
+        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+    )
+    .await
+    .expect_err("a missing repository must be refused before any intent");
+    let message = error.to_string();
+    assert_code(error, "not_found");
+    assert!(
+        message.contains("alpha-ghost") && message.contains("ghost_repo"),
+        "the refusal must name the migration and the missing repository: {message}"
+    );
+    assert_eq!(
+        journal_rows(&db).await,
+        pristine,
+        "the preflight refusal must not write a started event"
     );
     assert!(db.schema_migration_gate_generation("testdb").is_none());
 }

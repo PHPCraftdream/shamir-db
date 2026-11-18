@@ -11,6 +11,8 @@ use shamir_query_types::admin::types::schema_migration::{
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 use super::super::helpers::{checksum, rows};
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableManager;
 use crate::query::batch::BatchError;
 use crate::shamir_db::system_store::{DatabaseIdentity, SystemStoreConfig};
@@ -34,6 +36,15 @@ pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
         .await
         .unwrap();
     db.create_db("testdb").await.unwrap();
+    // The migration bodies address repository `main`; create it the way the
+    // sibling DDL fixtures do so the store resource `testdb/main` exists
+    // before any test (or the admission preflight) addresses it.
+    db.add_repo(
+        "testdb",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()),
+    )
+    .await
+    .unwrap();
     db.set_resource_meta(
         &ResourcePath::database("testdb"),
         &ResourceMeta {

@@ -1,7 +1,6 @@
 //! Server-side tests for the read-only application-schema status operation
 //! (R1c step 2b-1): empty journal, applied prefix, owned fence, in-doubt,
-//! checksum mismatch, identity mismatch, authorization, and the documented
-//! temporary apply refusal.
+//! checksum mismatch, identity mismatch, and authorization.
 //!
 //! Requests are built ONLY through `shamir-query-builder`
 //! (`application_schema_status`) and executed through the normal batch
@@ -9,7 +8,7 @@
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_types::admin::types::schema_migration::{
-    SchemaMigrationApplyRequest, SchemaMigrationStatusRequest, SchemaMigrationTarget,
+    SchemaMigrationStatusRequest, SchemaMigrationTarget,
 };
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
@@ -326,54 +325,4 @@ async fn status_requires_database_read() {
         .expect("the database owner holds Read");
     let value = allowed.results["status"].records[0].as_value().into_owned();
     assert_eq!(field(&value, "last_applied_ordinal").as_i64(), Some(0));
-}
-
-#[tokio::test]
-async fn apply_arm_returns_the_documented_temporary_error() {
-    let (_dir, db) = persistent_db().await;
-    db.create_db("testdb").await.unwrap();
-    let identity = db
-        .system_store()
-        .schema_migration_identity("testdb")
-        .await
-        .unwrap();
-
-    let mut b = Batch::new();
-    b.op(
-        "apply",
-        shamir_query_builder::apply_application_schema_migration(SchemaMigrationApplyRequest {
-            protocol_version: 1,
-            target: SchemaMigrationTarget {
-                database_identity: identity.0,
-            },
-            expected_predecessor:
-                shamir_query_types::admin::types::schema_migration::SchemaMigrationPredecessor {
-                    migration_id: None,
-                    ordinal: 0,
-                    checksum: [0; 32],
-                },
-            expected_fence_generation: 0,
-            migration:
-                shamir_query_types::admin::types::schema_migration::SchemaMigrationSubmission {
-                    metadata: body("alpha-001", 1).metadata,
-                    function_dependencies: Vec::new(),
-                    operations: Vec::new(),
-                    checksum: [0; 32],
-                },
-        }),
-    );
-    let request = b.to_request_via_msgpack().unwrap();
-    let error = db
-        .execute("testdb", &request)
-        .await
-        .expect_err("apply refuses");
-    let message = error.to_string();
-    assert!(
-        message.contains("schema_migration_operation_not_implemented"),
-        "temporary error must be named, got: {message}"
-    );
-    assert!(
-        !message.contains("migration_state_changed") && !message.contains("read_only_replica"),
-        "must stay distinguishable from online storage-move / replica errors: {message}"
-    );
 }

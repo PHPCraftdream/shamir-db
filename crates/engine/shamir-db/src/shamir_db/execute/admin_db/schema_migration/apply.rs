@@ -28,8 +28,9 @@
 //!    (step 3b executes them); HMAC-required destructive operations →
 //!    `hmac_required` refusal BEFORE any intent (the engine never holds the
 //!    session HMAC key, so it cannot verify the tag itself);
-//! 9. per-operation authorization preflight of every underlying DDL target —
-//!    the migration-level `Manage` never replaces the DDL checks (§5.2);
+//! 9. repository existence of every operation's target repo and §5.2
+//!    authorization of every underlying DDL target through the
+//!    normal access path — before the fence and before any journal write;
 //! 10. the durable fence CAS with `expected_fence_generation` plus the
 //!     in-process per-database gate (§4.3).
 //!
@@ -229,9 +230,15 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         }
     }
 
-    // (9) §5.2: authorization of every underlying DDL target through the
-    // normal access path — before the fence and before any journal write.
+    // (9) A body naming a repository the serving database instance does not
+    // have is knowable at admission: refuse it here (the handlers' own
+    // `NotFound` → wire code `not_found`), BEFORE the fence and before the
+    // durable `started` event would strand the journal in doubt. §5.2:
+    // authorization of every underlying DDL target through the normal access
+    // path — the migration-level `Manage` never replaces the DDL checks.
+    let migration_id = submission.metadata.id.clone();
     for operation in &body.operations {
+        preflight_repo_exists(executor, &db, operation, &migration_id)?;
         preflight_authorized(executor, operation).await?;
     }
 
@@ -312,6 +319,54 @@ fn is_function_or_validator(operation: &SchemaMigrationOp) -> bool {
             | SchemaMigrationOp::BindValidator(_)
             | SchemaMigrationOp::UnbindValidator(_)
     )
+}
+
+/// Repo name each admitted operation addresses (`None` for the
+/// function/validator family, which is refused earlier). Every admitted
+/// variant carries a `repo` field naming its repository (RenameTable's
+/// source and destination share it).
+fn operation_repo(operation: &SchemaMigrationOp) -> Option<&str> {
+    match operation {
+        SchemaMigrationOp::CreateTable(op) => Some(&op.repo),
+        SchemaMigrationOp::DropTable(op) => Some(&op.repo),
+        SchemaMigrationOp::RenameTable(op) => Some(&op.repo),
+        SchemaMigrationOp::CreateIndex(op) => Some(&op.repo),
+        SchemaMigrationOp::DropIndex(op) => Some(&op.repo),
+        SchemaMigrationOp::RenameIndex(op) => Some(&op.repo),
+        SchemaMigrationOp::SetTableSchema(op) => Some(&op.repo),
+        SchemaMigrationOp::AddSchemaRule(op) => Some(&op.repo),
+        SchemaMigrationOp::RemoveSchemaRule(op) => Some(&op.repo),
+        _ => None, // function/validator family refused earlier
+    }
+}
+
+/// Admission preflight: the repository each operation addresses must exist
+/// on the serving database instance. Uses the same cheap existence check
+/// the DDL handlers resolve through (`DbInstance::get_repo`), and the same
+/// wire code `map_store_error` gives an engine `NotFound` (`not_found`).
+fn preflight_repo_exists(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    operation: &SchemaMigrationOp,
+    migration_id: &str,
+) -> Result<(), BatchError> {
+    let Some(repo) = operation_repo(operation) else {
+        return Ok(());
+    };
+    let exists = executor
+        .shamir
+        .get_db(db)
+        .is_some_and(|instance| instance.get_repo(repo).is_some());
+    if !exists {
+        return Err(coded(
+            "not_found",
+            format!(
+                "migration {migration_id} names repository '{repo}' which does not \
+                 exist on the serving database '{db}'"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// §5.2 authorization preflight mirroring each DDL handler's own check
