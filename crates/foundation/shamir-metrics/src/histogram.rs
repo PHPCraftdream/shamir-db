@@ -5,7 +5,14 @@ use crate::atomics::{fence, AtomicU64, Ordering};
 use crate::bounds::MAX_BOUNDS;
 
 /// Bounded reader retries before a best-effort `torn` copy (design §3.4).
+#[cfg(not(loom))]
 const SNAPSHOT_RETRIES: u32 = 8;
+
+/// Under the model checker the retry loop is a spin and every extra
+/// iteration multiplies the interleaving space (the model timed out with 8);
+/// exhaustion is the documented `torn` degradation the model already accepts.
+#[cfg(loom)]
+const SNAPSHOT_RETRIES: u32 = 2;
 
 /// Fixed static bucket bounds; inclusive `le` semantics with one implicit
 /// overflow cell; integer `sum` in the bucket unit; no allocation in
