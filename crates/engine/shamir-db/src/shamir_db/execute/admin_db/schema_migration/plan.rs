@@ -4,7 +4,8 @@
 //! applied prefix (design §3.3, §4.1, §4.4) and returns the typed plan for
 //! the next migration — checksums recomputed server-side, order proven
 //! against the journal, effects and their blast radius listed — with NO side
-//! effect: no journal event, no fence, no operation execution.
+//! effect: no journal event, no fence, no schema changes. Function checks
+//! use the same read-only admin dispatch as apply admission.
 //!
 //! Authorization is §5.2 `Manage` on the database, before any journal byte
 //! is read. Refusals use the stable §5.3 codes only. Plan is primary-only;
@@ -32,6 +33,9 @@ use crate::types::value::QueryValue;
 
 use super::super::admin_dispatch::ShamirAdminExecutor;
 use super::super::helpers::admin_result;
+use super::function_family::admission::{
+    is_function_family, preflight_checks, preflight_dependencies, validate_binding_scope,
+};
 
 /// §5.2 authorization for the plan arm: `Manage` on the database through the
 /// normal `authorize_access` path — no bypass — before any journal byte is
@@ -113,7 +117,22 @@ pub(in crate::shamir_db::execute) async fn plan_application_schema(
         ));
     }
     let next = validate_submissions(&history, request, predecessor.ordinal)?;
-    let result = plan_result(request.protocol_version, &predecessor, next);
+    for operation in &next.operations {
+        validate_binding_scope(&executor.db_name, operation)?;
+    }
+    Box::pin(preflight_checks(executor, &next.operations)).await?;
+    let dependencies_resolved = Box::pin(preflight_dependencies(
+        executor,
+        &next.function_dependencies,
+        false,
+    ))
+    .await?;
+    let result = plan_result(
+        request.protocol_version,
+        &predecessor,
+        next,
+        dependencies_resolved,
+    );
     Ok(admin_result(plan_value(&result)))
 }
 
@@ -233,51 +252,42 @@ fn plan_result(
     protocol_version: u16,
     predecessor: &SchemaMigrationPredecessor,
     submission: &SchemaMigrationSubmission,
+    dependencies_resolved: bool,
 ) -> SchemaMigrationPlanResult {
     let mut operations = Vec::with_capacity(submission.operations.len());
-    let mut has_function_op = false;
-    let mut has_validator_op = false;
+    let server_global = submission.operations.iter().any(is_function_family);
     for (index, operation) in submission.operations.iter().enumerate() {
         let (kind, target) = operation_kind_and_target(operation);
         let mut function_registration: Option<String> = None;
         let mut validator_registration: Option<String> = None;
         match operation {
             SchemaMigrationOp::CreateFunction(op) => {
-                has_function_op = true;
                 function_registration = Some(op.create_function.clone());
             }
             SchemaMigrationOp::DropFunction(op) => {
-                has_function_op = true;
                 function_registration = Some(op.drop_function.clone());
             }
             SchemaMigrationOp::RenameFunction(op) => {
-                has_function_op = true;
                 function_registration = Some(op.rename_function.clone());
             }
             SchemaMigrationOp::AlterFunction(op) => {
-                has_function_op = true;
                 function_registration = Some(op.alter_function.clone());
             }
-            // Preflight-only: it registers nothing and has no target name.
+            // Read-only: it registers nothing and has no target name.
             SchemaMigrationOp::CheckFunction(_) => {}
             SchemaMigrationOp::CreateValidator(op) => {
-                has_validator_op = true;
                 validator_registration = Some(op.create_validator.clone());
             }
             SchemaMigrationOp::DropValidator(op) => {
-                has_validator_op = true;
                 validator_registration = Some(op.drop_validator.clone());
             }
             SchemaMigrationOp::RenameValidator(op) => {
-                has_validator_op = true;
                 validator_registration = Some(op.rename_validator.clone());
             }
             SchemaMigrationOp::BindValidator(op) => {
-                has_validator_op = true;
                 validator_registration = Some(op.bind_validator.clone());
             }
             SchemaMigrationOp::UnbindValidator(op) => {
-                has_validator_op = true;
                 validator_registration = Some(op.unbind_validator.clone());
             }
             _ => {}
@@ -304,11 +314,32 @@ fn plan_result(
             affected_database_registrations,
         });
     }
-    let server_global = has_function_op || has_validator_op;
     let mut warnings = vec![SchemaMigrationWarning::MaintenanceFenceRequired];
     if server_global {
         warnings.push(SchemaMigrationWarning::ServerGlobalRegistrationBlastRadius);
         warnings.push(SchemaMigrationWarning::DependencyListMustBeReviewed);
+    }
+    let mut recovery_summary =
+        "no down migrations; recovery is resume under a new fence, operator \
+         reconciliation, or restore of the pre-migration backup"
+            .to_string();
+    if !dependencies_resolved {
+        recovery_summary.push_str("; apply is blocked by unresolved function dependencies");
+    }
+    if !submission.function_dependencies.is_empty() {
+        recovery_summary.push_str(
+            "; apply requires current resolution of declared function dependencies \
+             (not a signature guarantee): ",
+        );
+        for (index, declaration) in submission.function_dependencies.iter().enumerate() {
+            if index != 0 {
+                recovery_summary.push_str("; ");
+            }
+            recovery_summary.push_str(&format!(
+                "{:?} depends on {:?}",
+                declaration.function, declaration.depends_on,
+            ));
+        }
     }
     SchemaMigrationPlanResult {
         protocol_version,
@@ -318,12 +349,10 @@ fn plan_result(
         operations,
         total_work_bound: None,
         warnings,
-        recovery_summary: Some(
-            "no down migrations; recovery is resume under a new fence, operator \
-             reconciliation, or restore of the pre-migration backup"
-                .to_string(),
+        recovery_summary: Some(recovery_summary),
+        requires_server_wide_fence: Some(
+            server_global || !submission.function_dependencies.is_empty(),
         ),
-        requires_server_wide_fence: Some(server_global),
     }
 }
 

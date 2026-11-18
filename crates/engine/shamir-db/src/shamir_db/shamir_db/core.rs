@@ -180,6 +180,8 @@ pub struct ShamirDb {
     pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Server-default policy, validated at initialization and each repository open.
     pub(super) durability_policy: DurabilityPolicy,
+    /// Shared by clones; serializes function-family migration runners server-wide.
+    pub(in crate::shamir_db) function_family_migration_gate: Arc<std::sync::atomic::AtomicBool>,
     /// R1c §4.3 — in-process per-database application-schema maintenance
     /// fence: db name → held durable fence generation; absent entry = free.
     /// Lock-free (`DashMap` entries, admin/DDL frequency only); the ONLY
@@ -372,6 +374,7 @@ impl ShamirDb {
             principal_resolver: None,
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
+            function_family_migration_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_migration_gate: Arc::new(DashMap::with_hasher(THasher::default())),
             schema_migration_gate_in_doubt: Arc::new(DashMap::with_hasher(THasher::default())),
             node_read_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),

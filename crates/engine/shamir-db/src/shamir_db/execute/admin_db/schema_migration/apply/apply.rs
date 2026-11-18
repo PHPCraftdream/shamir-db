@@ -6,7 +6,7 @@
 //! postconditions live in `apply_operations.rs`, and the journal append /
 //! error mapping / result wire encoding live in `apply_journal.rs`.
 //!
-//! Executes the deterministic table/index/schema-rule subset of a submitted
+//! Executes admitted table/index/schema-rule and function-family operations of a submitted
 //! migration body under the durable fence of step 2a, with per-operation
 //! journal intent → one bounded DDL → exact postcondition → completion, and
 //! a final end-state verification before the durable `applied` event and
@@ -30,13 +30,14 @@
 //!    mismatch → the fresh-path stable refusal codes, nothing written;
 //! 7. expected predecessor == durable journal head; ordinal contiguous with
 //!    the applied prefix (same refusals and stable codes as plan);
-//! 8. function/validator-family operations → one typed, documented refusal
-//!    (step 3b executes them); HMAC-required destructive operations →
-//!    `hmac_required` refusal BEFORE any intent (the engine never holds the
-//!    session HMAC key, so it cannot verify the tag itself);
+//! 8. Reject cross-database bindings and HMAC-required operations before
+//!    any intent; defer binds because this fence cannot drain staged writes.
 //! 9. repository existence of every operation's target repo and §5.2
 //!    authorization of every underlying DDL target through the
-//!    normal access path — before the fence and before any journal write;
+//!    normal access path, plus read-only function checks before either fence;
+//!    authorization that depends on ordered effects is done by the runner;
+//!    acquire the server-wide function-family gate before resolving declared
+//!    dependencies and before the durable CAS;
 //! 10. the durable fence CAS with `expected_fence_generation` (recovery
 //!     takes over the OWNED fence at the journal's current generation)
 //!     plus the in-process per-database gate (§4.3).
@@ -47,6 +48,7 @@
 //! completion and returns `schema_migration_postcondition_failed` with the
 //! journal left resumable (resume itself is step 3b).
 
+use shamir_collections::TFxSet;
 use shamir_query_types::admin::types::schema_migration::{
     canonical_body_checksum, SchemaMigrationApplyRequest, SchemaMigrationOp,
     SchemaMigrationPredecessor,
@@ -55,24 +57,21 @@ use shamir_query_types::admin::types::schema_migration::{
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
-use crate::shamir_db::system_store::{DatabaseIdentity, FormatEpoch, SchemaMigrationContext};
-
-use super::super::admin_dispatch::ShamirAdminExecutor;
-use super::apply_journal::{applied_value, map_fence_error, plain};
-use super::apply_operations::{run_operations, FencedRun};
-use super::plan::{
-    applied_head, coded, map_store_error, operation_kind_and_target, submission_body,
+use crate::shamir_db::system_store::{
+    DatabaseIdentity, FormatEpoch, JournalEventKind, SchemaMigrationContext,
 };
 
-/// Stable documented refusal message for function/validator operations:
-/// step 3b executes them (design §4.4 preflight/dependency work lands there).
-/// The fixed `schema_migration_operation_deferred: ` PREFIX is part of the
-/// contract: the refusal carries no stable wire code, so callers and tests
-/// identify it by this literal prefix; a wording change behind the prefix is
-/// free, a prefix change is a breaking contract change.
-pub(super) const FUNCTION_FAMILY_DEFERRED: &str = "schema_migration_operation_deferred: \
-     function and validator operations are not executed by application-schema apply in \
-     R1c step 2b-3a; they are refused before any effect and will be executed by step 2b-3b";
+use super::super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::function_family::admission::{
+    authorize_family_operation, defer_bind, family_batch_op, is_function_family, preflight_checks,
+    preflight_dependencies, validate_binding_scope,
+};
+use super::super::function_family::gate::FunctionFamilyGate;
+use super::super::plan::{
+    applied_head, coded, map_store_error, operation_kind_and_target, submission_body,
+};
+use super::apply_journal::{applied_value, map_fence_error, plain};
+use super::apply_operations::{run_operations, FencedRun};
 
 /// The apply entry point. Called from the dispatcher arm (already `Manage`-
 /// authorized) through `Box::pin` so the many DDL-handler awaits live on the
@@ -240,16 +239,12 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
 
-    // (8) Function/validator operations are step 3b; HMAC-required destructive
-    // operations cannot be verified engine-side and are refused before intent.
+    // (8) Reject cross-database bindings before any other operation refusal.
     for operation in &body.operations {
-        if is_function_or_validator(operation) {
-            return Err(BatchError::QueryError {
-                alias: String::new(),
-                message: FUNCTION_FAMILY_DEFERRED.to_string(),
-                code: None,
-            });
-        }
+        validate_binding_scope(&db, operation)?;
+    }
+    // HMAC-required operations cannot be verified engine-side.
+    for operation in &body.operations {
         if let Some(op) = fence_batch_op(operation) {
             if shamir_query_types::hmac::hmac_policy(&op)
                 == shamir_query_types::hmac::HmacPolicy::Required
@@ -274,11 +269,76 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // durable `started` event would strand the journal in doubt. §5.2:
     // authorization of every underlying DDL target through the normal access
     // path — the migration-level `Manage` never replaces the DDL checks.
-    let migration_id = submission.metadata.id.clone();
-    for operation in &body.operations {
-        preflight_repo_exists(executor, &db, operation, &migration_id)?;
-        preflight_authorized(executor, operation).await?;
+    let last_intent = if resume {
+        history
+            .events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.migration == submission.metadata
+                    && event.kind == JournalEventKind::OperationIntent
+            })
+            .and_then(|event| event.operation_index)
+            .map(|index| index as usize)
+    } else {
+        None
+    };
+    let migration_id = &submission.metadata.id;
+    let mut introduced: TFxSet<&str> = TFxSet::with_hasher(shamir_collections::THasher::default());
+    for (index, operation) in body.operations.iter().enumerate() {
+        if is_function_family(operation) {
+            // The runner must authorize journaled effects only after proof,
+            // or authorize their source before executing. For names introduced
+            // earlier in the body, defer the source check until the actual ACL
+            // exists; absent-resource defaults are not proof of authority.
+            let source = match operation {
+                SchemaMigrationOp::RenameFunction(op) => Some(op.rename_function.as_str()),
+                SchemaMigrationOp::AlterFunction(op) => Some(op.alter_function.as_str()),
+                _ => None,
+            };
+            let defer_source = source.is_some_and(|name| {
+                last_intent.is_some_and(|last| index <= last) || introduced.contains(name)
+            });
+            if !defer_source {
+                Box::pin(authorize_family_operation(executor, operation)).await?;
+            } else if matches!(operation, SchemaMigrationOp::RenameFunction(_)) {
+                Box::pin(executor.shamir.authorize_access(
+                    &executor.actor,
+                    &ResourcePath::FunctionNamespace,
+                    Action::Create,
+                ))
+                .await
+                .map_err(|error| coded("access_denied", error.to_string()))?;
+            }
+            defer_bind(operation)?;
+        }
+        preflight_repo_exists(executor, &db, operation, migration_id)?;
+        Box::pin(preflight_authorized(executor, operation)).await?;
+        match operation {
+            SchemaMigrationOp::CreateFunction(op) => {
+                introduced.insert(&op.create_function);
+            }
+            SchemaMigrationOp::RenameFunction(op) => {
+                introduced.remove(op.rename_function.as_str());
+                introduced.insert(&op.to);
+            }
+            _ => {}
+        }
     }
+    Box::pin(preflight_checks(executor, &body.operations)).await?;
+
+    // Even without a function-family operation, another migration could rename
+    // a declared endpoint. Hold the gate from lookup through the runner.
+    let _function_gate = (!body.function_dependencies.is_empty()
+        || body.operations.iter().any(is_function_family))
+    .then(|| FunctionFamilyGate::acquire(&executor.shamir.function_family_migration_gate))
+    .transpose()?;
+    Box::pin(preflight_dependencies(
+        executor,
+        &body.function_dependencies,
+        true,
+    ))
+    .await?;
 
     // (10) In-process gate fast-fail, then the durable fence CAS. The
     // acquire also re-validates id/ordinal/checksum against the journal and
@@ -323,7 +383,7 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
 
     // Fence owned durably: the runner holds the in-process gate under an
     // RAII guard so EVERY exit path releases it.
-    run_operations(FencedRun {
+    Box::pin(run_operations(FencedRun {
         executor,
         serving,
         db: &db,
@@ -333,13 +393,12 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         generation,
         resume,
         context: &context,
-    })
+    }))
     .await
 }
 
 /// Convert an admitted migration operation to its `BatchOp` shape for the
-/// HMAC-policy preflight. `None` for the function/validator families (they
-/// are refused before this runs) — kept total for exhaustiveness.
+/// HMAC-policy preflight, delegating function and validator shapes.
 fn fence_batch_op(operation: &SchemaMigrationOp) -> Option<BatchOp> {
     match operation {
         SchemaMigrationOp::CreateTable(op) => Some(BatchOp::CreateTable((**op).clone())),
@@ -351,30 +410,11 @@ fn fence_batch_op(operation: &SchemaMigrationOp) -> Option<BatchOp> {
         SchemaMigrationOp::SetTableSchema(op) => Some(BatchOp::SetTableSchema((**op).clone())),
         SchemaMigrationOp::AddSchemaRule(op) => Some(BatchOp::AddSchemaRule((**op).clone())),
         SchemaMigrationOp::RemoveSchemaRule(op) => Some(BatchOp::RemoveSchemaRule((**op).clone())),
-        _ => None,
+        _ => family_batch_op(operation),
     }
 }
 
-fn is_function_or_validator(operation: &SchemaMigrationOp) -> bool {
-    matches!(
-        operation,
-        SchemaMigrationOp::CreateFunction(_)
-            | SchemaMigrationOp::DropFunction(_)
-            | SchemaMigrationOp::RenameFunction(_)
-            | SchemaMigrationOp::CheckFunction(_)
-            | SchemaMigrationOp::AlterFunction(_)
-            | SchemaMigrationOp::CreateValidator(_)
-            | SchemaMigrationOp::DropValidator(_)
-            | SchemaMigrationOp::RenameValidator(_)
-            | SchemaMigrationOp::BindValidator(_)
-            | SchemaMigrationOp::UnbindValidator(_)
-    )
-}
-
-/// Repo name each admitted operation addresses (`None` for the
-/// function/validator family, which is refused earlier). Every admitted
-/// variant carries a `repo` field naming its repository (RenameTable's
-/// source and destination share it).
+/// Repo targeted by table-family operations and table validator bindings.
 fn operation_repo(operation: &SchemaMigrationOp) -> Option<&str> {
     match operation {
         SchemaMigrationOp::CreateTable(op) => Some(&op.repo),
@@ -386,7 +426,9 @@ fn operation_repo(operation: &SchemaMigrationOp) -> Option<&str> {
         SchemaMigrationOp::SetTableSchema(op) => Some(&op.repo),
         SchemaMigrationOp::AddSchemaRule(op) => Some(&op.repo),
         SchemaMigrationOp::RemoveSchemaRule(op) => Some(&op.repo),
-        _ => None, // function/validator family refused earlier
+        SchemaMigrationOp::BindValidator(op) => Some(&op.repo),
+        SchemaMigrationOp::UnbindValidator(op) => Some(&op.repo),
+        _ => None,
     }
 }
 
@@ -466,7 +508,7 @@ async fn preflight_authorized(
             ResourcePath::table(db.clone(), op.repo.clone(), op.remove_schema_rule.clone()),
             Action::Write,
         ),
-        _ => return Ok(()), // function/validator family refused earlier
+        _ => return Ok(()), // function-family authorization is handled separately
     };
     executor
         .shamir
