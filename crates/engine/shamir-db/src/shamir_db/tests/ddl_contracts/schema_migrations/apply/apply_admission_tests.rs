@@ -230,9 +230,11 @@ async fn a_ddl_target_the_caller_may_not_touch_stops_the_migration_before_its_in
     let (_dir, db) = persistent_owner_db().await;
     let target = identity(&db).await;
 
-    // The owner holds Manage on the database, but the target store is owned
-    // by another user with no "other" bits: §5.2 requires the normal Create
-    // authorization of the DDL target too.
+    // The fixture already grants [`OWNER`] the store resource (the preflight
+    // authorizes CreateTable as `Create` on the store). This test DENIES that
+    // specific resource again — the store is owned by another user with no
+    // "other" bits — proving §5.2's per-target Create authorization stops the
+    // migration even though the caller holds `Manage` on the database.
     db.set_resource_meta(
         &ResourcePath::store("testdb", "main"),
         &ResourceMeta {

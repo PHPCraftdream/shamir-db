@@ -55,6 +55,20 @@ pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
     )
     .await
     .unwrap();
+    // The freshly created repository resource defaults to System-open meta;
+    // §5.2's per-target preflight authorizes CreateTable as `Create` on the
+    // STORE resource, so grant [`OWNER`] the store too (mirrors the database
+    // grant above). Individual tests may still DENY this resource explicitly.
+    db.set_resource_meta(
+        &ResourcePath::store("testdb", "main"),
+        &ResourceMeta {
+            owner: OWNER,
+            group: None,
+            mode: 0o700,
+        },
+    )
+    .await
+    .unwrap();
     (dir, db)
 }
 
