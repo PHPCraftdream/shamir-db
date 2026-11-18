@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use shamir_collections::{TFxSet, THasher};
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::ShamirDb;
 use tracing::{debug, info, warn};
 
@@ -41,6 +42,11 @@ pub struct SubscriptionSupervisor {
     /// Long-poll budget forwarded to each `pull` (ms).
     pub(super) poll_wait_ms: u32,
     pub(super) validate_replicated_payload: bool,
+    /// Optional server-wide maintenance gate cloned into every spawned
+    /// follower loop's [`FollowerLoopConfig`] (online logical-export
+    /// enrolment). `None` unless installed by boot via
+    /// [`Self::with_maintenance_gate`].
+    pub(super) maintenance_gate: Option<MaintenanceGate>,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
     /// Test seam for replacing the row between lease-take and spawn.
@@ -75,6 +81,7 @@ impl SubscriptionSupervisor {
             max_iterations: None,
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
+            maintenance_gate: None,
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             start_race_hook: None,
@@ -134,6 +141,18 @@ impl SubscriptionSupervisor {
     #[must_use]
     pub fn with_validate_replicated_payload(mut self, validate: bool) -> Self {
         self.validate_replicated_payload = validate;
+        self
+    }
+
+    /// Enrol every loop this supervisor spawns in the server-wide
+    /// maintenance gate: a raised logical-export freeze blocks each loop's
+    /// apply (via `MaintenanceGate::wait_for_mutation` in
+    /// `run_follower_loop`) and the loop's counted writer keeps the
+    /// export's writer-drain correct. Boot owns the gate instance and
+    /// installs it here once; all clones share the same admission.
+    #[must_use]
+    pub fn with_maintenance_gate(mut self, gate: MaintenanceGate) -> Self {
+        self.maintenance_gate = Some(gate);
         self
     }
 
@@ -208,6 +227,27 @@ impl SubscriptionSupervisor {
     ///   replaced — an old task must never survive to mark or clear the
     ///   replacement.
     pub async fn reconcile(&self) {
+        // Online-export enrolment (narrowest shared reconcile path): a pass
+        // persists durable terminal subscription states (through
+        // `start_subscription`) and admits loop replacements, which alter
+        // exported-scope eligibility (`read_quarantine_reason`), so the pass
+        // must hold the server-wide maintenance gate's counted writer before
+        // taking the reconcile/control locks. Nonblocking admission: while a
+        // freeze is raised, skip this tick entirely — the next tick (poke /
+        // notify / retry) converges. The guard is held across the stop
+        // phase's joins; a loop's exit wrapper parked on a frozen gate is
+        // released by its cancel token (biased select in start.rs), so
+        // joining a cancelled loop cannot deadlock against the freeze.
+        let _maintenance = match &self.maintenance_gate {
+            Some(gate) => match gate.enter_mutation() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    debug!("supervisor: logical-export freeze raised; reconcile tick skipped");
+                    return;
+                }
+            },
+            None => None,
+        };
         let _lifecycle = self.reconcile_lock.lock().await;
         // Lock only the catalogue read; release before task stop/start callbacks.
         let control = self.local.lock_replication_control().await;

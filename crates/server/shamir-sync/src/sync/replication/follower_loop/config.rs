@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::repl_binding::SubscriptionLease;
 
 #[cfg(test)]
@@ -47,6 +48,14 @@ pub struct FollowerLoopConfig {
     /// applies only while the lease is valid. `None` for unsupervised
     /// loops (empty [`Self::subscription`]).
     pub lease: Option<Arc<SubscriptionLease>>,
+    /// Optional server-wide maintenance gate (online logical-export
+    /// enrolment). When `Some`, the loop awaits
+    /// [`MaintenanceGate::wait_for_mutation`] before every apply, so a
+    /// raised export freeze blocks replication apply and the counted
+    /// writer keeps the export's drain correct. `None` (the default) leaves
+    /// the loop unenrolled — boot wires it through
+    /// `SubscriptionSupervisor::with_maintenance_gate`.
+    pub maintenance_gate: Option<MaintenanceGate>,
     /// Test-only apply park for selected target loops.
     #[cfg(test)]
     pub(crate) apply_park: Option<Arc<ApplyParkHook>>,
@@ -97,6 +106,7 @@ impl FollowerLoopConfig {
             max_iterations: None,
             subscription: String::new(),
             lease: None,
+            maintenance_gate: None,
             #[cfg(test)]
             apply_park: None,
             #[cfg(test)]

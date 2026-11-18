@@ -59,6 +59,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
+use shamir_db::engine::table::writer_drain_barrier::WriterDrainGuard;
 use shamir_db::ShamirDb;
 use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
@@ -179,6 +181,12 @@ pub struct OnlineBackupRegistry {
     /// per-thread state; no process-global arming.
     #[cfg(test)]
     pending_step_callback: Mutex<Option<TestStepCallback>>,
+    /// R3-2b: shared server-wide maintenance gate. When installed, every
+    /// `start` takes one mutation admission (`enter_mutation`, refusing
+    /// promptly with the existing `AlreadyRunning` while a freeze holds
+    /// intent) and holds it for the whole run thread — the backup is a
+    /// mutation-source the gate must see; never re-entered while held.
+    maintenance: Option<MaintenanceGate>,
 }
 
 /// Test-only step callback: invoked by the engine's barrier-step hook
@@ -227,7 +235,17 @@ impl OnlineBackupRegistry {
             shutdown,
             #[cfg(test)]
             pending_step_callback: Mutex::new(None),
+            maintenance: None,
         }
+    }
+
+    /// R3-2b: install the shared server-wide maintenance gate (`shamir_db::
+    /// engine::db_instance::logical_export::MaintenanceGate`). Must be the
+    /// SAME instance the write paths admit through, so the online backup's
+    /// mutation admission participates in a logical-export freeze drain.
+    pub fn with_maintenance_gate(mut self, gate: MaintenanceGate) -> Self {
+        self.maintenance = Some(gate);
+        self
     }
 
     fn fresh_record(data_dir: &Path) -> RunRecord {
@@ -267,11 +285,24 @@ impl OnlineBackupRegistry {
             Some(root) => CancelFlag::from_shutdown(root),
             None => CancelFlag::default(),
         };
-        {
+        let maintenance = {
             let mut record = self.record.lock();
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
+            // R3-2b: one mutation admission per run, taken here at the
+            // registry level BEFORE admitting the run, so a freeze that
+            // already raised intent refuses promptly with the existing
+            // `AlreadyRunning` (`CancelBackup`/`BackupStatus` stay served —
+            // they never touch the gate). `enter_mutation` is non-blocking;
+            // the guard is then handed to the runner thread.
+            let maintenance = match &self.maintenance {
+                Some(gate) => Some(
+                    gate.enter_mutation()
+                        .map_err(|_| StartBackupError::AlreadyRunning)?,
+                ),
+                None => None,
+            };
             *record = RunRecord {
                 running: true,
                 cancel: cancel.clone(),
@@ -284,6 +315,7 @@ impl OnlineBackupRegistry {
                 last_error: None,
             };
             *self.backup_id.lock() = Some(backup_id.clone());
+            maintenance
         };
         // Test-only: take a pending per-run step callback (see
         // `arm_runner_step_callback`) onto this run's job.
@@ -300,6 +332,7 @@ impl OnlineBackupRegistry {
             record: Arc::clone(&self.record),
             #[cfg(test)]
             step_callback,
+            maintenance,
         };
         // §4.8 metrics hook: the run counts as started once registration
         // succeeded; a failed spawn is published as a preparing-stage
@@ -389,6 +422,10 @@ struct RunJob {
     /// Test-only: armed on the runner thread before the protocol runs.
     #[cfg(test)]
     step_callback: Option<TestStepCallback>,
+    /// R3-2b: the registry-level mutation admission, held for the whole run
+    /// — protocol, cleanup and every error/cancel/panic exit (a panic on
+    /// this thread unwinds through `run`, dropping the guard).
+    maintenance: Option<WriterDrainGuard>,
 }
 
 impl RunJob {
@@ -410,6 +447,9 @@ impl RunJob {
             record,
             #[cfg(test)]
             step_callback,
+            // Held to the end of the body: the gate stays occupied through
+            // the protocol call, the record update (cleanup) and metrics.
+            maintenance,
         } = self;
         // Test-only: arm this runner thread with the run's one-shot step
         // callback (the shared engine hook consults the per-thread slot;
@@ -420,6 +460,7 @@ impl RunJob {
             TEST_STEP_CALLBACK.with(|slot| *slot.borrow_mut() = Some(callback));
         }
         let started_at = Instant::now();
+        let _maintenance = maintenance;
         let Some(permit_guard) = permit.try_acquire() else {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol.

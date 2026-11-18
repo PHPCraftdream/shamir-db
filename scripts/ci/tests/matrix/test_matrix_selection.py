@@ -136,6 +136,69 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
         self.assertEqual([item["name"] for item in query_types["crates"]], ["shamir-query-types"])
         self.assertTrue(query_types["flags"]["ts"])
 
+    def test_export_production_paths_widen_to_db_only_via_declared_edge(self):
+        # Brief 56 item 8: a change in the logical export production paths must
+        # select shamir-db (the e2e round-trips verify/import the artifact
+        # through it) even though Cargo never selects db there: db is a normal
+        # dependency of shamir-server, not a dependent, and shamir-client does
+        # not depend on db at all — only shamir-e2e dev-depends on all three.
+        config = load_edges(open(os.path.join(os.path.dirname(__file__), "../../matrix/edges.toml"), encoding="utf-8").read())
+        packages = [
+            pkg("shamir-client", directory="crates/client/shamir-client"),
+            pkg("shamir-db", directory="crates/engine/shamir-db"),
+            # The real server manifest (crates/server/shamir-server/Cargo.toml)
+            # has shamir-client as a normal dependency too, so an isolated
+            # client export.rs change selects server and e2e through Cargo.
+            pkg("shamir-server", directory="crates/server/shamir-server",
+                deps=[("shamir-db", {}), ("shamir-client", {})]),
+            pkg("shamir-e2e", directory="crates/devtools/shamir-e2e",
+                deps=[("shamir-client", {"kind": "dev"}),
+                      ("shamir-db", {"kind": "dev"}),
+                      ("shamir-server", {"kind": "dev"})]),
+        ]
+        export_paths = [
+            "crates/client/shamir-client/src/client/session/mux/export.rs",
+            "crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/service.rs",
+            "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs",
+            "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs",
+            "crates/server/shamir-server/src/engine/db_handler/repo_admin/export_gate.rs",
+        ]
+        for path in export_paths:
+            owner = "shamir-client" if path.startswith("crates/client/") else "shamir-server"
+            # Cargo-only selection: a server path selects server+e2e, a client
+            # path additionally pulls the server (its normal dependent) and
+            # e2e; db is never selected by Cargo on either path.
+            before = {"shamir-server", "shamir-e2e"} | {owner}
+            without = select([path], packages)
+            self.assertEqual({item["name"] for item in without["crates"]}, before, path)
+            self.assertNotIn("shamir-db", before, path)
+            with_edge = select([path], packages, config)
+            self.assertEqual({item["name"] for item in with_edge["crates"]},
+                             before | {"shamir-db"}, path)
+            db_item = crate(with_edge, "shamir-db")
+            self.assertTrue(any("declared edge" in reason for reason in db_item["reasons"]), path)
+
+        # The widening is path-narrow: unrelated production sources of the same
+        # crates keep the Cargo-only selection and must not pull in db (the
+        # client reader does select the server through the real normal
+        # dependency, but still no db).
+        for path in ("crates/client/shamir-client/src/client/session/mux/reader.rs",
+                     "crates/server/shamir-server/src/boot/config/mod.rs"):
+            result = select([path], packages, config)
+            self.assertNotIn("shamir-db", {item["name"] for item in result["crates"]}, path)
+
+        # Runtime-path widening for the R3-2b online export job (brief 56):
+        # a production file of export_online behaves like any server path
+        # (server + e2e via the dev-dependency closure, never db without the
+        # edge), but a unit-test file inside the job's own tests/ tree only
+        # selects the server's lib tests through Cargo — the edge is what
+        # widens that to db as well (e2e stays out: a unit change does not
+        # propagate dev-dependents).
+        unit = select(["crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/tests/registry_tests.rs"], packages)
+        self.assertEqual({item["name"] for item in unit["crates"]}, {"shamir-server"}, path)
+        unit_widened = select(["crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/tests/registry_tests.rs"], packages, config)
+        self.assertEqual({item["name"] for item in unit_widened["crates"]}, {"shamir-server", "shamir-db"})
+
     def test_migration_fixture_sets_ts_flag_but_builder_source_does_not(self):
         # A schema_migration_canonical_vectors.json change must set the ts flag
         # (so the TS parity suite cannot be skipped) while staying bounded, and

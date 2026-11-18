@@ -68,7 +68,7 @@ use shamir_client::schema_migration::{
     ApplicationMigrationSet, MigrationError, PrefixCoverage, SchemaMigrationAppliedEntry,
     SchemaMigrationErrorCode, SchemaMigrationTarget,
 };
-use shamir_client::{Client, ConnectOptions};
+use shamir_client::{Client, ClientError, ConnectOptions};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -83,6 +83,19 @@ const M3_ID: &str = "mig-create-metrics";
 const DRIFT_TABLE: &str = "items_tampered";
 const TEST_TIMEOUT: Duration = Duration::from_secs(180);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Generous per-await budget for the export-refusal scenario (>= 120 s:
+/// the Windows CI runner is up to 10x slower; handshakes not sleeps).
+const EXPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Fixture for the export-refusal scenario: the shared migration fixture
+/// configuration with the several-session KDF/rate settings raised
+/// (argon2_concurrent_max 64, auth_init_rate_per_second 64).
+fn export_refusal_config(temp: &TempDir) -> Config {
+    let mut config = migration_config(temp);
+    config.argon2_concurrent_max = 64;
+    config.security.auth_init_rate_per_second = 64;
+    config
+}
 
 fn migration_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
@@ -471,6 +484,198 @@ async fn run_scenario() {
     );
 }
 
+/// CI-only partial-safe-stage proof for the R3-2b online-export operations
+/// (brief `docs/dev-artifacts/prompts/release/56-r3-2b-online-export-job.md`,
+/// design Review: the storage-owned background mutation is not fenceable
+/// within this step's allowed scope, so the running server has NO live
+/// export job yet — every `StartExport` / `ExportStatus` / `CancelExport`
+/// is refused fail-closed before any database work, including the
+/// admin/HMAC gates).
+///
+/// This drives the REAL typed client methods (`Client::start_export` /
+/// `export_status` / `cancel_export` in
+/// `crates/client/shamir-client/src/client/session/mux/export.rs`) through
+/// the REAL TLS-exporter handshake against the REAL server — the typed
+/// `ClientError::Db` answers below can only come from the server's
+/// protocol handler (`db_handler/handler.rs` fail-closed gate), not from a
+/// local stub:
+///
+/// 1. for the bootstrap ADMIN (superuser) all three operations are refused
+///    with the static code `online_export_not_configured` and its exact
+///    static message — the fixture's `security.export_root` is unset (the
+///    specific no-root configuration below), no gate is ever taken, and
+///    the temp fixture directory is asserted to hold no export staging
+///    entry or artifact after the refusals (there is no root: there is
+///    nothing to have written into);
+/// 2. for an ORDINARY (non-superuser) user created through the typed
+///    `Client::create_scram_user` API, `start_export` is refused with
+///    `permission_denied` — the superuser check precedes the
+///    not-configured refusal.
+///
+/// The refusal is checked on a FULLY VALID database (created + persistent
+/// Fjall repo, same fixture as the migration scenario above): the gate
+/// demonstrably precedes any database resolution. No sleeps; every await
+/// is bounded; the persistent store and temp dir live for the whole test;
+/// shutdown is joined and must report clean.
+async fn run_online_export_not_configured_scenario() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let temp = TempDir::new().expect("tempdir");
+    let password = b"correct horse battery staple".to_vec();
+
+    let launcher = ServerLauncher {
+        node_mode: Default::default(),
+        config: export_refusal_config(&temp),
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(password.clone()),
+        },
+    };
+    let handle: ServerHandle = tokio::time::timeout(TEST_TIMEOUT, Box::pin(launcher.launch()))
+        .await
+        .expect("server launch deadline")
+        .expect("server launch");
+    let addr = handle.first_tls_exporter_addr().expect("bound listener");
+
+    let client: Client = tokio::time::timeout(
+        EXPORT_REQUEST_TIMEOUT,
+        Box::pin(Client::connect(ConnectOptions {
+            addr,
+            server_name: "localhost".into(),
+            username: "admin".into(),
+            password: Zeroizing::new(password),
+            accept_new_host: true,
+            trusted_pin: None,
+            connect_timeout: None,
+            handshake_timeout: None,
+            request_timeout: Some(EXPORT_REQUEST_TIMEOUT),
+        })),
+    )
+    .await
+    .expect("client connect deadline")
+    .expect("client connect");
+
+    // Fully valid database + persistent repo (fixture reuse): the refusals
+    // below must come from the online-export gate, not from a missing db.
+    let mut mk = Batch::new();
+    mk.id("mk-db");
+    mk.create_db(DB, ddl::create_db(DB));
+    tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.execute("default", mk.build()))
+        .await
+        .expect("create db deadline")
+        .expect("create db");
+    let mut repo = Batch::new();
+    repo.id("mk-repo");
+    repo.create_repo("mr", ddl::create_repo("main").engine(RepoEngine::Fjall));
+    tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.execute(DB, repo.build()))
+        .await
+        .expect("create repo deadline")
+        .expect("create repo");
+
+    // 1. Admin (superuser): all three typed operations refused with the
+    //    exact static not-configured code + message.
+    fn expect_export_not_configured(error: ClientError) {
+        match error {
+            ClientError::Db { code, message } => {
+                assert_eq!(code, "online_export_not_configured");
+                assert_eq!(message, "online export is not configured on this server");
+            }
+            other => panic!("expected ClientError::Db(not_configured), got {other:?}"),
+        }
+    }
+    expect_export_not_configured(
+        tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.start_export(DB, ddl::start_export(DB)))
+            .await
+            .expect("start_export deadline")
+            .expect_err("start_export must be refused"),
+    );
+    expect_export_not_configured(
+        tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.export_status(DB))
+            .await
+            .expect("export_status deadline")
+            .expect_err("export_status must be refused"),
+    );
+    expect_export_not_configured(
+        tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.cancel_export(DB))
+            .await
+            .expect("cancel_export deadline")
+            .expect_err("cancel_export must be refused"),
+    );
+
+    // 2. Ordinary (non-superuser) user: `permission_denied` — the superuser
+    //    check precedes the not-configured refusal. The user is created
+    //    through the typed `Client::create_scram_user` API (the session-HMAC
+    //    confirmation tag is computed inside the client; no hand-rolled
+    //    HMAC here), with no roles, hence not a superuser.
+    client
+        .create_scram_user(
+            "exporter",
+            Zeroizing::new("exporter-passphrase-1".to_string()),
+            Vec::new(),
+        )
+        .await
+        .expect("create ordinary user");
+
+    let ordinary: Client = tokio::time::timeout(
+        EXPORT_REQUEST_TIMEOUT,
+        Box::pin(Client::connect(ConnectOptions {
+            addr,
+            server_name: "localhost".into(),
+            username: "exporter".into(),
+            password: Zeroizing::new(b"exporter-passphrase-1".to_vec()),
+            accept_new_host: true,
+            trusted_pin: None,
+            connect_timeout: None,
+            handshake_timeout: None,
+            request_timeout: Some(EXPORT_REQUEST_TIMEOUT),
+        })),
+    )
+    .await
+    .expect("ordinary connect deadline")
+    .expect("ordinary client connect");
+    match tokio::time::timeout(
+        EXPORT_REQUEST_TIMEOUT,
+        ordinary.start_export(DB, ddl::start_export(DB)),
+    )
+    .await
+    .expect("ordinary start_export deadline")
+    {
+        Err(ClientError::Db { code, .. }) => assert_eq!(code, "permission_denied"),
+        other => panic!("expected permission_denied, got {other:?}"),
+    }
+
+    // No output / no temp state, asserted through real fixture access: the
+    // fixture's `security.export_root` is unset (the no-root configuration),
+    // and the refusals are atomic, so the temp fixture directory must not
+    // contain any export staging entry (the service's live-stage prefix
+    // `.shamir-export-`, see the logical-dump staging module) or any other
+    // export-named file or directory. If a later slice wires a root into
+    // this fixture, this assertion must be re-derived — do not weaken it
+    // silently.
+    for entry in std::fs::read_dir(temp.path()).expect("list the temp fixture") {
+        let name = entry
+            .expect("temp fixture entry")
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !name.starts_with(".shamir-export-") && !name.contains("export"),
+            "no export staging or artifact may exist after the refusals, found {name:?}"
+        );
+    }
+
+    ordinary.close().await;
+    client.close().await;
+    // Shutdown drains in-flight work and flushes/closes the persistent
+    // repositories; the report must be clean (the Fjall repo included).
+    let report = handle.shutdown().await;
+    assert!(
+        report.is_clean(),
+        "clean shutdown, including the persistent repo: {:?}",
+        report.repository_failures()
+    );
+}
+
 /// The deep server + client async frames overflow a default test stack
 /// (same Windows debug-build mechanism the `shamir-db` schema-migration
 /// tests solve with `on_big_stack`): one 64 MiB thread owns ONE multi-thread
@@ -491,6 +696,32 @@ fn rust_migration_real_server_resume_two_applies_repeat_nothing_to_apply_drift_r
                     tokio::time::timeout(TEST_TIMEOUT, Box::pin(run_scenario()))
                         .await
                         .expect("the whole migration scenario must finish inside the deadline");
+                }));
+        })
+        .expect("spawn big-stack test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+/// Same big-stack harness as the migration scenario above.
+#[test]
+fn rust_online_export_ops_refused_not_configured_admin_permission_denied_ordinary() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(Box::pin(async {
+                    tokio::time::timeout(
+                        TEST_TIMEOUT,
+                        Box::pin(run_online_export_not_configured_scenario()),
+                    )
+                    .await
+                    .expect("the whole export-refusal scenario must finish inside the deadline");
                 }));
         })
         .expect("spawn big-stack test thread")

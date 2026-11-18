@@ -73,6 +73,8 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
+use shamir_db::engine::table::writer_drain_barrier::WriterDrainGuard;
 use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_types::hmac as canon;
@@ -224,10 +226,29 @@ pub struct ShamirDbHandler {
     /// `super::activity::requests` for the bounding argument and the
     /// privacy rule.
     pub(super) activity_requests: Arc<ActivityRequests>,
+    /// R3-2b — shared server-wide maintenance gate for the running server's
+    /// logical-export freeze (design §0.3, §4.1). `None` (both
+    /// constructors) means the handler runs unenrolled — every
+    /// `wait_for_mutation` fast-paths; the boot path installs the
+    /// process-wide instance via [`Self::with_maintenance_gate`] so that
+    /// ALL clones of the handler share the SAME gate (`MaintenanceGate` is
+    /// internally `Arc`-backed and `Clone`). Enrollment covers only this
+    /// native/REST request boundary: `Execute` writes, `TxBegin`, mutating
+    /// `TxExecute`, `TxCommit` and the top-level identity/token mutations.
+    pub(super) maintenance: Option<MaintenanceGate>,
     /// R4b-1 — monotonic source of fresh [`RequestExecId`] values, minted
     /// when a BATCH is admitted (same shape as `next_cursor_id`). The
     /// client's optional `rid` is carried alongside, never replaced.
     pub(super) next_request_exec_id: Arc<std::sync::atomic::AtomicU64>,
+    /// R3-2b — the online logical-export job service (StartExport /
+    /// ExportStatus / CancelExport). `None` (both constructors) means the
+    /// export surface refuses with the stable
+    /// `online_export_not_configured` code; the launcher installs the
+    /// process-wide instance via [`Self::with_online_export`] after the
+    /// admission audit has enrolled every mutation source in the shared
+    /// gate. Shared across all clones of the handler (`Arc`).
+    pub(super) online_export:
+        Option<Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>>,
 }
 
 impl ShamirDbHandler {
@@ -259,6 +280,8 @@ impl ShamirDbHandler {
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            maintenance: None,
+            online_export: None,
         }
     }
 
@@ -284,7 +307,33 @@ impl ShamirDbHandler {
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            maintenance: None,
+            online_export: None,
         }
+    }
+
+    /// R3-2b — install the online-export job service (launcher-only, after
+    /// the admission audit). The service is shared `Arc`-backed, so every
+    /// clone of the handler reaches the same registry and root.
+    pub(crate) fn with_online_export(
+        mut self,
+        service: Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>,
+    ) -> Self {
+        self.online_export = Some(service);
+        self
+    }
+
+    /// R3-2b — install the shared server-wide maintenance gate. The gate
+    /// is `Clone` and internally `Arc`-backed, so the boot path builds ONE
+    /// instance and hands clones to the handler, the future online-export
+    /// job and any other enrolled mutation entry point; a clone made from
+    /// an already-built handler (the handler derives `Clone`) shares the
+    /// same gate state. Until this is called (tests, minimal boots) the
+    /// handler runs unenrolled: admission fast-paths and behaviour is
+    /// byte-identical to the pre-gate code.
+    pub(crate) fn with_maintenance_gate(mut self, gate: MaintenanceGate) -> Self {
+        self.maintenance = Some(gate);
+        self
     }
 
     /// Attach the shared token service and configure self-service creation.
@@ -378,6 +427,20 @@ impl ShamirDbHandler {
     /// periodic reaper against it. Mirrors [`Self::tx_registry`].
     pub fn cursor_registry(&self) -> Arc<CursorRegistry> {
         Arc::clone(&self.cursor_registry)
+    }
+
+    /// R3-2b — maintenance-gate admission for one request. `None` when no
+    /// gate is installed (unenrolled handler) or the caller chose not to
+    /// enroll this op; `Some(guard)` when the request was admitted: the
+    /// guard MUST be retained until the request's last mutation has landed
+    /// (RAII drop releases the writer-drain slot). While an online-export
+    /// freeze is raised this awaits the drain and returns only after the
+    /// freeze is released — reads stay available throughout, only
+    /// mutations queue here. Cancel-safe: the future may be dropped while
+    /// parked (the caller's request future is the only holder).
+    pub(super) async fn maintenance_admission(&self) -> Option<WriterDrainGuard> {
+        let gate = self.maintenance.as_ref()?;
+        Some(gate.wait_for_mutation().await)
     }
 
     /// FG-5b — mint a fresh, process-unique cursor id.
@@ -499,12 +562,17 @@ impl ShamirDbHandler {
                 self.execute_with_rid(session, query_version, &db, batch, conn, client_rid)
                     .await
             }
+            // R3-2b — identity mutations are enrolled: admission is taken
+            // around the handler call and retained through it, so an
+            // online-export freeze drains pending user/superuser/
+            // replicator changes before the freeze's logical instant.
             DbRequest::CreateScramUser {
                 name,
                 password,
                 roles,
                 hmac,
             } => {
+                let _maintenance = self.maintenance_admission().await;
                 create_scram_user(
                     self.admin.as_ref(),
                     session,
@@ -517,6 +585,7 @@ impl ShamirDbHandler {
                 .await
             }
             DbRequest::SetSuperuser { user, on, hmac } => {
+                let _maintenance = self.maintenance_admission().await;
                 set_superuser(
                     self.admin.as_ref(),
                     session,
@@ -528,6 +597,7 @@ impl ShamirDbHandler {
                 .await
             }
             DbRequest::SetReplicator { user, on, hmac } => {
+                let _maintenance = self.maintenance_admission().await;
                 set_replicator(
                     self.admin.as_ref(),
                     session,
@@ -592,7 +662,10 @@ impl ShamirDbHandler {
             DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
                 change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
             }
+            // R3-2b — `ChangePasswordVerify` writes the credential row and
+            // (with a session store) kills other sessions: enrolled.
             DbRequest::ChangePasswordVerify(secrets) => {
+                let _maintenance = self.maintenance_admission().await;
                 change_password_verify(
                     self.admin.as_ref(),
                     self.session_store.as_ref(),
@@ -605,10 +678,24 @@ impl ShamirDbHandler {
                 .await
             }
 
+            // R3-2b — token administration: only the MUTATING ops
+            // (`CreateApiToken`, `RevokeApiToken`, `RevokeUserTokens`) are
+            // enrolled; `ListApiTokens` is a read and stays available
+            // during a freeze.
             DbRequest::CreateApiToken { .. }
             | DbRequest::ListApiTokens { .. }
             | DbRequest::RevokeApiToken { .. }
             | DbRequest::RevokeUserTokens { .. } => {
+                let _maintenance = if matches!(
+                    &request,
+                    DbRequest::CreateApiToken { .. }
+                        | DbRequest::RevokeApiToken { .. }
+                        | DbRequest::RevokeUserTokens { .. }
+                ) {
+                    self.maintenance_admission().await
+                } else {
+                    None
+                };
                 token_admin::handle(self, session, &request, top_level_canonical.as_deref()).await
             }
 

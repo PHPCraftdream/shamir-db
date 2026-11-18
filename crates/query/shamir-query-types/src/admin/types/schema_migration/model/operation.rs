@@ -518,6 +518,16 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "activity listing",
                 ))
             }
+            BatchOp::StartExport(_) | BatchOp::CancelExport(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "online-export admin operation",
+                ))
+            }
+            BatchOp::ExportStatus(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "online-export inspection",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

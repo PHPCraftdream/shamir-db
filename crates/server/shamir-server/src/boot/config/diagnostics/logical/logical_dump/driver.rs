@@ -1,11 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use shamir_db::engine::db_instance::logical_export::{LogicalExport, MaintenanceGate};
 use shamir_db::{DbError, ShamirDb};
+use shamir_server_security::user_directory::FjallUserDirectory;
 use shamir_sync::format_stamp::{inspect, StampState};
 use shamir_sync::replication_seed::{
     preflight_artifact_size, verify_dump, DatabaseItem, DumpReport, DumpScope, DumpWriter,
@@ -16,10 +20,175 @@ use shamir_sync::replication_seed::{
 use shamir_types::types::value::QueryValue;
 use tokio_util::sync::CancellationToken;
 
-use super::progress::CheckedIo;
-use super::projection::{fields, record_value, resource, text, Projection};
+use super::progress::{byte_counter, ByteCounter, CheckedIo};
+use super::projection::{fields, record_value, rename_provenance, resource, text, Projection};
 use super::sorting::{checkpoint, next_item, Sorter};
 use super::staging::Stage;
+
+/// Online observability only. The offline CLI keeps its stderr lines; a live
+/// export job must never write to stderr and instead receives these events.
+/// The last observed event tells the caller which phase failed: everything
+/// before [`ExportProgress::Verifying`] is ordinary writing (staging,
+/// catalogue projection, section emission); `Verifying` covers the verifier
+/// and everything after it is post-verify (health check, publication).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExportProgress {
+    ItemWritten {
+        /// Frame bytes written since the previous item event (writer
+        /// counter delta, including framing).
+        bytes: u64,
+    },
+    SectionFinished(SectionKind),
+    Verifying,
+}
+
+/// Observer for a live export. Implementations must be `Send` (the job runs
+/// on a spawned task) and use interior mutability to record events; the
+/// offline path ignores it and keeps stderr.
+pub(crate) trait ExportObserver: Send + Sync {
+    fn on_export_progress(&self, event: ExportProgress);
+}
+
+/// Offline stderr reporter: unchanged behavior for the CLI.
+struct StderrObserver;
+
+impl ExportObserver for StderrObserver {
+    fn on_export_progress(&self, event: ExportProgress) {
+        match event {
+            ExportProgress::ItemWritten { .. } => eprintln!("logical-export item frame written"),
+            ExportProgress::SectionFinished(section) => {
+                eprintln!("logical-export section {section:?} complete");
+            }
+            ExportProgress::Verifying => eprintln!("logical-export verifying artifact"),
+        }
+    }
+}
+
+/// Where the export takes its identity projection from: the offline command
+/// opens the user directory under `data_dir` itself, the live job reuses the
+/// server's already-opened directory handle.
+pub(crate) enum SecuritySource<'a> {
+    OfflineDataDir(&'a Path),
+    LiveDirectory(Option<Arc<FjallUserDirectory>>),
+}
+
+/// Context for artifact production shared by the offline command and the
+/// online export job. The caller owns the maintenance gate/snapshots and has
+/// already captured `reader`; this function never takes a gate, opens the
+/// data directory, or calls `check_seed_catalogue()` (that flushes live
+/// state and stays offline-only, in [`export`]).
+///
+/// `on_publish`, when present, is the live publication protocol: a
+/// synchronous, non-async callback invoked exactly once after trailer
+/// verification with the staging directory path. The runner performs its
+/// final cancel/deadline check inside the callback and commits under its own
+/// record lock via [`super::staging::publish_stage`]; the commit point is a
+/// single no-clobber hard link. After the link succeeds publication is
+/// irrevocable: the artifact is complete and verified, and the only later
+/// failure is the explicit Unix final-directory-sync durability error that
+/// must be reported as "published, retained" — never removed or retried.
+/// `None` keeps the default offline publication (`publish_stage(stage,
+/// &args.output)` right after a final checkpoint). `live` selects the live
+/// `.shamir-export-` stage prefix that export-root cleanup recognizes;
+/// offline keeps `.logical-export-`.
+pub(crate) struct LiveExport<'a> {
+    pub reader: &'a LogicalExport<'a>,
+    pub security: SecuritySource<'a>,
+    pub args: &'a LogicalExportArgs,
+    pub epoch: Option<u32>,
+    pub live: bool,
+    pub cancel: &'a CancellationToken,
+    pub deadline: std::time::Instant,
+    pub observer: &'a dyn ExportObserver,
+    pub on_publish: Option<&'a (dyn Fn(&Path) -> Result<()> + Send + Sync)>,
+    /// Offline only: the open handle the caller retains so the
+    /// pre-publication catalogue health check can run inside the freeze. The
+    /// live job passes `None` and performs no background health probe.
+    pub offline_home: Option<&'a ShamirDb>,
+}
+
+/// Coarse, static failure categories for the online export job.
+/// Classification is structural only: the cancellation token, the deadline
+/// clock, and typed markers carried in the anyhow chain — never by matching
+/// formatted error text. No variant carries a filesystem path, a secret, or
+/// peer-supplied text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LiveExportFailure {
+    /// The caller's cancellation token fired.
+    Cancelled,
+    /// The caller's deadline has passed.
+    DeadlineExceeded,
+    /// Creating the attempt-owned staging directory failed.
+    StageIo,
+    /// Coarse catch-all for failures during artifact production: writer
+    /// frames, spill sorter, engine read cursors.
+    WriterIo,
+    /// Verifying the staged artifact (size preflight or verifier) failed.
+    VerifierIo,
+    /// An explicit projection/refusal abort: unsupported catalogue family,
+    /// feature, scope, or record value. The artifact was never published.
+    UnsupportedProjection,
+}
+
+/// Structural marker for an explicit projection refusal, tagged at each
+/// refuse site. Never matched by formatted text.
+#[derive(Debug)]
+struct UnsupportedProjectionTag;
+
+impl Display for UnsupportedProjectionTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("logical-export unsupported projection")
+    }
+}
+
+impl std::error::Error for UnsupportedProjectionTag {}
+
+/// Refuse with the exact offline message plus a typed marker in the chain.
+fn unsupported(message: impl Display) -> Error {
+    Error::new(UnsupportedProjectionTag).context(message.to_string())
+}
+
+/// Structural marker for the phase an I/O failure occurred in.
+#[derive(Clone, Copy, Debug)]
+struct PhaseTag(&'static str);
+
+const PHASE_STAGE: &str = "logical-export staging";
+const PHASE_VERIFY: &str = "logical-export verification";
+
+impl Display for PhaseTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for PhaseTag {}
+
+fn tagged<T>(result: Result<T>, phase: &'static str) -> Result<T> {
+    result.map_err(|error| error.context(PhaseTag(phase)))
+}
+
+/// Classify a caught failure into a coarse static category for the wire.
+/// Cancel/deadline dominate; the rest is decided by typed markers only.
+pub(crate) fn classify_export_failure(
+    error: Error,
+    cancel: &CancellationToken,
+    deadline: std::time::Instant,
+) -> LiveExportFailure {
+    if cancel.is_cancelled() {
+        return LiveExportFailure::Cancelled;
+    }
+    if std::time::Instant::now() >= deadline {
+        return LiveExportFailure::DeadlineExceeded;
+    }
+    if error.downcast_ref::<UnsupportedProjectionTag>().is_some() {
+        return LiveExportFailure::UnsupportedProjection;
+    }
+    match error.downcast_ref::<PhaseTag>() {
+        Some(PhaseTag(PHASE_STAGE)) => LiveExportFailure::StageIo,
+        Some(PhaseTag(PHASE_VERIFY)) => LiveExportFailure::VerifierIo,
+        _ => LiveExportFailure::WriterIo,
+    }
+}
 
 /// Initial lossless subset: Fjall repositories with default durability, plain
 /// unbound/index-free tables, default buffer sizing plus TTL, and unambiguous
@@ -105,15 +274,22 @@ pub async fn export(
                         .system_store()
                         .capture_logical_export(&db, guard)
                         .await?;
-                    write_export(
-                        &home,
-                        &reader,
-                        &data_dir,
-                        &args,
-                        source_epoch,
-                        &cancel,
+                    let observer = StderrObserver;
+                    // Offline only: the catalogue health probe runs inside
+                    // write_live_export, after verification and before the
+                    // final checkpoint/publication.
+                    write_live_export(LiveExport {
+                        reader: &reader,
+                        security: SecuritySource::OfflineDataDir(&data_dir),
+                        args: &args,
+                        epoch: source_epoch,
+                        live: false,
+                        cancel: &cancel,
                         deadline,
-                    )
+                        observer: &observer,
+                        on_publish: None,
+                        offline_home: Some(&home),
+                    })
                     .await
                 }
                 .await;
@@ -124,17 +300,35 @@ pub async fn export(
     Ok(result)
 }
 
-async fn write_export(
-    home: &ShamirDb,
-    reader: &LogicalExport<'_>,
-    data_dir: &Path,
-    args: &LogicalExportArgs,
-    epoch: Option<u32>,
-    cancel: &CancellationToken,
-    deadline: std::time::Instant,
-) -> Result<DumpReport> {
-    let stage = Stage::new(&args.output)?;
-    let mut security = Projection::new(data_dir)?;
+/// Shared artifact production. cancel-safe per the offline contract; on
+/// failure the caller classifies with [`classify_export_failure`], which
+/// decides structurally from the token, the clock, and typed markers.
+/// Publication stays synchronous and never replaces an existing artifact.
+pub(crate) async fn write_live_export(ctx: LiveExport<'_>) -> Result<DumpReport> {
+    let LiveExport {
+        reader,
+        security,
+        args,
+        epoch,
+        live,
+        cancel,
+        deadline,
+        observer,
+        on_publish,
+        offline_home,
+    } = ctx;
+    let mut security = match security {
+        SecuritySource::OfflineDataDir(data_dir) => Projection::new(data_dir)?,
+        SecuritySource::LiveDirectory(directory) => Projection::from_directory(directory),
+    };
+    let stage = tagged(
+        if live {
+            Stage::for_live(&args.output)
+        } else {
+            Stage::new(&args.output)
+        },
+        PHASE_STAGE,
+    )?;
     let mut repos = BTreeMap::new();
     let mut tables = BTreeMap::new();
     let mut database = None;
@@ -160,14 +354,16 @@ async fn write_export(
                     family,
                     "functions" | "validators" | "function_folders" | "groups"
                 ) {
-                    bail!("logical-export unsupported catalogue family '{family}': reference/security closure is not implemented");
+                    return Err(unsupported(format!(
+                        "logical-export unsupported catalogue family '{family}': reference/security closure is not implemented"
+                    )));
                 }
                 if family == "settings" {
                     let key = text(&row, "key")?;
                     let kind = match key {
                         "root_meta" => SettingKey::RootMeta,
                         "fn_namespace_meta" => SettingKey::FunctionNamespaceMeta,
-                        _ => bail!("unsupported exported setting"),
+                        _ => return Err(unsupported("unsupported exported setting")),
                     };
                     fields(&row, &["key", "value"], "setting")?;
                     let value = row
@@ -248,10 +444,14 @@ async fn write_export(
                             "repository",
                         )?;
                         if !matches!(text(&row, "engine")?, "fjall" | "fjall_raw") {
-                            bail!("logical-export supports only persisted Fjall repositories; in-memory/hybrid state is unsupported");
+                            return Err(unsupported(
+                                "logical-export supports only persisted Fjall repositories; in-memory/hybrid state is unsupported",
+                            ));
                         }
                         if !matches!(row.get("durability"), None | Some(QueryValue::Null)) {
-                            bail!("logical-export repository durability overrides are not representable in the initial projection");
+                            return Err(unsupported(
+                                "logical-export repository durability overrides are not representable in the initial projection",
+                            ));
                         }
                         let (owner, group, mode) =
                             security.meta(&row, resource(&args.db, Some(name), None, None))?;
@@ -284,22 +484,32 @@ async fn write_export(
                                 "table_name",
                                 "enable_indexes",
                                 "store_id",
+                                "rename_from",
+                                "rename_from_store_id",
                                 "owner",
                                 "group",
                                 "mode",
                             ],
-                            "table (schemas/bindings/renames are unsupported)",
+                            "table (schemas/bindings are unsupported)",
                         )?;
+                        // Validated physical provenance of a successfully
+                        // renamed table: accepted as input, never projected
+                        // (the portable item names the table as it is now).
+                        rename_provenance(&row)?;
                         let view = reader.table(repo, name)?;
                         if view.regular_indexes().next().is_some()
                             || view.unique_indexes().next().is_some()
                             || !view.sorted_indexes().is_empty()
                             || view.next_index2(0).await?.is_some()
                         {
-                            bail!("logical-export index descriptors are not implemented for '{repo}/{name}'");
+                            return Err(unsupported(format!(
+                                "logical-export index descriptors are not implemented for '{repo}/{name}'"
+                            )));
                         }
                         if !view.bindings().is_empty() || !view.transforms().is_empty() {
-                            bail!("logical-export validator/FK/transform bindings are not implemented for '{repo}/{name}'");
+                            return Err(unsupported(format!(
+                                "logical-export validator/FK/transform bindings are not implemented for '{repo}/{name}'"
+                            )));
                         }
                         let buffer = view.buffer_config().await?;
                         if let Some(buffer) = &buffer {
@@ -308,7 +518,9 @@ async fn write_export(
                                 || buffer.flush_interval_ms != 500
                                 || buffer.flush_batch_size != 256
                             {
-                                bail!("logical-export nondefault buffer sizing/flusher configuration is not representable");
+                                return Err(unsupported(
+                                    "logical-export nondefault buffer sizing/flusher configuration is not representable",
+                                ));
                             }
                         }
                         let enable_indexes = match row.get("enable_indexes") {
@@ -337,7 +549,7 @@ async fn write_export(
                             bail!("duplicate table");
                         }
                     }
-                    _ => bail!("unsupported catalogue family"),
+                    _ => return Err(unsupported("unsupported catalogue family")),
                 }
             }
         }
@@ -413,19 +625,32 @@ async fn write_export(
             .collect(),
     };
     checkpoint(cancel).await?;
-    let mut writer = DumpWriter::new(CheckedIo::new(stage.create()?, cancel, deadline), header)?;
+    let counter = byte_counter();
+    let mut writer = DumpWriter::new(
+        CheckedIo::with_counter(stage.create()?, cancel, deadline, counter.clone()),
+        header,
+    )?;
     for section in SectionKind::ORDERED {
         checkpoint(cancel).await?;
         writer.start_section(section)?;
         match section {
             SectionKind::Identities => {
                 for item in security.identities.values() {
-                    emit(&mut writer, &PortableItem::Identity(item.clone()), cancel).await?;
+                    emit(
+                        &mut writer,
+                        &counter,
+                        observer,
+                        &PortableItem::Identity(item.clone()),
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             SectionKind::Database => {
                 emit(
                     &mut writer,
+                    &counter,
+                    observer,
                     &PortableItem::Database(database.clone()),
                     cancel,
                 )
@@ -433,17 +658,38 @@ async fn write_export(
             }
             SectionKind::Repositories => {
                 for item in repos.values() {
-                    emit(&mut writer, &PortableItem::Repository(item.clone()), cancel).await?;
+                    emit(
+                        &mut writer,
+                        &counter,
+                        observer,
+                        &PortableItem::Repository(item.clone()),
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             SectionKind::Tables => {
                 for item in tables.values() {
-                    emit(&mut writer, &PortableItem::Table(item.clone()), cancel).await?;
+                    emit(
+                        &mut writer,
+                        &counter,
+                        observer,
+                        &PortableItem::Table(item.clone()),
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             SectionKind::Acls => {
                 for item in security.acls.values() {
-                    emit(&mut writer, &PortableItem::Acl(item.clone()), cancel).await?;
+                    emit(
+                        &mut writer,
+                        &counter,
+                        observer,
+                        &PortableItem::Acl(item.clone()),
+                        cancel,
+                    )
+                    .await?;
                 }
             }
             SectionKind::Records if !args.schema_only => {
@@ -460,14 +706,22 @@ async fn write_export(
                                 repository: repo.clone(),
                                 table: table.clone(),
                                 raw_key: key.to_vec(),
-                                value: record_value(&value)?,
+                                value: record_value(&value)
+                                    .map_err(|error| error.context(UnsupportedProjectionTag))?,
                             });
-                            sorter.push(key.to_vec(), &item, cancel).await?;
+                            tagged(
+                                sorter.push(key.to_vec(), &item, cancel).await,
+                                "logical-export record spill",
+                            )?
                         }
                     }
-                    if let Some(mut sorted) = sorter.finish(cancel).await? {
-                        while let Some(item) = next_item(&mut sorted)? {
-                            emit(&mut writer, &item, cancel).await?;
+                    if let Some(mut sorted) =
+                        tagged(sorter.finish(cancel).await, "logical-export record spill")?
+                    {
+                        while let Some(item) =
+                            tagged(next_item(&mut sorted), "logical-export record spill")?
+                        {
+                            emit(&mut writer, &counter, observer, &item, cancel).await?;
                         }
                     }
                 }
@@ -476,32 +730,56 @@ async fn write_export(
         }
         checkpoint(cancel).await?;
         writer.end_section()?;
-        eprintln!("logical-export section {section:?} complete");
+        observer.on_export_progress(ExportProgress::SectionFinished(section));
     }
     checkpoint(cancel).await?;
-    let file = writer.finish()?.into_inner();
+    let (file, _total_bytes) = writer.finish()?.into_parts();
     file.sync_all()?;
     drop(file); // Windows: verifier must never read a writer-held file.
     checkpoint(cancel).await?;
-    let input = File::open(stage.path().join("dump"))?;
-    preflight_artifact_size(input.metadata()?.len())?;
-    let report = verify_dump(CheckedIo::new(input, cancel, deadline))?;
+    observer.on_export_progress(ExportProgress::Verifying);
+    let report = tagged(
+        (|| {
+            let input = File::open(stage.path().join("dump"))?;
+            preflight_artifact_size(input.metadata()?.len())?;
+            Ok(verify_dump(CheckedIo::new(input, cancel, deadline))?)
+        })(),
+        PHASE_VERIFY,
+    )?;
     checkpoint(cancel).await?;
-    // Ensure repository storage is still healthy; no listener/scheduler exists.
-    home.check_seed_catalogue().await?;
+    // Offline only (the live job performs no background health probe inside
+    // the freeze): run the catalogue health check after verification but
+    // before the final checkpoint and publication, so a verified artifact is
+    // published only by a healthy source.
+    if let Some(home) = offline_home {
+        home.check_seed_catalogue()
+            .await
+            .map_err(|e: DbError| anyhow!("{e}"))?;
+    }
+    // Final checkpoint before publication; publication itself is synchronous
+    // with no async point after it. Once the no-clobber link commits, no
+    // failure is reported for the completed artifact: the only possible error
+    // is the explicit "published, retained" directory-sync durability error.
     checkpoint(cancel).await?;
-    stage.publish(&args.output)?;
+    match on_publish {
+        Some(publish) => publish(stage.path())?,
+        None => stage.publish(&args.output)?,
+    }
     Ok(report)
 }
 
 async fn emit(
     writer: &mut DumpWriter<CheckedIo<File>>,
+    counter: &ByteCounter,
+    observer: &dyn ExportObserver,
     item: &PortableItem,
     cancel: &CancellationToken,
 ) -> Result<()> {
     checkpoint(cancel).await?;
+    let before = counter.load(Ordering::Relaxed);
     writer.write_item(item)?;
-    eprintln!("logical-export item frame written");
+    let bytes = counter.load(Ordering::Relaxed).saturating_sub(before);
+    observer.on_export_progress(ExportProgress::ItemWritten { bytes });
     Ok(())
 }
 

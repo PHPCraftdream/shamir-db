@@ -75,6 +75,12 @@ flags = ["node"]
 reason = "Node binding tests consume the TS schema-migration builder"
 
 [[edge]]
+paths = ["crates/client/shamir-client/src/client/session/mux/export.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/**", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs", "crates/server/shamir-server/src/engine/db_handler/repo_admin/export_gate.rs"]
+crates = ["shamir-db"]
+propagate = "tests"
+reason = "shamir-db owns the export artifact codec/verifier these paths produce and consume, but Cargo never selects db there (db is a normal dependency of the server, not a dependent, and no dependency of the client; the e2e suite itself is selected only as a dev-dependent of server/client): the online export job (StartExport/ExportStatus/CancelExport over export_online, gated by export_gate), the offline logical_dump driver/projection and the client mux export reader are all round-tripped through db's export/verify/import contract, so db's own suite runs alongside"
+
+[[edge]]
 paths = ["Cargo.lock"]
 crates = ["shamir-storage"]
 propagate = "tests"

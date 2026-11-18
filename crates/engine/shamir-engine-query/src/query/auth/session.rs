@@ -598,6 +598,15 @@ impl SessionPermissions {
             // `authorize_access`, exactly like the `ApplicationSchema`
             // arm above.
             BatchOp::ListActivity(_) => (Action::Read, Resource::Global),
+
+            // Online export job — same split as the backup arms: the export
+            // job mutates server-side job state (gate held, temp file under
+            // the export root), so Start/Cancel are global Alter and status
+            // is global Read; ExportStatus mirrors BackupStatus.
+            BatchOp::StartExport(_) | BatchOp::CancelExport(_) => {
+                (Action::Alter, Resource::Global)
+            }
+            BatchOp::ExportStatus(_) => (Action::Read, Resource::Global),
         }
     }
 

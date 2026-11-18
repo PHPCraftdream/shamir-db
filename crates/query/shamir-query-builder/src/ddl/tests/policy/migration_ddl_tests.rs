@@ -2,6 +2,7 @@
 
 use shamir_types::mpack;
 
+use crate::batch::IntoBatchOp;
 use crate::ddl;
 
 use crate::ddl::tests::helpers::roundtrip;
@@ -135,6 +136,97 @@ fn cancel_backup_wire() {
             "cancel_backup": true
         })
     );
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+// ============================================================================
+// Online logical-dump export (R3 step 2b) — node-local superuser-only
+// admin ops, no operator-supplied output path on the wire
+// ============================================================================
+
+#[test]
+fn start_export_wire() {
+    let op = ddl::start_export("appdb")
+        .repo("main")
+        .table("users")
+        .schema_only(false)
+        .include_artifacts(false)
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "start_export": true,
+            "database": "appdb",
+            "repo": "main",
+            "table": "users",
+            "schema_only": false,
+            "include_artifacts": false
+        })
+    );
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn start_export_minimal_defaults_false() {
+    let op = ddl::start_export("appdb").repo("main").build();
+    let j = roundtrip(&op);
+    assert_eq!(j["start_export"], true);
+    assert_eq!(j["database"], "appdb");
+    assert_eq!(j["repo"], "main");
+    assert!(j.get("table").is_none());
+    assert_eq!(j["schema_only"], false);
+    assert_eq!(j["include_artifacts"], false);
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn start_export_table_without_repo_wire_shape() {
+    // Table without repo still round-trips on the wire (the builder is
+    // infallible, mirroring StartMigration). No scope check enforces the
+    // repo/table pairing in this phase — the online job is disabled.
+    let op = ddl::start_export("appdb").table("users").build();
+    let j = roundtrip(&op);
+    assert!(j.get("repo").is_none());
+    assert_eq!(j["table"], "users");
+}
+
+#[test]
+fn export_status_wire() {
+    let op = ddl::export_status();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "export_status": true
+        })
+    );
+    assert!(op.is_admin());
+    assert!(!op.is_write());
+}
+
+#[test]
+fn cancel_export_wire() {
+    let op = ddl::cancel_export();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "cancel_export": true
+        })
+    );
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn start_export_into_batch_op() {
+    // The infallible builder is accepted directly by `Batch::op` via
+    // `IntoBatchOp` (no required field, so no `try_op` gating needed).
+    let op = ddl::start_export("appdb").into_batch_op();
     assert!(op.is_admin());
     assert!(op.is_write());
 }

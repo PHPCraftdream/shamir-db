@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use shamir_connect::common::crypto::StoredKey;
@@ -43,8 +45,58 @@ pub const ALICE_FIXSTR: [u8; 6] = [0xa5, b'a', b'l', b'i', b'c', b'e'];
 const STAGE_PREFIX: &str = ".logical-import-";
 
 /// Current-thread runtime, mirroring the `logical_dump` test precedent.
+/// `enable_all` brings the time driver, so `tokio::time::timeout` works —
+/// but only for futures created and awaited ON this runtime: a timer built
+/// outside `block_on` has no reactor and panics.
 pub fn runtime() -> Runtime {
     Builder::new_current_thread().enable_all().build().unwrap()
+}
+
+/// One generous bound per awaited test stage (the Windows runner can be up
+/// to 10x slower; nothing here is a synchronization sleep).
+pub const STAGE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Drive `fut` on the caller's single runtime, bounded by `STAGE_TIMEOUT`.
+/// The timeout future is created AND polled inside `block_on`, so the timer
+/// always has the runtime's time driver available.
+pub fn stage_timeout<T>(rt: &Runtime, label: &'static str, fut: impl Future<Output = T>) -> T {
+    rt.block_on(async {
+        tokio::time::timeout(STAGE_TIMEOUT, fut)
+            .await
+            .unwrap_or_else(|_| panic!("{label} timed out"))
+    })
+}
+
+/// Export; a `Locked` refusal comes from the driver's `MaintenanceOpen` (it
+/// opens the source's Fjall directories), which fails when a just-dropped
+/// engine's background tasks have not released its directory locks yet (seen
+/// on Windows). Opening fails before anything is written, so retrying is
+/// safe; the retry is bound to that specific error and a budget, and any
+/// other error fails at once. The pause runs on the caller's runtime, which
+/// also lets the dropped engine's tasks finish.
+///
+/// The refusal can only be recognized as text, not by downcast: the Fjall
+/// backend erases the typed `fjall::Error::Locked` into
+/// `DbError::Storage(e.to_string())` (`storage_fjall/store.rs`), which then
+/// travels as `SeedError::Database` under `export`'s `anyhow::Error` with no
+/// preserved source chain, so no `fjall::Error` is ever reachable here.
+pub async fn export_waiting_for_locks(
+    root: &Path,
+    args: &LogicalExportArgs,
+) -> shamir_sync::replication_seed::DumpReport {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match logical_dump::export(root, args, CancellationToken::new()).await {
+            Ok(report) => return report,
+            Err(error)
+                if format!("{error:#}").contains("Locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("logical export failed: {error:#}"),
+        }
+    }
 }
 
 pub fn export_args(db: &str, output: &Path, schema_only: bool) -> LogicalExportArgs {
@@ -236,6 +288,17 @@ pub fn artifact_tables(artifact: &Path) -> BTreeMap<String, BTreeMap<Vec<u8>, Lo
         }
     }
     tables
+}
+
+/// Every portable item of the artifact, in stream order (the diagnostic
+/// header is not an item, so it is excluded by construction).
+pub fn artifact_items(artifact: &Path) -> Vec<PortableItem> {
+    let mut reader = DumpReader::new(fs::File::open(artifact).unwrap()).unwrap();
+    let mut items = Vec::new();
+    while let Some(item) = reader.next_item().unwrap() {
+        items.push(item);
+    }
+    items
 }
 
 /// Engine snapshot of a published data directory, read through the same

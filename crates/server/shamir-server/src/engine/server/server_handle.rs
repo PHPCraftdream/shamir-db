@@ -126,6 +126,13 @@ pub struct ServerHandle {
     /// the task drops and any lingering open cursors release their pinned
     /// `SnapshotGuard`s (RAII unpin of MVCC GC).
     pub(super) cursor_reaper: Option<crate::cursor_registry::CursorReaperTask>,
+    /// R3-2b — the online logical-export job service, when a root is
+    /// configured. Held until shutdown: the export root's exclusive lock
+    /// must outlive every job, and `shutdown_with_report` waits (bounded)
+    /// for a draining worker BEFORE the store flush (a freeze holds the
+    /// gate). `None` without a configured root.
+    pub(super) online_export:
+        Option<Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>>,
     /// Follower-replication supervisor (386-c). Held here so its follower
     /// loops survive past boot (dropping it would kill every loop). On
     /// shutdown `stop_all()` cancels every running loop before the tasks are
@@ -275,6 +282,26 @@ impl ServerHandle {
         // 3. Drain the audit chain + scheduler.
         self.audit_appender.shutdown().await;
         self.scheduler.shutdown().await;
+        // 3b. R3-2b — wait (bounded, the writer's own drain bound) for a
+        //     still-draining online-export worker on EVERY shutdown path,
+        //     before the connection-dependent flush decision below. The
+        //     root token was cancelled at the top, so `start` refuses new
+        //     jobs and the worker unwinds on its token; `false` means the
+        //     bound elapsed with a worker still draining. The Arc is
+        //     dropped right after the wait so the service (and the
+        //     `Arc<ShamirDb>` / directory it owns) does not stay alive
+        //     into `wait_stores_released`; dropping it also drops
+        //     `ExportRoot`, which requires every job finished.
+        let export_idle = match self.online_export {
+            Some(service) => service.wait_idle().await,
+            None => true,
+        };
+        quiesced &= export_idle;
+        if !export_idle {
+            report.add_error(
+                "online export worker still draining after the shutdown bound".to_string(),
+            );
+        }
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new

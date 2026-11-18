@@ -6,6 +6,8 @@ mod cursor_handlers;
 mod cursor_support;
 #[path = "repo_admin/execute.rs"]
 mod execute;
+#[path = "repo_admin/export_gate.rs"]
+mod export_gate;
 mod handler;
 mod handlers;
 #[path = "repo_admin/native_handler.rs"]

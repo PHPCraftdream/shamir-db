@@ -66,6 +66,11 @@ pub use schema_migration::{
     UnknownApplyResolution,
 };
 pub use shamir_query_types::admin::ChangesSinceResponse;
+// Online logical-dump export receipts (R3 step 2b), re-exported so callers
+// name them without a direct `shamir-query-types` dependency.
+pub use shamir_query_types::admin::{
+    ExportCancelReceipt, ExportFailure, ExportPhase, ExportStartReceipt, ExportStatusReceipt,
+};
 pub use visibility::{
     CommitResult, TransactionInfo, VisibilityPendingReason, VisibilityState, VisibilityWait,
 };

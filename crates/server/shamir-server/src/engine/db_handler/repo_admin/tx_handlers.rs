@@ -82,6 +82,14 @@ impl ShamirDbHandler {
                 Err(()) => return server_busy_response(),
             };
 
+        // R3-2b — maintenance-gate enrollment for TxBegin. BEGIN can trigger
+        // lazy recovery / fresh snapshot registration on the engine side, so
+        // it enrolls unconditionally: admission is taken AFTER the version
+        // check and the in-flight registration (a server-busy reject never
+        // queues behind the gate) and BEFORE `db.tx_begin_as` touches any
+        // transaction state; the guard is retained to the end of the call.
+        let _maintenance = self.maintenance_admission().await;
+
         // RV-SERVER-C73466A7: TxBegin is NOT mode-gated — opening a
         // snapshot transaction is read-capable and a read-only replica must
         // keep serving reads inside interactive transactions. Writes are
@@ -192,6 +200,29 @@ impl ShamirDbHandler {
             };
         }
 
+        // R3-2b — an online-export operation is NEVER valid inside an
+        // interactive transaction. Reject EVERY form (standalone, mixed
+        // with other ops, or nested inside a Batch/ForEach body at any
+        // depth) HERE, before the read-only gate, before the in-flight
+        // registration and before any admission lock or partial mutation —
+        // the same atomic static refusal the stateless `execute` form
+        // check produces for invalid export shapes.
+        if BatchTreeVisitor::new(&batch.queries).any(|visit| {
+            matches!(
+                visit.entry.op,
+                shamir_query_types::batch::BatchOp::StartExport(_)
+                    | shamir_query_types::batch::BatchOp::ExportStatus(_)
+                    | shamir_query_types::batch::BatchOp::CancelExport(_)
+            )
+        }) {
+            return DbResponse::Error {
+                code: "online_export_invalid_form".into(),
+                message: "online export operations require a standalone, \
+                          nontransactional, top-level single-operation batch"
+                    .into(),
+            };
+        }
+
         if let Some(resp) = read_only_tx_write_gate(self.node_mode, &batch) {
             return resp;
         }
@@ -274,6 +305,22 @@ impl ShamirDbHandler {
                 message: format!("query '{}': {}", alias, message),
             };
         }
+
+        // R3-2b — maintenance-gate enrollment for MUTATING TxExecute
+        // batches. Taken after every auth-passed gate above (version,
+        // read-only replica, ListActivity form, admin/auth, destructive
+        // HMAC) and BEFORE the registry acquire / ctx-lock wait, using the
+        // same recursive `BatchOp::is_write` classifier as the read-only
+        // gate. A read-only (snapshot) TxExecute is a read: it stays
+        // available during a freeze. The guard is retained through the
+        // staged execution below; the commit lands under its own admission
+        // (see `tx_commit_with_options`).
+        let _maintenance =
+            if BatchTreeVisitor::new(&batch.queries).any(|visit| visit.entry.op.is_write()) {
+                Some(self.maintenance_admission().await)
+            } else {
+                None
+            };
 
         // R4b-1 — in-flight registration, one insert + one RAII removal
         // (the guard owns the entry AND the per-session request slot),
@@ -424,6 +471,18 @@ impl ShamirDbHandler {
         tx_handle: u64,
         wait: Option<VisibilityWait>,
     ) -> DbResponse {
+        // R3-2b — maintenance-gate enrollment for TxCommit. A commit can
+        // land staged writes, and whether it did cannot be known without
+        // taking the ctx lock, so the admission is taken UNCONDITIONALLY at
+        // the top — before `get_owned`, `begin_commit` or any ctx lock —
+        // and retained through the commit pipeline (the guard drops at the
+        // end of this fn, after `tx_commit_as_with_options` returned). A
+        // snapshot-only commit therefore also queues behind a freeze; the
+        // wait is bounded by the export job's ceiling and the tx's own
+        // absolute lifetime (INTERACTIVE_TX_MAX_LIFETIME) still bounds the
+        // parked handle on the registry side.
+        let _maintenance = self.maintenance_admission().await;
+
         let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
             Ok(it) => it,
             Err(TxRegistryError::TxNotFound) => {

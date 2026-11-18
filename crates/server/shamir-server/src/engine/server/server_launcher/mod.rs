@@ -10,6 +10,8 @@
 mod accept_loops;
 #[path = "support/audit.rs"]
 mod audit;
+#[path = "support/export_boot.rs"]
+mod export_boot;
 #[path = "support/helpers.rs"]
 mod helpers;
 mod http;

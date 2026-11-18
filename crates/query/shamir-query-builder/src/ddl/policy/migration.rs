@@ -1,10 +1,10 @@
 use shamir_query_types::admin::{
-    BackupStatusOp, CancelBackupOp, CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp,
-    StartBackupOp, StartMigrationOp,
+    BackupStatusOp, CancelBackupOp, CancelExportOp, CommitMigrationOp, ExportStatusOp,
+    MigrationStatusOp, RollbackMigrationOp, StartBackupOp, StartExportOp, StartMigrationOp,
 };
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::TryIntoBatchOp;
+use crate::batch::{IntoBatchOp, TryIntoBatchOp};
 use crate::write::BuilderError;
 
 /// Start an online table migration. Returns a builder for optional fields.
@@ -175,5 +175,106 @@ pub fn backup_status() -> BatchOp {
 pub fn cancel_backup() -> BatchOp {
     BatchOp::CancelBackup(CancelBackupOp {
         cancel_backup: true,
+    })
+}
+
+// ------------------------------------------------------------------------
+// Online logical-dump export job (R3 step 2b) — same shape as the backup
+// trio: superuser-only node-local admin ops, no operator-supplied output
+// path on the wire.
+// ------------------------------------------------------------------------
+
+/// Start an online logical-dump export job for `database`.
+///
+/// Returns a builder for the optional scope options. The server never
+/// accepts an output path: the artifact is written under the configured
+/// private export root and only its opaque artifact name is reported.
+pub fn start_export(database: impl Into<String>) -> StartExport {
+    StartExport {
+        database: database.into(),
+        repo: None,
+        table: None,
+        schema_only: false,
+        include_artifacts: false,
+    }
+}
+
+/// Builder for [`StartExportOp`]. The online export job itself is
+/// disabled in this release (see the operations guide): these ops are
+/// typed against the agreed wire contract only.
+///
+/// Infallible by design: there are no required optional fields, so
+/// `build()` cannot fail. No scope validation (e.g. `table` requires
+/// `repo`) exists in this phase — not here and not yet on the server.
+pub struct StartExport {
+    database: String,
+    repo: Option<String>,
+    table: Option<String>,
+    schema_only: bool,
+    include_artifacts: bool,
+}
+
+impl StartExport {
+    /// Restrict the export to one repository inside `database`.
+    pub fn repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = Some(repo.into());
+        self
+    }
+
+    /// Restrict the export to one table inside `.repo(..)`.
+    ///
+    /// The `table`-without-`repo` pairing is part of the wire contract,
+    /// but no scope check enforces it in this phase (the online job is
+    /// disabled); this builder accepts any combination.
+    pub fn table(mut self, table: impl Into<String>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+
+    /// Export schema definitions only, no record data (default `false`).
+    pub fn schema_only(mut self, schema_only: bool) -> Self {
+        self.schema_only = schema_only;
+        self
+    }
+
+    /// Request inclusion of raw guest artifacts (default `false`).
+    ///
+    /// Guest-artifact support is out of scope in this phase; the flag is
+    /// carried on the wire only.
+    pub fn include_artifacts(mut self, include_artifacts: bool) -> Self {
+        self.include_artifacts = include_artifacts;
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::StartExport(StartExportOp {
+            start_export: true,
+            database: self.database,
+            repo: self.repo,
+            table: self.table,
+            schema_only: self.schema_only,
+            include_artifacts: self.include_artifacts,
+        })
+    }
+}
+
+impl IntoBatchOp for StartExport {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Query the status of the current session's logical-export job.
+pub fn export_status() -> BatchOp {
+    BatchOp::ExportStatus(ExportStatusOp {
+        export_status: true,
+    })
+}
+
+/// Cancel the current session's logical-export job.
+pub fn cancel_export() -> BatchOp {
+    BatchOp::CancelExport(CancelExportOp {
+        cancel_export: true,
     })
 }

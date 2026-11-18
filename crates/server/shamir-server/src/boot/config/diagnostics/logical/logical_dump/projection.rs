@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use shamir_server_security::user_directory::FjallUserDirectory;
 use shamir_sync::replication_seed::{
     AclItem, IdentityItem, IdentityKind, LogicalValue, ResourceRef,
 };
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 /// Allowlisted projections only. Never serialize catalogue rows or credentials.
 pub(super) struct Projection {
-    directory: Option<FjallUserDirectory>,
+    directory: Option<Arc<FjallUserDirectory>>,
     pub(super) identities: BTreeMap<String, IdentityItem>,
     pub(super) acls: BTreeMap<Vec<String>, AclItem>,
 }
@@ -18,15 +20,22 @@ pub(super) struct Projection {
 impl Projection {
     pub(super) fn new(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join("users");
-        Ok(Self {
-            directory: if path.is_dir() {
-                Some(FjallUserDirectory::open(path)?)
-            } else {
-                None
-            },
+        let directory = if path.is_dir() {
+            Some(Arc::new(FjallUserDirectory::open(path)?))
+        } else {
+            None
+        };
+        Ok(Self::from_directory(directory))
+    }
+
+    /// Reuse an already-opened user directory (e.g. the live writer's
+    /// handle) instead of reopening Fjall underneath it.
+    pub(super) fn from_directory(directory: Option<Arc<FjallUserDirectory>>) -> Self {
+        Self {
+            directory,
             identities: BTreeMap::new(),
             acls: BTreeMap::new(),
-        })
+        }
     }
 
     pub(super) fn meta(
@@ -109,6 +118,41 @@ pub(super) fn fields(row: &QueryValue, allowed: &[&str], family: &str) -> Result
         if !allowed.contains(&key.as_str()) {
             bail!("logical-export unsupported {family} field '{key}'");
         }
+    }
+    Ok(())
+}
+
+/// A successfully renamed table keeps the committed physical provenance in
+/// its catalogue row (`rename_from`, optional `rename_from_store_id`, written
+/// by the rename persist path). Boot validates these fields the same way
+/// (`table_catalogue_config.rs`); the export validates them here and never
+/// emits them: the portable table item carries only the current name. A
+/// rename still in doubt is refused earlier by the repository fence, not
+/// here. Presence is coherent: the store id may appear only together with
+/// the source name, both types match the persisted string shapes, and the
+/// store id parses as a `RecordId`.
+pub(super) fn rename_provenance(row: &QueryValue) -> Result<()> {
+    match row.get("rename_from") {
+        None => {
+            if row.get("rename_from_store_id").is_some() {
+                bail!("logical-export table rename_from_store_id without rename_from");
+            }
+        }
+        Some(QueryValue::Str(from)) => {
+            if from.is_empty() || from.len() > 1024 {
+                bail!("logical-export invalid table rename_from");
+            }
+            match row.get("rename_from_store_id") {
+                None => {}
+                Some(QueryValue::Str(id)) => {
+                    id.parse::<RecordId>().map_err(|error| {
+                        anyhow!("logical-export invalid table rename_from_store_id: {error}")
+                    })?;
+                }
+                Some(_) => bail!("logical-export invalid table rename_from_store_id type"),
+            }
+        }
+        Some(_) => bail!("logical-export invalid table rename_from type"),
     }
     Ok(())
 }

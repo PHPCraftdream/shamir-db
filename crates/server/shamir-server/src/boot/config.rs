@@ -255,6 +255,14 @@ pub struct SecurityConfig {
     /// a production deployment.
     #[serde(default)]
     pub enable_experimental_migration_api: bool,
+    /// Owner-private root directory for online logical-export artifacts.
+    /// MUST be an absolute path OUTSIDE `data_dir`; actual validation
+    /// (existence, permissions, placement) happens at boot in a separate
+    /// root module — this config layer only parses and carries it.
+    /// `None` (the default) means the online export operations refuse
+    /// with a typed "not configured" error.
+    #[serde(default)]
+    pub export_root: Option<PathBuf>,
 }
 
 impl Default for SecurityConfig {
@@ -267,6 +275,7 @@ impl Default for SecurityConfig {
             auth_init_rate_per_second: default_auth_init_rate_per_second(),
             enable_experimental_migration_api: false,
             login_enumeration_hardening: default_login_enumeration_hardening(),
+            export_root: None,
         }
     }
 }

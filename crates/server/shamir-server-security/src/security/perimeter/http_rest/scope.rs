@@ -262,6 +262,10 @@ fn classify_batch(
             // token endpoint must not enumerate other sessions' activity
             // (Own) or global operator activity (All).
             | BatchOp::ListActivity(_)
+            // Export admin ops — same superuser surface as backup.
+            | BatchOp::StartExport(_)
+            | BatchOp::ExportStatus(_)
+            | BatchOp::CancelExport(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

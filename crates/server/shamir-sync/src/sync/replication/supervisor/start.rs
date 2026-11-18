@@ -318,6 +318,10 @@ impl SubscriptionSupervisor {
                 // so the supervisor can never observe them via the loop's
                 // return value).
                 .with_subscription(sub.name.clone());
+            // Online logical-export enrolment: clone the boot-installed
+            // server-wide maintenance gate into the loop's config; the loop
+            // awaits it before every apply (see `run_follower_loop`).
+            cfg.maintenance_gate = self.maintenance_gate.clone();
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
@@ -357,6 +361,7 @@ impl SubscriptionSupervisor {
             let join = tokio::spawn(async move {
                 // Retry terminal marking after the loop returns.
                 let tok_exit = tok.clone();
+                let exit_gate = cfg.maintenance_gate.clone();
                 let loop_result = run_follower_loop(local.clone(), src, cfg, tok).await;
                 #[cfg(test)]
                 if signal_other_exit {
@@ -364,6 +369,36 @@ impl SubscriptionSupervisor {
                         hook.exited.notify_one();
                     }
                 }
+                // Online-export enrolment for the exit path: the terminal
+                // callbacks below persist durable `resync_required` /
+                // `reopen_required` quarantine states, which alter
+                // exported-scope eligibility (`read_quarantine_reason`), so
+                // they must hold the server-wide maintenance gate's counted
+                // writer. Wait for the gate biased against the loop's own
+                // cancel token: a frozen gate must never stall a reconcile
+                // join (cancel releases the wait). If cancellation wins, do
+                // NOT early-return past cleanup — only the terminal writes
+                // are skipped; the teardown below always runs, and the next
+                // reconcile tick (unfrozen) re-evaluates the row.
+                let gate_guard = match &exit_gate {
+                    Some(gate) => {
+                        let tok_gate = tok.clone();
+                        tokio::select! {
+                            biased;
+                            _ = tok_gate.cancelled() => {
+                                debug!(
+                                    subscription = %sub_name,
+                                    "follower loop cancelled while gate frozen; terminal persistence skipped"
+                                );
+                                None
+                            }
+                            guard = gate.wait_for_mutation() => Some(guard),
+                        }
+                    }
+                    None => None,
+                };
+                match gate_guard {
+                    Some(_maintenance) => {
                 match loop_result {
                     Ok(()) => {}
                     Err(e @ ReplError::JournalGap { gap_at, .. })
@@ -570,6 +605,21 @@ impl SubscriptionSupervisor {
                         )
                         .await;
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
+                    }
+                }
+                    }
+                    None => {
+                        // Frozen-gate skip or cancellation: the terminal
+                        // quarantine write was NOT persisted here; the next
+                        // unfrozen reconcile tick re-reads the row and
+                        // converges. Nothing was lost — only the marking is
+                        // deferred, never the teardown below.
+                        if loop_result.is_err() {
+                            debug!(
+                                subscription = %sub_name,
+                                "gate frozen or loop cancelled; terminal persistence deferred to reconcile"
+                            );
+                        }
                     }
                 }
                 // ---- exit housekeeping: shared by every loop return path.

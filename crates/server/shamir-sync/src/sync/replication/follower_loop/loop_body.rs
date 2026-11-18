@@ -142,6 +142,7 @@ pub(super) async fn run_follower_loop_internal(
         max_iterations,
         subscription,
         lease,
+        maintenance_gate,
         #[cfg(test)]
         apply_park,
         #[cfg(test)]
@@ -647,6 +648,26 @@ pub(super) async fn run_follower_loop_internal(
         // the WRITE gate under the control lock and waits for this apply to
         // finish. The loop NEVER takes the control lock while holding this
         // guard.
+        // Server-wide maintenance gate (online logical-export enrolment):
+        // BEFORE the lease read, wait for any raised export freeze to thaw.
+        // `biased;` gives cancellation deterministic priority so a loop
+        // stopped while a freeze is held never waits forever. The returned
+        // counted writer is retained through the live apply below and
+        // dropped with `_apply_guard` BEFORE the post-apply control-lock
+        // updates, so the export's writer-drain observes this apply end to
+        // end and the lock order stays (control lock ← gate guard).
+        let maintenance_guard = match &maintenance_gate {
+            Some(gate) => {
+                let guard = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Ok(()),
+                    guard = gate.wait_for_mutation() => guard,
+                };
+                Some(guard)
+            }
+            None => None,
+        };
+
         let _apply_guard = match &lease {
             Some(l) => {
                 let g = l.apply_gate.read().await;
@@ -763,6 +784,11 @@ pub(super) async fn run_follower_loop_internal(
             }
         }
         drop(_apply_guard);
+        // Gate guard goes with the apply guard, BEFORE the pending
+        // stall/clear persistence below (which takes the replication
+        // control lock): the exported-drain view of this apply is complete
+        // and no counted writer is held across control-lock awaits.
+        drop(maintenance_guard);
         // Round 12 F1: the guard is gone — persistence may now safely take
         // the replication control lock inside the status writer.
         match pending_stall {

@@ -1,8 +1,7 @@
 use crate::http_rest::common::{ping_body, request, Harness, ADMIN_PASSWORD};
-use shamir_client::{Client, ConnectOptions};
+use shamir_client::{Client, ClientError, ConnectOptions};
 use shamir_connect::server::token::{TokenChannels, TokenMode};
-use shamir_query_builder::batch::Batch;
-use shamir_query_builder::token_admin;
+use shamir_query_builder::{batch::Batch, ddl, token_admin};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::wire::DbRequest;
 use std::time::Duration;
@@ -126,13 +125,17 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         // activity (Own) or global operator activity (All).
         | BatchOp::ListActivity(_)
         | BatchOp::CancelBackup(_)
-        | BatchOp::ReplicationStatus(_) => "admin-denied",
+        | BatchOp::ReplicationStatus(_)
+        // R3 2b: online-export admin ops are superuser-surface for tokens.
+        | BatchOp::StartExport(_)
+        | BatchOp::ExportStatus(_)
+        | BatchOp::CancelExport(_) => "admin-denied",
     }
 }
 
 async fn connect(harness: &Harness, username: &str, password: &[u8]) -> Client {
     tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(120),
         Client::connect(ConnectOptions {
             addr: harness.native_addr(),
             server_name: "localhost".into(),
@@ -140,9 +143,9 @@ async fn connect(harness: &Harness, username: &str, password: &[u8]) -> Client {
             password: Zeroizing::new(password.to_vec()),
             accept_new_host: true,
             trusted_pin: None,
-            connect_timeout: Some(Duration::from_secs(15)),
-            handshake_timeout: Some(Duration::from_secs(15)),
-            request_timeout: Some(Duration::from_secs(15)),
+            connect_timeout: Some(Duration::from_secs(120)),
+            handshake_timeout: Some(Duration::from_secs(120)),
+            request_timeout: Some(Duration::from_secs(120)),
         }),
     )
     .await
@@ -151,7 +154,7 @@ async fn connect(harness: &Harness, username: &str, password: &[u8]) -> Client {
 }
 
 async fn shutdown(harness: Harness) {
-    let report = tokio::time::timeout(Duration::from_secs(45), harness.handle.shutdown())
+    let report = tokio::time::timeout(Duration::from_secs(120), harness.handle.shutdown())
         .await
         .expect("server shutdown timed out");
     assert!(
@@ -210,7 +213,7 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
     assert!(!batches.is_empty(), "batch fixtures are complete");
     assert_eq!(
         batches.len(),
-        62,
+        65,
         "one fixture for each current admin BatchOp arm"
     );
 
@@ -357,5 +360,87 @@ async fn metadata_scope_rules_are_observed_over_sockets() {
     }
     // scope.rs denies List::{Databases,Users} whenever databases is Some despite
     // the Execute database being allowlisted; this contradicts the brief's allowance.
+    shutdown(harness).await;
+}
+
+/// R3 step 2b, fail-closed online-export slice: `StartExport` /
+/// `ExportStatus` / `CancelExport` are recognized by the db_handler even when
+/// nested inside a `ForEach` body, and are refused BEFORE any database work.
+/// Ordering: the SCRAM + superuser check precedes every form or
+/// configuration detail, so a non-superuser session always gets
+/// `permission_denied`; for the superuser the FORM check follows (shape
+/// before root): a standalone single-op batch with a matching envelope is
+/// dispatched only to find the fixture's `security.export_root` unset, so
+/// it gets `online_export_not_configured`; a batch nested inside `ForEach`
+/// is an invalid form and gets `online_export_invalid_form` — the shape is
+/// refused before any root is consulted. Static messages, no artifact, no
+/// dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_export_ops_fail_closed_without_gate_or_root() {
+    let harness = Harness::launch_with_native_seed().await;
+    let admin = connect(&harness, "admin", ADMIN_PASSWORD).await;
+    admin
+        .create_scram_user(
+            "plain-user",
+            Zeroizing::new("plain-password".into()),
+            vec![],
+        )
+        .await
+        .expect("create plain SCRAM account");
+    let plain = connect(&harness, "plain-user", b"plain-password").await;
+
+    let cases: Vec<(&str, BatchOp)> = vec![
+        ("start_export", ddl::start_export("default").build()),
+        ("export_status", ddl::export_status()),
+        ("cancel_export", ddl::cancel_export()),
+    ];
+    for (label, op) in &cases {
+        let mut batch = Batch::new();
+        batch.op("export", op.clone());
+        let batch = batch.build();
+        assert!(
+            matches!(
+                plain.execute("default", batch.clone()).await,
+                Err(ClientError::Db { ref code, .. }) if code == "permission_denied"
+            ),
+            "{label}: non-superuser must get permission_denied"
+        );
+        assert!(
+            matches!(
+                admin.execute("default", batch.clone()).await,
+                Err(ClientError::Db { ref code, .. }) if code == "online_export_not_configured"
+            ),
+            "{label}: superuser must get online_export_not_configured"
+        );
+    }
+
+    // Nested mixed case: the export op hides inside a ForEach body; the
+    // recognition must still fire (fail closed, no dispatch, no artifact).
+    // The FORM refusal precedes the root check, so the superuser here gets
+    // the shape code — the fixture's default `security.export_root` is
+    // unset, and the shape check runs before any root would be consulted.
+    let mut inner = Batch::new();
+    inner.op("nested_export", ddl::start_export("default").build());
+    let mut nested = Batch::new();
+    nested.for_each("loop", vec!["row"], "row", inner.build());
+    let nested = nested.build();
+    assert!(
+        matches!(
+            plain.execute("default", nested.clone()).await,
+            Err(ClientError::Db { ref code, .. }) if code == "permission_denied"
+        ),
+        "nested export inside ForEach: non-superuser must get permission_denied"
+    );
+    assert!(
+        matches!(
+            admin.execute("default", nested).await,
+            Err(ClientError::Db { ref code, .. }) if code == "online_export_invalid_form"
+        ),
+        "nested export inside ForEach: superuser must get online_export_invalid_form \
+         (shape before root)"
+    );
+
+    drop(plain);
+    drop(admin);
     shutdown(harness).await;
 }

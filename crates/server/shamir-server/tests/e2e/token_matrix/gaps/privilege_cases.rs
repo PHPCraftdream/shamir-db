@@ -434,5 +434,9 @@ pub(super) fn admin_batch_cases() -> Vec<(BatchOp, &'static str)> {
         (ddl::list_publications(), "ListPublications"),
         (ddl::list_subscriptions(), "ListSubscriptions"),
         (ddl::replication_status(), "ReplicationStatus"),
+        // R3 2b: online-export admin ops are superuser-surface for tokens.
+        (ddl::start_export("deny").build(), "StartExport"),
+        (ddl::export_status(), "ExportStatus"),
+        (ddl::cancel_export(), "CancelExport"),
     ]
 }
