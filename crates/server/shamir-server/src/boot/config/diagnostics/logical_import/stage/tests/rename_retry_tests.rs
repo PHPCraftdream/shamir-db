@@ -19,6 +19,8 @@ fn absent_target() -> &'static Path {
     Path::new("definitely-absent-target")
 }
 
+// Sharing violations (os errors 5 and 32) count as transient on Windows only.
+#[cfg(windows)]
 #[tokio::test]
 async fn transient_error_retried_until_success() {
     let calls = Arc::new(AtomicU32::new(0));
@@ -51,6 +53,7 @@ async fn permanent_error_fails_immediately() {
     assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one attempt");
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn exhausted_budget_fails_naming_attempts() {
     let calls = Arc::new(AtomicU32::new(0));
@@ -65,6 +68,24 @@ async fn exhausted_budget_fails_naming_attempts() {
         calls.load(Ordering::SeqCst),
         super::super::dir::RENAME_ATTEMPTS,
         "the rename ran exactly RENAME_ATTEMPTS times"
+    );
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn sharing_errors_are_not_retried_off_windows() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let calls_in = calls.clone();
+    let rename = move || {
+        calls_in.fetch_add(1, Ordering::SeqCst);
+        Err(sharing_violation())
+    };
+    let result = rename_with_retry(rename, absent_target(), &CancellationToken::new()).await;
+    assert!(result.is_err(), "a sharing error must fail off Windows");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "exactly one attempt: the error is not transient off Windows"
     );
 }
 
