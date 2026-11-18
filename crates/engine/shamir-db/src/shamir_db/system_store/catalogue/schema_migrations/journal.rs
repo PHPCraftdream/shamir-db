@@ -46,23 +46,11 @@ impl SystemStore {
         let records = read_journal_partition_records(&table).await?;
         let mut rows = Vec::with_capacity(records.len());
         let mut partition_control = None;
+        // Route on the trusted persisted envelope keys BEFORE any payload
+        // decode or revalidation: one unreadable event of database A must not
+        // block B (design §5.3), while an unroutable row fails closed for
+        // every reader and an owned row is never silently omitted.
         for (row_id, value) in records {
-            let record_version = value
-                .get("record_version")
-                .and_then(QueryValue::as_str)
-                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_version"))?
-                .parse::<u16>()
-                .map_err(|error| corrupt(&row_id, &format!("invalid record_version: {error}")))?;
-            if record_version != JOURNAL_RECORD_VERSION {
-                return Err(corrupt(
-                    &row_id,
-                    &format!("unknown mandatory record version {record_version}"),
-                ));
-            }
-            let record_type = value
-                .get("record_type")
-                .and_then(QueryValue::as_str)
-                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_type"))?;
             let stored_identity = value
                 .get("database_identity")
                 .and_then(QueryValue::as_str)
@@ -71,7 +59,25 @@ impl SystemStore {
                 .map_err(|error| {
                     corrupt(&row_id, &format!("invalid database_identity: {error}"))
                 })?;
-            let selected_partition = stored_identity == identity;
+            if stored_identity != identity {
+                continue;
+            }
+            let record_version = value
+                .get("record_version")
+                .and_then(QueryValue::as_str)
+                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_version"))?
+                .parse::<u16>()
+                .map_err(|error| corrupt(&row_id, &format!("invalid record_version: {error}")))?;
+            let record_type = value
+                .get("record_type")
+                .and_then(QueryValue::as_str)
+                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_type"))?;
+            if record_version != JOURNAL_RECORD_VERSION {
+                return Err(corrupt(
+                    &row_id,
+                    &format!("unknown mandatory record version {record_version}"),
+                ));
+            }
             match record_type {
                 "event" => {
                     let bytes = value
@@ -101,16 +107,13 @@ impl SystemStore {
                     {
                         return Err(corrupt(&row_id, "event payload differs from row envelope"));
                     }
-                    if selected_partition {
-                        rows.push((event, row_id));
-                    }
+                    rows.push((event, row_id));
                 }
                 "control" => {
                     let control = decode_control(&value, &row_id, stored_identity, 0)?;
-                    if selected_partition
-                        && partition_control
-                            .replace((row_id.clone(), control))
-                            .is_some()
+                    if partition_control
+                        .replace((row_id.clone(), control))
+                        .is_some()
                     {
                         return Err(corrupt(&row_id, "duplicate partition control record"));
                     }

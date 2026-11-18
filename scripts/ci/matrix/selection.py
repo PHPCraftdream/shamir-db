@@ -564,7 +564,7 @@ def select_matrix(changed: list[str], metadata: dict, root: str, content_provide
     flags["engine"] = scope == "all" or "shamir-engine" in names
     flags["deny"] |= scope == "all"
     flags["ts"] |= scope == "all" or "shamir-query-types" in names
-    flags["node"] = scope == "all" or bool(names & {"shamir-client", "shamir-client-node"})
+    flags["node"] |= scope == "all" or bool(names & {"shamir-client", "shamir-client-node"})
     flags["wasm32"] = scope == "all" or bool(names & WASM_GUESTS)
     flags["docs_only"] = scope == "none" and bool(changed) and not flags["ts"] and not flags["deny"] and not flags["pipeline"]
     args = WORKSPACE if scope == "all" else " ".join(f"-p {name}" for name in sorted(names))

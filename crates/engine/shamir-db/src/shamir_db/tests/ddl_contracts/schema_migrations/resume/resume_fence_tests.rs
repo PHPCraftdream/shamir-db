@@ -17,8 +17,9 @@ use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
 use super::super::helpers::{body, checksum, context};
 use super::helpers::{
-    apply_request, assert_code, empty_predecessor, identity, journal_rows, persistent_owner_db,
-    predecessor, reopen_owner_db, run_apply, str_field, submission,
+    apply_request, assert_code, empty_predecessor, field, identity, journal_rows,
+    persistent_owner_db, predecessor, reopen_owner_db, run_apply, run_status, str_field,
+    submission,
 };
 use crate::shamir_db::system_store::{JournalEventKind, SchemaMigrationStep};
 use crate::shamir_db::ShamirDb;
@@ -230,6 +231,61 @@ async fn takeover_fences_the_stale_runner_generation() {
         .expect_err("an apply while the gate is held must be refused");
     assert_code(error, "schema_migration_in_progress");
     db.release_schema_migration_gate("testdb", 2);
+
+    // The stale generation cannot EXECUTE either, even with nothing held:
+    // the fence is free (the takeover released it after acquiring at
+    // generation 2), so the
+    // refusal of the stale runner's `expected_fence_generation = 1` comes
+    // from the durable fence CAS, mapped to the stable in-progress code —
+    // with no journal write and no executed effect.
+    let pristine = journal_rows(&db).await;
+    assert!(db.schema_migration_gate_generation("testdb").is_none());
+    assert!(db
+        .schema_migration_gate_in_doubt_generation("testdb")
+        .is_none());
+    let stale_request = apply_request(
+        &target,
+        predecessor(Some("alpha-001"), 1, checksum(&migration)),
+        1,
+        submission(&next),
+    );
+    let error = run_apply(&db, stale_request)
+        .await
+        .expect_err("a stale fence generation must not execute the next migration");
+    assert_code(error, "schema_migration_in_progress");
+    assert_eq!(
+        journal_rows(&db).await,
+        pristine,
+        "the stale-generation refusal writes nothing"
+    );
+    let instance = db.get_db("testdb").unwrap();
+    assert!(
+        !instance.has_table("main", "items_2"),
+        "the fenced-out runner must not have executed the next migration"
+    );
+
+    // Positive control: the CURRENT runner — generation derived from the
+    // status (the durable fence head, released after the takeover) — applies the
+    // same next migration and its effect exists.
+    let status = run_status(&db, &target).await;
+    let current = u64::try_from(
+        field(&status, "fence_generation")
+            .as_i64()
+            .expect("the status reports a durable fence generation"),
+    )
+    .expect("the durable fence generation fits in u64");
+    let fresh_request = apply_request(
+        &target,
+        predecessor(Some("alpha-001"), 1, checksum(&migration)),
+        current,
+        submission(&next),
+    );
+    let value = run_apply(&db, fresh_request)
+        .await
+        .expect("the status-derived current generation applies the next migration");
+    assert_eq!(str_field(&value, "status"), "applied");
+    let instance = db.get_db("testdb").unwrap();
+    assert!(instance.has_table("main", "items_2"));
 }
 
 #[tokio::test]

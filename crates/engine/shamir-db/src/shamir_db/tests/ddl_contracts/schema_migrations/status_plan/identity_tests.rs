@@ -1,9 +1,13 @@
 use crate::access::ResourceMeta;
-use crate::shamir_db::system_store::{DatabaseIdentity, SystemStoreConfig};
+use crate::shamir_db::system_store::{
+    DatabaseIdentity, JournalEventKind, SchemaMigrationStep, SystemStoreConfig,
+};
 use crate::shamir_db::ShamirDb;
 use shamir_types::types::value::QueryValue;
 use std::str::FromStr;
 use tokio::runtime::Builder;
+
+use super::helpers::{body, checksum, context};
 
 #[test]
 fn database_identity_survives_cold_restart_and_rename() {
@@ -20,6 +24,57 @@ fn database_identity_survives_cold_restart_and_rename() {
             .schema_migration_identity("before_rename")
             .await
             .unwrap();
+        // Populate the journal under the pre-rename identity: a fully
+        // applied migration (the rename must not disturb the per-identity
+        // partition or its applied prefix).
+        let store = db.system_store();
+        let migration = body("alpha-001", 1);
+        let metadata = migration.metadata.clone();
+        let digest = checksum(&migration);
+        let generation = store
+            .acquire_schema_migration_fence(
+                identity,
+                0,
+                metadata.clone(),
+                migration.clone(),
+                false,
+                &context(),
+            )
+            .await
+            .unwrap();
+        for step in [
+            SchemaMigrationStep {
+                kind: JournalEventKind::OperationIntent,
+                operation_index: Some(0),
+                evidence: None,
+            },
+            SchemaMigrationStep {
+                kind: JournalEventKind::OperationComplete,
+                operation_index: Some(0),
+                evidence: Some("table exists with the intended definition".into()),
+            },
+            SchemaMigrationStep {
+                kind: JournalEventKind::Applied,
+                operation_index: None,
+                evidence: Some("all schema postconditions verified".into()),
+            },
+        ] {
+            store
+                .append_schema_migration_event(
+                    identity,
+                    generation,
+                    metadata.clone(),
+                    digest,
+                    step,
+                    &context(),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .release_schema_migration_fence(identity, generation, metadata, digest, &context())
+            .await
+            .unwrap();
         db.rename_db("before_rename", "after_rename").await.unwrap();
         assert_eq!(
             db.system_store()
@@ -28,6 +83,15 @@ fn database_identity_survives_cold_restart_and_rename() {
                 .unwrap(),
             identity
         );
+        // The populated journal is still served under the SAME identity
+        // after the rename: applied prefix intact.
+        let renamed_history = db
+            .system_store()
+            .read_schema_migration_history(identity)
+            .await
+            .unwrap();
+        assert_eq!(renamed_history.applied.len(), 1);
+        assert_eq!(renamed_history.applied[0].checksum, digest);
         identity
     });
     drop(runtime);
@@ -43,6 +107,19 @@ fn database_identity_survives_cold_restart_and_rename() {
                 .await
                 .unwrap(),
             identity
+        );
+        // Cold restart after the rename: the journal (including the applied
+        // prefix and its canonical body) is still partitioned under the
+        // same identity.
+        let history = db
+            .system_store()
+            .read_schema_migration_history(identity)
+            .await
+            .unwrap();
+        assert_eq!(history.applied.len(), 1);
+        assert_eq!(
+            history.applied[0].migration.id, "alpha-001",
+            "the applied prefix survives the rename and the restart"
         );
     });
     drop(runtime);

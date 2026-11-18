@@ -3,3 +3,4 @@
 
 pub mod fixture;
 pub mod restore_tests;
+pub mod schema_migration_restore_tests;

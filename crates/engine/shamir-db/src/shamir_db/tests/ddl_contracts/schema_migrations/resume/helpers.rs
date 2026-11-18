@@ -11,6 +11,7 @@ use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationStatusRequest, SchemaMigrationSubmission, SchemaMigrationTarget,
 };
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+use std::time::Duration;
 
 use super::super::helpers::{body, checksum, rows};
 use crate::engine::repo::repo_types::BoxRepoFactory;
@@ -28,7 +29,29 @@ pub(super) const OWNER: Actor = Actor::User(7);
 /// `init_memory`) with `testdb` owned by [`OWNER`] (`0o700`, so the owner
 /// holds Manage) and repository `main` granted to the owner.
 pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
+    persistent_owner_db_on(BoxRepoFactory::in_memory()).await
+}
+
+/// The same fixture with a FILE-BACKED (`fjall`) repository `main`: use it
+/// in scenarios whose assertions are about PHYSICAL objects surviving a
+/// drop/reopen cycle — an in-memory repo is re-created empty after the
+/// reopen, which would make such assertions vacuous (the fixture shape the
+/// function-family crash tests use).
+pub(super) async fn persistent_owner_db_fjall_repo() -> (tempfile::TempDir, ShamirDb) {
     let dir = tempfile::tempdir().unwrap();
+    let repo = BoxRepoFactory::fjall(dir.path().join("repos/main"));
+    persistent_owner_db_dir(dir, repo).await
+}
+
+async fn persistent_owner_db_on(repo_factory: BoxRepoFactory) -> (tempfile::TempDir, ShamirDb) {
+    let dir = tempfile::tempdir().unwrap();
+    persistent_owner_db_dir(dir, repo_factory).await
+}
+
+async fn persistent_owner_db_dir(
+    dir: tempfile::TempDir,
+    repo_factory: BoxRepoFactory,
+) -> (tempfile::TempDir, ShamirDb) {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(dir.path().join("system")))
         .await
         .unwrap();
@@ -36,12 +59,9 @@ pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
     // The migration bodies address repository `main`; create it the way the
     // sibling DDL fixtures do so the store resource `testdb/main` exists
     // before any test (or the admission preflight) addresses it.
-    db.add_repo(
-        "testdb",
-        RepoConfig::new("main", BoxRepoFactory::in_memory()),
-    )
-    .await
-    .unwrap();
+    db.add_repo("testdb", RepoConfig::new("main", repo_factory))
+        .await
+        .unwrap();
     db.set_resource_meta(
         &ResourcePath::database("testdb"),
         &ResourceMeta {
@@ -70,19 +90,33 @@ pub(super) async fn persistent_owner_db() -> (tempfile::TempDir, ShamirDb) {
 
 /// Reopen a NEW `ShamirDb` over the SAME Fjall system directory (the caller
 /// must have dropped every previous handle; the TempDir guard stays alive).
-/// The bounded retry loop absorbs the backend's asynchronous lock release —
-/// the same pattern as the system metadata fixtures' `reinit_with_retry`.
+/// A just-dropped engine can keep its fjall lock until its background tasks
+/// finish (`FjallError: Locked`, seen on Windows), so retry ONLY that error
+/// for a bounded time; each attempt itself is bounded, and any other error
+/// fails at once (the `init_waiting_for_locks` shape of the function-family
+/// fixtures).
 pub(super) async fn reopen_owner_db(dir: &tempfile::TempDir) -> ShamirDb {
     let system_path = dir.path().join("system");
-    for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())).await {
-            Ok(db) => return db,
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(30),
+            ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(db)) => return db,
+            Ok(Err(error)) if error.to_string().contains("Locked") => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "system store still locked after the bounded retry window"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(Err(error)) => panic!("reopen the system store: {error}"),
+            Err(_) => panic!("reopen the system store: init timed out"),
         }
     }
-    ShamirDb::init(SystemStoreConfig::Fjall(system_path))
-        .await
-        .expect("system store still locked after retries")
 }
 
 /// The serving database's canonical identity for `testdb`.

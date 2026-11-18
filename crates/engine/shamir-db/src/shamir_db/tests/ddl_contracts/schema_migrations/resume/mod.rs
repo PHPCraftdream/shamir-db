@@ -5,4 +5,5 @@ mod helpers;
 mod resume_concurrency_tests;
 mod resume_crash_tests;
 mod resume_fence_tests;
+mod resume_in_doubt_restart_tests;
 mod resume_status_tests;
