@@ -21,7 +21,10 @@ use super::super::reader::CancelledRead;
 use super::preflight::Preflight;
 
 /// Validate the staged database against the artifact. `home` stays open;
-/// the freeze admission is attempt-owned like the export driver's.
+/// the freeze admission is attempt-owned like the export driver's. Both
+/// callers pass a freshly opened engine (the driver re-opens the staged
+/// directory after flushing and dropping the loading engine; the idempotent
+/// retry opens the published target), so a pass can never rest on memory.
 pub(crate) async fn run(
     home: &ShamirDb,
     pf: &Preflight,

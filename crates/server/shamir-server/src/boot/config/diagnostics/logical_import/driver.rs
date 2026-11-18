@@ -84,19 +84,42 @@ async fn import_into_stage(
     cancel: &CancellationToken,
 ) -> Result<ImportReport, LogicalImportError> {
     let loaded = stage_load::run(stage.path(), &args.input, preflight, args, cancel).await?;
-    progress(&format!(
-        "loaded into stage as database '{}'",
-        loaded.db_name
-    ));
+    let db_name = loaded.db_name.clone();
+    progress(&format!("loaded into stage as database '{db_name}'"));
+    // Durability invariant (design §4.2): every repository's buffers — all
+    // tables, the buffer-TTL ones included — are flushed and waited on
+    // BEFORE the staged engine is dropped, the receipt is sealed and the
+    // stage is published. Records that only lived in a membuffer would
+    // otherwise vanish with the engine's memory and the published directory
+    // would silently miss them.
+    loaded
+        .home
+        .flush_all_waiting()
+        .await
+        .map_err(|e| LogicalImportError::Stage(format!("cannot flush the staged database: {e}")))?;
+    // Handle-lifecycle invariant: every handle the import opened (the staged
+    // engine, its repositories and the user directory) is closed and dropped
+    // BEFORE the publish rename, exactly once per instance — no database may
+    // survive a publish or the next open of the directory fails on the lock.
+    drop(loaded.home);
+    // Stage validation reads from a FRESH open of the staged directory, so
+    // "validation passed" can never again mean "the loading engine still had
+    // the records in memory".
+    let reopened = ShamirDb::init(SystemStoreConfig::Fjall(
+        stage.path().join("shamir_db_meta.redb"),
+    ))
+    .await
+    .map_err(|e| LogicalImportError::Stage(format!("cannot re-open the staged engine: {e}")))?;
     validate::run(
-        &loaded.home,
+        &reopened,
         preflight,
-        &loaded.db_name,
+        &db_name,
         &loaded.owner_ids,
         &args.input,
         cancel,
     )
     .await?;
+    drop(reopened);
     progress("validated against the artifact");
     let epoch = match inspect(stage.path()) {
         StampState::Valid(stamp) => stamp.format_epoch(),
@@ -121,13 +144,9 @@ async fn import_into_stage(
     if cancel.is_cancelled() {
         return Err(LogicalImportError::Cancelled);
     }
-    // Handle-lifecycle invariant: every handle the import opened (the staged
-    // engine, its repositories and the user directory) is closed and dropped
-    // BEFORE the publish rename, exactly once per instance — no database may
-    // survive a publish or the next open of the directory fails on the lock.
-    drop(loaded.home);
+    // (The flush-and-drop above already ran: see the durability invariant.)
     Ok(ImportReport {
-        database: loaded.db_name,
+        database: db_name,
         items: preflight.report.items,
         bytes: preflight.report.bytes,
         published: true,

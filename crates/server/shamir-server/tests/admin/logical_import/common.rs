@@ -270,6 +270,16 @@ pub async fn engine_snapshot(
                 let instance = owned
                     .get_db(&db_owned)
                     .ok_or_else(|| DbError::Validation("database missing".into()))?;
+                // The engine read facade refuses unopened tables (a booted
+                // server opens every catalogue table); the snapshot opens
+                // every requested table itself, so helpers that read
+                // schema-only or freshly published targets — where nothing
+                // else opens the tables — still work.
+                for (repo, table) in &tables_owned {
+                    instance.get_table(repo, table).await.map_err(|e| {
+                        DbError::Validation(format!("cannot open table '{repo}/{table}': {e}"))
+                    })?;
+                }
                 let reader = owned
                     .system_store()
                     .capture_logical_export(&instance, guard)
