@@ -7,6 +7,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
+use super::super::helpers::on_big_stack;
 use super::helpers::{
     apply_request, assert_code, crash_started_only_and_reopen, empty_predecessor, field, identity,
     journal_prefix, persistent_owner_db, reopen_owner_db, run_apply, run_status, str_field,
@@ -42,89 +43,91 @@ const RENAME_BOTH_PRESENT_EVIDENCE: &str = "operation 0 is unresolved after rest
      table 'main/items_1' → 'renamed_items': source and destination are in an ambiguous \
      state after restart";
 
-#[tokio::test]
-async fn status_reports_in_doubt_reason_for_unresolved_migration() {
-    let (dir, db) = persistent_owner_db().await;
-    create_table(&db, "items_1").await;
-    let migration = rename_body();
+#[test]
+fn status_reports_in_doubt_reason_for_unresolved_migration() {
+    on_big_stack(|| async {
+        let (dir, db) = persistent_owner_db().await;
+        create_table(&db, "items_1").await;
+        let migration = rename_body();
 
-    // Crash after the rename effect but before its completion append, built
-    // directly in the journal (see `journal_prefix`): source gone, destination
-    // created.
-    journal_prefix(
-        &db,
-        &migration,
-        &[(JournalEventKind::OperationIntent, 0, None)],
-    )
-    .await;
-    let mut effect = Batch::new();
-    effect.op("rn", ddl::rename_table("items_1", "renamed_items").build());
-    db.execute_as(
-        super::helpers::OWNER,
-        "testdb",
-        &effect.to_request_via_msgpack().unwrap(),
-    )
-    .await
-    .unwrap();
-
-    drop(db);
-    let db = reopen_owner_db(&dir).await;
-    let target = identity(&db).await;
-    // Externally re-create the SOURCE (both present → unprovable): this
-    // resume attempt is refused and BEST-EFFORT records the InDoubt marker
-    // with the reconcile evidence.
-    db.get_db("testdb")
-        .unwrap()
-        .create_table("main", "items_1")
+        // Crash after the rename effect but before its completion append, built
+        // directly in the journal (see `journal_prefix`): source gone, destination
+        // created.
+        journal_prefix(
+            &db,
+            &migration,
+            &[(JournalEventKind::OperationIntent, 0, None)],
+        )
+        .await;
+        let mut effect = Batch::new();
+        effect.op("rn", ddl::rename_table("items_1", "renamed_items").build());
+        db.execute_as(
+            super::helpers::OWNER,
+            "testdb",
+            &effect.to_request_via_msgpack().unwrap(),
+        )
         .await
         .unwrap();
-    let error = run_apply(
-        &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-    )
-    .await
-    .expect_err("a rename with source and destination both present is unprovable");
-    assert_code(error, "schema_migration_in_doubt");
 
-    // STATUS as OWNER surfaces the unresolved migration with the recorded
-    // evidence: `unresolved.last()` is the InDoubt status event itself, so
-    // `status` is the in-doubt kind string, the fence generation is the
-    // refused resume's takeover generation 2 (the crashed run held 1), and
-    // `in_doubt_reason` is exactly the marker's evidence. The InDoubt marker names the blocked operation
-    // (index 0 — the rename), so `operation_index` is that pending index.
-    let value = run_status(&db, &target).await;
-    let in_flight = field(&value, "in_flight");
-    assert_eq!(str_field(in_flight, "migration_id"), "alpha-001");
-    assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
-    assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(2));
-    assert_eq!(str_field(in_flight, "status"), "in_doubt");
-    assert_eq!(
-        str_field(in_flight, "in_doubt_reason"),
-        RENAME_BOTH_PRESENT_EVIDENCE
-    );
-    assert_eq!(
-        field(in_flight, "operation_index").as_i64(),
-        Some(0),
-        "the in-doubt marker names the blocked operation index"
-    );
+        drop(db);
+        let db = reopen_owner_db(&dir).await;
+        let target = identity(&db).await;
+        // Externally re-create the SOURCE (both present → unprovable): this
+        // resume attempt is refused and BEST-EFFORT records the InDoubt marker
+        // with the reconcile evidence.
+        db.get_db("testdb")
+            .unwrap()
+            .create_table("main", "items_1")
+            .await
+            .unwrap();
+        let error = run_apply(
+            &db,
+            apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+        )
+        .await
+        .expect_err("a rename with source and destination both present is unprovable");
+        assert_code(error, "schema_migration_in_doubt");
 
-    // A resumed-then-completed migration leaves the journal fully applied:
-    // STATUS has no `in_flight` record at all.
-    let (_dir2, db2, migration2) = crash_started_only_and_reopen().await;
-    let target2 = identity(&db2).await;
-    let value2 = run_apply(
-        &db2,
-        apply_request(&target2, empty_predecessor(), 0, submission(&migration2)),
-    )
-    .await
-    .expect("the identical submission resumes the unresolved migration");
-    assert_eq!(str_field(&value2, "status"), "applied");
-    let status2 = run_status(&db2, &target2).await;
-    assert!(
-        status2.get("in_flight").is_none(),
-        "a completed migration has no in-flight record"
-    );
-    assert_eq!(str_field(&status2, "last_applied_id"), "alpha-001");
+        // STATUS as OWNER surfaces the unresolved migration with the recorded
+        // evidence: `unresolved.last()` is the InDoubt status event itself, so
+        // `status` is the in-doubt kind string, the fence generation is the
+        // refused resume's takeover generation 2 (the crashed run held 1), and
+        // `in_doubt_reason` is exactly the marker's evidence. The InDoubt marker names the blocked operation
+        // (index 0 — the rename), so `operation_index` is that pending index.
+        let value = run_status(&db, &target).await;
+        let in_flight = field(&value, "in_flight");
+        assert_eq!(str_field(in_flight, "migration_id"), "alpha-001");
+        assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
+        assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(2));
+        assert_eq!(str_field(in_flight, "status"), "in_doubt");
+        assert_eq!(
+            str_field(in_flight, "in_doubt_reason"),
+            RENAME_BOTH_PRESENT_EVIDENCE
+        );
+        assert_eq!(
+            field(in_flight, "operation_index").as_i64(),
+            Some(0),
+            "the in-doubt marker names the blocked operation index"
+        );
+
+        // A resumed-then-completed migration leaves the journal fully applied:
+        // STATUS has no `in_flight` record at all.
+        let (_dir2, db2, migration2) = crash_started_only_and_reopen().await;
+        let target2 = identity(&db2).await;
+        let value2 = run_apply(
+            &db2,
+            apply_request(&target2, empty_predecessor(), 0, submission(&migration2)),
+        )
+        .await
+        .expect("the identical submission resumes the unresolved migration");
+        assert_eq!(str_field(&value2, "status"), "applied");
+        let status2 = run_status(&db2, &target2).await;
+        assert!(
+            status2.get("in_flight").is_none(),
+            "a completed migration has no in-flight record"
+        );
+        assert_eq!(str_field(&status2, "last_applied_id"), "alpha-001");
+    });
 }
 
 #[tokio::test]

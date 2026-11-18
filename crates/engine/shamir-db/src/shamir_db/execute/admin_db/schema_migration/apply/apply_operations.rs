@@ -342,7 +342,12 @@ async fn run_operation(
 ) -> Result<(Option<String>, String), BatchError> {
     let ordered_check = matches!(operation, SchemaMigrationOp::CheckFunction(_));
     if ordered_check {
-        Box::pin(execute_operation(executor, operation)).await?;
+        // A single `execute_operation` call site below; the no-effect check runs
+        // through the function-family dispatcher so this frame holds one big
+        // temporary, not two (debug-build test threads have small stacks).
+        let check = admission::family_batch_op(operation)
+            .ok_or_else(|| plain("unsupported migration operation".to_string()))?;
+        Box::pin(execution::execute(executor, &check)).await?;
     }
     // Create postconditions need the pre-image: a pre-existing object is a
     // conflict (4.2), never an `if_not_exists` success. The pre-image is
@@ -363,19 +368,8 @@ async fn run_operation(
         }
         _ => true,
     };
-    let intent_evidence = match operation {
-        SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
-            Some(if created_from_absent {
-                "pre_state=absent".to_string()
-            } else {
-                "pre_state=present".to_string()
-            })
-        }
-        _ if admission::is_function_family(operation) => {
-            Some(Box::pin(reconcile::capture_intent(executor, operation)).await?)
-        }
-        _ => None,
-    };
+    let intent_evidence =
+        Box::pin(intent_evidence(executor, operation, created_from_absent)).await?;
 
     // Persist + sync the operation intent BEFORE any effect (4.1). After the
     // first durable intent a later journal failure means an effect may
@@ -449,6 +443,29 @@ async fn run_operation(
     .await
     .map_err(|error| durability_error(error, *intents_durable))?;
     Ok((intent_evidence, evidence))
+}
+
+/// The pre-state recorded in the operation intent (resume reconcile): the
+/// create token for tables and indexes, registration fingerprints for the
+/// function family. Its own future so the runner frame stays small.
+async fn intent_evidence(
+    executor: &ShamirAdminExecutor,
+    operation: &SchemaMigrationOp,
+    created_from_absent: bool,
+) -> Result<Option<String>, BatchError> {
+    Ok(match operation {
+        SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
+            Some(if created_from_absent {
+                "pre_state=absent".to_string()
+            } else {
+                "pre_state=present".to_string()
+            })
+        }
+        _ if admission::is_function_family(operation) => {
+            Some(Box::pin(reconcile::capture_intent(executor, operation)).await?)
+        }
+        _ => None,
+    })
 }
 
 fn access_denied(error: &BatchError) -> bool {

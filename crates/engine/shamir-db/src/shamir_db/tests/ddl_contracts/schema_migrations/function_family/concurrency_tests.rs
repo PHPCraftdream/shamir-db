@@ -6,6 +6,7 @@ use shamir_query_builder::{apply_application_schema_migration, batch::Batch};
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationApplyRequest;
 use shamir_types::access::{ResourceMeta, ResourcePath};
 
+use super::super::helpers::on_big_stack;
 use super::helpers::{
     apply_request, body, bounded, create_function, history, identity, persistent_owner_db,
     run_apply, DB, OWNER,
@@ -36,67 +37,71 @@ fn outcome(result: &Result<QueryValue, BatchError>) -> &str {
     }
 }
 
-#[tokio::test]
-async fn function_migrations_on_two_databases_share_a_server_wide_gate() {
-    let (_dir, db) = bounded(persistent_owner_db()).await;
-    bounded(db.create_db(OTHER_DB)).await.unwrap();
-    bounded(db.set_resource_meta(
-        &ResourcePath::database(OTHER_DB),
-        &ResourceMeta {
-            owner: OWNER,
-            group: None,
-            mode: 0o700,
-        },
-    ))
-    .await
-    .unwrap();
-    // Both migrations contain only function operations; neither needs a repo on OTHER_DB.
-    let first_target = bounded(identity(&db)).await;
-    let other_target = bounded(db.system_store().schema_migration_identity(OTHER_DB))
+#[test]
+fn function_migrations_on_two_databases_share_a_server_wide_gate() {
+    on_big_stack(|| async {
+        let (_dir, db) = bounded(persistent_owner_db()).await;
+        bounded(db.create_db(OTHER_DB)).await.unwrap();
+        bounded(db.set_resource_meta(
+            &ResourcePath::database(OTHER_DB),
+            &ResourceMeta {
+                owner: OWNER,
+                group: None,
+                mode: 0o700,
+            },
+        ))
         .await
         .unwrap();
-    assert_ne!(first_target, other_target);
-    let first = body("first-function", 1, [create_function("first_function")]);
-    let other = body("other-function", 1, [create_function(OTHER_FUNCTION)]);
-    let first_request = apply_request(first_target, None, 0, &first);
-    let other_request = apply_request(other_target, None, 0, &other);
-    let pristine = bounded(history(&db, other_target)).await;
+        // Both migrations contain only function operations; neither needs a repo on OTHER_DB.
+        let first_target = bounded(identity(&db)).await;
+        let other_target = bounded(db.system_store().schema_migration_identity(OTHER_DB))
+            .await
+            .unwrap();
+        assert_ne!(first_target, other_target);
+        let first = body("first-function", 1, [create_function("first_function")]);
+        let other = body("other-function", 1, [create_function(OTHER_FUNCTION)]);
+        let first_request = apply_request(first_target, None, 0, &first);
+        let other_request = apply_request(other_target, None, 0, &other);
+        let pristine = bounded(history(&db, other_target)).await;
 
-    let (entered, release) = pause_next_function_registration_for_test(&db);
-    let (first_result, (competing, other_during_pause, other_row_during_pause)) = bounded(async {
-        tokio::join!(
-            bounded(run_apply(&db, first_request)),
+        let (entered, release) = pause_next_function_registration_for_test(&db);
+        let (first_result, (competing, other_during_pause, other_row_during_pause)) =
             bounded(async {
-                bounded(entered.notified()).await;
-                assert_eq!(db.schema_migration_gate_generation(DB), Some(1));
-                let competing = bounded(apply_on_other_db(&db, other_request.clone())).await;
-                let other_during_pause = bounded(history(&db, other_target)).await;
-                let other_row_during_pause =
-                    bounded(db.system_store().load_function(OTHER_FUNCTION))
-                        .await
-                        .unwrap();
-                release.notify_one();
-                (competing, other_during_pause, other_row_during_pause)
+                tokio::join!(
+                    bounded(run_apply(&db, first_request)),
+                    bounded(async {
+                        bounded(entered.notified()).await;
+                        assert_eq!(db.schema_migration_gate_generation(DB), Some(1));
+                        let competing =
+                            bounded(apply_on_other_db(&db, other_request.clone())).await;
+                        let other_during_pause = bounded(history(&db, other_target)).await;
+                        let other_row_during_pause =
+                            bounded(db.system_store().load_function(OTHER_FUNCTION))
+                                .await
+                                .unwrap();
+                        release.notify_one();
+                        (competing, other_during_pause, other_row_during_pause)
+                    })
+                )
             })
-        )
-    })
-    .await;
+            .await;
 
-    assert_eq!(
-        BTreeSet::from([outcome(&first_result), outcome(&competing)]),
-        BTreeSet::from(["applied", "schema_migration_in_progress"]),
-    );
-    assert_eq!(other_during_pause, pristine);
-    assert_eq!(bounded(history(&db, other_target)).await, pristine);
-    assert!(other_row_during_pause.is_none());
-    assert!(db.schema_migration_gate_generation(OTHER_DB).is_none());
-    assert_eq!(bounded(history(&db, first_target)).await.applied.len(), 1);
+        assert_eq!(
+            BTreeSet::from([outcome(&first_result), outcome(&competing)]),
+            BTreeSet::from(["applied", "schema_migration_in_progress"]),
+        );
+        assert_eq!(other_during_pause, pristine);
+        assert_eq!(bounded(history(&db, other_target)).await, pristine);
+        assert!(other_row_during_pause.is_none());
+        assert!(db.schema_migration_gate_generation(OTHER_DB).is_none());
+        assert_eq!(bounded(history(&db, first_target)).await.applied.len(), 1);
 
-    let retry = bounded(apply_on_other_db(&db, other_request)).await;
-    assert_eq!(outcome(&retry), "applied");
-    assert_eq!(bounded(history(&db, other_target)).await.applied.len(), 1);
-    assert!(bounded(db.system_store().load_function(OTHER_FUNCTION))
-        .await
-        .unwrap()
-        .is_some());
+        let retry = bounded(apply_on_other_db(&db, other_request)).await;
+        assert_eq!(outcome(&retry), "applied");
+        assert_eq!(bounded(history(&db, other_target)).await.applied.len(), 1);
+        assert!(bounded(db.system_store().load_function(OTHER_FUNCTION))
+            .await
+            .unwrap()
+            .is_some());
+    });
 }
