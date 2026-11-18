@@ -66,6 +66,12 @@ pub enum ResourcePath {
     /// trigger host compilation), default `0o755` (mirrors `Root`'s
     /// default — see `resource_meta`'s `ResourcePath::Root` arm).
     WasmCompiler,
+    /// Global singleton gating the operator activity view (`ListActivity`
+    /// with `scope: All`, release-1 R4b) — the `WasmCompiler` precedent:
+    /// mode-bearing, POSIX-style, default `0o755` (see `resource_meta_ref`'s
+    /// matching arm). `scope: Own` listing needs no right; every cross-user
+    /// view requires `ActivityView` + `Action::Manage`.
+    ActivityView,
     /// A folder within the function namespace, addressed by path segments.
     ///
     /// For example, the folder `reports/daily` is represented as
@@ -186,6 +192,7 @@ impl ResourcePath {
             },
             Self::FunctionNamespace => ResourcePathRef::FunctionNamespace,
             Self::WasmCompiler => ResourcePathRef::WasmCompiler,
+            Self::ActivityView => ResourcePathRef::ActivityView,
             Self::FunctionFolder { path } => ResourcePathRef::FunctionFolder { path },
             Self::Function { name } => ResourcePathRef::Function { name },
             Self::User { name } => ResourcePathRef::User { name },
@@ -228,6 +235,7 @@ impl fmt::Display for ResourcePath {
             } => write!(f, "db://{db}/{store}/{table}.idx/{index}"),
             Self::FunctionNamespace => f.write_str("fn://"),
             Self::WasmCompiler => f.write_str("compiler://"),
+            Self::ActivityView => f.write_str("activity://"),
             Self::FunctionFolder { path } => write!(f, "fn://{}/", path.join("/")),
             Self::Function { name } => write!(f, "fn://{name}"),
             Self::User { name } => write!(f, "user://{name}"),

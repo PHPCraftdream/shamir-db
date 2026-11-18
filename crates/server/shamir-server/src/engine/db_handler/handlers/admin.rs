@@ -626,6 +626,14 @@ pub(crate) fn is_coarse_admin_gate_exempt(op: &BatchOp) -> bool {
             // error, so the exemption grants nothing today.
             | BatchOp::ApplicationSchema(_)
             | BatchOp::GetTableSchema(_)
+            // R4b-1: the activity view's read-only listing. `scope: All`
+            // (other users' work) requires `ResourcePath::ActivityView` +
+            // `Action::Manage` through the normal `authorize_access` path
+            // inside the paging worker; `scope: Own` is open to any
+            // authenticated user and returns only that user's rows. This
+            // exemption only stops the coarse superuser gate from blocking
+            // it — it grants nothing by itself.
+            | BatchOp::ListActivity(_)
     )
 }
 

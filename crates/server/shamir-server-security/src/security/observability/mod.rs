@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 
 use axum::{
     extract::State,
@@ -74,8 +74,16 @@ pub use export::replication::{
 
 pub use crate::security::backup_metrics::{install_backup_metrics_source, BackupMetricsSnapshot};
 
+/// Live mirror counts behind the four `shamir_active_*` gauges
+/// (R4b-1, §5.4/D14). Public so the request handler's
+/// `activity_counts()` can return it; sampled per scrape by the
+/// per-state source installed via
+/// [`ObservabilityState::set_activity_source`].
+pub use export::activity::ActivityMetricsSnapshot;
+
 use crate::security::backup_metrics::{record_backup_metrics, register_backup_metrics};
 use durability_export::{record_durability_metrics, register_durability_metrics};
+use export::activity::{render_activity_series, ActivitySource};
 use export::functions::{record_functions_metrics, register_functions_metrics};
 use export::replication::{record_replication_metrics, register_replication_metrics};
 use export::{
@@ -95,6 +103,14 @@ pub struct ObservabilityState {
     pub ready: AtomicBool,
     pub started_at: std::time::Instant,
     pub bound_addrs: ArcSwap<Vec<SocketAddr>>,
+    /// Per-server activity gauge source (R4b-1), installed once at
+    /// production boot. Held per state, NOT in the process-global
+    /// Prometheus recorder: a concurrent scrape of a second server in
+    /// the same process must never return this server's counts through
+    /// the shared `PrometheusHandle`. The closure references the request
+    /// handler via `Weak`, so this state cannot keep the handler alive
+    /// past shutdown and never reports a dropped server's mirrors.
+    activity_source: ArcSwapOption<ActivitySource>,
 }
 
 impl ObservabilityState {
@@ -103,7 +119,28 @@ impl ObservabilityState {
             ready: AtomicBool::new(false),
             started_at: std::time::Instant::now(),
             bound_addrs: ArcSwap::from_pointee(Vec::new()),
+            activity_source: ArcSwapOption::empty(),
         })
+    }
+
+    /// Install the per-server activity gauge source. Called once at
+    /// production boot; a later call replaces the source (test servers
+    /// spawning back-to-back never share counts, since each state holds
+    /// its own source). While unset, the gauges render explicit zeros.
+    pub fn set_activity_source(
+        &self,
+        source: Arc<dyn Fn() -> ActivityMetricsSnapshot + Send + Sync>,
+    ) {
+        self.activity_source
+            .store(Some(Arc::new(ActivitySource::new(source))));
+    }
+
+    /// Sample the live activity mirrors for one scrape. Lock-free:
+    /// `ArcSwapOption::load_full` plus the handler's atomic mirror reads.
+    fn activity_snapshot(&self) -> ActivityMetricsSnapshot {
+        self.activity_source
+            .load_full()
+            .map_or_else(Default::default, |source| source.sample())
     }
 
     pub fn mark_ready(&self) {
@@ -627,7 +664,13 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
             record_functions_metrics();
             record_replication_metrics();
             record_backup_metrics();
-            (StatusCode::OK, h.render()).into_response()
+            // R4b-1: the four `shamir_active_*` gauges are rendered from
+            // THIS server's per-state source and appended after the
+            // process-global recorder's text. They never go through the
+            // shared recorder, so a concurrent scrape of another server
+            // in the same process cannot return those counts here.
+            let activity_series = render_activity_series(&s.state.activity_snapshot());
+            (StatusCode::OK, format!("{}{}", h.render(), activity_series)).into_response()
         }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,

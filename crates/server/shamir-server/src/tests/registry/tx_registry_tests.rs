@@ -522,3 +522,165 @@ async fn stale_reap_candidate_rechecks_lease_activity_and_identity() {
         "only the current entry may be reaped",
     );
 }
+
+// ---------------------------------------------------------------------
+// R4b-1 — activity mirror, commit observation guard, duplicate-handle
+// fail-closed, gauge mirrors. Tx IDs are minted per repo, so the tests
+// below reuse ONE handle across registers to model the collision the
+// server-level registry can really see.
+
+use crate::tx_registry::{TxActivityState, TxCommitGuard};
+
+/// Register `it` under `handle` with activity attribution (handler shape).
+fn register_activity(
+    reg: &TxRegistry,
+    handle: u64,
+    it: InteractiveTx,
+    session_handle: u64,
+) -> Arc<InteractiveTx> {
+    reg.register_activity(handle, it, session_handle, Arc::from("operator"))
+        .expect("registration succeeds")
+}
+
+#[tokio::test]
+async fn duplicate_handle_fails_closed_and_keeps_first_row() {
+    let reg = TxRegistry::new();
+    let (handle, first) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    register_activity(&reg, handle, first, 7);
+
+    // A second repo mints the same id: the registry must REJECT, never
+    // overwrite (the old `DashMap::insert` silently replaced the row).
+    let (_, second) = make_tx(SID_B, Duration::from_secs(300), 2).await;
+    assert!(matches!(
+        reg.register_activity(handle, second, 9, Arc::from("other")),
+        Err(TxRegistryError::TxHandleCollision)
+    ));
+
+    // First transaction untouched, mirrors agree, no stray rows.
+    assert!(reg.get_owned(handle, &SID_A).is_ok());
+    assert_eq!(reg.len(), 1);
+    assert_eq!(reg.activity_count(), 1);
+    let row = reg.activity_row(handle).expect("projection row present");
+    assert_eq!(row.session_handle(), 7);
+    assert_eq!(row.username(), "operator");
+    assert_eq!(row.state(), TxActivityState::Active);
+
+    // SID_B's session slot was never taken by the rejected register.
+    let (h2, third) = make_tx(SID_B, Duration::from_secs(300), 3).await;
+    reg.register(h2, third).expect("session B slot still free");
+    assert_eq!(reg.len(), 2);
+    assert_eq!(reg.activity_count(), 2);
+}
+
+#[tokio::test]
+async fn commit_guard_keeps_awaiting_commit_row_until_drop() {
+    let reg = Arc::new(TxRegistry::new());
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    let arc = register_activity(&reg, handle, it, 11);
+
+    let guard: TxCommitGuard = reg.begin_commit(handle, &arc).expect("commit observed");
+
+    // The tx is no longer executable: identity parked as `Committing` in
+    // the authoritative map (re-register, acquire and reap all skip it),
+    // and the open mirror lost it — but the activity mirror keeps the row.
+    assert!(matches!(
+        reg.get_owned(handle, &SID_A),
+        Err(TxRegistryError::TxNotFound)
+    ));
+    assert!(matches!(
+        reg.acquire_owned(handle, &SID_A),
+        Err(TxRegistryError::TxNotFound)
+    ));
+    assert_eq!(reg.len(), 0, "committing row left the open gauge");
+    assert_eq!(reg.activity_count(), 1, "committing row stays visible");
+    let row = reg.activity_row(handle).expect("row visible mid-commit");
+    assert_eq!(row.state(), TxActivityState::AwaitingCommit);
+    assert_eq!(row.session_handle(), 11);
+    assert_eq!(row.db(), "db");
+
+    // The reaper cannot touch a committing row (identity parked as
+    // `Committing`, skipped by the sweep). Zero-TTL sweep — asserted BEFORE
+    // any replacement registration below: a freshly registered tx has no
+    // activity bump yet, so a zero idle TTL would flag it immediately and
+    // the assertion would race the replacement, not the committing row.
+    assert!(reg
+        .expired_handles(Instant::now(), Duration::ZERO)
+        .is_empty());
+
+    // The one-tx-per-session slot was freed at begin_commit.
+    let (h2, next) = make_tx(SID_A, Duration::from_secs(300), 2).await;
+    reg.register(h2, next)
+        .expect("session slot freed while committing");
+
+    // Guard drop = commit pipeline returned: projection row goes, activity
+    // gauge follows.
+    drop(guard);
+    assert!(reg.activity_row(handle).is_none());
+    assert_eq!(reg.activity_count(), 1, "only the re-registered row");
+    assert_eq!(reg.activity_count(), reg.len());
+}
+
+#[tokio::test]
+async fn commit_guard_reaped_race_reports_none() {
+    let reg = Arc::new(TxRegistry::new());
+    // Zero lifetime: the reaper fires between get_owned and begin_commit.
+    let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+    let arc = register_activity(&reg, handle, it, 3);
+    // Simulate the race: sweep removed the row; begin_commit must refuse
+    // (identity recheck) and leave nothing behind.
+    assert!(reg.remove(handle).is_some());
+    assert!(reg.begin_commit(handle, &arc).is_none());
+    assert_eq!(reg.activity_count(), 0);
+}
+
+#[tokio::test]
+async fn expired_row_reports_expired_pending_reap_while_registered() {
+    let reg = TxRegistry::new();
+    let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+    register_activity(&reg, handle, it, 5);
+
+    let row = reg.activity_row(handle).expect("row present");
+    assert_eq!(
+        row.state(),
+        TxActivityState::ExpiredPendingReap,
+        "real expiry must be reported while the row is still registered"
+    );
+    // The sweep then removes both the lifecycle row and the projection.
+    assert_eq!(reg.reap_expired(Duration::from_secs(60)), 1);
+    assert!(reg.activity_row(handle).is_none());
+    assert_eq!(reg.activity_count(), 0);
+    assert_eq!(reg.len(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn projection_timing_is_shared_not_duplicated() {
+    let reg = TxRegistry::new();
+    let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    let arc = register_activity(&reg, handle, it, 6);
+
+    // Bump activity through the PARKED tx: the projection row must observe
+    // it (one shared timing state, no drifting duplicate timestamp).
+    //
+    // Paused Tokio time: the registered-at instant is at elapsed zero, so
+    // advance PAST it before bumping (7 ms) and again after (1 ms) — the
+    // idle/elapsed split is then asserted at a DETERMINISTIC instant
+    // (elapsed 8 ms, idle 1 ms since the bump) instead of racing a
+    // real-clock threshold on a loaded CI runner. If the bump failed to
+    // reach the projection row, idle would read 8 ms, not 1 ms.
+    tokio::time::advance(Duration::from_millis(7)).await;
+    arc.bump_activity();
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let row = reg.activity_row(handle).expect("row present");
+    assert_eq!(row.idle_ns(), 1_000_000, "idle clock follows the tx bump");
+    assert_eq!(row.elapsed_ns(), 8_000_000);
+
+    // Mirrors and rows agree on a multi-row registry.
+    let (h2, it2) = make_tx(SID_B, Duration::from_secs(300), 2).await;
+    register_activity(&reg, h2, it2, 8);
+    assert_eq!(reg.len(), 2);
+    assert_eq!(reg.activity_count(), 2);
+    assert_eq!(reg.activity_rows().len(), 2);
+    let mut handles: Vec<u64> = reg.activity_rows().iter().map(|(k, _)| *k).collect();
+    handles.sort_unstable();
+    assert_eq!(handles, vec![handle.min(h2), handle.max(h2)]);
+}

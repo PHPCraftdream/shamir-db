@@ -17,7 +17,7 @@ use crate::admin::{
     CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp, DescribeTableOp, DropDbOp,
     DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp, DropReplicationProfileOp,
     DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp, ExportFunctionOp,
-    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
+    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListActivityReq, ListOp,
     ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
@@ -209,6 +209,8 @@ pub enum BatchOp {
     StartBackup(StartBackupOp),
     BackupStatus(BackupStatusOp),
     CancelBackup(CancelBackupOp),
+    /// Operator activity-view listing (read-only, R4b step 1).
+    ListActivity(ListActivityReq),
 }
 
 impl Serialize for BatchOp {
@@ -312,6 +314,7 @@ impl Serialize for BatchOp {
             BatchOp::StartBackup(op) => op.serialize(serializer),
             BatchOp::BackupStatus(op) => op.serialize(serializer),
             BatchOp::CancelBackup(op) => op.serialize(serializer),
+            BatchOp::ListActivity(op) => op.serialize(serializer),
         }
     }
 }
@@ -538,6 +541,9 @@ impl<'de> Deserialize<'de> for BatchOp {
                     OpKind::CancelBackup => {
                         CancelBackupOp::deserialize(value).map(BatchOp::CancelBackup)
                     }
+                    OpKind::ListActivity => {
+                        ListActivityReq::deserialize(value).map(BatchOp::ListActivity)
+                    }
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
@@ -670,7 +676,8 @@ impl BatchOp {
             | BatchOp::ApplicationSchema(_)
             | BatchOp::StartBackup(_)
             | BatchOp::BackupStatus(_)
-            | BatchOp::CancelBackup(_) => return None,
+            | BatchOp::CancelBackup(_)
+            | BatchOp::ListActivity(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -784,6 +791,7 @@ impl BatchOp {
                 | BatchOp::StartBackup(_)
                 | BatchOp::BackupStatus(_)
                 | BatchOp::CancelBackup(_)
+                | BatchOp::ListActivity(_)
         )
     }
 
@@ -830,7 +838,7 @@ impl BatchOp {
             BatchOp::ReplicationStatus(_) => false,
             // Online-backup admin ops: status is pure introspection; start
             // and cancel change persistent node-side backup state (R2a 3a).
-            BatchOp::BackupStatus(_) => false,
+            BatchOp::BackupStatus(_) | BatchOp::ListActivity(_) => false,
             BatchOp::StartBackup(_) => true,
             BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan

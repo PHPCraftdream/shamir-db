@@ -1,9 +1,11 @@
 use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchRequest};
 use shamir_query_types::batch::{BatchTreeVisitor, IsolationLevel, VisibilityWait};
+use std::sync::Arc;
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
+use super::activity::server_busy_response;
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::handler::{DbResponse, ShamirDbHandler, INTERACTIVE_TX_MAX_LIFETIME};
 
@@ -40,13 +42,21 @@ fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<
 impl ShamirDbHandler {
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
-    pub(super) async fn tx_begin(
+    ///
+    /// R4b-1 — the `tx_open` unit of work is registered in the in-flight
+    /// activity table (RAII guard) after every cheap fast-reject gate and
+    /// BEFORE the engine open wait (`db.tx_begin_as`), so a BEGIN stuck
+    /// waiting on the engine stays visible as `Running`; `client_rid` is the
+    /// OPTIONAL transport request id carried alongside the minted
+    /// [`RequestExecId`].
+    pub(super) async fn tx_begin_with_rid(
         &self,
         session: &Session,
         query_version: u32,
         db_name: &str,
         repo_name: &str,
         isolation: Option<IsolationLevel>,
+        client_rid: Option<u32>,
     ) -> DbResponse {
         if let Err(e) = crate::version::check_query_lang(query_version) {
             return DbResponse::Error {
@@ -54,6 +64,24 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
+        // R4b-1 — in-flight registration, one insert + one RAII removal
+        // (the guard owns the entry AND the per-session request slot).
+        // Per-session cap (R4b-1 follow-up): a stamped session must
+        // acquire a slot under `QueryLimitsCap::
+        // max_in_flight_requests_per_session` HERE, before the engine
+        // open wait; an exhausted session is rejected with the fixed
+        // `server_busy` wire text (same code/message as the HTTP REST
+        // executor and the serialized launcher overload frame) with no
+        // side effect. Skipped ONLY for the stateless (handle-0)
+        // fallback. The op-kind is the static discriminant name
+        // `tx_open`; no query value ever enters the summary (privacy,
+        // D3).
+        let _in_flight =
+            match self.try_track_activity_request(session, db_name, "tx_open", client_rid) {
+                Ok(guard) => guard,
+                Err(()) => return server_busy_response(),
+            };
+
         // RV-SERVER-C73466A7: TxBegin is NOT mode-gated — opening a
         // snapshot transaction is read-capable and a read-only replica must
         // keep serving reads inside interactive transactions. Writes are
@@ -88,11 +116,23 @@ impl ShamirDbHandler {
             repo_name.to_string(),
             INTERACTIVE_TX_MAX_LIFETIME,
         );
-        match self.tx_registry.register(handle, it) {
+        match self.tx_registry.register_activity(
+            handle,
+            it,
+            session.activity_handle(),
+            Arc::from(session.username.as_str()),
+        ) {
             // On reject the just-opened tx (`it`) drops = RAII rollback.
             Err(TxRegistryError::TxAlreadyOpen) => DbResponse::Error {
                 code: "tx_already_open".into(),
                 message: "session already has an open transaction".into(),
+            },
+            // R4b-1: tx ids are minted per repo; a collision with a tx from
+            // another repo fails closed (the just-opened tx drops = rollback).
+            Err(TxRegistryError::TxHandleCollision) => DbResponse::Error {
+                code: "tx_handle_conflict".into(),
+                message: "transaction handle already in use; retry (per-repo tx id collision)"
+                    .into(),
             },
             Err(_) => DbResponse::Error {
                 code: "tx_error".into(),
@@ -106,17 +146,44 @@ impl ShamirDbHandler {
         }
     }
 
+    /// Legacy test entry point: the pre-R4b-1 5-argument `tx_begin` (no
+    /// transport request id). Test-only forwarding — identical semantics to
+    /// `tx_begin_with_rid(..., None)`; the production caller (`handler.rs`)
+    /// passes the transport `rid` via `tx_begin_with_rid`.
+    #[cfg(test)]
+    pub(super) async fn tx_begin(
+        &self,
+        session: &Session,
+        query_version: u32,
+        db_name: &str,
+        repo_name: &str,
+        isolation: Option<IsolationLevel>,
+    ) -> DbResponse {
+        self.tx_begin_with_rid(session, query_version, db_name, repo_name, isolation, None)
+            .await
+    }
+
     /// Phase B EXECUTE — run one batch inside an open interactive tx (no
     /// commit). Applies the same per-batch gates as [`Self::execute`]
     /// (version, limits cap, admin, destructive-HMAC), then threads the
     /// parked `TxContext` through the engine glue.
-    pub(super) async fn tx_execute(
+    ///
+    /// R4b-1 — the batch is registered in the in-flight activity table
+    /// (RAII guard) after every cheap fast-reject gate and BEFORE the
+    /// registry acquire and the ctx-lock wait, so an execute stuck waiting
+    /// for the parked context stays visible as `Running`. The op-kind is
+    /// the static discriminant summary of the batch (homogeneous batches
+    /// keep their `activity_name`; heterogeneous ones are conservatively
+    /// `write`), derived in the same pre-flight visitor pass that rejects
+    /// `ListActivity` — never from arguments (privacy, D3).
+    pub(super) async fn tx_execute_with_rid(
         &self,
         session: &Session,
         query_version: u32,
         db_name: &str,
         tx_handle: u64,
         batch: BatchRequest,
+        client_rid: Option<u32>,
     ) -> DbResponse {
         if let Err(e) = crate::version::check_query_lang(query_version) {
             return DbResponse::Error {
@@ -129,18 +196,52 @@ impl ShamirDbHandler {
             return resp;
         }
 
-        let nested_override =
-            BatchTreeVisitor::new(&batch.queries).any(|visit| match &visit.entry.op {
+        // R4b-1 — a listing is never transactional. Reject EVERY form
+        // (nested in a Batch/ForEach body, mixed with other ops, or
+        // standalone) here, BEFORE admission and before the ctx lock is
+        // taken, mirroring the `execute` pre-flight. The snapshot of an
+        // interactive tx must never serve an operator view that is
+        // explicitly nontransactional. The SAME walk derives the batch's
+        // op-kind summary (static discriminant names only) AND detects a
+        // nested visibility_wait (folded walk, R4b-1 follow-up);
+        // precedence is preserved — a `ListActivity` anywhere in the tree
+        // is rejected DURING the walk, before the post-walk
+        // visibility_wait check runs.
+        let mut seen_op: Option<&'static str> = None;
+        let mut uniform_ops = true;
+        let mut nested_visibility_wait = false;
+        for visit in BatchTreeVisitor::new(&batch.queries) {
+            if matches!(
+                &visit.entry.op,
+                shamir_query_types::batch::BatchOp::ListActivity(_)
+            ) {
+                return DbResponse::Error {
+                    code: "invalid_request".into(),
+                    message: "ListActivity is not allowed inside a transactional batch".into(),
+                };
+            }
+            let name = visit.entry.op.activity_name();
+            match seen_op {
+                None => seen_op = Some(name),
+                Some(prev) if prev != name => uniform_ops = false,
+                _ => {}
+            }
+            match &visit.entry.op {
                 shamir_query_types::batch::BatchOp::Batch(sub) => {
-                    sub.batch.visibility_wait.is_some()
+                    nested_visibility_wait |= sub.batch.visibility_wait.is_some();
                 }
                 shamir_query_types::batch::BatchOp::ForEach(fe) => {
-                    fe.batch.visibility_wait.is_some()
+                    nested_visibility_wait |= fe.batch.visibility_wait.is_some();
                 }
                 // Only container operations carry nested BatchRequest options.
-                _ => false,
-            });
-        if batch.visibility_wait.is_some() || nested_override {
+                _ => {}
+            }
+        }
+        let tx_batch_op_kind = match (seen_op, uniform_ops) {
+            (Some(name), true) => name,
+            _ => "write",
+        };
+        if batch.visibility_wait.is_some() || nested_visibility_wait {
             return DbResponse::Error {
                 code: "validation".into(),
                 message: "visibility_wait is commit-only; use TxCommit".into(),
@@ -174,6 +275,22 @@ impl ShamirDbHandler {
             };
         }
 
+        // R4b-1 — in-flight registration, one insert + one RAII removal
+        // (the guard owns the entry AND the per-session request slot),
+        // after every cheap gate (visibility, admin/auth, HMAC) and
+        // before the registry acquire / ctx-lock waits. The per-session
+        // cap (see `tx_begin_with_rid`) rejects an exhausted session with
+        // the fixed `server_busy` text before any execution.
+        let _in_flight =
+            match self.try_track_activity_request(session, db_name, tx_batch_op_kind, client_rid) {
+                Ok(guard) => guard,
+                Err(()) => return server_busy_response(),
+            };
+
+        // Identity-checked stale-failure removals below: `remove_owned`
+        // refuses when the reaper already replaced the tx under the same
+        // per-repo id.
+
         // Look up the handle and verify it belongs to this session.
         let (it, _lease) = match self
             .tx_registry
@@ -195,7 +312,7 @@ impl ShamirDbHandler {
         };
 
         if it.remaining_lifetime().is_zero() {
-            self.tx_registry.remove(tx_handle);
+            self.tx_registry.remove_owned(tx_handle, &it);
             drop(it);
             return DbResponse::Error {
                 code: "tx_expired".into(),
@@ -261,7 +378,7 @@ impl ShamirDbHandler {
                     // Abort: drop the handle (RAII rollback of TxContext +
                     // SnapshotGuard via the Arc) and surface the cap to the
                     // client.
-                    self.tx_registry.remove(tx_handle);
+                    self.tx_registry.remove_owned(tx_handle, &it);
                     drop(it);
                     return DbResponse::Error {
                         code: "tx_too_large".into(),
@@ -278,7 +395,7 @@ impl ShamirDbHandler {
                     &e,
                     BatchError::ExecutionTimedOut { .. } | BatchError::LimitExceeded { .. }
                 ) {
-                    self.tx_registry.remove(tx_handle);
+                    self.tx_registry.remove_owned(tx_handle, &it);
                     drop(it);
                 }
                 super::cursor_handlers::error_response(&e)
@@ -346,9 +463,22 @@ impl ShamirDbHandler {
             };
         }
 
-        // Remove first: no concurrent TxExecute can find the handle once we
-        // start committing.
-        self.tx_registry.remove(tx_handle);
+        // Commit observation guard (R4b-1): the handle leaves `open` here —
+        // no concurrent TxExecute, re-register or reap can find it, so the tx
+        // is no longer executable — but the activity-mirror row stays visible
+        // as `AwaitingCommit` until `commit_guard` drops, i.e. until the
+        // commit pipeline returned (success or failure). The guard holds no
+        // ctx lock and never makes the tx executable. `None` = raced the
+        // reaper between `get_owned` and now.
+        let _commit_guard = match self.tx_registry.begin_commit(tx_handle, &it) {
+            Some(guard) => guard,
+            None => {
+                return DbResponse::Error {
+                    code: "tx_not_found".into(),
+                    message: format!("no open transaction for handle {}", tx_handle),
+                }
+            }
+        };
 
         // Invalid commit policy consumes a correctly addressed owned handle too.
         // Dropping `it` releases the snapshot and rolls back staged writes.
@@ -418,10 +548,34 @@ impl ShamirDbHandler {
                 message: format!("handle pinned to db '{}', got '{}'", it.db(), db_name),
             };
         }
-        self.tx_registry.remove(tx_handle);
+        // Identity-checked removal (R4b-1): if the reaper already took the
+        // tx and another one was re-registered under the same per-repo id,
+        // the fresh transaction survives (this rollback drops only OUR
+        // parked tx). `None` = raced; the response is unchanged.
+        self.tx_registry.remove_owned(tx_handle, &it);
         // Last ref drops here → InteractiveTx drops → TxContext drops (RAII
         // rollback) and the SnapshotGuard releases the GC pin.
         drop(it);
         DbResponse::TxRolledBack { tx_handle }
+    }
+}
+
+#[cfg(test)]
+impl ShamirDbHandler {
+    /// Legacy test entry points: the pre-R4b-1 signatures without a
+    /// transport request id. Test-only forwarding — identical semantics to
+    /// the `*_with_rid(..., None)` forms; the production caller
+    /// (`handler.rs`) passes the transport `rid` through the `_with_rid`
+    /// methods.
+    pub(super) async fn tx_execute(
+        &self,
+        session: &Session,
+        query_version: u32,
+        db_name: &str,
+        tx_handle: u64,
+        batch: BatchRequest,
+    ) -> DbResponse {
+        self.tx_execute_with_rid(session, query_version, db_name, tx_handle, batch, None)
+            .await
     }
 }

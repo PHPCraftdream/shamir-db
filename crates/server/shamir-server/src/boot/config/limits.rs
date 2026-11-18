@@ -170,6 +170,19 @@ pub struct QueryLimitsConfig {
     /// this (it IS `4 * max_result_size_bytes`'s own default).
     #[serde(default = "default_max_inflight_response_bytes")]
     pub max_inflight_response_bytes: Option<usize>,
+    /// R4b-1 follow-up: per-session concurrent in-flight REQUEST cap — how
+    /// many requests ONE authenticated session may have admitted and
+    /// executing at once (admission via `Session::try_acquire_request_slot`,
+    /// RAII release via `SessionRequestSlot`). Distinct from
+    /// `max_inflight_response_bytes` (memory budget) and `CONN_MAX_IN_FLIGHT`
+    /// (per-connection transport semaphore): this bounds a session ACROSS
+    /// connections and re-logins, because the counter is inherited across
+    /// same-bearer session replacement. `0` admits nothing — it does NOT
+    /// disable the cap (startup validation rejects 0; see `Config::validate`).
+    /// Default 32 —
+    /// `shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT`.
+    #[serde(default = "default_max_in_flight_requests_per_session")]
+    pub max_in_flight_requests_per_session: usize,
 }
 
 impl Default for QueryLimitsConfig {
@@ -187,6 +200,7 @@ impl Default for QueryLimitsConfig {
             max_page_size: default_max_page_size(),
             max_offset: default_max_offset(),
             max_inflight_response_bytes: default_max_inflight_response_bytes(),
+            max_in_flight_requests_per_session: default_max_in_flight_requests_per_session(),
         }
     }
 }
@@ -235,4 +249,11 @@ fn default_max_offset() -> u64 {
 /// `4 * 64 MiB = 256 MiB`, matching the shipped medium profile's own value.
 fn default_max_inflight_response_bytes() -> Option<usize> {
     Some(default_max_result_size_bytes() * 4)
+}
+
+/// R4b-1 follow-up: default per-session in-flight cap — the existing
+/// `CONN_MAX_IN_FLIGHT` (32) constant, so the session-level admission cap
+/// and the per-connection transport semaphore start in lockstep.
+fn default_max_in_flight_requests_per_session() -> usize {
+    shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT
 }

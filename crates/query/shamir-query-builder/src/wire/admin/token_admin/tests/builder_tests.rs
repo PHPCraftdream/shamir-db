@@ -113,7 +113,7 @@ fn create_api_token_some_empty_databases_differs_from_none() {
 #[test]
 fn token_admin_builders_follow_shared_hmac_vector_fields() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../shamir-query-types/test-vectors/admin_hmac_v2.json"
+        "../../../../../../shamir-query-types/test-vectors/admin_hmac_v2.json"
     ))
     .unwrap();
     let vectors = fixture["vectors"].as_array().unwrap();

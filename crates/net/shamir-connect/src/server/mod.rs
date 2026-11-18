@@ -26,7 +26,7 @@ pub use state::{admission, origin, resume, session, ticket, token_session};
 pub use conn_services::{ConnectionServices, PushRejected, PushSink};
 pub use dispatch::{dispatch_request, DispatchOutcome, RequestHandler};
 pub use session::{PendingChangePwChallenge, Session, SessionPermissions, SessionStore};
-pub use state::admission::{Admission, AdmitReject, Sid, ACTIVE_WINDOW_NS};
+pub use state::admission::{Admission, AdmitReject, SessionRequestSlot, Sid, ACTIVE_WINDOW_NS};
 
 pub use config::{ListenerPolicy, ServerSecrets};
 pub use handshake::{

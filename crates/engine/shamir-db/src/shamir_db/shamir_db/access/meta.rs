@@ -248,6 +248,31 @@ impl ShamirDb {
                     }
                 }
             }
+            // ActivityView — mirrors the WasmCompiler arm above, keyed
+            // "activity_view_meta". Absent key -> System-owned, 0o755:
+            // the activity view (`ListActivity { scope: All }`, release-1
+            // R4b) follows the same global-singleton POSIX-mode gate as
+            // WasmCompiler (`ResourcePath::ActivityView`). Cross-user
+            // listing requires Manage on this singleton; Own-scope
+            // listing never reaches this path. No self-lockout guardrail
+            // (same reasoning as the WasmCompiler arm).
+            ResourcePathRef::ActivityView => {
+                match self.system_store.load_setting("activity_view_meta").await {
+                    Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
+                    Ok(None) => Ok(ResourceMeta {
+                        owner: Actor::System,
+                        group: None,
+                        mode: 0o755,
+                    }),
+                    Err(e) => {
+                        log::warn!(
+                            "resource_meta: failed to load activity view meta: {}",
+                            escape_resource_diagnostic(&e.to_string())
+                        );
+                        Err(e)
+                    }
+                }
+            }
             // User — a FIXED, computed 3-tier rule, never persisted.
             // Task #559: the owner is the REAL principal64 resolved from
             // the directory via the injected PrincipalResolver. With a

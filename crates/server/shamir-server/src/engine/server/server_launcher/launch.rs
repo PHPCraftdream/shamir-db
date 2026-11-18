@@ -753,6 +753,23 @@ impl ServerLauncher {
                 ))
             })?;
             let state = crate::observability::ObservabilityState::new();
+            // R4b-1: install the per-server activity gauge source on THIS
+            // server's observability state. The four `shamir_active_*`
+            // gauges are appended per scrape from this handler's
+            // `activity_counts()` mirrors, never written into the
+            // process-global Prometheus recorder — two servers in one
+            // process share that recorder, so a concurrent scrape of one
+            // must never return the other's counts. The source holds the
+            // handler only by `Weak`: the observability state cannot keep
+            // the handler alive past shutdown, and after the handler is
+            // dropped the gauges render zeros instead of a stale server's
+            // mirrors.
+            let handler_for_activity = Arc::downgrade(&handler_concrete);
+            state.set_activity_source(Arc::new(move || {
+                handler_for_activity
+                    .upgrade()
+                    .map_or_else(Default::default, |handler| handler.activity_counts())
+            }));
             // Record what the data-path bound to — `/info` surfaces this.
             state.set_bound_addrs(bound_addrs.iter().filter_map(|a| *a).collect());
             // The Prometheus recorder is global per-process. In integration
@@ -888,6 +905,25 @@ impl ServerLauncher {
             crate::server::server_handle::ReplSupervisorTask { handle }
         };
 
+        // R4b-1 (test-only): capture the production-boot artifacts the
+        // activity-gauge source closes over so `server_launcher/tests` can
+        // drive the real handler and scrape the real `/metrics`. Compiled
+        // out of production builds entirely. Computed BEFORE the literal so
+        // `observability` is only borrowed here and moved exactly once,
+        // into the `ServerHandle`; the bound address is the one the server
+        // ACTUALLY bound (`None` — not a fake port-0 sentinel — when no
+        // observability server was configured).
+        #[cfg(test)]
+        let activity_test_seam =
+            observability
+                .as_ref()
+                .map(|obs| crate::server::server_handle::ActivityGaugeTestSeam {
+                    handler: Arc::clone(&handler_concrete),
+                    byte_budget: byte_budget.clone(),
+                    session_store: session_store.clone(),
+                    observability_bound_addr: obs.bound_addr,
+                });
+
         boot_guard.disarm();
         Ok(ServerHandle {
             token_service,
@@ -899,7 +935,6 @@ impl ServerLauncher {
             audit_appender,
             shutdown_token,
 
-            observability,
             meta_snapshot_task,
             interactive_tx_reaper,
             cursor_reaper,
@@ -911,6 +946,9 @@ impl ServerLauncher {
             format_stamp,
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
+            #[cfg(test)]
+            activity_test_seam,
+            observability,
         })
     }
 }

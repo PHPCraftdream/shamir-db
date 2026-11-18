@@ -690,3 +690,53 @@ fn backup_ops_are_admin_and_node_local() {
     assert!(cancel.is_write());
     assert_eq!(cancel.required_access("mydb"), None);
 }
+
+// ========================================================================
+// Activity view (R4b step 1) ----------------------------------------------
+// ========================================================================
+//
+// `ListActivity` is a read-only, server-owned-state introspection op with
+// no database target (`required_access == None`). Authorization (Own vs
+// All scope, `ActivityView` permission, coarse-gate exemption) is enforced
+// in the server's admin handler, not here. The activity-name summary is
+// the fixed string activity-view rows carry in their `op_kind` field.
+
+#[test]
+fn list_activity_serde_and_classify() {
+    let op = roundtrip_op(mpack!({
+        "list_activity": true,
+        "scope": "all",
+        "kind": "sessions"
+    }));
+    match &op {
+        BatchOp::ListActivity(request) => {
+            assert_eq!(request.scope, crate::admin::ActivityScope::All);
+            assert_eq!(request.kind, crate::admin::ActivityKind::Sessions);
+            assert_eq!(request.limit, None);
+            assert_eq!(request.continuation, None);
+        }
+        _ => panic!("expected ListActivity"),
+    }
+    assert!(op.is_admin());
+    assert!(!op.is_write(), "list_activity is read-only introspection");
+    assert_eq!(op.required_access("mydb"), None);
+    assert_eq!(op.activity_name(), "admin:list_activity");
+}
+
+#[test]
+fn activity_name_vocabulary_is_pinned() {
+    let read = roundtrip_op(mpack!({"from": "users"}));
+    assert_eq!(read.activity_name(), "read");
+    for wire in [
+        mpack!({"insert_into": "users", "values": []}),
+        mpack!({"update": "users", "set": {}}),
+        mpack!({"set": "users", "key": {"id": 1_i64}, "value": {"name": "x"}}),
+        mpack!({"delete_from": "users", "where": {"op": "eq", "field": ["id"], "value": 1_i64}}),
+    ] {
+        assert_eq!(roundtrip_op(wire).activity_name(), "write");
+    }
+    let migrate = roundtrip_op(mpack!({"migration_status": ""}));
+    assert_eq!(migrate.activity_name(), "admin:migration_status");
+    let backup = roundtrip_op(mpack!({"backup_status": true}));
+    assert_eq!(backup.activity_name(), "admin:backup_status");
+}

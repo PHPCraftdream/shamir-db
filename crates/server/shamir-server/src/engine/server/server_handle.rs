@@ -47,6 +47,33 @@ pub struct ReplSupervisorTask {
     pub(super) handle: JoinHandle<()>,
 }
 
+/// R4b-1 gauge-binding test seam (`cfg(test)` only — the field is absent
+/// from production builds and the type is never constructed outside
+/// `ServerLauncher::launch`'s `#[cfg(test)]` capture): the production-boot
+/// artifacts the observability activity-gauge source closes over.
+///
+/// Exposed so `server_launcher/tests` can drive the REAL
+/// [`ShamirDbHandler`](crate::db_handler::ShamirDbHandler) the
+/// launcher built (with the launcher's own `ByteBudget` and server-wide
+/// `SessionStore`) and scrape the REAL `/metrics` endpoint through the
+/// actual bound observability address — proving the boot path's
+/// `set_activity_source` wiring, not a separately-constructed fixture.
+#[cfg(test)]
+pub(in crate::engine::server) struct ActivityGaugeTestSeam {
+    /// The concrete request handler the launcher built and handed to every
+    /// listener — the same instance the activity source reads mirrors from.
+    pub handler: Arc<crate::db_handler::ShamirDbHandler>,
+    /// The launcher's RI-15 in-flight response-byte budget (shared with the
+    /// handler) — a test can hold it fully to park real request futures.
+    pub byte_budget: crate::byte_budget::ByteBudget,
+    /// The server-wide session store the handler was given via
+    /// `with_session_store`.
+    pub session_store: Arc<shamir_connect::server::session::SessionStore>,
+    /// The address the observability HTTP server ACTUALLY bound (config
+    /// may say port 0; this is `ObservabilityHandle::bound_addr`).
+    pub observability_bound_addr: std::net::SocketAddr,
+}
+
 /// Owner of the runtime state of a launched server.
 pub struct ServerHandle {
     /// Live token service, including token mirror and GC lifecycle.
@@ -134,6 +161,10 @@ pub struct ServerHandle {
     /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
     /// slice to keep this slice small and behaviour-identical.
     pub tunables: Arc<RuntimeTunables>,
+    /// R4b-1 gauge-binding test seam (see [`ActivityGaugeTestSeam`]).
+    /// `None` in production builds entirely (`#[cfg(test)]` field).
+    #[cfg(test)]
+    pub(in crate::engine::server) activity_test_seam: Option<ActivityGaugeTestSeam>,
 }
 
 /// cancel-safe: yes — timeout cancels only the wait; abort_all is idempotent.

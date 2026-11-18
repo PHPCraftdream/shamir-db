@@ -13,10 +13,11 @@ use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::server::auth::token::verify::Verified;
 use crate::server::state::admission::{Admission, AdmitReject, Sid, ACTIVE_WINDOW_NS};
 use crate::server::state::origin::SessionOrigin;
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use dashmap::DashMap;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Snapshot of user permissions taken at session creation (spec §7.3).
@@ -122,6 +123,12 @@ impl core::fmt::Debug for Session {
     }
 }
 
+/// Handle 0 means "not stamped by a store" and is only observable on a
+/// `Session` that never entered a store (direct fixtures, stateless REST —
+/// which has no stored session); published generations are always stamped
+/// under the store's shard write guard BEFORE they become visible.
+const UNSTAMPED_HANDLE: u64 = 0;
+
 /// Per-session state held by the server in memory (spec §7.2).
 ///
 /// Custom [`Debug`] impl redacts `channel_binding_at_auth` (TLS exporter
@@ -180,6 +187,19 @@ pub struct Session {
     /// double-spend a token) lives entirely in `micro_tokens`'s CAS retry
     /// loop; `last_refill_at_ns` tolerates benign raciness.
     post_auth_bucket: PostAuthBucket,
+    /// Minted non-secret per-session numeric handle (operational-views D3,
+    /// R4b-1). The bearer token and its prefix are credential material; this
+    /// handle is the operator-facing identity used by the activity view and
+    /// (later) cancel targets. Private: only the stores write it, under
+    /// publication control, before visibility. An atomic cell so a same-sid
+    /// replacement can inherit the predecessor's handle without rebuilding
+    /// the `Arc`.
+    session_handle: AtomicU64,
+    /// Shared per-session in-flight request counter (R4b-1 follow-up). `Arc`
+    /// so a same-bearer replacement INHERITS the live counter — swapped in
+    /// by `admit` under the occupied `by_sid` guard BEFORE publication, so
+    /// old-generation requests keep counting; RAII: `SessionRequestSlot`.
+    pub(super) in_flight_requests: Arc<AtomicUsize>,
 }
 
 /// Fixed-point token-bucket state — mirrors `rate_limit.rs`'s `BucketState`
@@ -255,6 +275,8 @@ impl Session {
                 micro_tokens: AtomicU64::new(PostAuthBucket::capacity()),
                 last_refill_at_ns: AtomicU64::new(now_ns),
             },
+            session_handle: AtomicU64::new(UNSTAMPED_HANDLE),
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -306,6 +328,23 @@ impl Session {
     /// guardrail we want on destructive DDL.
     pub fn hmac_key(&self) -> [u8; 32] {
         Self::derive_hmac_key(&self.session_id)
+    }
+
+    /// The minted non-secret session handle (operational-views D3). Never
+    /// derived from, and never to be confused with, the 32-byte bearer token
+    /// or its 8-byte prefix — those are credentials and must not appear in
+    /// any activity row, log line or metric label. Uniqueness, monotonicity
+    /// and same-bearer replacement inheritance come from the minter and
+    /// `admit` (see [`NEXT_ACTIVITY_HANDLE`]).
+    pub fn activity_handle(&self) -> u64 {
+        self.session_handle.load(Ordering::Relaxed)
+    }
+
+    /// Store-side only: stamp the handle before the generation is published.
+    /// Shared by [`SessionStore`] and `TokenSessionStore` (same `pub(super)`
+    /// helper set, `state/session.rs`).
+    pub(super) fn stamp_handle(&self, handle: u64) {
+        self.session_handle.store(handle, Ordering::Relaxed);
     }
 
     /// Update `last_activity_ns` to current wall-clock.
@@ -447,6 +486,90 @@ type UserSlot = SmallVec<[(Sid, Arc<Session>); 16]>;
 /// Contention-model map: one shard guard per user hash (see `SessionStore`).
 type UserSlotMap = DashMap<[u8; 16], UserSlot, SessionIdHasher>;
 
+/// Process-wide minter for non-secret activity handles (R4b-1 D3), shared by
+/// `SessionStore` and `TokenSessionStore` so every stored session carries a
+/// unique operator-facing identity: handles are strictly increasing (starts
+/// at 1; 0 is [`UNSTAMPED_HANDLE`]), with gaps from rejected admissions —
+/// uniqueness/monotonicity unaffected. A same-sid replacement inherits its
+/// predecessor's handle instead of minting (`admit`), so an activity row
+/// keyed by the handle survives the swap.
+static NEXT_ACTIVITY_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+pub(super) fn mint_activity_handle() -> u64 {
+    NEXT_ACTIVITY_HANDLE.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Shard count of the lock-free activity projection (R4b-1): sid-hash keyed
+/// `ArcSwap` RCU slabs, each holding the live `Arc<Session>` generations whose
+/// sid hashes into it. Writers rebuild a slab (rcu) per mutation (see
+/// `projection_update` for the guard timing); readers take one atomic load
+/// per shard and clone `Arc`s — never a map guard, no new lock.
+const ACTIVITY_PROJECTION_SHARDS: usize = 16;
+type ActivityShard = ArcSwap<Vec<Arc<Session>>>;
+pub(super) type ActivityProjection = Vec<ActivityShard>;
+
+fn projection_shard_of(sid: &Sid) -> usize {
+    (SessionIdHasher::default().hash_one(sid) as usize) % ACTIVITY_PROJECTION_SHARDS
+}
+
+/// Projection RCU step: drop every entry ptr_eq to `gone`, then ensure
+/// `keep` is present exactly once (presence check = upsert restore path).
+///
+/// TIMING: publishes (`entry.insert` / `admit`'s vacant claim) run while the
+/// primary-map shard write guard is held, but a REMOVAL step may run after
+/// that guard is released (`DashMap::remove`/`remove_if` give no guard to
+/// piggyback on). That is safe because the update only ever drops the exact
+/// `Arc` generation passed as `gone` (ptr_eq) — a same-sid reinsert is
+/// always a DIFFERENT generation (fresh mint), and the single reinsertion
+/// of a prior generation (the `admit` rollback restore) happens under the
+/// primary entry guard with the ptr_eq check preserved, then arrives here
+/// as `keep`. Same-sid steps are ordered by the `rcu` retry loop on the
+/// shared slab, so a stale removal can never resurrect or duplicate an
+/// entry.
+pub(super) fn projection_update(
+    projection: &ActivityProjection,
+    sid: &Sid,
+    gone: Option<&Arc<Session>>,
+    keep: Option<&Arc<Session>>,
+) {
+    let shard = &projection[projection_shard_of(sid)];
+    shard.rcu(|list| {
+        let mut next: Vec<Arc<Session>> = list
+            .iter()
+            .filter(|s| !gone.is_some_and(|g| Arc::ptr_eq(s, g)))
+            .cloned()
+            .collect();
+        if let Some(k) = keep {
+            if !next.iter().any(|s| Arc::ptr_eq(s, k)) {
+                next.push(Arc::clone(k));
+            }
+        }
+        next
+    });
+}
+
+/// Lock-free copy-out of the projection: one atomic load per shard, `Arc`
+/// clones only. Momentarily torn across shards (D4) — consumers treat it as a
+/// sample, not a transactionally consistent cut.
+pub(super) fn projection_snapshot(projection: &ActivityProjection) -> Vec<Arc<Session>> {
+    let mut out = Vec::new();
+    for shard in projection {
+        // Named guard binding: the temporary `Guard` must outlive the
+        // iterator (a `.flat_map(|s| s.load().iter()...)` chain would
+        // borrow it inside the expression and fail E0515).
+        let guard = shard.load();
+        out.extend(guard.iter().cloned());
+    }
+    out
+}
+
+pub(super) fn new_activity_projection() -> ActivityProjection {
+    (0..ACTIVITY_PROJECTION_SHARDS)
+        .map(|_| ArcSwap::from_pointee(Vec::new()))
+        .collect()
+}
+
 #[derive(Debug)]
 /// Active sessions indexed by session ID (routing) plus a per-user
 /// membership index (cap accounting).
@@ -462,6 +585,15 @@ pub struct SessionStore {
     /// Lock order: `admit` takes the `by_user` guard FIRST, then a single
     /// `by_sid` guard under it — never the reverse (see `admit`'s doc).
     by_user: UserSlotMap,
+    /// Replacement rollback restores the predecessor instead of removing —
+    /// also no counter change. See `admit`/`remove`/`gc_expired`.
+    activity_len: AtomicUsize,
+    /// Lock-free projection of `by_sid` for the activity view: sharded
+    /// `ArcSwap` RCU slabs keyed by sid hash (see [`projection_update`] /
+    /// [`projection_snapshot`]). Publishes are rebuilt under the `by_sid`
+    /// shard write guard; removals are rebuilt right after their guard is
+    /// released (ptr_eq keeps that safe — see `projection_update`).
+    activity_projection: ActivityProjection,
 }
 
 impl Default for SessionStore {
@@ -476,6 +608,8 @@ impl SessionStore {
         Self {
             by_sid: DashMap::with_hasher(SessionIdHasher::default()),
             by_user: DashMap::with_hasher(SessionIdHasher::default()),
+            activity_len: AtomicUsize::new(0),
+            activity_projection: new_activity_projection(),
         }
     }
 
@@ -515,7 +649,7 @@ impl SessionStore {
     ) -> Admission {
         session.session_id = session_id;
         let user_id = session.user_id;
-        let arc = Arc::new(session);
+        let mut arc = Arc::new(session);
 
         // by_user guard: all cap accounting for this user happens under it.
         let mut slot = self.by_user.entry(user_id).or_default();
@@ -569,15 +703,40 @@ impl SessionStore {
 
         // 3. Claim the sid atomically in by_sid (a foreign user's sid is never
         //    stolen). `prev` lets a later rejection restore the old binding.
+        //    Handle stamping (D3) happens HERE, under the shard write guard,
+        //    BEFORE publication, so no reader can observe an un-stamped
+        //    generation: vacant => mint a fresh monotonic handle; occupied
+        //    same-user => inherit the predecessor's handle (same bearer =
+        //    same session; see `Session::activity_handle` for the resume
+        //    justification). Mirror accounting: only a NEW sid (+1) changes
+        //    the count; an in-place swap does not. The projection slab is
+        //    rebuilt under this same guard (push / old->new swap).
         let prev = match self.by_sid.entry(session_id) {
             dashmap::mapref::entry::Entry::Occupied(mut occ) => {
                 if occ.get().user_id != user_id {
                     return Admission::Rejected(AdmitReject::SidConflict);
                 }
-                // Same user's replacement: swap the Arc in place.
-                Some(occ.insert(Arc::clone(&arc)))
+                let inherited = occ.get().session_handle.load(Ordering::Relaxed);
+                arc.stamp_handle(inherited);
+                // Inherit the predecessor's shared in-flight counter: `arc`
+                // is exclusive (count 1); swap BEFORE publication.
+                if let Some(s) = Arc::get_mut(&mut arc) {
+                    s.in_flight_requests = Arc::clone(&occ.get().in_flight_requests);
+                }
+                let old = occ.insert(Arc::clone(&arc));
+                projection_update(
+                    &self.activity_projection,
+                    &session_id,
+                    Some(&old),
+                    Some(&arc),
+                );
+                Some(old)
             }
             dashmap::mapref::entry::Entry::Vacant(vac) => {
+                let minted = mint_activity_handle();
+                arc.stamp_handle(minted);
+                self.activity_len.fetch_add(1, Ordering::Relaxed);
+                projection_update(&self.activity_projection, &session_id, None, Some(&arc));
                 vac.insert(Arc::clone(&arc));
                 None
             }
@@ -599,6 +758,9 @@ impl SessionStore {
                         >= ACTIVE_WINDOW_NS
             });
             if removed.is_some() {
+                // Successful removal of a live sid: mirror -1, projection out.
+                self.activity_len.fetch_sub(1, Ordering::Relaxed);
+                projection_update(&self.activity_projection, vk, Some(va), None);
                 slot.retain(|(k, _)| k != vk);
                 evicted.push(*vk);
             } else if self
@@ -609,11 +771,50 @@ impl SessionStore {
                 // Still bound => it turned active: undo the claim and reject.
                 match prev {
                     Some(old) => {
-                        self.by_sid.insert(session_id, old);
+                        // Guarded restore: only if the primary still holds
+                        // exactly OUR generation (`arc`, ptr_eq) do we swap
+                        // in `old` under this entry guard and rebuild the
+                        // slab. A racing remove (vacant now) or a foreign
+                        // re-admission (occupied, different generation)
+                        // leaves BOTH registries untouched. The update drops
+                        // exactly `arc` and upserts `old` (presence-checked).
+                        match self.by_sid.entry(session_id) {
+                            dashmap::mapref::entry::Entry::Occupied(mut occ)
+                                if Arc::ptr_eq(occ.get(), &arc) =>
+                            {
+                                occ.insert(Arc::clone(&old));
+                                projection_update(
+                                    &self.activity_projection,
+                                    &session_id,
+                                    Some(&arc),
+                                    Some(&old),
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                     None => {
-                        self.by_sid
-                            .remove_if(&session_id, |_, v| Arc::ptr_eq(v, &arc));
+                        // Rollback of a fresh claim: undo its mirror +1 and
+                        // projection entry iff the removal actually happened.
+                        // Between the claim and this rollback no third party
+                        // could have re-inserted this CSPRNG sid for another
+                        // user AND had it observed by our ptr_eq check, so
+                        // `Some` here is exactly our own generation; a stale
+                        // concurrent remove already dropped the projection
+                        // entry via its own ptr_eq step.
+                        if self
+                            .by_sid
+                            .remove_if(&session_id, |_, v| Arc::ptr_eq(v, &arc))
+                            .is_some()
+                        {
+                            self.activity_len.fetch_sub(1, Ordering::Relaxed);
+                            projection_update(
+                                &self.activity_projection,
+                                &session_id,
+                                Some(&arc),
+                                None,
+                            );
+                        }
                     }
                 }
                 return Admission::Rejected(AdmitReject::AllActive);
@@ -679,6 +880,11 @@ impl SessionStore {
     /// admit that replaced the sid cannot drop the replacement generation.
     pub fn remove(&self, sid: &Sid) -> Option<Arc<Session>> {
         let (_, v) = self.by_sid.remove(sid)?;
+        // Successful removal: mirror -1, projection out (ptr_eq against the
+        // generation actually removed — a stale removal cannot delete a
+        // replacement's projection entry).
+        self.activity_len.fetch_sub(1, Ordering::Relaxed);
+        projection_update(&self.activity_projection, sid, Some(&v), None);
         let user = v.user_id;
         self.remove_from_user_slot(user, sid, &v);
         Some(v)
@@ -700,8 +906,15 @@ impl SessionStore {
     }
 
     /// Number of currently-live sessions.
+    ///
+    /// O(1): reads the mirror atomics maintained at every `by_sid`
+    /// mutation (see [`Self::activity_len`] field doc for the accounting —
+    /// increment under the vacant shard guard before visibility, decrement
+    /// on every successful removal, no change on replacement or restore),
+    /// instead of `DashMap::len`'s per-shard guard sweep. Mirrors the gauge
+    /// source required by the R4b activity view.
     pub fn len(&self) -> usize {
-        self.by_sid.len()
+        self.activity_len.load(Ordering::Relaxed)
     }
 
     /// Whether the store is empty.
@@ -737,6 +950,8 @@ impl SessionStore {
                 .is_some();
             if gone {
                 removed += 1;
+                self.activity_len.fetch_sub(1, Ordering::Relaxed);
+                projection_update(&self.activity_projection, &sid, Some(&gen), None);
                 let user = gen.user_id;
                 self.remove_from_user_slot(user, &sid, &gen);
             }
@@ -752,6 +967,20 @@ impl SessionStore {
             .get(user_id)
             .map(|slot| slot.iter().map(|(k, _)| *k).collect())
             .unwrap_or_default()
+    }
+
+    /// Copy-only activity snapshot of all live sessions (R4b-1, D1/D3):
+    /// one `Arc<Session>` per live generation, carrying the minted handle.
+    ///
+    /// LOCK-FREE: served from the sharded `ArcSwap` projection — only
+    /// atomic loads and `Arc` clones; no `by_sid` guard is taken. The
+    /// projection converges with the primary once in-flight mutations
+    /// quiesce (see `projection_update` for the publish/removal timing and
+    /// the ptr_eq argument); a snapshot may be torn ACROSS shards (D4).
+    /// Gauge balance: every push is paired with exactly one ptr_eq-guarded
+    /// drop, so after quiescence `activity_snapshot().len() == len()`.
+    pub fn activity_snapshot(&self) -> Vec<Arc<Session>> {
+        projection_snapshot(&self.activity_projection)
     }
 
     /// Number of sessions currently held for a user. Reads the per-user

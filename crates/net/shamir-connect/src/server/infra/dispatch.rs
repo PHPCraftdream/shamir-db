@@ -15,6 +15,16 @@
 //! The request loop stays lock-step (one request at a time per connection);
 //! this is preparation for future duplex multiplexing.
 
+//! ## Request id propagation (R4b-1)
+//!
+//! [`dispatch_request`] and [`dispatch_request_view`] forward the optional
+//! envelope `rid` to the handler through
+//! [`RequestHandler::handle_with_request_id`]. The default implementation
+//! delegates to [`RequestHandler::handle`], so existing handlers need no
+//! changes; rid-aware handlers (currently only the server db handler)
+//! override it. Callers that reach handlers without going through dispatch
+//! (native REST / direct) still invoke plain `handle` and observe no rid.
+
 use crate::common::envelope::{
     ErrorEnvelope, RequestEnvelope, RequestEnvelopeView, ResponseEnvelope,
 };
@@ -42,6 +52,22 @@ pub trait RequestHandler: Send + Sync {
         req: &'a [u8],
         conn: &'a ConnectionServices,
     ) -> HandlerFuture<'a>;
+
+    /// Rid-aware variant invoked by [`dispatch_request`] /
+    /// [`dispatch_request_view`] with the optional envelope `rid` (R4b-1).
+    ///
+    /// Default: delegates to [`RequestHandler::handle`], so rid-agnostic
+    /// handlers need no changes. Override only if the handler needs the
+    /// client-side correlation id (e.g. activity logging).
+    fn handle_with_request_id<'a>(
+        &'a self,
+        session: &'a Session,
+        req: &'a [u8],
+        conn: &'a ConnectionServices,
+        _request_id: Option<u32>,
+    ) -> HandlerFuture<'a> {
+        self.handle(session, req, conn)
+    }
 }
 
 /// RV-CONNECT-2A423D73: handler `Err(String)` diagnostics (e.g. response
@@ -120,7 +146,12 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
     }
 
     // Application-level dispatch — async, no blocking bridge needed.
-    match handler.handle(&session, &envelope.req, conn).await {
+    // The optional envelope rid is forwarded to the handler (R4b-1);
+    // rid-agnostic handlers via the default `handle` delegation.
+    match handler
+        .handle_with_request_id(&session, &envelope.req, conn, envelope.request_id)
+        .await
+    {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             envelope.request_id,
             res_bytes,
@@ -178,7 +209,11 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
     }
 
     // Application-level dispatch — async, no blocking bridge needed.
-    match handler.handle(&session, view.req, conn).await {
+    // Same rid forwarding as [`dispatch_request`] (R4b-1).
+    match handler
+        .handle_with_request_id(&session, view.req, conn, view.request_id)
+        .await
+    {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             view.request_id,
             res_bytes,

@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use scc::{Guard, HashIndex};
 use shamir_query_types::read::ReadQuery;
 use shamir_tx::SnapshotGuard;
 use shamir_types::types::record_id::RecordId;
@@ -88,6 +89,14 @@ pub enum CursorRegistryError {
     /// rejected). Mirrors `TxRegistryError::TxOwnershipMismatch`.
     #[error("cursor does not belong to this session")]
     CursorOwnershipMismatch,
+    /// R4b-1: the id is ALREADY open — ids are minted monotonically by
+    /// `next_cursor_id()` in production, so an occupied slot means a caller
+    /// bug (or a test reusing a live id), and the registry now REJECTS it
+    /// instead of silently overwriting (an overwrite would orphan the
+    /// previous cursor's mirror row + count contribution). Normal id reuse
+    /// AFTER a `remove`/reap is unaffected — the slot is vacant then.
+    #[error("cursor id already open")]
+    CursorIdAlreadyOpen,
 }
 
 /// CR-A4 (#764): which coordinate system a cursor's bookmark resumes from,
@@ -220,6 +229,55 @@ pub struct CursorState {
     pub after_id: Option<RecordId>,
 }
 
+/// R4b-1 activity metadata, stamped onto a [`Cursor`] at construction (see
+/// [`Cursor::with_activity`]) and mirrored into [`CursorRegistry::activity`]
+/// (as an `Arc` — the reader clones Arcs, never Strings) at every registry
+/// lifecycle linearization point.
+///
+/// PRIVACY (brief D3/D4): ids, actor, db, TABLE NAME, pinned snapshot
+/// version and a monotonic creation baseline ONLY — never a bearer token,
+/// its 8-byte prefix, query literals, filter values or row data. This
+/// struct is the entire data surface of the cursor activity view.
+/// `pub(crate)`: the projection stays inside the server engine — the paging
+/// worker (`db_handler::repo_admin::activity::list`) reads it via
+/// `activity_snapshot`.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorActivity {
+    /// Minted non-secret session handle (`Session::activity_handle`, D3) —
+    /// never the 32-byte sid, and nothing derived from it.
+    pub session_handle: u64,
+    /// STABLE directory-minted user id (16 bytes) — survives a dropped-and-
+    /// recreated account with a reused name, so a later `scope: Own` filter
+    /// keys on identity, not a mutable username. Never a credential.
+    pub user_id: [u8; 16],
+    /// Owning user's username (post-NFC display name; safe by D3).
+    pub username: String,
+    /// Database the cursor reads.
+    pub db: String,
+    /// Table NAME the cursor scans — a name only, never a query literal.
+    pub table: String,
+    /// MVCC version the cursor pinned at creation.
+    pub pinned_version: u64,
+    /// Monotonic construction baseline (the same `Instant::now()` family as
+    /// `Cursor::created_at`) — `elapsed` for a row is `created.elapsed()` at
+    /// scan time. Deliberately NOT a unix wall-clock (monotonic cannot go
+    /// backwards under NTP/leap adjustments).
+    pub created: Instant,
+}
+
+/// One entry of [`CursorRegistry::activity_snapshot`]: the mirror's owned
+/// metadata behind an `Arc` plus its cursor id. Cheap to collect (one Arc
+/// clone per row, zero String clones); the paging worker sorts by
+/// `cursor_id`, renders at most `limit` rows, and derives `elapsed` as
+/// `meta.created.elapsed()` — this module deliberately does NOT pre-sort
+/// or pre-render every row.
+/// `pub(crate)`: engine-internal, same reasoning as [`CursorActivity`].
+#[derive(Clone, Debug)]
+pub(crate) struct CursorActivitySnapshot {
+    pub cursor_id: u64,
+    pub meta: Arc<CursorActivity>,
+}
+
 /// A live server-side result cursor parked between `FetchNext` round-trips.
 pub struct Cursor {
     /// Mutable pagination bookmark. `tokio::sync::Mutex` because
@@ -254,6 +312,12 @@ pub struct Cursor {
     /// by [`FetchLease`]'s `Drop`. See that method's doc comment for the
     /// ordering argument this whole mechanism rests on.
     in_flight: AtomicU32,
+    /// R4b-1: safe activity metadata (see [`CursorActivity`]) stamped by the
+    /// `CreateCursor` handler via [`Cursor::with_activity`]. `None` on
+    /// cursors built without it (existing constructor callers, most tests) —
+    /// the registry mirrors it only when present, so existing call sites
+    /// keep compiling and simply produce no activity row.
+    activity: Option<CursorActivity>,
 }
 
 impl Cursor {
@@ -291,7 +355,28 @@ impl Cursor {
             created_at: Instant::now(),
             last_activity_nanos: AtomicU64::new(0),
             in_flight: AtomicU32::new(0),
+            activity: None,
         }
+    }
+
+    /// R4b-1: attach safe activity metadata at construction time (builder
+    /// style, called only by `db_handler::cursor_handlers::create_cursor` —
+    /// existing `Cursor::new` callers are untouched). Must be called BEFORE
+    /// [`CursorRegistry::register`] so the mirror is populated inside
+    /// register (see `register`'s doc comment for the exact lock scope:
+    /// the `scc` projection write happens under `open`'s existing shard
+    /// write lock plus `HashIndex`'s own internal bucket lock — no
+    /// second mutation pass, but not literally lock-free either).
+    #[must_use]
+    pub(crate) fn with_activity(mut self, activity: CursorActivity) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
+    /// The attached activity metadata, if any (read by the registry's
+    /// mirror-population step inside `register`).
+    pub(crate) fn activity(&self) -> Option<&CursorActivity> {
+        self.activity.as_ref()
     }
 
     /// The mutable pagination bookmark — lock it to run a `FetchNext`.
@@ -381,6 +466,19 @@ pub struct CursorRegistry {
     open: DashMap<u64, Arc<Cursor>, THasher>,
     by_session: DashMap<[u8; 32], Arc<AtomicUsize>, THasher>,
     reaped_tombstones: DashMap<u64, Instant, THasher>,
+    /// R4b-1: non-authoritative lock-free-reader projection of safe cursor
+    /// metadata keyed by cursor id (see [`CursorActivity`]). Written ONLY at
+    /// the existing lifecycle linearization points (`register`, `remove`,
+    /// `sweep_and_reap`), so no ordering is added or changed for
+    /// `get_owned_for_fetch`/`reap`; read ONLY via `HashIndex::iter` under
+    /// an epoch `Guard`, which takes no lock a writer takes (unlike a
+    /// `DashMap::iter`, which holds shard read locks — the reason scc's
+    /// `HashIndex` was chosen per the brief).
+    activity: HashIndex<u64, Arc<CursorActivity>, THasher>,
+    /// R4b-1: O(1) count mirror next to `open`. `len()`/`is_empty` read
+    /// THIS, never `DashMap::len()` — the gauge feed per the brief (mirrors,
+    /// no scan).
+    count: AtomicUsize,
 }
 
 /// How long a reaped-for-idle cursor id stays tombstoned (so a `FetchNext`
@@ -402,6 +500,19 @@ impl CursorRegistry {
     /// the just-built `cursor` (and the `SnapshotGuard`/table handle it
     /// holds) is dropped — RAII release of the just-opened, unused
     /// resource — mirroring `TxRegistry::register`'s `TxAlreadyOpen` path.
+    ///
+    /// Writer locks taken by this method (in order):
+    /// 1. `by_session`'s shard write lock (`dashmap::entry`) for the
+    ///    session's counter, held across the cap CAS loop and dropped
+    ///    before the insert below (see the inline comment for the
+    ///    `free_session_slot` ordering argument).
+    /// 2. `open`'s shard write lock (`dashmap::entry` vacant guard) for
+    ///    `cursor_id`, held while the activity projection is written via
+    ///    `HashIndex::insert_sync` — that call takes AND holds `HashIndex`'s
+    ///    own internal bucket lock for the key — and the count mirror is
+    ///    bumped. No NEW lock class is introduced (the projection write is
+    ///    nested inside a lock `insert` already took), but it is a second,
+    ///    real lock acquisition, not a lock-free append.
     pub fn register(
         &self,
         cursor_id: u64,
@@ -458,11 +569,53 @@ impl CursorRegistry {
         drop(slot);
 
         let arc = Arc::new(cursor);
-        self.open.insert(cursor_id, Arc::clone(&arc));
-        // Clear any stale tombstone for a reused id (ids are u64-minted
-        // monotonically by the caller in production; tests may reuse small
-        // ids, so keep this registry-side invariant tight regardless).
-        self.reaped_tombstones.remove(&cursor_id);
+        // R4b-1: populate the activity mirror and the count mirror BEFORE
+        // the authoritative entry becomes visible, UNDER `open`'s shard
+        // write lock (the `entry()` vacant guard). `remove`/`sweep_and_reap`
+        // tear the mirror + count down under the SAME shard lock (see their
+        // doc comments), so the pair (publish, mirror+count) is atomic per
+        // shard: a teardown for this id can only observe the entry strictly
+        // after its mirror row and count contribution exist — no ghost
+        // mirror row for an already-removed cursor, no mirror-count
+        // underflow. No lock class is added: this is the lock `insert`
+        // already took, held marginally longer (two atomic ops + one
+        // `HashIndex::insert_sync`, none of which block on external I/O).
+        match self.open.entry(cursor_id) {
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                if let Some(a) = arc.activity() {
+                    // `insert_sync` REJECTS a duplicate key (Err) instead of
+                    // overwriting — defense in depth alongside the `Vacant`
+                    // match above: an id that somehow already carries a
+                    // mirror row belongs to a cursor this call must not
+                    // clobber (see `CursorIdAlreadyOpen`).
+                    if self
+                        .activity
+                        .insert_sync(cursor_id, Arc::new(a.clone()))
+                        .is_err()
+                    {
+                        self.free_session_slot(&arc.owner_sid);
+                        return Err(CursorRegistryError::CursorIdAlreadyOpen);
+                    }
+                }
+                self.count.fetch_add(1, Ordering::AcqRel);
+                // Clear any stale tombstone for a reused id (ids are u64-
+                // minted monotonically by the caller in production; tests
+                // may reuse small ids, so keep this registry-side invariant
+                // tight regardless).
+                self.reaped_tombstones.remove(&cursor_id);
+                vacant.insert(Arc::clone(&arc));
+            }
+            // Deliberate behavior change (R4b-1): the previous
+            // `self.open.insert(...)` silently OVERWROTE an occupied id,
+            // orphaning the old cursor's mirror row, count contribution and
+            // session slot. Ids are minted monotonically in production, so
+            // an Occupied slot is a caller bug — reject it closed. Normal
+            // id reuse AFTER `remove`/reap takes the Vacant arm unchanged.
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                self.free_session_slot(&arc.owner_sid);
+                return Err(CursorRegistryError::CursorIdAlreadyOpen);
+            }
+        }
         Ok(arc)
     }
 
@@ -557,7 +710,26 @@ impl CursorRegistry {
     /// Does NOT tombstone — a deliberate close is not an error condition a
     /// later fetch should be told "expired" about.
     pub fn remove(&self, cursor_id: u64) -> Option<Arc<Cursor>> {
-        let (_, arc) = self.open.remove(&cursor_id)?;
+        // R4b-1: `remove_if` runs its predicate under the SAME shard write
+        // lock `register`'s vacant-entry guard takes, so the mirror removal
+        // + count decrement are atomic relative to register's
+        // publish-under-guard: a decrement can only happen for an entry
+        // that is CURRENTLY visible (register's mirror row + count
+        // contribution are always made before publication — see
+        // `register`'s doc comment), so there is no interleaving where the
+        // mirror or the count could lose an entry that was never added
+        // (underflow) or keep one whose authoritative entry is gone (ghost
+        // row). If the entry is absent (already removed, or register has
+        // not published yet), the predicate never runs and nothing is
+        // torn down.
+        let mut removed: Option<Arc<Cursor>> = None;
+        self.open.remove_if(&cursor_id, |_, arc| {
+            self.activity.remove_sync(&cursor_id);
+            self.count.fetch_sub(1, Ordering::AcqRel);
+            removed = Some(Arc::clone(arc));
+            true
+        });
+        let arc = removed?;
         self.free_session_slot(&arc.owner_sid);
         Some(arc)
     }
@@ -674,6 +846,15 @@ impl CursorRegistry {
             if expired {
                 reaped_owners.push(cursor.owner_sid);
                 reaped_ids.push(*id);
+                // R4b-1: mirror teardown + count decrement INSIDE the
+                // retain predicate — i.e. under the same per-shard write
+                // lock that removes the authoritative entry — so a
+                // concurrent `register` (vacant guard) is fully serialized
+                // with this removal for every key on this shard: the
+                // reaper never deletes a mirror row a register has not
+                // finished contributing, and never misses one it has.
+                self.activity.remove_sync(id);
+                self.count.fetch_sub(1, Ordering::AcqRel);
             }
             !expired // keep everything that is NOT being reaped
         });
@@ -695,14 +876,44 @@ impl CursorRegistry {
             .retain(|_, inserted_at| now.saturating_duration_since(*inserted_at) < TOMBSTONE_TTL);
     }
 
-    /// Number of open cursors.
+    /// Number of open cursors — O(1), reads the R4b-1 [`AtomicUsize`]
+    /// mirror (`count`), never `DashMap::len()`. This is what the activity
+    /// gauges read.
     pub fn len(&self) -> usize {
-        self.open.len()
+        self.count.load(Ordering::Acquire)
     }
 
-    /// Whether no cursors are open.
+    /// Whether no cursors are open — mirror-backed like [`Self::len`].
     pub fn is_empty(&self) -> bool {
-        self.open.is_empty()
+        self.len() == 0
+    }
+
+    /// R4b-1 reader: every open cursor's safe activity metadata as
+    /// `(cursor_id, Arc<CursorActivity>)` pairs (see
+    /// [`CursorActivitySnapshot`]). INTENTIONALLY cheap and unsorted:
+    /// one `Arc` clone per row, zero `String` clones, NO global sort — the
+    /// paging worker sorts by `cursor_id`, renders at
+    /// most `limit` rows and derives `elapsed` as `meta.created.elapsed()`.
+    ///
+    /// Lock-free: iterates the scc `HashIndex` mirror under a fresh epoch
+    /// `Guard` — the reader takes NO lock that any lifecycle writer
+    /// (`register` / `remove` / `sweep_and_reap`) takes, unlike a
+    /// `DashMap::iter` which would hold shard read locks. A momentarily
+    /// torn snapshot (a cursor registered/removed mid-scan) is acceptable
+    /// and documented per the brief's D4. No bearer material, query
+    /// literal or row data can appear in a row by construction — the
+    /// mirror's value type carries only the safe fields.
+    /// `pub(crate)`: engine-internal — read by the paging worker
+    /// (`db_handler::repo_admin::activity::list`).
+    pub(crate) fn activity_snapshot(&self) -> Vec<CursorActivitySnapshot> {
+        let guard = Guard::new();
+        self.activity
+            .iter(&guard)
+            .map(|(cursor_id, meta)| CursorActivitySnapshot {
+                cursor_id: *cursor_id,
+                meta: Arc::clone(meta),
+            })
+            .collect()
     }
 
     /// Live open-cursor count for a session (0 if the session has never

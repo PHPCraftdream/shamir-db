@@ -47,6 +47,7 @@ fn borrowed_ancestors_match_independent_contract_for_every_variant() {
         ),
         (namespace.clone(), vec![root.clone()]),
         (ResourcePath::WasmCompiler, vec![root.clone()]),
+        (ResourcePath::ActivityView, vec![root.clone()]),
         (folder(&[]), vec![namespace.clone(), root.clone()]),
         (folder(&["a"]), vec![namespace.clone(), root.clone()]),
         (
@@ -181,6 +182,7 @@ fn borrowed_display_matches_owned_for_all_variants_and_controls() {
         },
         ResourcePathRef::FunctionNamespace,
         ResourcePathRef::WasmCompiler,
+        ResourcePathRef::ActivityView,
         ResourcePathRef::FunctionFolder { path: &parts },
         ResourcePathRef::FunctionFolder { path: &empty },
         ResourcePathRef::FunctionFolderPrefix { prefix: value },

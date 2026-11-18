@@ -7,7 +7,7 @@ use shamir_query_types::wire::CursorId;
 use shamir_types::types::common::{new_map, TMap};
 
 use crate::byte_budget::stash_serialized_response;
-use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
+use crate::cursor_registry::{Cursor, CursorActivity, CursorRegistryError, PaginationMode};
 
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
@@ -451,7 +451,21 @@ impl ShamirDbHandler {
             session.session_id,
             db_name.to_string(),
             repo_name,
-        );
+        )
+        // R4b-1: stamp safe activity metadata (minted session handle,
+        // username, db, TABLE NAME, pinned version, creation unix-ns) at
+        // construction so `CursorRegistry::register` mirrors it inside its
+        // existing linearization point. Safe fields only — no bearer token,
+        // prefix, query literal or row data ever enters `CursorActivity`.
+        .with_activity(CursorActivity {
+            session_handle: session.activity_handle(),
+            user_id: session.user_id,
+            username: session.username.clone(),
+            db: db_name.to_string(),
+            table: table_name,
+            pinned_version,
+            created: std::time::Instant::now(),
+        });
         {
             let mut state = cursor.state().lock().await;
             state.seek_key = seek_key;

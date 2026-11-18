@@ -42,7 +42,7 @@
 //! - `write`    — Insert / Update / Upsert / Delete + the `Doc` value builder.
 //! - `batch`    — `Batch` + typed `Handle` dependency references.
 //! - `cursor`   — `DbRequest::{CreateCursor,FetchNext,CancelCursor}` constructors (FG-5a).
-//! - `token_admin` — typed API-token administration request builders (a narrow top-level `DbRequest` exception).
+//! - `admin`   — grouped top-level administration builders (former `token_admin`, kept alive as a re-export; a narrow `DbRequest`/`BatchOp` exception), including the R4b activity-view listing.
 //! - `response` — `BatchResponse` extraction helpers.
 //! - `macros`   — `doc!` / `vals!` declarative macros; `filter!` / `q!` DSL macros.
 
@@ -72,6 +72,7 @@ pub mod write;
 mod read;
 pub use batch::visibility;
 pub use read::{cursor, filter, query, select, val};
+pub use wire::admin::list_activity;
 pub use wire::response;
 pub use wire::schema_migration::{
     application_schema_plan, application_schema_status, apply_application_schema_migration,

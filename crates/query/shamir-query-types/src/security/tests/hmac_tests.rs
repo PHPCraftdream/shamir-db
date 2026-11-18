@@ -1,3 +1,4 @@
+use crate::admin::activity::{ActivityKind, ActivityScope, ListActivityReq};
 use crate::admin::{CreateFunctionOp, DropDbOp, DropTableOp, GroupRef, ResourceRef};
 use crate::auth::SecretString;
 use crate::batch::BatchOp;
@@ -910,6 +911,26 @@ fn new_function_ops_need_no_hmac() {
         let op: BatchOp = serde_json::from_value(wire).unwrap();
         assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
     }
+}
+
+#[test]
+fn list_activity_is_not_hmac_gated() {
+    // R4b-1: the activity listing is read-only introspection of server-owned
+    // state — NotGated like every other read-only admin op, with no canonical
+    // v2 arm (nothing destructive to integrity-bind); the canonical encoder
+    // rejects it as unsupported. Built from the typed request DTO (the wire
+    // value it encodes is identical to the flat `list_activity` map).
+    let op = BatchOp::ListActivity(ListActivityReq {
+        scope: ActivityScope::All,
+        kind: ActivityKind::All,
+        limit: None,
+        continuation: None,
+    });
+    assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+    assert!(matches!(
+        canonical_batch_op("", &op),
+        Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
+    ));
 }
 
 #[test]

@@ -36,6 +36,7 @@ pub enum ResourcePathRef<'a> {
     },
     FunctionNamespace,
     WasmCompiler,
+    ActivityView,
     FunctionFolder {
         path: &'a [String],
     },
@@ -75,6 +76,7 @@ impl<'a> ResourcePathRef<'a> {
             } => ResourcePath::index(db, store, table, index),
             Self::FunctionNamespace => ResourcePath::FunctionNamespace,
             Self::WasmCompiler => ResourcePath::WasmCompiler,
+            Self::ActivityView => ResourcePath::ActivityView,
             Self::FunctionFolder { path } => ResourcePath::function_folder(path.to_vec()),
             Self::FunctionFolderPrefix { prefix } => {
                 ResourcePath::function_folder(prefix.split('/').map(str::to_owned).collect())
@@ -92,6 +94,7 @@ impl<'a> ResourcePathRef<'a> {
             Self::Database { .. }
             | Self::FunctionNamespace
             | Self::WasmCompiler
+            | Self::ActivityView
             | Self::User { .. }
             | Self::Group { .. } => Some(Self::Root),
             Self::Store { db, .. } => Some(Self::Database { db }),
@@ -155,7 +158,8 @@ impl PartialEq for ResourcePathRef<'_> {
         match (*self, *other) {
             (Root, Root)
             | (FunctionNamespace, FunctionNamespace)
-            | (WasmCompiler, WasmCompiler) => true,
+            | (WasmCompiler, WasmCompiler)
+            | (ActivityView, ActivityView) => true,
             (Database { db: a }, Database { db: b }) => a == b,
             (Store { db: a, store: b }, Store { db: c, store: d }) => (a, b) == (c, d),
             (
@@ -250,6 +254,7 @@ impl Hash for ResourcePathRef<'_> {
             }
             FunctionNamespace => 6u8.hash(state),
             WasmCompiler => 7u8.hash(state),
+            ActivityView => 12u8.hash(state),
             FunctionFolder { path } => {
                 8u8.hash(state);
                 for part in path {
@@ -303,6 +308,7 @@ impl fmt::Display for ResourcePathRef<'_> {
             } => write!(f, "db://{db}/{store}/{table}.idx/{index}"),
             FunctionNamespace => f.write_str("fn://"),
             WasmCompiler => f.write_str("compiler://"),
+            ActivityView => f.write_str("activity://"),
             FunctionFolder { path } => {
                 f.write_str("fn://")?;
                 for (i, segment) in path.iter().enumerate() {

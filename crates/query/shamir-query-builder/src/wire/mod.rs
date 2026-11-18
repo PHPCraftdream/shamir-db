@@ -21,9 +21,15 @@
 mod error;
 mod to_wire;
 
+pub mod admin;
 pub mod response;
 pub mod schema_migration;
-pub mod token_admin;
+
+/// Stable path: the former `token_admin` module was grouped under `admin`
+/// (R4b step 1); the old public path keeps resolving through this re-export
+/// of the unchanged submodule (it does not re-expose `list_activity`).
+#[doc(inline)]
+pub use admin::token_admin;
 
 pub use error::WireError;
 pub use to_wire::ToWire;

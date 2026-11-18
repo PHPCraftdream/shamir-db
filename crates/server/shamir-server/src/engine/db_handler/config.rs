@@ -35,6 +35,12 @@ pub struct QueryLimitsCap {
     pub max_total_work: u64,
     pub max_page_size: u64,
     pub max_offset: u64,
+    /// R4b-1 follow-up: per-session concurrent in-flight request cap (see
+    /// `crate::config::QueryLimitsConfig::max_in_flight_requests_per_session`).
+    /// The handler worker passes this to `Session::try_acquire_request_slot`
+    /// before admitting a batch; `0` admits nothing (does not disable).
+    /// Tests that don't care use `UNLIMITED`.
+    pub max_in_flight_requests_per_session: usize,
 }
 
 impl QueryLimitsCap {
@@ -51,6 +57,7 @@ impl QueryLimitsCap {
         max_total_work: u64::MAX,
         max_page_size: u64::MAX,
         max_offset: u64::MAX,
+        max_in_flight_requests_per_session: usize::MAX,
     };
 
     pub fn policy(&self) -> ExecPolicy {
@@ -87,6 +94,7 @@ impl From<&crate::config::QueryLimitsConfig> for QueryLimitsCap {
             max_total_work: config.max_total_work,
             max_page_size: config.max_page_size,
             max_offset: config.max_offset,
+            max_in_flight_requests_per_session: config.max_in_flight_requests_per_session,
         }
     }
 }

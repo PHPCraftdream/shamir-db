@@ -26,6 +26,17 @@ fn rv_types_65dde5b8_resource_path_wasm_compiler_is_distinct() {
         Some(ResourcePath::Root)
     );
 }
+
+#[test]
+fn rv_types_r4b_activity_view_is_distinct_global_singleton() {
+    assert_ne!(ResourcePath::ActivityView, ResourcePath::Root);
+    assert_ne!(ResourcePath::ActivityView, ResourcePath::WasmCompiler);
+    assert_eq!(
+        ResourcePath::ActivityView.parent(),
+        Some(ResourcePath::Root)
+    );
+    assert_eq!(ResourcePath::ActivityView.to_string(), "activity://");
+}
 #[test]
 fn rv_types_65dde5b8_owner_field_distinguishes_absent_from_system() {
     let absent = mpack!({});

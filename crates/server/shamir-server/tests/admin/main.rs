@@ -1,5 +1,7 @@
 //! Admin integration tests.
 
+#[path = "activity/mod.rs"]
+mod activity;
 #[path = "identity/auth_ok_hints_e2e.rs"]
 mod auth_ok_hints_e2e;
 #[path = "ops/backup_restore_e2e/mod.rs"]
