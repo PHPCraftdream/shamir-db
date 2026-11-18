@@ -5,6 +5,7 @@ mod settings;
 mod store;
 mod validators;
 
+pub use catalogue::load_replay_scopes;
 pub use catalogue::schema_migrations::{
     ensure_database_identity, DatabaseIdentity, FormatEpoch, JournalEvent, JournalEventKind,
     MigrationHistory, SchemaMigrationContext, SchemaMigrationStep, JOURNAL_EVENT_VERSION,

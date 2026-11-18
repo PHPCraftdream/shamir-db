@@ -220,8 +220,9 @@ impl SystemStore {
         Ok(())
     }
 
-    /// Load all repository records.
-    pub async fn load_repositories(&self) -> DbResult<Vec<QueryValue>> {
+    /// Load all raw repository records, with `path` in catalogue form
+    /// (as persisted, before any runtime resolution).
+    pub(super) async fn load_raw_repositories(&self) -> DbResult<Vec<QueryValue>> {
         #[cfg(test)]
         self.count_full_catalogue_load();
         let table = self.table(TABLE_REPOSITORIES).await?;
@@ -238,7 +239,17 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| self.resolve_repo_record(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
+            .collect())
+    }
+
+    /// Load all repository records.
+    pub async fn load_repositories(&self) -> DbResult<Vec<QueryValue>> {
+        Ok(self
+            .load_raw_repositories()
+            .await?
+            .into_iter()
+            .map(|r| self.resolve_repo_record(r))
             .collect())
     }
 
