@@ -320,7 +320,7 @@ fn ttl_ms_round_trips_exactly_through_the_streaming_dataset() {
 
 /// (d) Complete-target exact retry on the 64 MiB dataset is accepted
 /// idempotently, while a retry with a changed effective option
-/// (`--schema-only`) is refused by the receipt and leaves the published
+/// (`--as-db`) is refused by the receipt and leaves the published
 /// target intact. Extends — does not repeat — the small-input proofs in
 /// `logical_import/roundtrip.rs` by exercising receipt verification on a
 /// full-size published target.
@@ -347,7 +347,9 @@ fn streaming_target_accepts_exact_retry_and_refuses_changed_options() {
     assert!(first.published);
 
     let mut changed = import_args(&artifact, &target);
-    changed.schema_only = true;
+    // `--schema-only` would fail the preflight scope check first, so the
+    // changed effective option is the database name mapping.
+    changed.as_db = Some("renamed_app".to_string());
     let error = import_now(&changed, CancellationToken::new()).unwrap_err();
     assert!(matches!(error, LogicalImportError::Receipt(_)));
     assert!(target.join("shamir_db_meta.redb").exists(), "target intact");
