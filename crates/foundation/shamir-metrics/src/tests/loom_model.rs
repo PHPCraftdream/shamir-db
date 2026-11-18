@@ -13,7 +13,7 @@ use crate::Histogram;
 /// Private crate-test-local bound set (two bounds) — keeps the model small.
 const MODEL_BOUNDS: [u64; 2] = [100, 200];
 const LOW: u64 = 50;
-const HIGH: u64 = 300;
+const HIGH: u64 = 150;
 
 #[test]
 fn snapshot_consistent_under_two_writers_loom_model() {

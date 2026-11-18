@@ -251,14 +251,16 @@ fn upgrade_job(weak: &Weak<FunctionShared>, is_retry: bool) {
     };
     match compiled {
         Ok(slot) => {
-            shared.install(slot);
-            shared
-                .upgrade_state
-                .store(UpgradeState::Done as u8, Ordering::Release);
+            // Counted before the swap: whoever observes the optimized slot
+            // also observes the completed upgrade.
             engine
                 .tier_stats()
                 .upgrades_completed
                 .fetch_add(1, Ordering::Relaxed);
+            shared.install(slot);
+            shared
+                .upgrade_state
+                .store(UpgradeState::Done as u8, Ordering::Release);
             log::info!(
                 "wasm function upgraded to the optimized tier in {:?}, {} module bytes",
                 started.elapsed(),
