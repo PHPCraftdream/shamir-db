@@ -280,6 +280,10 @@ pub async fn engine_snapshot(
                         DbError::Validation(format!("cannot open table '{repo}/{table}': {e}"))
                     })?;
                 }
+                // Mirror the production drivers exactly: check_seed_catalogue
+                // opens every system-repository table read handle (settings,
+                // tables, databases, …), which the capture below reads.
+                owned.check_seed_catalogue().await?;
                 let reader = owned
                     .system_store()
                     .capture_logical_export(&instance, guard)
