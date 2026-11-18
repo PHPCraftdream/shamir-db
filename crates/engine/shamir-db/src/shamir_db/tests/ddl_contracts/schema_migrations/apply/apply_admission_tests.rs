@@ -1,7 +1,7 @@
 //! Server-side tests for the ADMISSION half of application-schema APPLY
 //! (R1c step 2b-3a): `Manage` authorization, durable-prefix refusals without
-//! writes, function/validator-family refusal, per-DDL-target authorization
-//! before intent, and the engine-side follower refusal.
+//! writes, per-DDL-target authorization before intent, and follower refusal.
+//! Function-family pre-intent coverage lives in the sibling function_family suite.
 
 use shamir_query_builder::ddl;
 use shamir_query_builder::SchemaMigration;
@@ -127,67 +127,6 @@ async fn wrong_predecessor_gap_checksum_mismatch_and_identity_mismatch_are_refus
         pristine,
         "admission refusals must write nothing"
     );
-}
-
-#[tokio::test]
-async fn function_and_validator_operations_are_refused_with_the_documented_reason() {
-    let (_dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
-
-    let function_body = SchemaMigration::new("alpha-fn", 1, "function family")
-        .op(ddl::create_function("greeter")
-            .source("fn greeter() {}")
-            .build()
-            .expect("typed create-function operation builds"))
-        .expect("typed create-function operation is admitted")
-        .build()
-        .expect("test migration body is valid");
-    let validator_body = SchemaMigration::new("alpha-vld", 1, "validator family")
-        .op(ddl::create_validator("positive")
-            .source("fn positive() -> bool { true }")
-            .build()
-            .expect("typed create-validator operation builds"))
-        .expect("typed create-validator operation is admitted")
-        .build()
-        .expect("test migration body is valid");
-
-    let pristine = journal_rows(&db).await;
-    for migration in [function_body, validator_body] {
-        let error = run_apply(
-            &db,
-            apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-        )
-        .await
-        .expect_err("step 2b-3a refuses function and validator operations");
-        // Documented reason, no stable code: the refusal message starts with
-        // the fixed documented `schema_migration_operation_deferred: `
-        // prefix and names the deferred family explicitly.
-        // Documented reason, no stable code: the refusal message carries the
-        // fixed documented `schema_migration_operation_deferred: ` prefix and
-        // names the deferred family explicitly. `BatchError` exposes only a
-        // `code()` accessor — no inner-message accessor — so the handler's own
-        // message is asserted via `contains` on its `Display`.
-        assert_eq!(
-            error.code(),
-            None,
-            "the deferred-family refusal carries no code: {error}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains("schema_migration_operation_deferred: "),
-            "documented refusal prefix must be present: {error}"
-        );
-        assert!(
-            message.contains("function and validator operations"),
-            "documented reason must be returned: {error}"
-        );
-    }
-    assert_eq!(
-        journal_rows(&db).await,
-        pristine,
-        "the family refusal writes nothing"
-    );
-    assert!(db.schema_migration_gate_generation("testdb").is_none());
 }
 
 #[tokio::test]

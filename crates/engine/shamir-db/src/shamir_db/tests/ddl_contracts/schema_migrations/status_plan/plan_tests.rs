@@ -8,6 +8,10 @@
 //! (`application_schema_plan`) and executed through the normal batch entry
 //! point (`execute` / `execute_as` / `to_request_via_msgpack`).
 
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use shamir_query_builder::application_schema_plan;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -519,23 +523,41 @@ fn non_admitted_operations_cannot_enter_a_plan_request() {
 
 #[tokio::test]
 async fn plan_lists_function_and_validator_warnings_and_registrations() {
-    let (_dir, db) = persistent_db().await;
-    db.create_db("testdb").await.unwrap();
-    let identity = db
-        .system_store()
-        .schema_migration_identity("testdb")
+    let limit = Duration::from_secs(30);
+    let (_dir, db) = tokio::time::timeout(limit, Box::pin(persistent_db()))
         .await
+        .expect("persistent database setup timed out");
+    tokio::time::timeout(limit, Box::pin(db.create_db("testdb")))
+        .await
+        .expect("database creation timed out")
         .unwrap();
+    let identity = tokio::time::timeout(
+        limit,
+        Box::pin(db.system_store().schema_migration_identity("testdb")),
+    )
+    .await
+    .expect("database identity lookup timed out")
+    .unwrap();
+    let wasm = STANDARD.encode(
+        wat::parse_str(
+            r#"(module
+                (memory (export "memory") 2)
+                (func (export "shamir_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0)
+            )"#,
+        )
+        .expect("fixture must be valid WAT"),
+    );
     let global = SchemaMigration::new("alpha-001", 1, "server-global registrations")
         .op(ddl::create_table("items_1").build())
         .expect("typed create-table operation is admitted")
         .op(ddl::create_function("pricing_fn")
-            .source("pub fn shamir_call() -> i64 { 1 }")
+            .wasm(wasm.as_str())
             .build()
             .expect("typed create-function operation builds"))
         .expect("typed create-function operation is admitted")
         .op(ddl::create_validator("row_guard")
-            .source("pub fn shamir_validate() -> bool { true }")
+            .wasm(wasm)
             .build()
             .expect("typed create-validator operation builds"))
         .expect("typed create-validator operation is admitted")
@@ -547,7 +569,10 @@ async fn plan_lists_function_and_validator_warnings_and_registrations() {
         vec![submission(&global)],
     );
 
-    let value = run_plan(&db, request).await.expect("plan succeeds");
+    let value = tokio::time::timeout(limit, Box::pin(run_plan(&db, request)))
+        .await
+        .expect("plan timed out")
+        .expect("plan succeeds");
     let warnings = match field(&value, "warnings") {
         QueryValue::List(warnings) => warnings,
         other => panic!("warnings must be a list, got {other:?}"),

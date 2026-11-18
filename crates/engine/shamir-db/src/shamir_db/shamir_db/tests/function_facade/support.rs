@@ -2,14 +2,18 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
 use shamir_engine::function::Params;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+use tokio::sync::Notify;
 
 use crate::access::ResourceMeta;
+use crate::shamir_db::shamir_db::core::FunctionDdlHookPoint;
 use crate::shamir_db::shamir_db::{ArtifactKind, KIND_FIELD};
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 
@@ -42,6 +46,33 @@ const ECHO_WAT: &str = r#"
 
 /// Bound for the clean-shutdown flush; the per-test timeout is the hang detector.
 const FLUSH_BUDGET: Duration = Duration::from_secs(3600);
+
+pub(in crate::shamir_db) fn pause_next_function_registration_for_test(
+    db: &ShamirDb,
+) -> (Arc<Notify>, Arc<Notify>) {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let hook_entered = Arc::clone(&entered);
+    let hook_release = Arc::clone(&release);
+    let armed = Arc::new(AtomicBool::new(true));
+    assert!(db
+        .function_ddl_hook
+        .set(Box::new(move |point| {
+            let entered = Arc::clone(&hook_entered);
+            let release = Arc::clone(&hook_release);
+            let armed = Arc::clone(&armed);
+            Box::pin(async move {
+                if point == FunctionDdlHookPoint::ReplaceAfterRowSaveBeforeRegistryWrite
+                    && armed.swap(false, Ordering::SeqCst)
+                {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            })
+        }))
+        .is_ok());
+    (entered, release)
+}
 
 pub(super) fn echo_wasm() -> Vec<u8> {
     wat::parse_str(ECHO_WAT).expect("echo wat")

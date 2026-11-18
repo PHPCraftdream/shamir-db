@@ -1,20 +1,19 @@
 //! The fenced operation runner of the application-schema APPLY arm
 //! (release-1 R1c step 2b-3a/2b-3b, design §4.1–§4.3): per-operation journal
-//! intent → one bounded DDL → exact postcondition → completion, then
+//! intent → one bounded effect → exact postcondition → completion, then
 //! end-state verification, the durable `applied` event, and fence release.
 //! On a resume run, a reconcile pass first classifies each operation index
 //! from the durable journal and finishes what the previous runner already
 //! proved, without re-running completed work. Admission lives in `apply.rs`;
 //! the journal append / error mapping / wire encoding live in
-//! `apply_journal.rs`.
+//! `apply_journal.rs`. A read-only CheckFunction runs before its intent.
 
 use crate::query::admin::{
-    AddSchemaRuleOp, CreateIndexOp, CreateTableOp, DropIndexOp, DropTableOp, FieldRuleDto,
-    RemoveSchemaRuleOp, SetTableSchemaOp,
+    AddSchemaRuleOp, CreateIndexOp, CreateTableOp, DropIndexOp, DropTableOp, RemoveSchemaRuleOp,
+    SetTableSchemaOp,
 };
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
-use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
 };
@@ -23,14 +22,37 @@ use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationBody, SchemaMigrationMetadata, SchemaMigrationOp, SchemaMigrationSubmission,
 };
 
-use super::super::admin_dispatch::ShamirAdminExecutor;
-use super::super::schema_codec::checked_catalogue_rules;
-use super::apply::FUNCTION_FAMILY_DEFERRED;
+use super::super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::function_family::{admission, execution, reconcile};
+use super::super::plan::{coded, map_store_error};
 use super::apply_journal::{
     append_step, applied_value, durability_error, plain, record_in_doubt,
     record_postcondition_failure, JournalRef,
 };
-use super::plan::{coded, map_store_error};
+
+#[path = "ddl_postconditions.rs"]
+mod ddl_postconditions;
+
+use self::ddl_postconditions::{index_exists, stored_rules, table_exists};
+
+struct LiveGate<'a> {
+    shamir: &'a ShamirDb,
+    db: &'a str,
+    generation: u64,
+    succeeded: bool,
+}
+
+impl Drop for LiveGate<'_> {
+    fn drop(&mut self) {
+        if self.succeeded {
+            self.shamir
+                .release_schema_migration_gate(self.db, self.generation);
+        } else {
+            self.shamir
+                .mark_schema_migration_gate_in_doubt(self.db, self.generation);
+        }
+    }
+}
 
 /// Parameter bundle for one fenced run: the runner takes this single struct
 /// instead of a long argument list (rust-guard: no new `#[allow]`).
@@ -49,27 +71,21 @@ pub(super) struct FencedRun<'a> {
 }
 
 /// The fenced run: holds the IN-PROCESS gate for the whole run and converts
-/// it to the in-doubt marker on any error exit (see `run_operations`), then
-/// delegates to `run_operations_fenced`.
+/// it to an in-doubt marker on error or cancellation. Only a successful
+/// durable fence release clears the live gate.
 pub(super) async fn run_operations(run: FencedRun<'_>) -> Result<QueryResult, BatchError> {
     let shamir = &run.executor.shamir;
     let db = run.db;
     let generation = run.generation;
-    // Fence owned durably: hold the in-process gate so EVERY exit path
-    // releases it (mirrors the admission entry, which acquired the durable
-    // fence before calling this runner).
     shamir.hold_schema_migration_gate(db, generation);
+    let mut gate = LiveGate {
+        shamir,
+        db,
+        generation,
+        succeeded: false,
+    };
     let result = Box::pin(run_operations_fenced(run)).await;
-    if result.is_err() {
-        // Every error exit leaves the durable fence OWNED with an unresolved
-        // journal (the fence is only released on the success path): keep
-        // writers refused with `schema_migration_in_doubt` until a resume or
-        // the next open resolves it, instead of ungating after the RAII
-        // release of the live gate.
-        shamir.mark_schema_migration_gate_in_doubt(db, generation);
-    } else {
-        shamir.release_schema_migration_gate(db, generation);
-    }
+    gate.succeeded = result.is_ok();
     result
 }
 
@@ -109,22 +125,20 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
     // Resume reconcile (§4.2): classify every operation index from the
     // durable journal rows BEFORE running anything new. The classify pass
     // is its own function, not part of the per-operation future.
-    let resume_states = if resume {
-        Some(
-            Box::pin(classify_resume(
-                executor,
-                serving,
-                metadata,
-                checksum,
-                body.operations.len(),
-            ))
-            .await?,
-        )
+    let mut states = if resume {
+        Box::pin(classify_resume(
+            executor,
+            serving,
+            metadata,
+            checksum,
+            body.operations.len(),
+        ))
+        .await?
     } else {
-        None
+        vec![OperationProgress::default(); body.operations.len()]
     };
 
-    for (position, operation) in body.operations.iter().enumerate() {
+    for (position, (operation, progress)) in body.operations.iter().zip(&mut states).enumerate() {
         let index = u32::try_from(position).map_err(|_| {
             coded(
                 "schema_migration_gap",
@@ -132,42 +146,35 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
             )
         })?;
 
-        // Resume reconcile: act on what the journal proves the previous
-        // runner already did (never re-run completed work, never conceal
-        // drift). An in-doubt classification blocks every later operation.
-        // Each step is its own boxed future: a Windows debug test thread has
-        // a small stack and this runner state machine must stay small.
-        if let Some(states) = &resume_states {
-            let (state, intent_evidence) = &states[position];
-            if let ResumeStep::Done = Box::pin(resume_operation(
+        // Check/reconcile existing journal work before executing a new effect.
+        // Box each step for Windows debug stacks.
+        if !matches!(progress.state, JournalOpState::NotStarted) {
+            intents_durable = true;
+            progress.completion = Some(
+                Box::pin(resume_operation(
+                    executor, db, &journal, operation, index, progress,
+                ))
+                .await?,
+            );
+        } else {
+            let (intent, completion) = Box::pin(run_operation(
                 executor,
                 db,
                 &journal,
                 operation,
                 index,
-                *state,
-                intent_evidence.as_deref(),
+                &mut intents_durable,
             ))
-            .await?
-            {
-                continue;
-            }
+            .await?;
+            progress.intent = intent;
+            progress.completion = Some(completion);
         }
-
-        Box::pin(run_operation(
-            executor,
-            db,
-            &journal,
-            operation,
-            index,
-            &mut intents_durable,
-        ))
-        .await?;
     }
 
-    // End-state invariants: every operation's postcondition still holds.
-    for operation in &body.operations {
-        Box::pin(verify_postcondition(executor, db, operation, true)).await?;
+    // Predicates are independent: a later drop, rename, or alter that
+    // supersedes an earlier predicate can make this conservative check fail.
+    for (operation, progress) in body.operations.iter().zip(&states) {
+        Box::pin(verify_completed(executor, db, operation, progress)).await?;
     }
 
     // Durable `applied` — only after all completions and final checks.
@@ -208,12 +215,30 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
     ))
 }
 
-/// What the resume pass did for one operation index.
-enum ResumeStep {
-    /// Completed or reconciled from the journal: nothing left to run.
-    Done,
-    /// No durable intent: run the operation through the normal path.
-    RunNormally,
+/// Recheck the exact effect of a completed operation without replay.
+async fn verify_completed(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    operation: &SchemaMigrationOp,
+    progress: &OperationProgress,
+) -> Result<String, BatchError> {
+    let observed = Box::pin(verify_postcondition(
+        executor,
+        db,
+        operation,
+        true,
+        progress.intent.as_deref(),
+    ))
+    .await?;
+    if admission::is_function_family(operation)
+        && progress.completion.as_deref() != Some(observed.as_str())
+    {
+        return Err(coded(
+            "schema_migration_postcondition_failed",
+            "function-family completion evidence no longer matches".to_string(),
+        ));
+    }
+    Ok(observed)
 }
 
 /// Resume reconcile of ONE operation index (design 4.2 restart cases).
@@ -223,24 +248,21 @@ async fn resume_operation(
     journal: &JournalRef<'_>,
     operation: &SchemaMigrationOp,
     index: u32,
-    state: JournalOpState,
-    intent_evidence: Option<&str>,
-) -> Result<ResumeStep, BatchError> {
-    match state {
-        JournalOpState::Completed => {
-            // Durable completion: only re-verify; drift is refused with no
-            // write and no re-run.
-            if let Err(error) = Box::pin(verify_postcondition(executor, db, operation, true)).await
-            {
-                return Err(coded(
+    progress: &OperationProgress,
+) -> Result<String, BatchError> {
+    let intent_evidence = progress.intent.as_deref();
+    match progress.state {
+        JournalOpState::Completed => Box::pin(verify_completed(executor, db, operation, progress))
+            .await
+            .map_err(|error| {
+                if admission::is_function_family(operation) && access_denied(&error) {
+                    return error;
+                }
+                coded(
                     "schema_migration_postcondition_failed",
-                    format!(
-                        "operation {index} is durably completed but its postcondition no longer holds: {error}"
-                    ),
-                ));
-            }
-            Ok(ResumeStep::Done)
-        }
+                    format!("operation {index} is durably completed but its postcondition no longer holds: {error}"),
+                )
+            }),
         JournalOpState::IntentPending => {
             let evidence = match Box::pin(reconcile_pending(
                 executor,
@@ -255,7 +277,7 @@ async fn resume_operation(
                 ReconcileOutcome::AlreadyApplied(evidence) => evidence,
                 ReconcileOutcome::ExecuteOnce(created_from_absent) => {
                     if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
-                        return Err(Box::pin(record_in_doubt(
+                        let in_doubt = Box::pin(record_in_doubt(
                             executor,
                             journal,
                             index,
@@ -263,19 +285,21 @@ async fn resume_operation(
                                 "operation {index} failed while finishing a resume execution: {error}"
                             ),
                         ))
-                        .await);
+                        .await;
+                        return Err(preserve_family_denial(operation, error, in_doubt));
                     }
                     match Box::pin(verify_postcondition(
                         executor,
                         db,
                         operation,
                         created_from_absent,
+                        intent_evidence,
                     ))
                     .await
                     {
                         Ok(evidence) => evidence,
                         Err(error) => {
-                            return Err(Box::pin(record_postcondition_failure(
+                            let failure = Box::pin(record_postcondition_failure(
                                 executor,
                                 journal,
                                 index,
@@ -283,7 +307,8 @@ async fn resume_operation(
                                     "operation {index} postcondition failed during resume: {error}"
                                 ),
                             ))
-                            .await)
+                            .await;
+                            return Err(preserve_family_denial(operation, error, failure));
                         }
                     }
                 }
@@ -294,14 +319,14 @@ async fn resume_operation(
                 SchemaMigrationStep {
                     kind: JournalEventKind::OperationComplete,
                     operation_index: Some(index),
-                    evidence: Some(evidence),
+                    evidence: Some(evidence.clone()),
                 },
             ))
             .await
             .map_err(|error| durability_error(error, true))?;
-            Ok(ResumeStep::Done)
+            Ok(evidence)
         }
-        JournalOpState::NotStarted => Ok(ResumeStep::RunNormally),
+        JournalOpState::NotStarted => Err(plain("cannot resume an unstarted operation".to_string())),
     }
 }
 
@@ -314,7 +339,16 @@ async fn run_operation(
     operation: &SchemaMigrationOp,
     index: u32,
     intents_durable: &mut bool,
-) -> Result<(), BatchError> {
+) -> Result<(Option<String>, String), BatchError> {
+    let ordered_check = matches!(operation, SchemaMigrationOp::CheckFunction(_));
+    if ordered_check {
+        // A single `execute_operation` call site below; the no-effect check runs
+        // through the function-family dispatcher so this frame holds one big
+        // temporary, not two (debug-build test threads have small stacks).
+        let check = admission::family_batch_op(operation)
+            .ok_or_else(|| plain("unsupported migration operation".to_string()))?;
+        Box::pin(execution::execute(executor, &check)).await?;
+    }
     // Create postconditions need the pre-image: a pre-existing object is a
     // conflict (4.2), never an `if_not_exists` success. The pre-image is
     // recorded in the intent evidence so a later resume can decide the
@@ -334,18 +368,10 @@ async fn run_operation(
         }
         _ => true,
     };
-    let intent_evidence = match operation {
-        SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
-            Some(if created_from_absent {
-                "pre_state=absent".to_string()
-            } else {
-                "pre_state=present".to_string()
-            })
-        }
-        _ => None,
-    };
+    let intent_evidence =
+        Box::pin(intent_evidence(executor, operation, created_from_absent)).await?;
 
-    // Persist + sync the operation intent BEFORE the effect (4.1). After the
+    // Persist + sync the operation intent BEFORE any effect (4.1). After the
     // first durable intent a later journal failure means an effect may
     // already have occurred: in doubt, never plain unavailability.
     Box::pin(append_step(
@@ -354,7 +380,7 @@ async fn run_operation(
         SchemaMigrationStep {
             kind: JournalEventKind::OperationIntent,
             operation_index: Some(index),
-            evidence: intent_evidence,
+            evidence: intent_evidence.clone(),
         },
     ))
     .await
@@ -364,16 +390,20 @@ async fn run_operation(
     // Execute exactly one bounded DDL operation through the EXISTING handler
     // paths: existing validation, per-target authorization and HMAC gates
     // apply unchanged.
-    if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
-        // The effect outcome is uncertain: record in doubt (best effort) and
-        // stop before the next effect, journal resumable.
-        return Err(Box::pin(record_in_doubt(
+    let execution = if ordered_check {
+        Ok(())
+    } else {
+        Box::pin(execute_operation(executor, operation)).await
+    };
+    if let Err(error) = execution {
+        let in_doubt = Box::pin(record_in_doubt(
             executor,
             journal,
             index,
             format!("operation {index} failed before its postcondition: {error}"),
         ))
-        .await);
+        .await;
+        return Err(preserve_family_denial(operation, error, in_doubt));
     }
 
     // Verify the exact postcondition; a failure records no completion.
@@ -382,18 +412,20 @@ async fn run_operation(
         db,
         operation,
         created_from_absent,
+        intent_evidence.as_deref(),
     ))
     .await
     {
         Ok(evidence) => evidence,
         Err(error) => {
-            return Err(Box::pin(record_postcondition_failure(
+            let failure = Box::pin(record_postcondition_failure(
                 executor,
                 journal,
                 index,
                 format!("operation {index} postcondition failed: {error}"),
             ))
-            .await);
+            .await;
+            return Err(preserve_family_denial(operation, error, failure));
         }
     };
 
@@ -405,12 +437,51 @@ async fn run_operation(
         SchemaMigrationStep {
             kind: JournalEventKind::OperationComplete,
             operation_index: Some(index),
-            evidence: Some(evidence),
+            evidence: Some(evidence.clone()),
         },
     ))
     .await
     .map_err(|error| durability_error(error, *intents_durable))?;
-    Ok(())
+    Ok((intent_evidence, evidence))
+}
+
+/// The pre-state recorded in the operation intent (resume reconcile): the
+/// create token for tables and indexes, registration fingerprints for the
+/// function family. Its own future so the runner frame stays small.
+async fn intent_evidence(
+    executor: &ShamirAdminExecutor,
+    operation: &SchemaMigrationOp,
+    created_from_absent: bool,
+) -> Result<Option<String>, BatchError> {
+    Ok(match operation {
+        SchemaMigrationOp::CreateTable(_) | SchemaMigrationOp::CreateIndex(_) => {
+            Some(if created_from_absent {
+                "pre_state=absent".to_string()
+            } else {
+                "pre_state=present".to_string()
+            })
+        }
+        _ if admission::is_function_family(operation) => {
+            Some(Box::pin(reconcile::capture_intent(executor, operation)).await?)
+        }
+        _ => None,
+    })
+}
+
+fn access_denied(error: &BatchError) -> bool {
+    matches!(error, BatchError::QueryError { code: Some(code), .. } if code == "access_denied")
+}
+
+fn preserve_family_denial(
+    operation: &SchemaMigrationOp,
+    error: BatchError,
+    fallback: BatchError,
+) -> BatchError {
+    if admission::is_function_family(operation) && access_denied(&error) {
+        error
+    } else {
+        fallback
+    }
 }
 
 /// Execute exactly one bounded DDL operation by delegating to the existing
@@ -458,9 +529,18 @@ async fn execute_operation(
             let op: &RemoveSchemaRuleOp = op;
             executor.handle_remove_schema_rule(op).await?;
         }
-        // The function/validator families never reach execution: admission
-        // refuses them with FUNCTION_FAMILY_DEFERRED before the fence.
-        _ => return Err(plain(FUNCTION_FAMILY_DEFERRED.to_string())),
+        _ => {
+            // Admission also rejects bind. Keep replay fail-closed even if an
+            // intent was written by older code or constructed directly.
+            admission::validate_binding_scope(&executor.db_name, operation)?;
+            admission::defer_bind(operation)?;
+            // A replay is still an execution and must check the actual
+            // source ACL, not the destination authorization used for proof.
+            Box::pin(admission::authorize_family_operation(executor, operation)).await?;
+            let op = admission::family_batch_op(operation)
+                .ok_or_else(|| plain("unsupported migration operation".to_string()))?;
+            Box::pin(execution::execute(executor, &op)).await?;
+        }
     }
     Ok(())
 }
@@ -469,15 +549,22 @@ async fn execute_operation(
 
 /// How far the previous runner got for one operation index, read from the
 /// durable journal event rows.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 enum JournalOpState {
     /// No intent, no completion: run through the normal path.
+    #[default]
     NotStarted,
-    /// Durable intent without completion (§4.2 case 2). The tuple carries
-    /// the intent's recorded evidence (create pre-state, if any).
+    /// Durable intent without completion (§4.2 case 2).
     IntentPending,
     /// Durable OperationComplete: never re-run, only re-verify.
     Completed,
+}
+
+#[derive(Clone, Default)]
+struct OperationProgress {
+    state: JournalOpState,
+    intent: Option<String>,
+    completion: Option<String>,
 }
 
 /// What the reconcile pass decided for one pending intent.
@@ -500,14 +587,14 @@ async fn classify_resume(
     metadata: &SchemaMigrationMetadata,
     checksum: [u8; 32],
     operation_count: usize,
-) -> Result<Vec<(JournalOpState, Option<String>)>, BatchError> {
+) -> Result<Vec<OperationProgress>, BatchError> {
     let history = executor
         .shamir
         .system_store()
         .read_schema_migration_history(serving)
         .await
         .map_err(map_store_error)?;
-    let mut states = vec![(JournalOpState::NotStarted, None); operation_count];
+    let mut states = vec![OperationProgress::default(); operation_count];
     for event in &history.events {
         if event.migration.id != metadata.id || event.checksum != checksum {
             continue;
@@ -529,9 +616,14 @@ async fn classify_resume(
         };
         match event.kind {
             JournalEventKind::OperationIntent => {
-                *state = (JournalOpState::IntentPending, event.evidence.clone())
+                state.state = JournalOpState::IntentPending;
+                state.intent.clone_from(&event.evidence);
+                state.completion = None;
             }
-            JournalEventKind::OperationComplete => *state = (JournalOpState::Completed, None),
+            JournalEventKind::OperationComplete => {
+                state.state = JournalOpState::Completed;
+                state.completion.clone_from(&event.evidence);
+            }
             _ => {}
         }
     }
@@ -560,6 +652,15 @@ async fn classify_resume(
 /// | AddSchemaRule     | rule absent                             | execute once |
 /// | RemoveSchemaRule  | path absent                             | complete WITHOUT replay |
 /// | RemoveSchemaRule  | path present                            | execute once |
+/// | Function/validator registration | exact target effect proven against intent | complete without replay |
+/// | Function/validator registration | exact pre-state still holds | execute once through normal authorization |
+/// | Rename | source absent, destination matches source fingerprint and destination write is authorized | complete without replay |
+/// | Binding | exact binding state (bind execution remains deferred) | reconcile without guessing |
+/// | CheckFunction | no catalogue effect | rerun read-only check if pending |
+///
+/// A missing rename source cannot authorize an execution. Reconciliation
+/// can only accept the proven destination effect, with destination authority;
+/// if it must execute the rename, normal source authorization still applies.
 async fn reconcile_pending(
     executor: &ShamirAdminExecutor,
     db: &str,
@@ -583,7 +684,7 @@ async fn reconcile_pending(
                     // Absent at intent, and the maintenance fence blocked every
                     // other writer since: the table is this operation's effect.
                     // The same postcondition as a normal completion decides.
-                    return match Box::pin(verify_postcondition(executor, db, operation, true))
+                    return match Box::pin(ddl_postconditions::verify_postcondition(executor, db, operation, true))
                         .await
                     {
                         Ok(evidence) => Ok(ReconcileOutcome::AlreadyApplied(evidence)),
@@ -627,7 +728,7 @@ async fn reconcile_pending(
                     // Absent at intent, writers fenced since: the index is this
                     // operation's effect. The same postcondition as a normal
                     // completion decides.
-                    return match Box::pin(verify_postcondition(executor, db, operation, true))
+                    return match Box::pin(ddl_postconditions::verify_postcondition(executor, db, operation, true))
                         .await
                     {
                         Ok(evidence) => Ok(ReconcileOutcome::AlreadyApplied(evidence)),
@@ -762,218 +863,39 @@ async fn reconcile_pending(
                 Ok(ReconcileOutcome::ExecuteOnce(false))
             }
         }
-        // Refused at admission; unreachable but kept total.
-        _ => Err(plain(FUNCTION_FAMILY_DEFERRED.to_string())),
+        _ => match Box::pin(reconcile::reconcile(executor, operation, intent_evidence)).await {
+            Ok(Some(evidence)) => Ok(ReconcileOutcome::AlreadyApplied(evidence)),
+            Ok(None) => Ok(ReconcileOutcome::ExecuteOnce(true)),
+            Err(error) => {
+                let in_doubt = Box::pin(doubt(error.to_string())).await;
+                Err(if access_denied(&error) {
+                    error
+                } else {
+                    in_doubt
+                })
+            }
+        },
     }
 }
 
-// ── postconditions (§4.2) ───────────────────────────────────────────────────
-
-fn table_exists(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> bool {
-    shamir
-        .get_db(db)
-        .is_some_and(|instance| instance.has_table(repo, table))
-}
-
-async fn index_exists(
-    executor: &ShamirAdminExecutor,
-    repo: &str,
-    table: &str,
-    index: &str,
-) -> bool {
-    let Some(instance) = executor.shamir.get_db(&executor.db_name) else {
-        return false;
-    };
-    let Ok(table_manager) = instance.get_table(repo, table).await else {
-        return false;
-    };
-    table_manager.any_index_exists(index).await
-}
-
-/// The stored declarative schema rule set of a table, de-interned to DTOs.
-async fn stored_rules(
-    executor: &ShamirAdminExecutor,
-    repo: &str,
-    table: &str,
-) -> Result<Vec<FieldRuleDto>, BatchError> {
-    let record = executor
-        .shamir
-        .system_store()
-        .load_table_record(&executor.db_name, repo, table)
-        .await
-        .map_err(map_store_error)?
-        .ok_or_else(|| {
-            coded(
-                "schema_migration_postcondition_failed",
-                format!(
-                    "table '{}/{repo}/{table}' has no catalogue record",
-                    executor.db_name
-                ),
-            )
-        })?;
-    let interner_manager = executor
-        .shamir
-        .resolve_repo_interner(&executor.db_name, repo)
-        .await
-        .map_err(map_store_error)?;
-    let interner = interner_manager
-        .get()
-        .await
-        .map_err(|error| plain(error.to_string()))?;
-    checked_catalogue_rules(record.get(SCHEMA_FIELD), interner)
-}
-
-/// Exact §4.2 postcondition of one operation. `created_from_absent` carries
-/// the create-time pre-image (a create whose object already existed is a
-/// conflict, never `if_not_exists` success). Returns the completion evidence
-/// string on success.
+/// Family verification uses the original intent (not a new catalogue read
+/// of the pre-state). In particular a rename needs the original fingerprint.
 async fn verify_postcondition(
     executor: &ShamirAdminExecutor,
     db: &str,
     operation: &SchemaMigrationOp,
     created_from_absent: bool,
+    intent: Option<&str>,
 ) -> Result<String, BatchError> {
-    let failed = |detail: String| coded("schema_migration_postcondition_failed", detail);
-    match operation {
-        SchemaMigrationOp::CreateTable(op) => {
-            if !created_from_absent {
-                return Err(failed(format!(
-                    "create table '{}/{}': object already existed before the operation \
-                     (conflicting definition, never an if_not_exists success)",
-                    op.repo, op.create_table
-                )));
-            }
-            if !table_exists(&executor.shamir, db, &op.repo, &op.create_table) {
-                return Err(failed(format!(
-                    "create table '{}/{}': object is absent after execution",
-                    op.repo, op.create_table
-                )));
-            }
-            Ok(format!("created table '{}/{}'", op.repo, op.create_table))
-        }
-        SchemaMigrationOp::DropTable(op) => {
-            if table_exists(&executor.shamir, db, &op.repo, &op.drop_table) {
-                return Err(failed(format!(
-                    "drop table '{}/{}': object is still present after execution",
-                    op.repo, op.drop_table
-                )));
-            }
-            Ok(format!("dropped table '{}/{}'", op.repo, op.drop_table))
-        }
-        SchemaMigrationOp::RenameTable(op) => {
-            if table_exists(&executor.shamir, db, &op.repo, &op.rename_table)
-                || !table_exists(&executor.shamir, db, &op.repo, &op.to)
-            {
-                return Err(failed(format!(
-                    "rename table '{}/{}' → '{}': source present or destination absent",
-                    op.repo, op.rename_table, op.to
-                )));
-            }
-            Ok(format!(
-                "renamed table '{}/{}' → '{}'",
-                op.repo, op.rename_table, op.to
-            ))
-        }
-        SchemaMigrationOp::CreateIndex(op) => {
-            if !created_from_absent {
-                return Err(failed(format!(
-                    "create index '{}' on '{}/{}': index already existed before the \
-                     operation (conflicting definition)",
-                    op.create_index, op.repo, op.table
-                )));
-            }
-            if !Box::pin(index_exists(
-                executor,
-                &op.repo,
-                &op.table,
-                &op.create_index,
-            ))
-            .await
-            {
-                return Err(failed(format!(
-                    "create index '{}' on '{}/{}': index is absent after execution",
-                    op.create_index, op.repo, op.table
-                )));
-            }
-            Ok(format!(
-                "created index '{}' on '{}/{}'",
-                op.create_index, op.repo, op.table
-            ))
-        }
-        SchemaMigrationOp::DropIndex(op) => {
-            if Box::pin(index_exists(executor, &op.repo, &op.table, &op.drop_index)).await {
-                return Err(failed(format!(
-                    "drop index '{}' on '{}/{}': index is still present after execution",
-                    op.drop_index, op.repo, op.table
-                )));
-            }
-            Ok(format!(
-                "dropped index '{}' on '{}/{}'",
-                op.drop_index, op.repo, op.table
-            ))
-        }
-        SchemaMigrationOp::RenameIndex(op) => {
-            if Box::pin(index_exists(
-                executor,
-                &op.repo,
-                &op.table,
-                &op.rename_index,
-            ))
-            .await
-                || !Box::pin(index_exists(executor, &op.repo, &op.table, &op.to)).await
-            {
-                return Err(failed(format!(
-                    "rename index '{}' → '{}' on '{}/{}': source present or destination absent",
-                    op.rename_index, op.to, op.repo, op.table
-                )));
-            }
-            Ok(format!(
-                "renamed index '{}' → '{}' on '{}/{}'",
-                op.rename_index, op.to, op.repo, op.table
-            ))
-        }
-        SchemaMigrationOp::SetTableSchema(op) => {
-            let rules = stored_rules(executor, &op.repo, &op.set_table_schema).await?;
-            if rules != op.schema {
-                return Err(failed(format!(
-                    "set table schema '{}/{}': stored rule set differs from the intended one",
-                    op.repo, op.set_table_schema
-                )));
-            }
-            Ok(format!(
-                "set schema of table '{}/{}' ({} rules)",
-                op.repo,
-                op.set_table_schema,
-                rules.len()
-            ))
-        }
-        SchemaMigrationOp::AddSchemaRule(op) => {
-            let rules = stored_rules(executor, &op.repo, &op.add_schema_rule).await?;
-            if !rules.iter().any(|rule| rule == &op.rule) {
-                return Err(failed(format!(
-                    "add schema rule '{}/{}': intended rule is not stored verbatim",
-                    op.repo, op.add_schema_rule
-                )));
-            }
-            Ok(format!(
-                "added schema rule to table '{}/{}'",
-                op.repo, op.add_schema_rule
-            ))
-        }
-        SchemaMigrationOp::RemoveSchemaRule(op) => {
-            let rules = stored_rules(executor, &op.repo, &op.remove_schema_rule).await?;
-            if rules.iter().any(|rule| rule.path == op.path) {
-                return Err(failed(format!(
-                    "remove schema rule '{}/{}': a rule with the removed path is still stored",
-                    op.repo, op.remove_schema_rule
-                )));
-            }
-            Ok(format!(
-                "removed schema rule from table '{}/{}'",
-                op.repo, op.remove_schema_rule
-            ))
-        }
-        // Refused at admission; unreachable but kept total.
-        _ => Err(plain(FUNCTION_FAMILY_DEFERRED.to_string())),
+    if admission::is_function_family(operation) {
+        Box::pin(reconcile::verify(executor, operation, intent)).await
+    } else {
+        Box::pin(ddl_postconditions::verify_postcondition(
+            executor,
+            db,
+            operation,
+            created_from_absent,
+        ))
+        .await
     }
 }

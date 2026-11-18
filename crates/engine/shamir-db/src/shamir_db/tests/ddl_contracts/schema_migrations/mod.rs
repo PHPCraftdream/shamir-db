@@ -1,7 +1,7 @@
 pub mod apply;
 
-mod fence_tests;
+mod function_family;
 mod helpers;
-mod journal_tests;
+mod journal;
 pub mod resume;
 pub mod status_plan;

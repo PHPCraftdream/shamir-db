@@ -74,3 +74,26 @@ pub(super) async fn overwrite_row(table: &TableManager, id: RecordId, value: Que
         .await
         .expect("raw fixture write succeeds");
 }
+
+/// Run a test body on a roomy thread with its own runtime: the apply runner
+/// nests the admin handlers' async frames (function compilation among them)
+/// deeper than a debug test thread's default stack allows. Same idea as the
+/// server's lifecycle fixtures.
+pub(super) fn on_big_stack<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(body())
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
