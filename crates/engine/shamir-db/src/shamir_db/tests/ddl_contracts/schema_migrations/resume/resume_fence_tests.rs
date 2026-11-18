@@ -49,7 +49,7 @@ fn write_batch() -> Batch {
 /// (journal left with `started` only) and reopen the same directory. A
 /// `probe` table is created BEFORE the crash so reads have a target after
 /// the restart (creating it afterwards would itself be fenced).
-async fn crash_started_only_and_reopen() -> (ShamirDb, SchemaMigrationBody) {
+async fn crash_started_only_and_reopen() -> (tempfile::TempDir, ShamirDb, SchemaMigrationBody) {
     let (dir, db) = persistent_owner_db().await;
     let target = identity(&db).await;
     create_table(&db, "probe").await;
@@ -71,12 +71,12 @@ async fn crash_started_only_and_reopen() -> (ShamirDb, SchemaMigrationBody) {
     assert_eq!(history.events[0].kind, JournalEventKind::Started);
     drop(db);
     let db = reopen_owner_db(&dir).await;
-    (db, migration)
+    (dir, db, migration)
 }
 
 #[tokio::test]
 async fn writers_refused_in_doubt_after_restart_until_resume() {
-    let (db, migration) = crash_started_only_and_reopen().await;
+    let (_dir, db, migration) = crash_started_only_and_reopen().await;
 
     // The reopen seeded the in-doubt marker: writes are refused with the
     // in-doubt code...
@@ -128,7 +128,7 @@ async fn writers_refused_in_doubt_after_restart_until_resume() {
 
 #[tokio::test]
 async fn the_fence_distinguishes_in_doubt_marker_live_gate_and_free() {
-    let (db, _migration) = crash_started_only_and_reopen().await;
+    let (_dir, db, _migration) = crash_started_only_and_reopen().await;
 
     // Marker only (no live runner after the restart): in doubt.
     assert_eq!(
@@ -178,7 +178,7 @@ async fn the_fence_distinguishes_in_doubt_marker_live_gate_and_free() {
 
 #[tokio::test]
 async fn takeover_fences_the_stale_runner_generation() {
-    let (db, migration) = crash_started_only_and_reopen().await;
+    let (_dir, db, migration) = crash_started_only_and_reopen().await;
     let target = identity(&db).await;
 
     // Take over via resume: a FRESH fence generation.
@@ -232,7 +232,7 @@ async fn takeover_fences_the_stale_runner_generation() {
 
 #[tokio::test]
 async fn changed_body_ordinal_or_id_resubmissions_are_refused_with_no_write() {
-    let (db, _migration) = crash_started_only_and_reopen().await;
+    let (_dir, db, _migration) = crash_started_only_and_reopen().await;
     let target = identity(&db).await;
 
     // The unresolved journal pins migration alpha-001 (ordinal 1). A changed

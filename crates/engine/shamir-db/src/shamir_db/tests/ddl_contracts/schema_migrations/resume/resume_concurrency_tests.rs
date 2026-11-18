@@ -25,18 +25,23 @@ async fn two_concurrent_resumes_exactly_one_runs() {
     // before the gate is installed is STILL fenced by the step-10 durable CAS
     // (a single-writer fence; its refusal maps to `in_progress`). No
     // interleaving can make both runners write.
-    let (winner, loser) = tokio::join!(run_apply(&db, request()), run_apply(&db, request()));
+    let (first, second) = tokio::join!(run_apply(&db, request()), run_apply(&db, request()));
 
-    // The loser is either refused in progress (gate held at admission step 6,
-    // or the step-10 durable CAS conflict) or answered as the durable no-op —
-    // both are documented non-double-run outcomes.
-    match loser {
-        Ok(value) => assert_eq!(str_field(&value, "status"), "applied"),
-        Err(error) => assert_code(error, "schema_migration_in_progress"),
+    // Which of the two wins is scheduling-dependent (the join order is not
+    // the winner order). The other is either refused in progress (gate held
+    // at admission step 6, or the step-10 durable CAS conflict) or answered
+    // as the durable no-op — both are documented non-double-run outcomes.
+    let mut applied = 0;
+    for outcome in [first, second] {
+        match outcome {
+            Ok(value) => {
+                assert_eq!(str_field(&value, "status"), "applied");
+                applied += 1;
+            }
+            Err(error) => assert_code(error, "schema_migration_in_progress"),
+        }
     }
-
-    let value = winner.expect("exactly one resume run must succeed");
-    assert_eq!(str_field(&value, "status"), "applied");
+    assert!(applied >= 1, "exactly one resume run must succeed");
 
     // Journal proof of a single run: exactly one Started (the crashed run),
     // one RecoveryAcquired (the single takeover), one intent, one completion,

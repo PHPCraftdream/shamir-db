@@ -15,8 +15,7 @@ use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
 use super::helpers::{
     apply_request, assert_code, completions_for, empty_predecessor, field, identity, journal_kinds,
-    journal_prefix, journal_rows, persistent_owner_db, reopen_owner_db, run_apply, str_field,
-    submission,
+    journal_prefix, persistent_owner_db, reopen_owner_db, run_apply, str_field, submission,
 };
 use crate::shamir_db::system_store::JournalEventKind;
 use crate::shamir_db::ShamirDb;
@@ -550,8 +549,8 @@ async fn unprovable_rename_stays_in_doubt_and_blocks_later_operations() {
     assert!(history.applied.is_empty());
 
     // An identical resubmission is refused in doubt again. The takeover
-    // itself is one durable RecoveryAcquired; it must NOT complete anything
-    // or write a second in-doubt marker.
+    // itself is one durable RecoveryAcquired; it must NOT complete anything.
+    // The refusal records the doubt under the fresh generation.
     let error = run_apply(
         &db,
         apply_request(&target, empty_predecessor(), 0, submission(&migration)),
@@ -578,11 +577,14 @@ async fn unprovable_rename_stays_in_doubt_and_blocks_later_operations() {
         .filter(|event| event.kind == JournalEventKind::InDoubt)
         .count();
     assert_eq!(recoveries, 2, "each resume takes over the fence once");
-    assert_eq!(doubts, 1, "no second in-doubt marker is appended");
+    assert_eq!(
+        doubts, 2,
+        "each refused resume records its own marker under its fresh generation"
+    );
 }
 
 #[tokio::test]
-async fn drifted_completed_operation_is_refused_without_a_write() {
+async fn drifted_completed_operation_is_refused_without_replay() {
     let (dir, db) = persistent_owner_db().await;
     let migration = super::super::helpers::body("alpha-001", 1);
 
@@ -617,7 +619,7 @@ async fn drifted_completed_operation_is_refused_without_a_write() {
         .await
         .unwrap();
 
-    let pristine = journal_rows(&db).await;
+    let pristine = journal_kinds(&db).await;
     let target = identity(&db).await;
     let error = run_apply(
         &db,
@@ -632,10 +634,13 @@ async fn drifted_completed_operation_is_refused_without_a_write() {
         "the refusal must describe the drift: {message}"
     );
 
-    // No re-run, no write: the journal is untouched.
+    // No re-run and no marker: the only journal growth is the takeover's
+    // RecoveryAcquired (the refusal runs after the fence is taken).
+    let mut expected = pristine;
+    expected.push(JournalEventKind::RecoveryAcquired);
     assert_eq!(
-        journal_rows(&db).await,
-        pristine,
-        "the drift refusal writes nothing"
+        journal_kinds(&db).await,
+        expected,
+        "the drift refusal appends no operation event and no marker"
     );
 }

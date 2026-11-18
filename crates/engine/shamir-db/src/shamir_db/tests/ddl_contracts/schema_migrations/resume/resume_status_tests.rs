@@ -89,14 +89,14 @@ async fn status_reports_in_doubt_reason_for_unresolved_migration() {
     // STATUS as OWNER surfaces the unresolved migration with the recorded
     // evidence: `unresolved.last()` is the InDoubt status event itself, so
     // `status` is the in-doubt kind string, the fence generation is the
-    // crashed run's generation 1, and `in_doubt_reason` is exactly the
-    // marker's evidence. The InDoubt marker names the blocked operation
+    // refused resume's takeover generation 2 (the crashed run held 1), and
+    // `in_doubt_reason` is exactly the marker's evidence. The InDoubt marker names the blocked operation
     // (index 0 — the rename), so `operation_index` is that pending index.
     let value = run_status(&db, &target).await;
     let in_flight = field(&value, "in_flight");
     assert_eq!(str_field(in_flight, "migration_id"), "alpha-001");
     assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
-    assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(1));
+    assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(2));
     assert_eq!(str_field(in_flight, "status"), "in_doubt");
     assert_eq!(
         str_field(in_flight, "in_doubt_reason"),

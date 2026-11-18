@@ -18,6 +18,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -460,9 +461,7 @@ pub fn import_args(input: &Path, target: &Path) -> LogicalImportArgs {
 /// Drive the offline export driver synchronously on a fresh runtime; the
 /// fixture database must already be closed.
 pub fn export_now(root: &Path, args: &LogicalExportArgs) -> DumpReport {
-    runtime()
-        .block_on(logical_dump::export(root, args, CancellationToken::new()))
-        .unwrap()
+    export_waiting_for_locks(&runtime(), root, args)
 }
 
 /// Drive the offline export driver on the caller's runtime, the one that
@@ -470,8 +469,31 @@ pub fn export_now(root: &Path, args: &LogicalExportArgs) -> DumpReport {
 /// Fjall directory locks until that runtime runs them, so a streaming test
 /// exports on its own runtime instead of a fresh one.
 pub fn export_on(rt: &Runtime, root: &Path, args: &LogicalExportArgs) -> DumpReport {
-    rt.block_on(logical_dump::export(root, args, CancellationToken::new()))
-        .unwrap()
+    export_waiting_for_locks(rt, root, args)
+}
+
+/// Upper bound for a dropped fixture engine to hand its Fjall directory locks
+/// back, and the pause between two export attempts.
+const LOCK_RELEASE_BUDGET: Duration = Duration::from_secs(30);
+const LOCK_RELEASE_POLL: Duration = Duration::from_millis(50);
+
+/// Export on `rt`; a `Locked` refusal means the dropped fixture engine has not
+/// released its directory locks yet (its background threads and tasks exit
+/// asynchronously, slowly on a loaded runner), so the attempt is repeated
+/// within [`LOCK_RELEASE_BUDGET`]. The pause runs on `rt`, which also lets
+/// the dropped engine's tasks finish. Opening fails before anything is
+/// written, so a repeat is safe; any other error fails at once.
+fn export_waiting_for_locks(rt: &Runtime, root: &Path, args: &LogicalExportArgs) -> DumpReport {
+    let deadline = Instant::now() + LOCK_RELEASE_BUDGET;
+    loop {
+        match rt.block_on(logical_dump::export(root, args, CancellationToken::new())) {
+            Ok(report) => return report,
+            Err(error) if format!("{error:#}").contains("Locked") && Instant::now() < deadline => {
+                rt.block_on(tokio::time::sleep(LOCK_RELEASE_POLL));
+            }
+            Err(error) => panic!("logical export failed: {error:#}"),
+        }
+    }
 }
 
 /// Drive the offline import driver synchronously and keep the typed result.
