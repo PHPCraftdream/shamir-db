@@ -287,6 +287,17 @@ impl ShamirDb {
         if let Some(err) = tx_read_quarantine_refusal_for_request(self, db_name, request) {
             return Err(err);
         }
+        // R1c §4.3: same maintenance-fence gate as the non-tx batch entry
+        // (`repo_admin/db_execute.rs`) — writes, DDL and stored-procedure
+        // calls are refused while an application-schema migration holds the
+        // database fence; reads pass. Same one-line sync-call shape.
+        if let Some(err) =
+            crate::shamir_db::execute::admin_db_schema_migration::maintenance_fence_refusal(
+                self, db_name, request,
+            )
+        {
+            return Err(err);
+        }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),

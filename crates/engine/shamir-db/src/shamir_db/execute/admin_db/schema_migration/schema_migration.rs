@@ -1,19 +1,17 @@
-//! Application-schema migration admin handler (release-1 R1c step 2b-1).
+//! Application-schema migration admin dispatcher arm (release-1 R1c).
 //!
-//! Implements the read-only `ApplicationSchemaStatus` arm and the
-//! side-effect-free `ApplicationSchemaPlan` arm (delegated to
-//! `schema_migration_plan.rs`) of
-//! [`SchemaMigrationAdminOp`]: authorize `Read` (status) or `Manage` (plan) on the database (design §5.2),
-//! resolve the serving database's stable identity, read the durable journal
-//! through the step-2a `SystemStore` API and build a typed
-//! `SchemaMigrationStatusResult` as the admin result record.
+//! Implements the `ApplicationSchema` admission entry of
+//! [`SchemaMigrationAdminOp`]: authorize `Read` (status), `Manage` (plan and
+//! apply) on the database (design §5.2), then delegate to the topical
+//! handlers in this folder. Status resolves the serving database's stable
+//! identity and reads the durable journal through the step-2a `SystemStore`
+//! API; plan (step 2b-2) validates an ordered submission against the applied
+//! prefix; apply (step 2b-3a) is journaled, fenced and postcondition-checked
+//! in `apply.rs`.
 //!
-//! The apply arm is NOT implemented in this step; it returns one documented
-//! temporary error (`schema_migration_operation_not_implemented`) that step
-//! 2b-3 replaces. No new wire error code is introduced.
-//!
-//! §5.3 error mapping lives in [`map_store_error`] only — application-schema
-//! codes stay distinguishable from the online storage-move errors.
+//! §5.3 error mapping lives in `plan::map_store_error` only —
+//! application-schema codes stay distinguishable from the online
+//! storage-move errors.
 
 use shamir_query_types::admin::types::schema_migration::{
     canonical_body_checksum, SchemaMigrationAdminOp, SchemaMigrationChecksumValidation,
@@ -27,25 +25,17 @@ use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, Migrati
 use crate::types::value::QueryValue;
 use shamir_types::types::common::new_map;
 
-use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::admin_result;
-
-/// Temporary error code returned by the apply arm until its step lands.
-/// Deliberately not a `SchemaMigrationErrorCode` variant.
-const OPERATION_NOT_IMPLEMENTED: &str = "schema_migration_operation_not_implemented";
+use super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::helpers::admin_result;
+use super::plan::map_store_error;
 
 impl ShamirAdminExecutor {
-    pub(super) async fn handle_application_schema(
+    pub(in crate::shamir_db::execute) async fn handle_application_schema(
         &self,
         batch_op: &BatchOp,
     ) -> Result<QueryResult, BatchError> {
         let BatchOp::ApplicationSchema(op) = batch_op else {
             unreachable!("handle_application_schema called with a non-ApplicationSchema op");
-        };
-        let err_code = |code: &str, msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: Some(code.to_string()),
         };
         match op {
             SchemaMigrationAdminOp::ApplicationSchemaStatus(request) => {
@@ -53,20 +43,22 @@ impl ShamirAdminExecutor {
                 self.status_result(request).await
             }
             SchemaMigrationAdminOp::ApplicationSchemaPlan(request) => {
-                super::admin_db_schema_migration_plan::authorize_database_manage(self).await?;
+                super::plan::authorize_database_manage(self).await?;
                 // Box::pin keeps the plan future out of this dispatcher's
                 // own stack frame (Windows debug-build overflow, 2026-11-17).
-                Box::pin(
-                    super::admin_db_schema_migration_plan::plan_application_schema(self, request),
-                )
-                .await
+                Box::pin(super::plan::plan_application_schema(self, request)).await
             }
-            SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(_) => Err(err_code(
-                OPERATION_NOT_IMPLEMENTED,
-                "application-schema apply is not implemented yet; \
-                 status and plan are the wired operations in R1c step 2b-2"
-                    .to_string(),
-            )),
+            SchemaMigrationAdminOp::ApplyApplicationSchemaMigration(request) => {
+                // §5.2 admission order starts with `Manage` on the database
+                // through the normal access path; everything else (identity,
+                // checksum, predecessor, fence, preflights) holds inside the
+                // apply handler before any effect. Box::pin keeps the apply
+                // future — which awaits many DDL handlers — out of this
+                // dispatcher's own stack frame (same Windows debug-build
+                // overflow mechanism as the plan arm).
+                super::plan::authorize_database_manage(self).await?;
+                Box::pin(super::apply::apply_application_schema(self, request)).await
+            }
         }
     }
 
@@ -160,22 +152,6 @@ fn validate_last_applied_checksum(history: &MigrationHistory) -> SchemaMigration
         Ok(checksum) if checksum == applied.checksum => SchemaMigrationChecksumValidation::Valid,
         Ok(_) => SchemaMigrationChecksumValidation::Mismatch,
         Err(_) => SchemaMigrationChecksumValidation::UnknownVersion,
-    }
-}
-
-/// §5.3 mapping — the single place `shamir-db` store errors become
-/// application-schema codes. Journal corruption / durability failures are
-/// `schema_migration_durability_unavailable`; a missing database keeps the
-/// engine's existing `not_found`. Never reuse the online storage-move codes.
-fn map_store_error(error: crate::DbError) -> BatchError {
-    let code = match &error {
-        crate::DbError::NotFound(_) => "not_found",
-        _ => "schema_migration_durability_unavailable",
-    };
-    BatchError::QueryError {
-        alias: String::new(),
-        message: error.to_string(),
-        code: Some(code.to_string()),
     }
 }
 

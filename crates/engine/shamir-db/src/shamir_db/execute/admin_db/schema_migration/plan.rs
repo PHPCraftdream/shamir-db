@@ -8,10 +8,13 @@
 //!
 //! Authorization is §5.2 `Manage` on the database, before any journal byte
 //! is read. Refusals use the stable §5.3 codes only. Plan is primary-only;
-//! the follower refusal sits in the server's single
-//! `BatchOp::ApplicationSchema` gate (step 2b-1) and is not duplicated here.
+//! prefix; apply (step 2b-3a) executes under the fence. Plan is primary-only;
+//! the follower refusal sits in the server's single `BatchOp::ApplicationSchema`
+//! gate (step 2b-1) plus the engine-side read-only flag (step 2b-3a).
 //!
-//! The apply arm remains a documented temporary error (step 2b-3).
+//! The admission helpers at the end of this file (`authorize_database_manage`,
+//! `map_store_error`, `applied_head`, `submission_body`, `coded`,
+//! `operation_kind_and_target`) are shared with `apply.rs`.
 
 use shamir_collections::TFxSet;
 use shamir_query_types::admin::types::schema_migration::{
@@ -27,13 +30,13 @@ use crate::query::read::QueryResult;
 use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, MigrationHistory};
 use crate::types::value::QueryValue;
 
-use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::admin_result;
+use super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::helpers::admin_result;
 
 /// §5.2 authorization for the plan arm: `Manage` on the database through the
 /// normal `authorize_access` path — no bypass — before any journal byte is
 /// read. A caller with only `Read` is refused.
-pub(super) async fn authorize_database_manage(
+pub(in crate::shamir_db::execute) async fn authorize_database_manage(
     executor: &ShamirAdminExecutor,
 ) -> Result<(), BatchError> {
     executor
@@ -53,7 +56,7 @@ pub(super) async fn authorize_database_manage(
 
 /// Validate the submitted set against the durable journal and encode the
 /// typed plan for the NEXT migration as the admin record. Writes nothing.
-pub(super) async fn plan_application_schema(
+pub(in crate::shamir_db::execute) async fn plan_application_schema(
     executor: &ShamirAdminExecutor,
     request: &SchemaMigrationPlanRequest,
 ) -> Result<QueryResult, BatchError> {
@@ -200,7 +203,9 @@ fn validate_submissions<'a>(
 }
 
 /// The applied-prefix head: last applied migration (id, ordinal, checksum).
-fn applied_head(history: &MigrationHistory) -> Option<(&str, u64, [u8; 32])> {
+pub(in crate::shamir_db::execute) fn applied_head(
+    history: &MigrationHistory,
+) -> Option<(&str, u64, [u8; 32])> {
     history.applied.last().map(|event| {
         (
             event.migration.id.as_str(),
@@ -211,7 +216,9 @@ fn applied_head(history: &MigrationHistory) -> Option<(&str, u64, [u8; 32])> {
 }
 
 /// Rebuild the typed body view of a submission for checksum recomputation.
-fn submission_body(submission: &SchemaMigrationSubmission) -> SchemaMigrationBody {
+pub(in crate::shamir_db::execute) fn submission_body(
+    submission: &SchemaMigrationSubmission,
+) -> SchemaMigrationBody {
     SchemaMigrationBody {
         metadata: submission.metadata.clone(),
         function_dependencies: submission.function_dependencies.clone(),
@@ -321,7 +328,9 @@ fn plan_result(
 }
 
 /// Stable snake_case kind and target object of one admitted operation.
-fn operation_kind_and_target(operation: &SchemaMigrationOp) -> (&'static str, &str) {
+pub(in crate::shamir_db::execute) fn operation_kind_and_target(
+    operation: &SchemaMigrationOp,
+) -> (&'static str, &str) {
     match operation {
         SchemaMigrationOp::CreateTable(op) => ("create_table", &op.create_table),
         SchemaMigrationOp::DropTable(op) => ("drop_table", &op.drop_table),
@@ -480,7 +489,7 @@ fn warning_str(warning: &SchemaMigrationWarning) -> &'static str {
     }
 }
 
-fn coded(code: &str, message: String) -> BatchError {
+pub(in crate::shamir_db::execute) fn coded(code: &str, message: String) -> BatchError {
     BatchError::QueryError {
         alias: String::new(),
         message,
@@ -492,7 +501,7 @@ fn coded(code: &str, message: String) -> BatchError {
 /// journal corruption / durability failures are
 /// `schema_migration_durability_unavailable`; a missing database keeps the
 /// engine's existing `not_found`.
-fn map_store_error(error: crate::DbError) -> BatchError {
+pub(in crate::shamir_db::execute) fn map_store_error(error: crate::DbError) -> BatchError {
     let code = match &error {
         crate::DbError::NotFound(_) => "not_found",
         _ => "schema_migration_durability_unavailable",

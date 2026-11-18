@@ -107,6 +107,19 @@ impl ShamirDb {
             return Err(err);
         }
 
+        // R1c §4.3: while an application-schema migration holds the database
+        // maintenance fence, any batch containing a write, a DDL op, or a
+        // stored-procedure call is refused (`schema_migration_in_progress`);
+        // reads and the ApplicationSchema ops themselves pass. One-line sync
+        // call — same stack-safety shape as the quarantine gate above.
+        if let Some(err) =
+            crate::shamir_db::execute::admin_db_schema_migration::maintenance_fence_refusal(
+                self, db_name, request,
+            )
+        {
+            return Err(err);
+        }
+
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),

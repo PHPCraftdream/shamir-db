@@ -538,6 +538,11 @@ impl ServerLauncher {
             .with_canceller(token_ws_cancel_registry.clone()),
         );
 
+        // R1c §4.5: lower the node mode into the engine so application-schema
+        // apply also fails closed engine-side; the server gate above stays
+        // the first refusal.
+        shamir.set_node_read_only(node_mode == crate::db_handler::NodeMode::ReadOnly);
+
         let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
             ShamirDbHandler::with_admin(
                 shamir.clone(),

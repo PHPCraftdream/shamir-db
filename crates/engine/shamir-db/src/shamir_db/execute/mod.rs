@@ -58,10 +58,12 @@ mod admin_retention;
 #[path = "admin_db/admin_replication.rs"]
 mod admin_replication;
 
-#[path = "admin_db/schema_migration.rs"]
-mod admin_db_schema_migration;
-#[path = "admin_db/schema_migration_plan.rs"]
-mod admin_db_schema_migration_plan;
+// R1c 2b-3a reorg: the three schema-migration handler files moved into the
+// topical subfolder `admin_db/schema_migration/` (a re-export-only `mod.rs`
+// plus `schema_migration.rs`, `plan.rs`, `apply.rs`, `fence.rs`); the parent
+// folder stays within the 7-entry layout limit.
+#[path = "admin_db/schema_migration/mod.rs"]
+pub(in crate::shamir_db) mod admin_db_schema_migration;
 
 #[path = "admin_db/visibility_sample/mod.rs"]
 mod visibility_sample;
