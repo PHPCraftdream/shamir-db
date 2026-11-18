@@ -1023,6 +1023,10 @@ jobs:
           cargo nextest list -p shamir-engine-table --features loom --lib -E 'test(loom_model)' --message-format json > loom_list.json
           python3 -I scripts/ci/gates/loom_preflight_check.py --list-file loom_list.json --name-filter loom_model
           rm -f loom_list.json
+          # shamir-metrics: the two-counter seqlock snapshot model (LOOM-METRICS-GATE).
+          cargo nextest list -p shamir-metrics --features loom --lib -E 'test(loom_model)' --message-format json > loom_metrics_list.json
+          python3 -I scripts/ci/gates/loom_preflight_check.py --list-file loom_metrics_list.json --name-filter loom_model
+          rm -f loom_metrics_list.json
       - name: loom model (affected crates)
         env:
           ENGINE: ${{ needs.affected.outputs.run_engine }}
@@ -1030,6 +1034,7 @@ jobs:
         shell: bash
         run: |
           cargo nextest run -p shamir-engine-table --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
+          cargo nextest run -p shamir-metrics --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
 
   # rust-guard source-integrity gates (CI-03a). Runs the workspace-excluded
   # `tools/rust-guard` binary against the whole repo: `modules` (every
