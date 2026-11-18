@@ -245,6 +245,7 @@ fn ttl_ms_round_trips_exactly_through_the_streaming_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let rt = runtime();
+    let _enter = rt.enter();
     let fixture = rt
         .block_on(timeout(BUILD_BUDGET, build_streaming_fixture(&root)))
         .unwrap();
@@ -305,6 +306,7 @@ fn streaming_target_accepts_exact_retry_and_refuses_changed_options() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let rt = runtime();
+    let _enter = rt.enter();
     let fixture = rt
         .block_on(timeout(BUILD_BUDGET, build_streaming_fixture(&root)))
         .unwrap();
@@ -355,6 +357,7 @@ fn cancelled_mid_load_on_streaming_dataset_publishes_nothing_and_leaves_no_stage
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let rt = runtime();
+    let _enter = rt.enter();
     let fixture = rt
         .block_on(timeout(BUILD_BUDGET, build_streaming_fixture(&root)))
         .unwrap();

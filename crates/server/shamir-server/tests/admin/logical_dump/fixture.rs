@@ -7,7 +7,7 @@
 //!
 //! Fixture-checklist compliance (every item failed CI on earlier steps):
 //! persistent Fjall system store (`ShamirDb::init(SystemStoreConfig::Fjall(
-//! tempdir/"system"))`), `check_seed_catalogue` before any facade read,
+//! root/"shamir_db_meta.redb"))`), `check_seed_catalogue` before any facade read,
 //! repository `main` owned by the fixture user plus an explicit `chown`
 //! grant on `store(db, "main")` (Manage is owner/admin-only), batches of at
 //! most 50 queries with unique aliases, nested values built with
@@ -39,8 +39,8 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 /// Directory name of the persistent (Fjall) system store under the fixture
-/// root, per the fixture checklist.
-pub const SYSTEM_STORE_DIR: &str = "system";
+/// root: the catalogue path the offline export and import drivers open.
+pub const SYSTEM_STORE_DIR: &str = "shamir_db_meta.redb";
 
 /// Directory name of the Fjall user directory under the fixture root.
 pub const USER_DIRECTORY_DIR: &str = "users";

@@ -181,6 +181,7 @@ fn run_streaming_budget_checks(
     import_budget: Duration,
 ) {
     let rt = runtime();
+    let _enter = rt.enter();
     let expected_records = (small_records + large_records) as u64;
 
     let fixture = rt
