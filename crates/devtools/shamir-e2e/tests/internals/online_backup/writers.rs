@@ -11,9 +11,11 @@
 //!
 //! Stop/control contract: the runner observes a `tokio::sync::watch`
 //! stop flag, checked after every awaited request (never across a guard:
-//! no lock is held over any `.await`). Every awaited request is bounded
-//! by the fixture's [`REQUEST_TIMEOUT`] (15 s — deliberately not the
-//! R3 measurement bound); there are no fixed sleeps.
+//! no lock is held over any `.await`). Every awaited request goes through
+//! the fixture's [`paced_execute`], so it is bounded by the fixture's
+//! [`REQUEST_TIMEOUT`] (120 s — deliberately not the R3 measurement bound)
+//! and paced by [`WRITER_PACE`] (≥ 4 ms) before every attempt; there are
+//! no fixed sleeps beyond that pacing.
 //!
 //! Termination: a writer that reaches [`WRITER_ROW_LIMIT`] rows without
 //! having been stopped returns [`WriterError::Exhausted`]; the gate test
@@ -28,7 +30,7 @@ use shamir_client::builder::write;
 use shamir_client::Client;
 use tokio::sync::watch;
 
-use super::fixture::{DB, REPO, REQUEST_TIMEOUT, TABLE};
+use super::fixture::{paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
 
 /// Column holding the writer id.
 pub const COL_WRITER: &str = "writer";
@@ -45,6 +47,11 @@ pub const WRITER_COUNT: usize = 4;
 /// nextest per-test kill; reaching it without a stop signal is an error,
 /// not a success.
 pub const WRITER_ROW_LIMIT: u64 = 1600;
+
+/// Pacing applied before EVERY attempt of a writer request (including
+/// retries of a `rate_limited` rejection): ≥ 4 ms, so a burst of writers
+/// never re-fires the pre-handler limiter it just got rejected by.
+pub const WRITER_PACE: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// Value derivation shared by writers and the read-back oracle: writer id
 /// times a fixed stride plus the sequence number, so a torn or misplaced
@@ -74,7 +81,8 @@ pub struct Ack {
     pub seq: u64,
     /// Stored value, `value(writer, seq)`.
     pub value: u64,
-    /// Monotonic timestamp taken at the successful alias response.
+    /// Monotonic timestamp taken immediately AFTER the successful
+    /// response was received (a real ACK receipt, never a send stamp).
     pub acked_at: Instant,
 }
 
@@ -190,9 +198,15 @@ impl WriterControl {
 /// 2. build ONE typed insert op for the next sequence;
 /// 3. await the bounded `execute(DB, batch.build())`;
 /// 4. verify a TYPED acknowledgement (non-skipped result AND an explicit
-///    committed `commit_version` — the batch is transactional); on
-///    success, stamp `Instant::now()` and append to the ledger;
+///    committed `commit_version` — the batch is transactional); only
+///    after that verified committed receipt, stamp `Instant::now()` as
+///    the real ACK receipt time and append to the ledger;
 /// 5. repeat.
+///
+/// The `Instant` returned by [`paced_execute`] is a SEND stamp (taken
+/// before the request goes out) and is deliberately DISCARDED here: it
+/// is the ordering anchor for the server-side status/StartBackup
+/// comparisons in the gate test, but it is never an ack time.
 ///
 /// Every insert goes through `Insert::with_repo(REPO, TABLE)` under
 /// `Durability::Synced` in an explicitly transactional batch — the ack
@@ -239,21 +253,19 @@ pub async fn run_writer(
         batch.durability(Durability::Synced);
         batch.insert(TABLE, write::Insert::with_repo(REPO, TABLE).row(doc));
 
-        let request = client.execute(DB, batch.build());
-        let response = match tokio::time::timeout(REQUEST_TIMEOUT, request).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(e)) => {
+        // Paced, retry-once-per-`rate_limited` execution bounded by the
+        // fixture's 120 s request deadline. The returned `Instant` is the
+        // SEND stamp (captured after pacing, immediately before the
+        // successful wire attempt) — the ordering anchor for the server
+        // side, NOT an ack time, so it is discarded here.
+        let (_send_at, result) = paced_execute(&client, DB, batch.build(), WRITER_PACE).await;
+        let response = match result {
+            Ok(response) => response,
+            Err(e) => {
                 bounded_close(client).await;
                 return Err(WriterError::Request {
                     seq,
                     source: e.to_string(),
-                });
-            }
-            Err(_elapsed) => {
-                bounded_close(client).await;
-                return Err(WriterError::Request {
-                    seq,
-                    source: format!("request exceeded {REQUEST_TIMEOUT:?}"),
                 });
             }
         };
@@ -293,9 +305,11 @@ pub async fn run_writer(
             });
         }
 
-        // Timestamp taken HERE, at the successful alias response — this
-        // is the ordering anchor for the R2 lower bound and the R3 gap
-        // bound.
+        // ACK time = `Instant::now()` taken immediately AFTER the typed
+        // non-skipped committed receipt above was verified — a real
+        // response-receipt timestamp (the write is durably committed when
+        // this stamp is taken), never the pre-send stamp of
+        // `paced_execute`.
         ledger.record(Ack {
             writer,
             seq,

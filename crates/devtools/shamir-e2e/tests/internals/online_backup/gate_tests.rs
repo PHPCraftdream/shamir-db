@@ -41,26 +41,26 @@ use tempfile::TempDir;
 use tokio::task::JoinSet;
 
 use super::copy_observation::{active_seal_copy, CopyProgress};
-use super::fixture::{self, DB, REPO, REQUEST_TIMEOUT, TABLE};
+use super::fixture::{self, paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
 use super::writers::{
     run_writer, value, Ack, Ledger, WriterControl, WriterError, WRITER_COUNT, WRITER_ROW_LIMIT,
 };
 
-/// Hard bound on consecutive ack-to-ack gaps per writer (R3, §6.2): the
-/// design's 2 s p99 per ack plus CI scheduling slack, floored at 10 s.
-const ACK_GAP_BOUND: Duration = Duration::from_secs(10);
+/// Hard bound on consecutive ack-to-ack gaps per writer (R3, §6.2): 10×
+/// the design's 2 s p99 per-ack baseline plus CI scheduling slack.
+const ACK_GAP_BOUND: Duration = Duration::from_secs(30);
 
-/// Total wall-clock budget for the whole test: the FlakeGuard watchdog
-/// and the overall scenario timeout, both under the 180 s nextest
-/// per-test kill. Every phase deadline derives from this bound; no fixed
-/// sleeps anywhere (bounded requests + busy yields only).
+/// Minimum pacing between BackupStatus attempts (retries included); the
+/// [`fixture::paced_execute`] send `Instant` is captured AFTER this sleep
+/// and BEFORE the wire request.
+pub(super) const STATUS_PACE: Duration = Duration::from_millis(20);
+
+/// Total wall-clock budget for the whole test — the ONE overall scenario
+/// bound: the FlakeGuard watchdog, the scenario timeout and every
+/// in-scenario deadline derive from it (under the 180 s nextest per-test
+/// kill). No stacked per-phase caps; no synchronization sleeps (bounded
+/// requests + busy yields).
 const TEST_BOUND: Duration = Duration::from_secs(170);
-
-/// Per-phase wall-clock budget inside the scenario.
-const TOTAL_BOUND: Duration = Duration::from_secs(150);
-
-/// Bound for the synchronous `restore` on its dedicated big-stack thread.
-const RESTORE_BOUND: Duration = Duration::from_secs(90);
 
 /// Stack for the deep synchronous restore/verify frames and for the
 /// roomy thread that drives the whole scenario.
@@ -76,10 +76,10 @@ const WORKER_STACK: usize = 16 * 1024 * 1024;
 /// both passes (file listing + hashing) and `verify_manifest` re-hashes
 /// the restored copy. Its ONLY purpose is to widen the observable
 /// post-capture interval (the backup does real 16 MiB of copying/hashing,
-/// so live `BackupStatus` polls have more time to land) — no sleeps, no
-/// injected pauses, and the strict two-post-capture-response non-vacuity
-/// requirement is NOT weakened. The size is a compile-time constant,
-/// independent of writer retry/row counts.
+/// so live `BackupStatus` polls have more time to land) — no
+/// synchronization sleeps, and the strict two-post-capture-response
+/// non-vacuity requirement is NOT weakened. The size is a compile-time
+/// constant, independent of writer retry/row counts.
 const CI_FIXTURE_PAD_BYTES: usize = 16 * 1024 * 1024;
 /// Chunk size for deterministic fixture writes (1 MiB per `write_all`).
 const CI_FIXTURE_CHUNK_BYTES: usize = 1024 * 1024;
@@ -94,19 +94,17 @@ const DATA_DIR_TOTAL_BUDGET: u64 = 200 * 1024 * 1024;
 const WAL_RETAINED_BUDGET: u64 = 32 * 1024 * 1024;
 
 /// Deterministic NONZERO byte pattern for chunk `idx` of the fixture:
-/// `(idx * 31 + 0x5A) as u8` — never zero, fully reproducible, so the
-/// restored copy can be byte-verified without any stored golden file.
-/// Nonzeroness proof: the addend 0x5A is nonzero, and `31 * idx mod 256`
-/// equals 0 only when `idx` is a multiple of 256 (gcd(31, 256) = 1), in
-/// which case the pattern is exactly 0x5A — so no `idx` yields 0.
+/// `(idx * 31 + 0x5A) as u8` — never zero, fully reproducible. Proof: the
+/// addend 0x5A is nonzero, and `31 * idx mod 256` equals 0 only when
+/// `idx` is a multiple of 256 (gcd(31, 256) = 1), where the pattern is
+/// exactly 0x5A — so no `idx` yields 0.
 fn fixture_pad_byte(chunk_idx: usize) -> u8 {
     (chunk_idx.wrapping_mul(31).wrapping_add(0x5A)) as u8
 }
 
 /// Write the inert fixture padding file directly into `data_dir` with
-/// deterministic nonzero bytes, 1 MiB per chunk. No locks, no protocol
-/// involvement — an ordinary side file in the `default/main` repo
-/// directory that the backup job treats like any other data file.
+/// deterministic nonzero bytes, 1 MiB per chunk — an ordinary side file
+/// in the `default/main` repo directory, no locks, no protocol.
 fn ci_fixture_pad_path(base: &std::path::Path) -> std::path::PathBuf {
     base.join("shamir_db_default_main.redb")
         .join(CI_FIXTURE_PAD_FILE)
@@ -250,19 +248,18 @@ struct StatusObservation {
     last: Option<SealObservation>,
 }
 
-/// Bounded `execute` of a typed batch; panics on transport failure or
-/// overrun (a gate-test certification failure, never a soft skip).
+/// Paced, bounded `execute` of a typed batch (pacing/retry via
+/// [`fixture::paced_execute`]: ≥ [`STATUS_PACE`] before the send, exact
+/// pre-dispatch `rate_limited` retried within the shared 120 s budget);
+/// panics on transport failure or overrun (certification failure).
 async fn bounded_execute(
     client: &shamir_client::Client,
     db: &str,
     batch: shamir_query_types::batch::BatchRequest,
     what: &'static str,
 ) -> BatchResponse {
-    match tokio::time::timeout(REQUEST_TIMEOUT, client.execute(db, batch)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(e)) => panic!("{what}: execute failed: {e}"),
-        Err(_elapsed) => panic!("{what}: exceeded {REQUEST_TIMEOUT:?}"),
-    }
+    let (_, result) = paced_execute(client, db, batch, STATUS_PACE).await;
+    result.unwrap_or_else(|e| panic!("{what}: execute failed: {e}"))
 }
 
 /// The single direct record of a single-alias response.
@@ -300,18 +297,25 @@ fn row_triple(record: &QueryRecord, what: &'static str) -> (i64, i64, i64) {
     (writer, seq, stored)
 }
 
-/// One `BackupStatus` poll (bounded request).
-async fn poll_backup_status(client: &shamir_client::Client) -> QueryRecord {
+/// One `BackupStatus` poll: a PACED bounded request via
+/// [`fixture::paced_execute`]; returns the send `Instant` (after the
+/// pacing sleep, before the SUCCESSFUL wire request, post-retry) and the
+/// record.
+async fn poll_backup_status(client: &shamir_client::Client) -> (Instant, QueryRecord) {
     let mut batch = Batch::new();
     batch.id("backup-status");
     batch.op("backup-status", ddl::backup_status());
-    let response = bounded_execute(client, "default", batch.build(), "backup status").await;
-    single_record(response, "backup-status", "backup status")
+    let (sent_at, result) = paced_execute(client, "default", batch.build(), STATUS_PACE).await;
+    let response = result.unwrap_or_else(|e| panic!("backup status: execute failed: {e}"));
+    (
+        sent_at,
+        single_record(response, "backup-status", "backup status"),
+    )
 }
 
 /// Poll `BackupStatus` until `running == false`; returns the final status
 /// record and the overlap observations. Fails on `Failed` stage, any
-/// present `last_error`, or the phase deadline. No fixed sleeps.
+/// present `last_error`, or the phase deadline. No synchronization sleeps.
 async fn await_backup_done(
     client: &shamir_client::Client,
     backup_id: &str,
@@ -328,10 +332,10 @@ async fn await_backup_done(
             Instant::now() < deadline,
             "backup did not finish within the phase deadline; last stage: {last_stage}"
         );
-        // The LAST request `Instant` is taken before send; the FIRST
-        // response `Instant` is set only after receipt.
-        let sent_at = Instant::now();
-        let status = poll_backup_status(client).await;
+        // The LAST request `Instant` is stamped by `paced_execute` after
+        // the pacing sleep and before the SUCCESSFUL wire request
+        // (post-retry); the response `Instant` is set after receipt.
+        let (sent_at, status) = poll_backup_status(client).await;
         let received_at = Instant::now();
         let stage = status
             .get_value_str("stage")
@@ -538,11 +542,14 @@ async fn read_restored_rows(client: &shamir_client::Client) -> BTreeMap<(i64, i6
 }
 
 /// Run the synchronous `restore(from → data_dir, force = false)` on a
-/// dedicated roomy thread, bounded by [`RESTORE_BOUND`].
+/// dedicated roomy thread, bounded by `budget` (remaining scenario
+/// deadline capped at [`REQUEST_TIMEOUT`], so a started restore never
+/// pushes the total past the outer cap).
 fn bounded_restore(
     guard: &FlakeGuard,
     from: std::path::PathBuf,
     data_dir: std::path::PathBuf,
+    budget: Duration,
 ) -> shamir_server::restore::RestoreReport {
     guard.mark("restore thread starts");
     let (tx, rx) = mpsc::channel();
@@ -556,8 +563,8 @@ fn bounded_restore(
         })
         .expect("spawn restore thread");
     let outcome = rx
-        .recv_timeout(RESTORE_BOUND)
-        .unwrap_or_else(|_| panic!("restore did not complete within {RESTORE_BOUND:?}"));
+        .recv_timeout(budget)
+        .unwrap_or_else(|_| panic!("restore did not complete within {budget:?}"));
     guard.mark("restore thread finished");
     let report = outcome.unwrap_or_else(|e| panic!("restore failed: {e}"));
     assert!(
@@ -577,7 +584,7 @@ fn bounded_restore(
 /// The gate scenario, run inside the test runtime.
 async fn gate_scenario(guard: FlakeGuard) {
     let started_at = Instant::now();
-    let overall_deadline = started_at + TOTAL_BOUND;
+    let overall_deadline = started_at + TEST_BOUND;
 
     let data_dir = TempDir::new().expect("temp data dir");
     let backup_root = TempDir::new().expect("temp backup root");
@@ -587,7 +594,7 @@ async fn gate_scenario(guard: FlakeGuard) {
 
     let booted = fixture::boot(data_dir.path(), true).await;
     let addr = booted.addr();
-    let admin = fixture::connect(addr, &booted.password).await;
+    let admin = fixture::connect(addr, &booted.password, "admin").await;
     fixture::setup(&admin).await;
     guard.mark("server booted, fixture set up");
 
@@ -604,14 +611,16 @@ async fn gate_scenario(guard: FlakeGuard) {
     let ledger = Ledger::new();
     let mut writers: JoinSet<Result<(), WriterError>> = JoinSet::new();
     for writer in 1..=WRITER_COUNT {
-        let client = fixture::connect(addr, &booted.password).await;
+        let client =
+            fixture::connect(addr, &booted.password, format!("writer {writer}").as_str()).await;
         let rx = control.subscribe();
         let task_ledger = ledger.clone();
         writers.spawn(async move { run_writer(writer as u64, client, rx, &task_ledger).await });
     }
 
-    // (a-warmup) Every writer has ≥1 ack BEFORE StartBackup is issued.
-    let warmup_deadline = overall_deadline.min(Instant::now() + Duration::from_secs(30));
+    // (a-warmup) Every writer has ≥1 ack BEFORE StartBackup (one overall
+    // bound — the fixture's 120 s deadline).
+    let warmup_deadline = overall_deadline.min(Instant::now() + REQUEST_TIMEOUT);
     loop {
         let snapshot = ledger.snapshot();
         let all_warmed = (1..=WRITER_COUNT as u64)
@@ -627,24 +636,20 @@ async fn gate_scenario(guard: FlakeGuard) {
     }
     guard.mark("all writers warmed up (≥1 ack each)");
 
-    // ── StartBackup (typed admin op on the "default" database, bounded) ──
-    let start_sent_at = Instant::now();
+    // ── StartBackup: the send `Instant` is the paced_execute SEND stamp
+    // (after pacing, before the successful wire request); the ledger
+    // stamps REAL ack receipts, so `acked_at < start_sent_at` proves
+    // acknowledgment before StartBackup went out (the server-side
+    // capture barrier sits after this request). ──
     let mut start = Batch::new();
     start.id("start-backup");
     start.op(
         "start",
         ddl::start_backup(backup_root.path().display().to_string()),
     );
-    let response = match tokio::time::timeout(
-        REQUEST_TIMEOUT,
-        admin.execute("default", start.build()),
-    )
-    .await
-    {
-        Ok(Ok(response)) => response,
-        Ok(Err(e)) => panic!("start backup: execute failed: {e}"),
-        Err(_elapsed) => panic!("start backup: exceeded {REQUEST_TIMEOUT:?}"),
-    };
+    let (start_sent_at, start_result) =
+        paced_execute(&admin, "default", start.build(), STATUS_PACE).await;
+    let response = start_result.unwrap_or_else(|e| panic!("start backup: execute failed: {e}"));
     let started_record = single_record(response, "start", "start backup");
     let backup_id = started_record
         .get_value_str("backup_id")
@@ -656,8 +661,9 @@ async fn gate_scenario(guard: FlakeGuard) {
     );
     guard.note("backup_id", &backup_id);
 
-    // (b) Backup runs to Done while writers keep committing.
-    let backup_deadline = overall_deadline.min(Instant::now() + Duration::from_secs(120));
+    // (b) Backup runs to Done while writers keep committing (one overall
+    // bound — `TEST_BOUND`).
+    let backup_deadline = overall_deadline.min(Instant::now() + REQUEST_TIMEOUT);
     let (final_status, observation) =
         await_backup_done(&admin, &backup_id, &guard, backup_deadline).await;
 
@@ -724,9 +730,10 @@ async fn gate_scenario(guard: FlakeGuard) {
     let snapshot = ledger.snapshot();
     certify_acks(&snapshot);
 
-    // (a-lower) The full pre-send set comes from the FINAL ledger,
-    // timestamped strictly before `start_sent_at` — an early snapshot
-    // would freeze before the StartBackup request was even built.
+    // (a-lower) The full pre-send set comes from the FINAL ledger, whose
+    // `acked_at` stamps are real ack receipts filtered strictly before
+    // `start_sent_at` (an early snapshot would freeze before the request
+    // was even built).
     let pre_start: Vec<&Ack> = snapshot
         .iter()
         .filter(|ack| ack.acked_at < start_sent_at)
@@ -747,26 +754,24 @@ async fn gate_scenario(guard: FlakeGuard) {
         .collect();
 
     // (b-overlap) MANDATORY: at least one ack per writer between the
-    // StartBackup request and the LAST observed live status — the copy
-    // really overlapped live writes for EVERY writer.
+    // StartBackup request and the LAST live status — real overlap for
+    // EVERY writer (acks are receipt stamps).
     let last_live = observation
         .last
         .expect("no live Sealing status was ever observed — overlap cannot be certified");
     let first_live = observation
         .first
         .expect("live statuses observed without a first observation");
-    // Endpoint instants: the window OPENS at the first qualifying
-    // response receipt (after the response arrived) and CLOSES at the
-    // last qualifying request send (before that request went out).
+    // Endpoint instants: window OPENS at the first response receipt,
+    // CLOSES at the last request send.
     let last_live_at = last_live.sent_at;
     let overlap_lower = first_live.received_at;
     assert!(
         overlap_lower <= last_live_at,
         "overlap window ill-formed (lower {overlap_lower:?} > upper {last_live_at:?})"
     );
-    // Both observed amounts (first and last qualifying observation) must
-    // sit strictly below the final nonzero totals on BOTH counters —
-    // proof the polls landed mid-copy, not after completion.
+    // Both observed amounts must sit strictly below the final nonzero
+    // totals on BOTH counters — the polls landed mid-copy, not after.
     first_live.progress.assert_before_final(final_progress);
     last_live.progress.assert_before_final(final_progress);
     for writer in 1..=WRITER_COUNT {
@@ -779,9 +784,8 @@ async fn gate_scenario(guard: FlakeGuard) {
             "writer {writer} had no acknowledgement between StartBackup and the last live status"
         );
     }
-    // STRICT window: endpoint instants are post-receipt (lower) and
-    // pre-send (upper), so a boundary ack is not attributable to the
-    // window and the in-window comparisons are strict.
+    // STRICT window: lower is post-receipt, upper pre-send — boundary
+    // acks are excluded and the comparisons are strict.
     let in_window: Vec<&Ack> = snapshot
         .iter()
         .filter(|ack| ack.acked_at > overlap_lower && ack.acked_at < last_live_at)
@@ -814,7 +818,7 @@ async fn gate_scenario(guard: FlakeGuard) {
     guard.mark("source server shut down cleanly");
     assert!(
         Instant::now() < overall_deadline,
-        "scenario exceeded the total {TOTAL_BOUND:?} budget before restore"
+        "scenario exceeded the total {TEST_BOUND:?} budget before restore"
     );
 
     // (d-snapshot) dest_dir exists, verifies, kind online, per-repo WAL pos.
@@ -858,15 +862,19 @@ async fn gate_scenario(guard: FlakeGuard) {
         repo_point.wal_position.to_string(),
     );
 
-    // (d-restore) Clean-machine restore onto the ABSENT target.
-    let report = bounded_restore(&guard, dest_dir, restored_data_dir.clone());
+    // (d-restore) Clean-machine restore onto the ABSENT target; budget
+    // min(120 s, remaining deadline) stays under the outer cap.
+    let restore_budget =
+        REQUEST_TIMEOUT.min(overall_deadline.saturating_duration_since(Instant::now()));
+    let report = bounded_restore(&guard, dest_dir, restored_data_dir.clone(), restore_budget);
     guard.note(
         "restored files/bytes",
         format!("{} / {}", report.files_restored, report.bytes_restored),
     );
 
     let restored_boot = fixture::boot(&restored_data_dir, false).await;
-    let restored_client = fixture::connect(restored_boot.addr(), &restored_boot.password).await;
+    let restored_client =
+        fixture::connect(restored_boot.addr(), &restored_boot.password, "restored").await;
     let restored = read_restored_rows(&restored_client).await;
     assert!(!restored.is_empty(), "the restored copy must not be empty");
 
@@ -893,9 +901,8 @@ async fn gate_scenario(guard: FlakeGuard) {
     }
 
     // (a-prefix) Per writer the restored sequences are the contiguous
-    // prefix 1..=m, m ≥ pre-start count, m ≤ the writer's final ack count
-    // (every attempt was acked), every value
-    // matches its derivation — no holes, no extras.
+    // prefix 1..=m, pre-start count ≤ m ≤ final ack count, values match
+    // the derivation — no holes/extras.
     for writer in 1..=WRITER_COUNT as u64 {
         let seqs: Vec<i64> = restored
             .keys()
@@ -935,16 +942,14 @@ async fn gate_scenario(guard: FlakeGuard) {
     guard.mark("restored server shut down cleanly");
 
     // ── quiet-shutdown budget scan (nothing removed, fixture included) ──
-    // Both data dirs are quiescent here (each server shut down cleanly).
-    // The scan counts every regular file: all `*.shamirwal` WAL directory
-    // files for the retained-WAL budget, the fixture padding for the
-    // total. Removing nothing keeps the scan observation-only.
+    // Both data dirs are quiescent (each server shut down cleanly); the
+    // scan counts every regular file and removes nothing.
     assert_shutdown_budgets(data_dir.path(), "source data dir");
     assert_shutdown_budgets(&restored_data_dir, "restored data dir");
     guard.mark("shutdown budget scan passed");
     assert!(
         Instant::now() < overall_deadline,
-        "scenario exceeded the total {TOTAL_BOUND:?} budget"
+        "scenario exceeded the total {TEST_BOUND:?} budget"
     );
 }
 

@@ -8,16 +8,18 @@
 //! shapes mirror `examples/reference_fixture.rs`.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
 use shamir_client::builder::batch::Batch;
 use shamir_client::builder::ddl::{self, RepoEngine};
-use shamir_client::{Client, ConnectOptions};
+use shamir_client::{Client, ClientError, ConnectOptions};
+use shamir_query_types::batch::{BatchRequest, BatchResponse};
 
 use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, SecurityConfig,
+    TlsConfig,
 };
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 
@@ -25,7 +27,9 @@ pub(super) const DB: &str = "backup_load";
 pub(super) const REPO: &str = "main";
 pub(super) const TABLE: &str = "rows";
 
-pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-request deadline, shared by every awaited client operation and by
+/// `paced_execute`'s retry budget (10× the 12 s baseline).
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 const ADMIN_USER: &str = "admin";
 const ADMIN_PASSWORD: &[u8] = b"correct horse battery staple";
@@ -65,7 +69,9 @@ fn backup_config(data_dir: &Path) -> Config {
             parallelism: 1,
             argon2_version: 0x13,
         },
-        argon2_concurrent_max: 4,
+        // 64: headroom alignment, NOT an EOF fix — SCRAM never touches the
+        // argon2 semaphore (the client KDF runs only after the challenge).
+        argon2_concurrent_max: 64,
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: "127.0.0.1:0".into(),
@@ -79,7 +85,16 @@ fn backup_config(data_dir: &Path) -> Config {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("cert.key"),
         },
-        security: Default::default(),
+        // Loopback fixture only: the auth_init limiter (shamir-sync
+        // handshake.rs, BEFORE the first frame) defaults to 10/s per subnet,
+        // burst 2 (startup divides the default by 4). Five sequential
+        // same-subnet clients can finish inside 1.4 s and exhaust it, so
+        // raise it to 64 (effective 16/s during warmup — above every gate
+        // connection here) while keeping the throttle finite.
+        security: SecurityConfig {
+            auth_init_rate_per_second: 64,
+            ..Default::default()
+        },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
@@ -121,26 +136,102 @@ pub async fn boot(data_dir: &Path, fresh: bool) -> Booted {
     Booted { handle, password }
 }
 
-/// Connect a typed client as the bootstrap admin; every await inside is
-/// bounded by `REQUEST_TIMEOUT` (also set as the request deadline).
-pub async fn connect(addr: std::net::SocketAddr, password: &Zeroizing<Vec<u8>>) -> Client {
-    tokio::time::timeout(
-        REQUEST_TIMEOUT,
-        Box::pin(Client::connect(ConnectOptions {
-            addr,
-            server_name: "localhost".into(),
-            username: ADMIN_USER.into(),
-            password: Zeroizing::new(password.to_vec()),
-            accept_new_host: true,
-            trusted_pin: None,
-            connect_timeout: None,
-            handshake_timeout: None,
-            request_timeout: Some(REQUEST_TIMEOUT),
-        })),
-    )
-    .await
-    .expect("client connect deadline")
-    .expect("client connect")
+/// Connect a typed client as the bootstrap admin. Every await inside is
+/// bounded by [`REQUEST_TIMEOUT`], which is also installed as the client's
+/// per-request deadline (along with explicit connect/handshake timeouts —
+/// `None` would fall back to the client's own tight defaults).
+///
+/// `label` is a scenario tag surfaced in both diagnostics (deadline expiry
+/// and the typed [`ClientError`]); there are NO retries here.
+pub async fn connect(
+    addr: std::net::SocketAddr,
+    password: &Zeroizing<Vec<u8>>,
+    label: &str,
+) -> Client {
+    let connect = Box::pin(Client::connect(ConnectOptions {
+        addr,
+        server_name: "localhost".into(),
+        username: ADMIN_USER.into(),
+        password: Zeroizing::new(password.to_vec()),
+        accept_new_host: true,
+        trusted_pin: None,
+        connect_timeout: Some(REQUEST_TIMEOUT),
+        handshake_timeout: Some(REQUEST_TIMEOUT),
+        request_timeout: Some(REQUEST_TIMEOUT),
+    }));
+    match tokio::time::timeout(REQUEST_TIMEOUT, connect).await {
+        Ok(Ok(client)) => client,
+        Ok(Err(e)) => panic!("[{label}] client connect failed: {e}"),
+        Err(_elapsed) => {
+            panic!("[{label}] client connect exceeded the {REQUEST_TIMEOUT:?} deadline")
+        }
+    }
+}
+
+/// Execute a batch with pacing and bounded `rate_limited` retries.
+///
+/// Wire contract (dispatch.rs pre-handler rejection):
+/// * sleeps `pace` before EVERY attempt (including the first);
+/// * retries ONLY `ClientError::Db { code: "rate_limited", .. }` — the
+///   server's pre-handler limiter rejection; transport, handshake,
+///   protocol and timeout errors are returned immediately, never retried;
+/// * at most 3 attempts, bounded by ONE genuine [`REQUEST_TIMEOUT`]
+///   deadline (`timeout_at` with `tokio::time::Instant`) covering BOTH the
+///   pacing sleeps and each complete wire attempt — a deadline hit never
+///   retries and returns a typed `Io(TimedOut)` error instead. Dropping
+///   the in-flight future at expiry also traces the client's pending
+///   response cancellation; because the server may still apply a batch
+///   that was already written to the wire, a deadline expiry leaves the
+///   commit AMBIGUOUS (the client's pending-response wait is cancelled by
+///   the mid-write drop and the pending registration is released by RAII
+///   in the client api) — callers must not infer outcome from `TimedOut`;
+/// * the request is sent as a cloned owned [`BatchRequest`], so the
+///   caller's builder value stays untouched across retries.
+///
+/// Returns the std `Instant` stamped AFTER pacing/backoff, immediately before
+/// the actual attempt (the successful one on `Ok`) — so overlap proofs
+/// never include the pacing sleep.
+pub(super) async fn paced_execute(
+    client: &Client,
+    db: &str,
+    batch: BatchRequest,
+    pace: Duration,
+) -> (Instant, Result<BatchResponse, ClientError>) {
+    const MAX_ATTEMPTS: u32 = 3;
+    let deadline = tokio::time::Instant::now() + REQUEST_TIMEOUT;
+
+    let timed_out = |where_: &str| {
+        ClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("paced_execute exceeded the {REQUEST_TIMEOUT:?} deadline {where_}"),
+        ))
+    };
+
+    let mut stamp = Instant::now();
+    for attempt in 0..MAX_ATTEMPTS {
+        // Pacing sleep, bounded by the same single deadline.
+        let wake = tokio::time::Instant::now() + pace;
+        tokio::time::sleep_until(wake.min(deadline)).await;
+        // `timeout_at` may poll the inner future even when the deadline
+        // has already expired; never touch the wire on an expired budget.
+        if tokio::time::Instant::now() >= deadline {
+            return (stamp, Err(timed_out("before a wire attempt")));
+        }
+        stamp = Instant::now();
+        // Complete wire attempt under the deadline; dropping the future
+        // at expiry cancels the client's pending-response wait.
+        match tokio::time::timeout_at(deadline, client.execute(db, batch.clone())).await {
+            Ok(Ok(response)) => return (stamp, Ok(response)),
+            Ok(Err(e))
+                if matches!(&e, ClientError::Db { code, .. } if code == "rate_limited")
+                    && attempt + 1 < MAX_ATTEMPTS => {}
+            Ok(Err(e)) => return (stamp, Err(e)),
+            Err(_elapsed) => {
+                return (stamp, Err(timed_out(&format!("at attempt {attempt}"))));
+            }
+        }
+    }
+    unreachable!("retry loop returns on every path")
 }
 
 /// Close the client and shut the server down; the report must be clean

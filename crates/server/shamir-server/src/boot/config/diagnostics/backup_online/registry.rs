@@ -272,7 +272,7 @@ impl RunJob {
             record,
         } = self;
         let started_at = Instant::now();
-        let Some(_permit_guard) = permit.try_acquire() else {
+        let Some(permit_guard) = permit.try_acquire() else {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol.
             let mut record = record.lock();
@@ -314,6 +314,9 @@ impl RunJob {
         }
         let snapshot_count = run_state.snapshot_count();
         let repos_created_during = live_repo_count(&db, &runtime).saturating_sub(snapshot_count);
+        // Release the permit before publishing idle, or a new run can be
+        // refused.
+        drop(permit_guard);
         let mut record = record.lock();
         record.running = false;
         record.progress = progress.clone();

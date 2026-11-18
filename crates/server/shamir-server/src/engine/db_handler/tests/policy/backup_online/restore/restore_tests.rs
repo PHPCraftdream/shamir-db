@@ -35,16 +35,18 @@
 //!   WAL still replays strictly;
 //! * store contents ABOVE `V*` — the staged store replaced with a fresh
 //!   copy of the live store AFTER the post-seal write (WAL and recorded
-//!   point untouched): replay to `V*` tolerates the above-point store and
-//!   restore SUCCEEDS on a fresh target with the post-seal write present
-//!   in the restored boot's read.
+//!   point untouched): strict replay REFUSES, fail-closed, with the typed
+//!   `ReplayToError::Recovery(DbError::Validation(...))` carrying the
+//!   exact expected-version mismatch (checked BEFORE any WAL entry is
+//!   applied), the fresh target stays absent and no stage/rollback
+//!   sibling is left behind.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use shamir_db::engine::db_instance::replay_to::{ReplayScopeError, ReplayToError};
-use shamir_db::{ShamirDb, SystemStoreConfig};
+use shamir_db::{DbError, ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
 
@@ -455,15 +457,18 @@ fn captured_point(snapshot_dir: &Path) -> u64 {
         .wal_position
 }
 
-/// Store contents ABOVE the recorded point are tolerated: the staged
-/// store is replaced with a fresh copy of the live store AFTER the
+/// Store contents ABOVE the recorded point are REFUSED, fail-closed: the
+/// staged store is replaced with a fresh copy of the live store AFTER the
 /// post-seal write `after_seal` (the staged WAL and the manifest's
 /// recorded point `V*` stay untouched, the manifest re-hashed so the
-/// verifier accepts). Restore SUCCEEDS on a fresh target and the restored
-/// boot's read CONTAINS `after_seal` (the WAL replays to `V*`, the store
-/// above the point is kept, not truncated).
+/// verifier accepts). Strict replay checks the version read from the
+/// opened store against `V*` BEFORE applying any WAL entry, so restore
+/// REFUSES with the typed `ReplayToError::Recovery` wrapping a
+/// `DbError::Validation` whose message is exactly the expected-version
+/// mismatch, the absent fresh target stays absent and no staged/rollback
+/// sibling is left behind.
 #[test]
-fn store_contents_above_recorded_point_are_tolerated_on_restore() {
+fn store_contents_above_recorded_point_are_refused_fail_closed_on_restore() {
     on_big_stack(|| {
         let fixture = Fixture::new();
         let snapshot = fixture.capture_snapshot(false);
@@ -476,21 +481,55 @@ fn store_contents_above_recorded_point_are_tolerated_on_restore() {
         );
         snapshot.assert_verifies();
 
-        let report = run_restore(&fixture).expect("restore must tolerate a store above V*");
-        assert!(
-            report.files_restored > 0,
-            "the restore must copy the snapshot files"
-        );
-        let boot = boot_probe_rows(&fixture);
-        assert_eq!(
-            boot,
-            ["after_seal", "before_capture", "before_seal"],
-            "the restored read must contain the above-V* store content `after_seal`"
-        );
+        match run_restore(&fixture) {
+            Ok(report) => {
+                panic!("replay against a store above the recorded point must refuse: {report:?}")
+            }
+            Err(RestoreError::Replay { repo, source }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+                match &*source {
+                    ReplayToError::Recovery(DbError::Validation(message)) => {
+                        assert_expected_version_mismatch(message, recorded);
+                    }
+                    other => panic!(
+                        "expected Recovery(Validation(expected-version mismatch)), \
+                         got: {other}"
+                    ),
+                }
+            }
+            Err(other) => panic!("expected RestoreError::Replay, got: {other}"),
+        }
+        assert_clean_refusal(&fixture);
 
         drop(fixture);
     })
     .expect("test thread");
+}
+
+/// The validation message must be exactly the strict-replay expected-
+/// version mismatch: `strict WAL replay: expected version {v_star}, got
+/// committed {committed}, allocated {allocated}` with `v_star == recorded`
+/// and the store-opened versions equal to each other and ABOVE `recorded`
+/// (the live store carries the post-seal commit). The committed/allocated
+/// values are parsed from the message, not assumed.
+fn assert_expected_version_mismatch(message: &str, recorded: u64) {
+    let prefix = format!("strict WAL replay: expected version {recorded}, got committed ");
+    let rest = message.strip_prefix(&prefix).unwrap_or_else(|| {
+        panic!("expected the expected-version mismatch naming V*={recorded}, got: {message:?}")
+    });
+    let (committed, allocated) = rest
+        .split_once(", allocated ")
+        .unwrap_or_else(|| panic!("missing allocated version: {message:?}"));
+    let committed: u64 = committed.parse().expect("committed version");
+    let allocated: u64 = allocated.parse().expect("allocated version");
+    assert_eq!(
+        committed, allocated,
+        "the store-opened versions must agree: {message:?}"
+    );
+    assert!(
+        committed > recorded,
+        "the store's versions must sit above V*: {message:?}"
+    );
 }
 
 /// The captured repository's store directory is missing from the snapshot

@@ -450,7 +450,9 @@ impl Snapshot {
     /// the manifest's recorded captured point `V*` untouched, then re-hash
     /// the manifest from the resulting files so the verifier accepts the
     /// snapshot: the store's contents are ABOVE the recorded point, which
-    /// replay to `V*` must tolerate.
+    /// strict replay must REFUSE, fail-closed
+    /// (`ReplayToError::Recovery(DbError::Validation(expected-version
+    /// mismatch))`), before touching the restore target.
     pub fn stage_above_v_star_store(&self, fixture: &Fixture) {
         let staged = self.dir.join("repos").join(REPO);
         fs::remove_dir_all(&staged).expect("remove staged store");

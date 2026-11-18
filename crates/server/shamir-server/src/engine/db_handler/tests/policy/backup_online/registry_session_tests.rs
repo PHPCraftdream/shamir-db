@@ -32,7 +32,23 @@ use crate::sync::durability::backup::online::progress::BackupStage;
 use crate::sync::durability::backup::online::wal_capture::{OnlineBackupPort, PortError};
 use crate::sync::durability::backup::verify_manifest;
 
-const WAIT: Duration = Duration::from_secs(60);
+/// Per-operation hang detector: allow for a runner up to ten times slower
+/// than the 12 s baseline, subject to the remaining overall budget. Every
+/// await, poll and blocking `recv_timeout` here uses at least this (CI
+/// evidence on Windows showed over 24 s elapsed per test against the
+/// previous tighter bounds).
+const WAIT: Duration = Duration::from_secs(120);
+/// Overall cap for a multi-phase test: every await is additionally capped
+/// by the remaining time to this deadline, so a stalled phase cannot push
+/// the test past the 180 s nextest per-test kill.
+const OVERALL: Duration = Duration::from_secs(170);
+
+/// Remaining time to an overall deadline, never below zero and never above
+/// `WAIT`: each await may take up to `WAIT`, shortened if needed by the
+/// overall limit — `WAIT` is an upper bound, never a minimum.
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now()).min(WAIT)
+}
 
 /// One durable engine (see module doc) plus the registry over it. The data dir
 /// passed to the registry is the system store's parent — the same root the
@@ -78,8 +94,8 @@ async fn fixture(root: &Path) -> (Arc<ShamirDb>, OnlineBackupRegistry) {
 /// Bounded wait for a background-runner condition (the runner thread has
 /// no completion channel, so the test polls the status snapshot under a
 /// hard deadline — never an unbounded sleep).
-fn wait_until(mut check: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + WAIT;
+fn wait_until(mut check: impl FnMut() -> bool, outer: Instant) -> bool {
+    let deadline = Instant::now() + remaining(outer);
     while Instant::now() < deadline {
         if check() {
             return true;
@@ -90,10 +106,10 @@ fn wait_until(mut check: impl FnMut() -> bool) -> bool {
 }
 
 /// Cancel a still-running run and wait (bounded) for the runner to finish.
-fn cancel_and_wait(registry: &OnlineBackupRegistry) {
+fn cancel_and_wait(registry: &OnlineBackupRegistry, deadline: Instant) {
     assert!(registry.cancel(), "run must be active to cancel");
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "runner must finish after cancel"
     );
 }
@@ -109,7 +125,10 @@ fn dest_root() -> PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_start_while_running_is_refused_with_typed_already_running() {
     let root = tempfile::tempdir().expect("tempdir").keep();
-    let (_db, registry) = fixture(&root).await;
+    let deadline = Instant::now() + OVERALL;
+    let (_db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within the bound");
     let to = dest_root();
 
     registry.start(to.clone()).expect("first start");
@@ -135,7 +154,7 @@ async fn second_start_while_running_is_refused_with_typed_already_running() {
         "a concurrent second start must be refused with AlreadyRunning"
     );
     if registry.status().running {
-        cancel_and_wait(&registry);
+        cancel_and_wait(&registry, deadline);
     }
     let _ = std::fs::remove_dir_all(&to);
     let _ = std::fs::remove_dir_all(&root);
@@ -147,7 +166,10 @@ async fn second_start_while_running_is_refused_with_typed_already_running() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_destinations_are_refused_with_typed_error() {
     let root = tempfile::tempdir().expect("tempdir").keep();
-    let (_db, registry) = fixture(&root).await;
+    let deadline = Instant::now() + OVERALL;
+    let (_db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within the bound");
 
     for (alias, to) in [
         ("relative", PathBuf::from("backup-out")),
@@ -173,7 +195,10 @@ async fn invalid_destinations_are_refused_with_typed_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_flips_flag_ends_run_and_leaves_engine_open() {
     let root = tempfile::tempdir().expect("tempdir").keep();
-    let (_db, registry) = fixture(&root).await;
+    let deadline = Instant::now() + OVERALL;
+    let (_db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within the bound");
     let to = dest_root();
 
     registry.start(to.clone()).expect("start");
@@ -184,7 +209,7 @@ async fn cancel_flips_flag_ends_run_and_leaves_engine_open() {
         "cancel flag must be observable in the status"
     );
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "run must end after cancel"
     );
     assert_eq!(
@@ -216,7 +241,7 @@ async fn cancel_flips_flag_ends_run_and_leaves_engine_open() {
     let (id, destination) = registry.start(to.clone()).expect("restart after cancel");
     assert!(id.starts_with("ob-"), "backup id shape: {id}");
     assert_eq!(destination, to);
-    cancel_and_wait(&registry);
+    cancel_and_wait(&registry, deadline);
     let after = registry.status();
     assert_eq!(after.dest_dir, None, "cancelled run has no snapshot dir");
     let _ = std::fs::remove_dir_all(&to);
@@ -250,20 +275,24 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
     let root = root_dir.path().to_path_buf();
     let to = to_dir.path().to_path_buf();
     let other = other_dir.path().to_path_buf();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let (db, registry) =
-        tokio::time::timeout(deadline - tokio::time::Instant::now(), fixture(&root))
-            .await
-            .expect("fixture within deadline");
+    // Bounded setup, insert and flush included: the overall cap (~170 s,
+    // under the 180 s nextest kill) bounds the whole multi-phase test, and
+    // each await gets up to `WAIT` (>= 120 s) of the remaining time.
+    let deadline = Instant::now() + OVERALL;
+    let (db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within deadline");
+    guard.note("fixture-ready", "engine + registry built");
     std::fs::create_dir_all(root.join("manifest.json.tmp")).expect("blocker dir");
     let blocker_bytes: &[u8] = b"block";
     std::fs::write(root.join("manifest.json.tmp/blocker"), blocker_bytes).expect("blocker file");
 
     registry.start(to.clone()).expect("start");
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "the failing run must end on its own"
     );
+    guard.note("failed", "run ended with recorded error");
     let snapshot = registry.status();
     assert!(
         snapshot.last_error.is_some(),
@@ -298,6 +327,7 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         0,
         "the failed run must have cleaned the destination root"
     );
+    guard.note("cleaned", "destination root empty after failure");
 
     // The engine is fully open: with the blocker removed and one more row
     // typed into the SAME live engine (a bounded write through the
@@ -311,20 +341,16 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         "ins_c",
         write::Insert::with_repo("main", "rows").row(QueryValue::Map(row_c)),
     );
-    tokio::time::timeout(
-        deadline - tokio::time::Instant::now(),
-        db.execute("app", &batch.build()),
-    )
-    .await
-    .expect("insert after failure within deadline")
-    .expect("insert after failure");
-    tokio::time::timeout(
-        deadline - tokio::time::Instant::now(),
-        db.flush_all_waiting(),
-    )
-    .await
-    .expect("flush after failure within deadline")
-    .expect("flush after failure");
+    tokio::time::timeout(remaining(deadline), db.execute("app", &batch.build()))
+        .await
+        .expect("insert after failure within deadline")
+        .expect("insert after failure");
+    guard.note("insert-returned", "row c typed");
+    tokio::time::timeout(remaining(deadline), db.flush_all_waiting())
+        .await
+        .expect("flush after failure within deadline")
+        .expect("flush after failure");
+    guard.note("flush-returned", "row c durable");
     let (second_id, destination) = registry
         .start(other.clone())
         .expect("restart after failure");
@@ -335,9 +361,10 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
     );
     assert_eq!(destination, other);
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "the second run must complete on its own"
     );
+    guard.note("second-backup-finished", "second run ended");
     let after = registry.status();
     assert!(
         after.last_error.is_none(),
@@ -370,12 +397,15 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_survives_until_next_start_and_shows_stage_progress() {
     let root = tempfile::tempdir().expect("tempdir").keep();
-    let (_db, registry) = fixture(&root).await;
+    let deadline = Instant::now() + OVERALL;
+    let (_db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within the bound");
     let to = dest_root();
 
     registry.start(to.clone()).expect("start");
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "run must complete on its own"
     );
 
@@ -440,7 +470,7 @@ async fn status_survives_until_next_start_and_shows_stage_progress() {
         fresh.last_error.is_none(),
         "new run starts with a clean record"
     );
-    cancel_and_wait(&registry);
+    cancel_and_wait(&registry, deadline);
     let _ = std::fs::remove_dir_all(snapshot.dest_dir.as_ref().expect("dest dir"));
     let _ = std::fs::remove_dir_all(&other);
     let _ = std::fs::remove_dir_all(&root);
@@ -469,11 +499,12 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
     let root = root_dir.path().to_path_buf();
     let to = to_dir.path().to_path_buf();
     // Bounded setup, insert and flush included.
-    let (db, registry) = tokio::time::timeout(WAIT, fixture(&root))
+    let deadline = Instant::now() + OVERALL;
+    let (db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
         .await
         .expect("fixture within the bound");
     tokio::time::timeout(
-        WAIT,
+        remaining(deadline),
         db.add_repo(
             "app",
             RepoConfig::new("extra", BoxRepoFactory::fjall_raw(root.join("repos/extra")))
@@ -505,7 +536,7 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
         let _ = catalogue_tx.send(port_for_catalogue.catalogue());
     });
     let sources = catalogue_rx
-        .recv_timeout(WAIT)
+        .recv_timeout(remaining(deadline))
         .expect("catalogue within the bound")
         .expect("catalogue must succeed");
     catalogue_thread
@@ -519,7 +550,7 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
 
     // Drop the repo AFTER the snapshot: the port's captured set still
     // names `app/extra`, but there is no live instance to pin.
-    let removed = tokio::time::timeout(WAIT, db.remove_repo("app", "extra"))
+    let removed = tokio::time::timeout(remaining(deadline), db.remove_repo("app", "extra"))
         .await
         .expect("remove within the bound")
         .expect("remove must not error");
@@ -532,7 +563,7 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
         let _ = pins_tx.send(port_for_pins.acquire_pins());
     });
     let pins = pins_rx
-        .recv_timeout(WAIT)
+        .recv_timeout(remaining(deadline))
         .expect("acquire_pins within the bound");
     pins_thread
         .join()
@@ -555,7 +586,7 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
     // is an inert orphan excluded from capture).
     registry.start(to.clone()).expect("start after pin failure");
     assert!(
-        wait_until(|| !registry.status().running),
+        wait_until(|| !registry.status().running, deadline,),
         "the follow-up run must complete on its own"
     );
     let snapshot = registry.status();

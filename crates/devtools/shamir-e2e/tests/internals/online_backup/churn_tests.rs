@@ -54,7 +54,8 @@ use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 
 use super::copy_observation::{active_seal_copy, CopyProgress};
-use super::fixture::{self, DB, REPO, REQUEST_TIMEOUT, TABLE};
+use super::fixture::{self, paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
+use super::gate_tests::STATUS_PACE;
 
 /// The second, mid-copy repository (Q9's created-after-capture repo).
 const CHURN_REPO: &str = "churn";
@@ -67,15 +68,10 @@ const CHURN_WRITER: u64 = 1;
 const CHURN_SEQ: u64 = 1;
 const CHURN_VALUE: u64 = 42;
 
-/// Total wall-clock budget for the whole test, under the 180 s nextest
-/// per-test kill; the FlakeGuard watchdog and the scenario timeout.
+/// Total wall-clock budget for the whole test — the ONE overall scenario
+/// bound (watchdog + scenario timeout + every in-scenario deadline),
+/// under the 180 s nextest per-test kill.
 const TEST_BOUND: Duration = Duration::from_secs(170);
-
-/// Per-phase wall-clock budget inside the scenario.
-const TOTAL_BOUND: Duration = Duration::from_secs(150);
-
-/// Bound for the synchronous `restore` on its dedicated big-stack thread.
-const RESTORE_BOUND: Duration = Duration::from_secs(90);
 
 /// Stack for the deep synchronous restore/verify frames and the roomy
 /// scenario thread.
@@ -101,27 +97,30 @@ fn running_of(status: &QueryRecord) -> bool {
 }
 
 /// Bounded `execute` of a typed batch; panics on transport failure or
-/// overrun (a certification failure, never a soft skip).
+/// overrun (a certification failure, never a soft skip). Paced by the
+/// fixture's [`paced_execute`] (≥ [`STATUS_PACE`] before every attempt,
+/// exact pre-dispatch `rate_limited` retried inside the shared budget).
 async fn bounded_execute(
     client: &shamir_client::Client,
     db: &str,
     batch: BatchRequest,
     what: &'static str,
 ) -> BatchResponse {
-    match tokio::time::timeout(REQUEST_TIMEOUT, client.execute(db, batch)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(e)) => panic!("{what}: execute failed: {e}"),
-        Err(_elapsed) => panic!("{what}: exceeded {REQUEST_TIMEOUT:?}"),
-    }
+    let (_, result) = paced_execute(client, db, batch, STATUS_PACE).await;
+    result.unwrap_or_else(|e| panic!("{what}: execute failed: {e}"))
 }
 
-/// One `BackupStatus` poll (bounded request) as a raw record.
-async fn poll_backup_status(client: &shamir_client::Client) -> QueryRecord {
+/// One `BackupStatus` poll: a PACED bounded request via
+/// [`fixture::paced_execute`]; returns the send `Instant` (captured after
+/// the pacing sleep, immediately before the SUCCESSFUL wire request —
+/// after any `rate_limited` retry) and the raw record.
+async fn poll_backup_status(client: &shamir_client::Client) -> (Instant, QueryRecord) {
     let mut batch = Batch::new();
     batch.id("churn-backup-status");
     batch.op("backup-status", ddl::backup_status());
+    let (sent_at, result) = paced_execute(client, "default", batch.build(), STATUS_PACE).await;
     let mut response =
-        bounded_execute(client, "default", batch.build(), "churn backup status").await;
+        result.unwrap_or_else(|e| panic!("churn backup status: execute failed: {e}"));
     let result = response
         .results
         .shift_remove("backup-status")
@@ -130,11 +129,12 @@ async fn poll_backup_status(client: &shamir_client::Client) -> QueryRecord {
         !result.skipped,
         "churn backup status: 'backup-status' was cascade-skipped"
     );
-    result
+    let record = result
         .records
         .into_iter()
         .next()
-        .unwrap_or_else(|| panic!("churn backup status: no records"))
+        .unwrap_or_else(|| panic!("churn backup status: no records"));
+    (sent_at, record)
 }
 
 /// One bounded, verified typed batch (single alias; DDL batches carry no
@@ -151,7 +151,7 @@ async fn run_step(client: &shamir_client::Client, what: &'static str, batch: Bat
 
 /// The churn scenario, run inside the test runtime.
 async fn churn_scenario(guard: FlakeGuard) {
-    let overall_deadline = Instant::now() + TOTAL_BOUND;
+    let overall_deadline = Instant::now() + TEST_BOUND;
 
     let data_dir = TempDir::new().expect("temp data dir");
     let backup_root = TempDir::new().expect("temp backup root");
@@ -160,7 +160,7 @@ async fn churn_scenario(guard: FlakeGuard) {
     assert!(!restored_data_dir.exists(), "restore target must be absent");
 
     let booted = fixture::boot(data_dir.path(), true).await;
-    let admin = fixture::connect(booted.addr(), &booted.password).await;
+    let admin = fixture::connect(booted.addr(), &booted.password, "admin").await;
     fixture::setup(&admin).await;
     guard.mark("server booted, fixture set up (no churn repo yet)");
 
@@ -234,14 +234,16 @@ async fn churn_scenario(guard: FlakeGuard) {
     // captured set is fixed, so mid-window DDL is provably after capture.
     // Only a `Sealing`+running poll of THIS backup counts (the helper); a
     // `Verifying`/bookkeeping poll can never open the window.
-    let window_deadline = overall_deadline.min(Instant::now() + Duration::from_secs(60));
+    // Bounded by the fixture's shared 120 s request deadline (no stacked
+    // phase cap — the ONE overall bound is `TEST_BOUND`).
+    let window_deadline = overall_deadline.min(Instant::now() + REQUEST_TIMEOUT);
     let first_progress: CopyProgress = loop {
         assert!(
             Instant::now() < window_deadline,
             "no active Sealing copy observed in time; the copy never reached the seal stage, \
              so churn-in-copy cannot be certified"
         );
-        let status = poll_backup_status(&admin).await;
+        let (_, status) = poll_backup_status(&admin).await;
         let stage = stage_of(&status);
         assert!(
             stage != "Failed",
@@ -332,8 +334,11 @@ async fn churn_scenario(guard: FlakeGuard) {
              overlap: {:?}",
             last_progress.is_some()
         );
-        let sent_at = Instant::now();
-        let status = poll_backup_status(&admin).await;
+        // The request must have STARTED strictly after the churn ack;
+        // `sent_at` is the paced_execute stamp (after pacing, before the
+        // successful wire request — post-retry), so the overlap proof
+        // never includes pacing.
+        let (sent_at, status) = poll_backup_status(&admin).await;
         let stage = stage_of(&status);
         assert!(
             stage != "Failed",
@@ -456,9 +461,13 @@ async fn churn_scenario(guard: FlakeGuard) {
             ));
         })
         .expect("spawn restore thread");
+    // Budget: min(120 s, remaining scenario deadline) so a started
+    // restore cannot push the total past the outer cap.
+    let restore_budget =
+        REQUEST_TIMEOUT.min(overall_deadline.saturating_duration_since(Instant::now()));
     let outcome = rx
-        .recv_timeout(RESTORE_BOUND)
-        .unwrap_or_else(|_| panic!("restore did not complete within {RESTORE_BOUND:?}"));
+        .recv_timeout(restore_budget)
+        .unwrap_or_else(|_| panic!("restore did not complete within {restore_budget:?}"));
     guard.mark("restore thread finished");
     let report = outcome.unwrap_or_else(|e| panic!("restore failed: {e}"));
     assert!(
@@ -487,7 +496,8 @@ async fn churn_scenario(guard: FlakeGuard) {
     // and the mid-copy churn repo/table are INACCESSIBLE: a typed query
     // against them must fail with the server's not-found error.
     let restored_boot = fixture::boot(&restored_data_dir, false).await;
-    let restored_client = fixture::connect(restored_boot.addr(), &restored_boot.password).await;
+    let restored_client =
+        fixture::connect(restored_boot.addr(), &restored_boot.password, "restored").await;
     let mut scan = Batch::new();
     scan.id("churn-restored-scan");
     scan.query(
