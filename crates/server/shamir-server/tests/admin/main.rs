@@ -16,6 +16,8 @@ mod config;
 mod config_unknown_section;
 #[path = "ops/doctor_e2e.rs"]
 mod doctor_e2e;
+#[path = "logical_import/mod.rs"]
+mod logical_import;
 #[path = "ops/migration_api_gating.rs"]
 mod migration_api_gating;
 #[path = "identity/permission_e2e/mod.rs"]

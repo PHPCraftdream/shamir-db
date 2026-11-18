@@ -32,6 +32,10 @@ pub use logical_dump::{
     SectionKind, SectionRecord, SettingItem, SettingKey, TableItem, Trailer, TrailerSection,
     ValidatorItem, ValidatorKind, VectorBackend, VectorMetric, Visibility,
 };
+// Stored-shape value conversion for the offline logical import stage
+// (consumed outside this crate); `logical_dump`'s root does not itself
+// re-export these, so the full content/values/conversion path is named.
+pub use logical_dump::content::values::conversion::{from_query_value, into_query_value};
 pub use manifest::Manifest;
 pub use table_record::TableRecord;
 pub use verifier::verify;

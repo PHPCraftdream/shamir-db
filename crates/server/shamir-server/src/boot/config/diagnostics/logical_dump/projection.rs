@@ -138,9 +138,12 @@ pub(super) fn resource(
     }
 }
 
-/// Persisted Str/Dec/Big and List/Set cannot be distinguished. Reject both
-/// ambiguous carrier kinds, recursively, instead of claiming full fidelity.
-/// Map order, binary, integer and IEEE-754 bits remain exact.
+/// Stored-shape fidelity. Persisted Dec/Big are flattened to strings and
+/// persisted Set to lists, so the export emits what is stored: a stored string
+/// as `str`, a stored list as `list`, recursively inside nested maps and lists.
+/// The artifact round-trips the stored bytes exactly; the import accepts every
+/// envelope tag, so a future exporter tagging dec/big/set needs no import
+/// change. Map order, binary, integer and IEEE-754 bits remain exact.
 pub(super) fn record_value(value: &QueryValue) -> Result<LogicalValue> {
     let mut nodes = 0;
     let mut bytes = 0;
@@ -168,6 +171,11 @@ fn record_budget(
         QueryValue::Bin(value) => {
             *bytes = bytes.saturating_add(value.len());
         }
+        QueryValue::List(list) => {
+            for child in list {
+                record_budget(child, depth + 1, nodes, bytes)?;
+            }
+        }
         _ => {}
     }
     if *bytes > 512 * 1024 {
@@ -184,7 +192,18 @@ fn convert_record(value: &QueryValue) -> Result<LogicalValue> {
         QueryValue::F64(v) => LogicalValue::F64(v.to_bits()),
         QueryValue::Bin(v) => LogicalValue::Bin(v.clone()),
         QueryValue::Map(map) => LogicalValue::Map(map.iter().map(|(k, v)| Ok((k.clone(), convert_record(v)?))).collect::<Result<_>>()?),
-        QueryValue::Str(_) | QueryValue::Dec(_) | QueryValue::Big(_) => bail!("logical-export cannot prove Str/Dec/Big fidelity from persisted storage; string-shaped record values are unsupported"),
-        QueryValue::List(_) | QueryValue::Set(_) => bail!("logical-export cannot prove List/Set fidelity from persisted storage; array-shaped record values are unsupported"),
+        QueryValue::Str(v) => LogicalValue::Str(v.clone()),
+        QueryValue::List(values) => LogicalValue::List(
+            values
+                .iter()
+                .map(convert_record)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        QueryValue::Dec(_) | QueryValue::Big(_) => bail!(
+            "logical-export cannot prove Dec/Big fidelity from persisted storage; they are flattened to strings"
+        ),
+        QueryValue::Set(_) => bail!(
+            "logical-export cannot prove Set fidelity from persisted storage; it is flattened to a list"
+        ),
     })
 }

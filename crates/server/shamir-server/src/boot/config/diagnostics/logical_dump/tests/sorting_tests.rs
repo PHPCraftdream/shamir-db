@@ -3,10 +3,14 @@ use std::fs;
 use shamir_sync::replication_seed::{LogicalValue, PortableItem, RecordItem};
 use tokio_util::sync::CancellationToken;
 
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
+use shamir_types::types::common::{new_map, TSet};
+use shamir_types::types::value::QueryValue;
+
 use super::super::projection::record_value;
 use super::super::sorting::{next_item, Sorter};
 use super::super::staging::Stage;
-use shamir_query_builder::doc;
 
 fn row(key: Vec<u8>) -> PortableItem {
     PortableItem::Record(RecordItem {
@@ -79,14 +83,51 @@ fn publish_conflict_never_replaces_racing_destination() {
 }
 
 #[test]
-fn ambiguous_nested_values_refuse_instead_of_coercing() {
-    assert!(record_value(&doc! { "nested" => "text" }.into()).is_err());
-    let value = record_value(&doc! { "integer" => 42_i64, "boolean" => true }.into()).unwrap();
+fn stored_strings_and_lists_convert_recursively_but_ambiguous_kinds_refuse() {
+    let mut outer = new_map();
+    outer.insert("text".to_string(), QueryValue::Str("stored".into()));
+    let mut inner = new_map();
+    inner.insert("inner".to_string(), QueryValue::Bool(true));
+    outer.insert(
+        "list".to_string(),
+        QueryValue::List(vec![
+            QueryValue::Int(1),
+            QueryValue::Str("nested".into()),
+            QueryValue::Map(inner),
+        ]),
+    );
+    let value = record_value(&QueryValue::Map(outer)).unwrap();
     assert_eq!(
         value,
         LogicalValue::Map(vec![
-            ("integer".into(), LogicalValue::Int(42)),
-            ("boolean".into(), LogicalValue::Bool(true))
+            ("text".into(), LogicalValue::Str("stored".into())),
+            (
+                "list".into(),
+                LogicalValue::List(vec![
+                    LogicalValue::Int(1),
+                    LogicalValue::Str("nested".into()),
+                    LogicalValue::Map(vec![("inner".into(), LogicalValue::Bool(true))]),
+                ])
+            ),
         ])
     );
+    let mut set = TSet::default();
+    set.insert(QueryValue::Int(1));
+    assert!(record_value(&QueryValue::Set(set)).is_err());
+    assert!(record_value(&QueryValue::Dec(Decimal::from(1))).is_err());
+    assert!(record_value(&QueryValue::Big(BigInt::from(1))).is_err());
+}
+
+#[test]
+fn record_budget_still_refuses_deep_or_oversized_stored_values() {
+    let mut deep = QueryValue::Int(0);
+    for _ in 0..64 {
+        deep = QueryValue::List(vec![deep]);
+    }
+    let mut outer = new_map();
+    outer.insert("deep".to_string(), deep);
+    assert!(record_value(&QueryValue::Map(outer)).is_err());
+    let mut outer = new_map();
+    outer.insert("bin".to_string(), QueryValue::Bin(vec![7; 512 * 1024 + 1]));
+    assert!(record_value(&QueryValue::Map(outer)).is_err());
 }

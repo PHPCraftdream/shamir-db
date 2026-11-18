@@ -6,7 +6,8 @@ use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter;
 use shamir_query_builder::{doc, write};
-use shamir_sync::replication_seed::{verify_dump_file, DumpReader, PortableItem};
+use shamir_sync::replication_seed::{verify_dump_file, DumpReader, LogicalValue, PortableItem};
+use shamir_types::types::value::QueryValue;
 use tokio::runtime::{Builder, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +28,7 @@ fn args(output: &Path) -> LogicalExportArgs {
     }
 }
 
-async fn fixture(root: &Path, ambiguous: bool) {
+async fn fixture(root: &Path, strings: bool) {
     let home = ShamirDb::init(SystemStoreConfig::Fjall(root.join("shamir_db_meta.redb")))
         .await
         .unwrap();
@@ -54,10 +55,16 @@ async fn fixture(root: &Path, ambiguous: bool) {
     .unwrap();
     home.add_table("app", "main", "rows", false).await.unwrap();
     let mut batch = Batch::new();
-    if ambiguous {
+    if strings {
+        let mut row = shamir_types::types::common::new_map();
+        row.insert("value".to_string(), QueryValue::Str("ambiguous".into()));
+        row.insert(
+            "list".to_string(),
+            QueryValue::List(vec![QueryValue::Int(1), QueryValue::Str("two".into())]),
+        );
         batch.op(
             "put",
-            write::Insert::with_repo("main", "rows").row(doc! { "value" => "ambiguous" }),
+            write::Insert::with_repo("main", "rows").row(QueryValue::Map(row)),
         );
     } else {
         batch.op(
@@ -155,20 +162,38 @@ fn locked_directory_is_refused_before_catalogue_open() {
 }
 
 #[test]
-fn ambiguous_values_fail_and_cleanup_then_schema_only_succeeds() {
+fn stored_strings_and_lists_export_with_stored_tags_then_schema_only_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     runtime().block_on(fixture(dir.path(), true));
-    let output = dir.path().join("dump");
-    let mut options = args(&output);
-    let error = runtime()
+    let output = dir.path().join("dump.mpack");
+    let options = args(&output);
+    let report = runtime()
         .block_on(export(dir.path(), &options, CancellationToken::new()))
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("Str/Dec/Big fidelity"),
-        "{error:#}"
+        .unwrap();
+    assert_eq!(verify_dump_file(&output).unwrap(), report);
+    let mut reader = DumpReader::new(File::open(&output).unwrap()).unwrap();
+    let mut records = Vec::new();
+    while let Some(item) = reader.next_item().unwrap() {
+        if let PortableItem::Record(row) = item {
+            records.push(row.value);
+        }
+    }
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0],
+        LogicalValue::Map(vec![
+            ("value".into(), LogicalValue::Str("ambiguous".into())),
+            (
+                "list".into(),
+                LogicalValue::List(vec![LogicalValue::Int(1), LogicalValue::Str("two".into()),])
+            ),
+        ])
     );
-    assert!(!output.exists());
-    no_stage(dir.path());
+    drop(reader);
+    // The exporter refuses to replace an existing output by design, so the
+    // schema-only pass writes to its own fresh path.
+    let schema_output = dir.path().join("schema.mpack");
+    let mut options = args(&schema_output);
     options.schema_only = true;
     let report = runtime()
         .block_on(export(dir.path(), &options, CancellationToken::new()))
