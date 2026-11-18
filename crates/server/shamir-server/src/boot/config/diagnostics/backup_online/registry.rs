@@ -25,7 +25,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
@@ -107,7 +107,11 @@ struct RunRecord {
 /// Registry over the shared engine handle. Chunk 4 wires the admin ops to
 /// `start` / `status` / `cancel`.
 pub struct OnlineBackupRegistry {
-    db: Arc<ShamirDb>,
+    /// Weak: the engine owns this registry (through the installed admin
+    /// port), so a strong handle would be a reference cycle that keeps every
+    /// store open after the server shuts down. A run upgrades it for its
+    /// whole duration only.
+    db: Weak<ShamirDb>,
     data_dir: PathBuf,
     runtime: Handle,
     permit: Arc<BackupPermit>,
@@ -122,7 +126,7 @@ impl OnlineBackupRegistry {
     pub fn new(db: Arc<ShamirDb>, data_dir: PathBuf, runtime: Handle) -> Self {
         let fresh = Self::fresh_record(&data_dir);
         Self {
-            db,
+            db: Arc::downgrade(&db),
             data_dir,
             runtime,
             permit: Arc::new(BackupPermit::new()),
@@ -150,6 +154,10 @@ impl OnlineBackupRegistry {
     /// `<to>/<timestamp>/` create happens on the runner thread (§4.2 A).
     pub fn start(&self, to: PathBuf) -> Result<(String, PathBuf), StartBackupError> {
         validate_destination(&to, &self.data_dir)?;
+        let db = self
+            .db
+            .upgrade()
+            .ok_or_else(|| StartBackupError::Io(io::Error::other("the engine is shutting down")))?;
         // The protocol creates only the timestamped child (atomic create,
         // refusing existing dirs); the root must exist by then.
         std::fs::create_dir_all(&to)?;
@@ -176,7 +184,7 @@ impl OnlineBackupRegistry {
             cancel
         };
         let job = RunJob {
-            db: Arc::clone(&self.db),
+            db,
             data_dir: self.data_dir.clone(),
             runtime: self.runtime.clone(),
             permit: Arc::clone(&self.permit),
