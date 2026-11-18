@@ -119,7 +119,8 @@ fn alters_only_optimization_and_renames_both_registrations() {
                 ddl::rename_validator("row_guard", "renamed_guard"),
             ],
         );
-        let applied = run_apply(&db, apply_request(target, Some(&alter), 1, &rename))
+        // The first migration released its fence: the durable generation is 2.
+        let applied = run_apply(&db, apply_request(target, Some(&alter), 2, &rename))
             .await
             .unwrap();
         assert_eq!(applied["status"].as_str(), Some("applied"));
