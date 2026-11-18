@@ -4,6 +4,8 @@ Pure-TypeScript client for **S.H.A.M.I.R. Database** — one shared platform-agn
 
 For bearer-token connections, token administration limitations, and password login, see [Tokens and token-based connections](./TOKENS.md). Tokens are issued with fixed mode/channel/database scope; `connect` does not widen it. Node IPC `connectLocal` is not available in the browser entry.
 
+For authoring and applying application schema migrations (`ApplicationMigrationSet`, `status` / `plan` / `applyNext`, the no-blind-retry rule), see [Application schema migrations](./SCHEMA_MIGRATIONS.md).
+
 ---
 
 ## Install

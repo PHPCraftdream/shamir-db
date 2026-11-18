@@ -113,4 +113,5 @@ export { CursorIterator } from './core/client/cursor-iterator.js';
 export type { ResumeOptions, ResumeLocalOptions, ConnectLocalOptions };
 export type { Db, Tx } from './core/client/db.js';
 export * from './core/builders/index.js';
+export * from './core/builders/admin/schema-migration/index.js';
 export type * from './core/types/index.js';

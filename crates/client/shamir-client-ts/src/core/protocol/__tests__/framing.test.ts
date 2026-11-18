@@ -7,9 +7,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { decode as rawDecode } from '@msgpack/msgpack';
+import { decode as rawDecode, encode as rawEncode } from '@msgpack/msgpack';
 import { encode, decode, WsFramer } from '../framing.js';
+import { migrationFloat } from '../../builders/admin/schema-migration/model/float.js';
 import type { Socket } from '../../support/platform.js';
+
+// `useBigInt64: true` — the only BigInt semantics the wire speaks (see ENCODE_OPTS).
+const RAW_OPTS = { useBigInt64: true } as const;
 
 // ── fake Socket ──────────────────────────────────────────────────────────────
 
@@ -150,6 +154,51 @@ describe('encode — promoteWideInts integer boundary (#216 regression)', () => 
   it('leaves strings, booleans and null untouched', () => {
     const buf = encode({ s: 'hello', t: true, f: false, n: null });
     expect(decode(buf)).toEqual({ s: 'hello', t: true, f: false, n: null });
+  });
+
+  it('drops an own enumerable __proto__ key from marker-free bytes (JSON.parse input)', () => {
+    // JSON.parse creates `__proto__` as an ordinary OWN key — exactly the
+    // constructor-like map key an adversarial/unexpected payload can carry.
+    const input = JSON.parse('{"__proto__":{"danger":1},"a":2}') as Record<string, unknown>;
+    expect(Object.getOwnPropertyNames(input)).toContain('__proto__');
+    // Prior byte behavior: the key is dropped, the rest of the map unchanged —
+    // identical bytes to msgpack of { a: 2 }.
+    expect(Array.from(encode(input))).toEqual([0x81, 0xa1, 0x61, 0x02]);
+  });
+
+  it('drops an own enumerable __proto__ key created via defineProperty (marker-free)', () => {
+    const input: Record<string, unknown> = { a: 2 };
+    Object.defineProperty(input, '__proto__', {
+      value: { danger: 1 },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    // Also proves inherited (prototype) keys never leak: only own keys walk.
+    expect(Array.from(encode(input))).toEqual([0x81, 0xa1, 0x61, 0x02]);
+  });
+
+  it('keeps __proto__ as an ordinary own key in the MigrationFloat branch', () => {
+    // Marked branch: the canonical query-value map must round-trip the
+    // constructor-like key with its own canonical map-key bytes.
+    const input: Record<string, unknown> = { a: migrationFloat(2.5) };
+    Object.defineProperty(input, '__proto__', {
+      value: 7,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const buf = encode(input);
+    // fixed map(2); "a"; float64 2.5 (0x40 04 00…); "__proto__"; int 7.
+    // Key order follows own-key insertion order: "a" first, then "__proto__".
+    const expected = [
+      0x82,
+      ...Array.from(rawEncode('a', RAW_OPTS)),
+      0xcb, 0x40, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      ...Array.from(rawEncode('__proto__', RAW_OPTS)),
+      0x07,
+    ];
+    expect(Array.from(buf)).toEqual(expected);
   });
 });
 

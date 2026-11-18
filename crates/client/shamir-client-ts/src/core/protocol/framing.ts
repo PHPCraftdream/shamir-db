@@ -11,12 +11,36 @@
  */
 
 import { encode as rawEncode, decode as rawDecode } from '@msgpack/msgpack';
+import { isMigrationFloat } from '../builders/admin/schema-migration/model/float.js';
 import type { Socket } from '../support/platform.js';
 
 /** Largest integer that `useBigInt64` still encodes as a msgpack int (uint32). */
 const U32_MAX = 0xffff_ffff;
 /** Most-negative integer that stays a msgpack int under `useBigInt64` (i32 min). */
 const I32_MIN = -0x8000_0000;
+
+/** Shared encoder options — the only BigInt semantics the wire speaks. */
+const ENCODE_OPTS = { useBigInt64: true } as const;
+
+/**
+ * Carries walk state through one `promoteWideInts` traversal.
+ *
+ * The walk reproduces the PRIOR byte behavior exactly: every key — including
+ * a literal `"__proto__"` — is applied with plain assignment (`out[k] = v`).
+ * For `"__proto__"` that historically mutated the object's prototype instead
+ * of creating an own key (the key silently vanished from the encoded map),
+ * and that is what the marker-free path must keep emitting. `protoSeen`
+ * records whether such a key was encountered; when the same request also
+ * contains an explicit `MigrationFloat`, `encode` reruns the (already
+ * promoted) tree with `restoreProto` set, so those keys are created as
+ * ordinary own enumerable properties via defineProperty in natural key
+ * order, and `encodeWithFloats` emits their canonical map-key bytes.
+ */
+interface WalkState {
+  found: boolean;
+  protoSeen: boolean;
+  restoreProto: boolean;
+}
 
 /**
  * Recursively promote integer `number`s that fall OUTSIDE the 32-bit range to
@@ -31,7 +55,11 @@ const I32_MIN = -0x8000_0000;
  * strings, `Uint8Array` (msgpack bin), `bigint`, booleans and null are left
  * untouched.
  */
-function promoteWideInts(value: unknown): unknown {
+function promoteWideInts(value: unknown, state: WalkState): unknown {
+  if (isMigrationFloat(value)) {
+    state.found = true;
+    return value;
+  }
   if (typeof value === 'number') {
     return Number.isInteger(value) && (value > U32_MAX || value < I32_MIN)
       ? BigInt(value)
@@ -39,15 +67,100 @@ function promoteWideInts(value: unknown): unknown {
   }
   // Leave binary payloads (records_idmsgpack, $fn bytes, …) byte-identical.
   if (value instanceof Uint8Array) return value;
-  if (Array.isArray(value)) return value.map(promoteWideInts);
+  if (Array.isArray(value)) return value.map((v) => promoteWideInts(v, state));
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = promoteWideInts(v);
+      const promoted = promoteWideInts(v, state);
+      if (k === '__proto__') {
+        // Plain assignment IS the legacy behavior: object values mutate the
+        // prototype (the key vanishes from the own-key map), non-object
+        // values are ignored entirely. Recorded so `encode` knows a narrow
+        // restore rerun is needed when a marker is also present.
+        state.protoSeen = true;
+        if (state.restoreProto) {
+          Object.defineProperty(out, '__proto__', {
+            value: promoted,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+          continue;
+        }
+      }
+      out[k] = promoted;
     }
     return out;
   }
   return value;
+}
+
+/** MessagePack fixed-format width ranges for array and map headers. */
+const FIXED_ARR_MAX = 15;
+const FIXED_MAP_MAX = 15;
+const U16_ARR_MAX = 0xffff;
+
+function writeHeader(
+  count: number,
+  fixedBase: number,
+  u16Code: number,
+  u32Code: number,
+  fixedMax: number,
+): Uint8Array {
+  const out = new Uint8Array(count <= fixedMax ? 1 : count <= U16_ARR_MAX ? 3 : 5);
+  if (count <= fixedMax) {
+    out[0] = fixedBase | count;
+  } else if (count <= U16_ARR_MAX) {
+    out[0] = u16Code;
+    out[1] = (count >>> 8) & 0xff;
+    out[2] = count & 0xff;
+  } else {
+    out[0] = u32Code;
+    out[1] = (count >>> 24) & 0xff;
+    out[2] = (count >>> 16) & 0xff;
+    out[3] = (count >>> 8) & 0xff;
+    out[4] = count & 0xff;
+  }
+  return out;
+}
+
+/**
+ * Recursively encode a shape that contains at least one `MigrationFloat`
+ * marker. Scalars are delegated to `rawEncode` with the same options as the
+ * normal path (preserving `useBigInt64` semantics), markers become a raw
+ * msgpack float64 (0xCB + 8 big-endian IEEE-754 bits), and containers are
+ * written with proper fixed/u16/u32 headers. No msgpack extension reaches
+ * the wire — the server only ever sees plain MessagePack types.
+ *
+ * Bytes are accumulated as `Uint8Array` chunks (one per header/scalar/marker)
+ * and concatenated exactly once by the caller, so a 16 MiB text/binary payload
+ * never materialises as a per-byte `number[]`.
+ */
+function encodeWithFloats(value: unknown, chunks: Uint8Array[]): void {
+  if (isMigrationFloat(value)) {
+    const bytes = new Uint8Array(9);
+    bytes[0] = 0xcb;
+    new DataView(bytes.buffer).setFloat64(1, value.value, false); // big-endian, bit-exact (-0 kept)
+    chunks.push(bytes);
+    return;
+  }
+  if (Array.isArray(value)) {
+    chunks.push(writeHeader(value.length, 0x90, 0xdc, 0xdd, FIXED_ARR_MAX));
+    for (const item of value) encodeWithFloats(item, chunks);
+    return;
+  }
+  if (value !== null && typeof value === 'object' && !(value instanceof Uint8Array)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    chunks.push(writeHeader(entries.length, 0x80, 0xde, 0xdf, FIXED_MAP_MAX));
+    for (const [k, v] of entries) {
+      // Keys in these DTOs are plain strings — encode directly, no promotion.
+      chunks.push(rawEncode(k, ENCODE_OPTS));
+      encodeWithFloats(v, chunks);
+    }
+    return;
+  }
+  // Scalar (or Uint8Array bin payload): shared options keep BigInt semantics.
+  chunks.push(rawEncode(value, ENCODE_OPTS));
 }
 
 /**
@@ -58,7 +171,42 @@ function promoteWideInts(value: unknown): unknown {
  * timestamps / versions are emitted as msgpack uint64, not float64.
  */
 export function encode(value: unknown): Uint8Array {
-  return rawEncode(promoteWideInts(value), { useBigInt64: true });
+  const state: WalkState = { found: false, protoSeen: false, restoreProto: false };
+  const promoted = promoteWideInts(value, state);
+  if (!state.found) {
+    // Marker-free path: the promoted tree keeps the legacy assignment
+    // semantics exactly (own `__proto__` keys mutate the prototype and stay
+    // absent from the own-key map) — byte-identical to prior behavior, with
+    // no second walk.
+    return rawEncode(promoted, ENCODE_OPTS);
+  }
+  let encoded: unknown = promoted;
+  if (state.protoSeen) {
+    // Marked branch WITH a `__proto__` key: rerun the ORIGINAL value tree
+    // (promotion is idempotent). The first legacy walk already dropped its own
+    // `__proto__` key, so it cannot be restored from `promoted`; rerunning on
+    // the original makes those keys ordinary own enumerable properties via
+    // defineProperty, in natural key order. This is the only case that pays
+    // for a second walk.
+    encoded = promoteWideInts(value, {
+      found: true,
+      protoSeen: true,
+      restoreProto: true,
+    });
+  }
+  // Marked branch without `__proto__`: no second walk — `encodeWithFloats`
+  // emits the canonical query-value map key bytes for constructor-like keys.
+  const chunks: Uint8Array[] = [];
+  encodeWithFloats(encoded, chunks);
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }
 
 /**

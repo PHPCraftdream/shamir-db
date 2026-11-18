@@ -85,4 +85,5 @@ export type { TokenAdminErrorCode } from './core/support/errors.js';
 export type { TxOpened, ScramUserCreated } from './core/client/client.js';
 export type { Db, Tx } from './core/client/db.js';
 export * from './core/builders/index.js';
+export * from './core/builders/admin/schema-migration/index.js';
 export type * from './core/types/index.js';
