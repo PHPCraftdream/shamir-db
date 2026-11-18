@@ -41,6 +41,8 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 
 use crate::query::batch::{BatchError, BatchOp, BatchRequest};
 use crate::shamir_db::shamir_db::ShamirDb;
+use crate::shamir_db::system_store::DatabaseIdentity;
+use crate::DbResult;
 
 /// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
@@ -108,6 +110,28 @@ impl ShamirDb {
         self.release_schema_migration_gate(db, generation);
         self.schema_migration_gate_in_doubt
             .insert(db.to_string(), generation);
+    }
+
+    /// One-time open-time seed of the in-doubt marker: every database whose
+    /// control record still OWNS the durable fence while its journal is
+    /// unresolved is marked in doubt (in-memory only). A no-op without a
+    /// durable journal. Called by `init_inner` only; never on the batch path.
+    pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(
+        &self,
+        identities: &[(String, DatabaseIdentity)],
+    ) -> DbResult<()> {
+        let store = self.system_store();
+        if !store.schema_migration_journal_durable() {
+            return Ok(());
+        }
+        for (name, identity) in identities {
+            let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await?;
+            if let Some(generation) = owned {
+                self.schema_migration_gate_in_doubt
+                    .insert(name.clone(), generation);
+            }
+        }
+        Ok(())
     }
 
     /// Release the in-process gate, but only if the recorded generation still

@@ -214,18 +214,20 @@ async fn takeover_fences_the_stale_runner_generation() {
     );
 
     // And a stale runner cannot execute through the in-process path either:
-    // while a live gate is held (as the resumed runner holds it), a second
-    // apply of the SAME migration is refused in progress.
+    // while a live gate is held (as the resumed runner holds it), the NEXT
+    // migration is refused in progress. (The identical migration is already
+    // applied and answers as the durable no-op before the gate.)
     db.hold_schema_migration_gate("testdb", 2);
+    let next = body("alpha-002", 2);
     let head_request = apply_request(
         &target,
         predecessor(Some("alpha-001"), 1, checksum(&migration)),
         2,
-        submission(&migration),
+        submission(&next),
     );
     let error = run_apply(&db, head_request)
         .await
-        .expect_err("a second apply while the gate is held must be refused");
+        .expect_err("an apply while the gate is held must be refused");
     assert_code(error, "schema_migration_in_progress");
     db.release_schema_migration_gate("testdb", 2);
 }
