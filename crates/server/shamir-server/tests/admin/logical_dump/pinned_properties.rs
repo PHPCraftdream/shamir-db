@@ -30,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::logical_dump::fixture::{
     assert_no_stage_leftovers, build_small_fixture, build_streaming_fixture, export_args,
-    export_now, import_args, import_now, runtime, stage_directory_present, STREAM_TTL_MS,
+    export_now, export_on, import_args, import_now, runtime, stage_directory_present,
+    STREAM_TTL_MS,
 };
 
 /// 60-second per-operation data budget; the import allowance for the
@@ -45,6 +46,22 @@ const BUILD_BUDGET: Duration = Duration::from_secs(300);
 fn frames_start(bytes: &[u8]) -> usize {
     let header_len = u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize;
     16 + header_len + 32
+}
+
+/// Offset where the final (trailer) frame begins. Frames are a 4-byte length,
+/// the payload and a 32-byte checksum. The trailer carries the digest of
+/// everything before it, header included, so it is the one frame that may
+/// differ between repeated exports (the header's diagnostic fields differ).
+fn trailer_start(bytes: &[u8], frames_from: usize) -> usize {
+    let mut offset = frames_from;
+    let mut last = frames_from;
+    while offset < bytes.len() {
+        last = offset;
+        let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4 + length + 32;
+    }
+    assert_eq!(offset, bytes.len(), "the frame walk must land on EOF");
+    last
 }
 
 /// Decode the header between the prefix and its digest.
@@ -86,10 +103,16 @@ fn repeated_exports_are_byte_identical_after_the_header() {
     let second = fs::read(&second_path).unwrap();
     let split = frames_start(&first);
     assert_eq!(split, frames_start(&second), "headers same size");
+    let first_trailer = trailer_start(&first, split);
+    let second_trailer = trailer_start(&second, split);
     assert_eq!(
-        first[split..],
-        second[split..],
-        "frames after the header must be byte-identical"
+        first_trailer, second_trailer,
+        "same frames before the trailer"
+    );
+    assert_eq!(
+        first[split..first_trailer],
+        second[split..second_trailer],
+        "frames between the header and the trailer must be byte-identical"
     );
     assert_eq!(
         strip_diagnostics(decode_artifact_header(&first)),
@@ -251,7 +274,7 @@ fn ttl_ms_round_trips_exactly_through_the_streaming_dataset() {
         .unwrap();
     drop(fixture.home);
     let artifact = root.join("dump.mpack");
-    export_now(&root, &export_args("app", &artifact, false));
+    export_on(&rt, &root, &export_args("app", &artifact, false));
 
     // Artifact side: the table definition carries the exact TTL.
     let mut reader = DumpReader::new(fs::File::open(&artifact).unwrap()).unwrap();
@@ -312,7 +335,7 @@ fn streaming_target_accepts_exact_retry_and_refuses_changed_options() {
         .unwrap();
     drop(fixture.home);
     let artifact = root.join("dump.mpack");
-    export_now(&root, &export_args("app", &artifact, false));
+    export_on(&rt, &root, &export_args("app", &artifact, false));
     let target = root.join("target");
     let first: ImportReport = rt
         .block_on(timeout(
@@ -363,7 +386,7 @@ fn cancelled_mid_load_on_streaming_dataset_publishes_nothing_and_leaves_no_stage
         .unwrap();
     drop(fixture.home);
     let artifact = root.join("dump.mpack");
-    export_now(&root, &export_args("app", &artifact, false));
+    export_on(&rt, &root, &export_args("app", &artifact, false));
     let before = snapshot_root(&root);
     let target = root.join("target");
 

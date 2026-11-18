@@ -126,23 +126,28 @@ fn walk_artifact(path: &Path) -> FrameWalk {
         file.read_exact(&mut checksum).unwrap();
         let _ = checksum;
 
-        let record = decode_canonical::<SectionRecord<PortableItem>>(&payload)
-            .unwrap_or_else(|e| panic!("frame {frames} is not one container record: {e}"));
-        match record {
-            SectionRecord::Start { section, .. } => {
-                current_section = Some(section);
-            }
-            SectionRecord::End { section, .. } => {
-                assert_eq!(current_section.take(), Some(section), "frame order");
-            }
-            SectionRecord::Item { section, item } => {
-                assert_eq!(current_section, Some(section), "item outside its section");
-                if section == SectionKind::Records {
-                    assert!(
-                        matches!(item, PortableItem::Record(_)),
-                        "non-record item inside the Records section"
-                    );
-                    records_section_items += 1;
+        // The final frame (it ends exactly at EOF) is the trailer, a distinct
+        // type; every earlier frame is one section record.
+        let is_trailer = offset + (length + ITEM_FRAME_OVERHEAD) as u64 == total_bytes;
+        if !is_trailer {
+            let record = decode_canonical::<SectionRecord<PortableItem>>(&payload)
+                .unwrap_or_else(|e| panic!("frame {frames} is not one container record: {e}"));
+            match record {
+                SectionRecord::Start { section, .. } => {
+                    current_section = Some(section);
+                }
+                SectionRecord::End { section, .. } => {
+                    assert_eq!(current_section.take(), Some(section), "frame order");
+                }
+                SectionRecord::Item { section, item } => {
+                    assert_eq!(current_section, Some(section), "item outside its section");
+                    if section == SectionKind::Records {
+                        assert!(
+                            matches!(item, PortableItem::Record(_)),
+                            "non-record item inside the Records section"
+                        );
+                        records_section_items += 1;
+                    }
                 }
             }
         }

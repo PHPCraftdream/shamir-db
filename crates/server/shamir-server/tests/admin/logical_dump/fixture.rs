@@ -465,6 +465,15 @@ pub fn export_now(root: &Path, args: &LogicalExportArgs) -> DumpReport {
         .unwrap()
 }
 
+/// Drive the offline export driver on the caller's runtime, the one that
+/// built the fixture: background tasks of the dropped engine still hold the
+/// Fjall directory locks until that runtime runs them, so a streaming test
+/// exports on its own runtime instead of a fresh one.
+pub fn export_on(rt: &Runtime, root: &Path, args: &LogicalExportArgs) -> DumpReport {
+    rt.block_on(logical_dump::export(root, args, CancellationToken::new()))
+        .unwrap()
+}
+
 /// Drive the offline import driver synchronously and keep the typed result.
 pub fn import_now(
     args: &LogicalImportArgs,
