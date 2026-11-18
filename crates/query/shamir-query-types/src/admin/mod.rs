@@ -1,6 +1,7 @@
 //! Admin (DDL) operation DTOs.
 
 pub mod access;
+pub mod activity;
 pub mod types;
 pub use types::schema_migration;
 
@@ -10,6 +11,10 @@ mod tests;
 pub use access::{
     AccessTreeOp, AddGroupMemberOp, ChgrpOp, ChmodOp, ChownOp, CreateGroupOp, DropGroupOp,
     GroupRef, RemoveGroupMemberOp, RenameGroupOp, ResourceRef,
+};
+pub use activity::{
+    ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ActivityTxState,
+    ListActivityReq, RequestExecId,
 };
 pub use types::{
     AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp, AlterRepoOp, AlterSubscriptionOp,

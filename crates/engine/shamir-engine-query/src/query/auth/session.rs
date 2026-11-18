@@ -585,6 +585,19 @@ impl SessionPermissions {
             // replication-DDL arms above.
             BatchOp::StartBackup(_) | BatchOp::CancelBackup(_) => (Action::Alter, Resource::Global),
             BatchOp::BackupStatus(_) => (Action::Read, Resource::Global),
+
+            // Activity view (R4b-1, design `operational-views.md` §5.2) —
+            // the server OWNS this op: it is served from the server-side
+            // registries (sessions, transactions, cursors, in-flight
+            // requests) and is never forwarded to the repo actor / engine
+            // executor. The session classifier only grants a conservative
+            // global Read here (same shape as `BackupStatus` above); the
+            // real split — `scope: All` needs `ActivityView` + Manage,
+            // `scope: Own` is any authenticated user, rows filtered to the
+            // caller's user — is re-checked at the server handler through
+            // `authorize_access`, exactly like the `ApplicationSchema`
+            // arm above.
+            BatchOp::ListActivity(_) => (Action::Read, Resource::Global),
         }
     }
 

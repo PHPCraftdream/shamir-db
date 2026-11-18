@@ -97,6 +97,7 @@ fn query_policy_allows_meaningful_zero_and_ceiling_values() {
         max_page_size: BatchLimits::CEILING.max_page_size,
         max_offset: BatchLimits::CEILING.max_offset,
         max_inflight_response_bytes: None,
+        max_in_flight_requests_per_session: shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
     };
     config.validate().expect("inclusive ceilings");
     assert_eq!(

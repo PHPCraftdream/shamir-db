@@ -73,12 +73,11 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
-use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
+use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
-use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::hmac as canon;
 
-use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudget};
+use crate::byte_budget::ByteBudget;
 use crate::security::tokens::TokenService;
 
 // Wire DTOs are defined once in `shamir-query-types::wire` so that the
@@ -90,16 +89,15 @@ pub use shamir_query_types::wire::{DbRequest, DbResponse};
 use crate::cursor_registry::CursorRegistry;
 use crate::tx_registry::TxRegistry;
 
+use super::activity::ActivityRequests;
 use super::admin::{
-    change_password_challenge, change_password_verify, check_destructive_hmacs, create_scram_user,
-    is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
+    change_password_challenge, change_password_verify, create_scram_user, set_replicator,
+    set_superuser, AdminGlue,
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::error_response;
 use super::cursor_support::authorize_cursor_read;
-use super::handlers::{backup_handlers, token_admin};
-use super::repo_audit;
-use super::subscribe_handler;
+use super::handlers::token_admin;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
 /// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
@@ -215,6 +213,21 @@ pub struct ShamirDbHandler {
     pub(super) token_service: Option<Arc<TokenService>>,
     /// Whether users may create their own tokens. Listing and revocation remain allowed.
     pub(super) allow_self_service: bool,
+    /// R4b-1 — in-flight request table backing the activity view's
+    /// `Requests` rows and the `shamir_active_requests` gauge. Shared
+    /// across all clones of the handler (`Arc`). One insert + one RAII
+    /// removal per admitted batch — the entire hot-path cost. READERS are
+    /// lock-free (`scc::HashIndex::iter` / `peek_with` under an epoch
+    /// `Guard`); the WRITERS take brief internal bucket locks. The RAII
+    /// guard additionally owns the per-session in-flight request slot
+    /// (`Session::try_acquire_request_slot` — R4b-1 follow-up). See
+    /// `super::activity::requests` for the bounding argument and the
+    /// privacy rule.
+    pub(super) activity_requests: Arc<ActivityRequests>,
+    /// R4b-1 — monotonic source of fresh [`RequestExecId`] values, minted
+    /// when a BATCH is admitted (same shape as `next_cursor_id`). The
+    /// client's optional `rid` is carried alongside, never replaced.
+    pub(super) next_request_exec_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ShamirDbHandler {
@@ -244,6 +257,8 @@ impl ShamirDbHandler {
             token_service: None,
             allow_self_service: true,
             session_store: None,
+            activity_requests: Arc::new(ActivityRequests::new()),
+            next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -267,6 +282,8 @@ impl ShamirDbHandler {
             token_service: None,
             allow_self_service: true,
             session_store: None,
+            activity_requests: Arc::new(ActivityRequests::new()),
+            next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -368,6 +385,13 @@ impl ShamirDbHandler {
         self.next_cursor_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// R4b-1 — mint a fresh, process-unique request-exec id for an
+    /// admitted BATCH (handler-local `AtomicU64`, like `next_cursor_id`).
+    pub(super) fn next_request_exec_id(&self) -> u64 {
+        self.next_request_exec_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl RequestHandler for ShamirDbHandler {
@@ -376,6 +400,20 @@ impl RequestHandler for ShamirDbHandler {
         session: &'a Session,
         req: &'a [u8],
         conn: &'a ConnectionServices,
+    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+        // R4b-1 — the transport's rid-carrying variant with no transport
+        // request id: token-REST and any other caller without dispatch
+        // context fall back to `None` (the minted `RequestExecId` still
+        // identifies the batch in the activity view).
+        self.handle_with_request_id(session, req, conn, None)
+    }
+
+    fn handle_with_request_id<'a>(
+        &'a self,
+        session: &'a Session,
+        req: &'a [u8],
+        conn: &'a ConnectionServices,
+        request_id: Option<u32>,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         Box::pin(async move {
             let request: DbRequest = match shamir_query_types::validate_request_alias_caps(req)
@@ -391,7 +429,8 @@ impl RequestHandler for ShamirDbHandler {
                         .map_err(|encode_err| format!("response encode: {}", encode_err));
                 }
             };
-            self.handle_decoded(session, request, conn).await
+            self.handle_decoded_with_request_id(session, request, conn, request_id)
+                .await
         })
     }
 }
@@ -403,6 +442,23 @@ impl ShamirDbHandler {
         session: &Session,
         request: DbRequest,
         conn: &ConnectionServices,
+    ) -> Result<Vec<u8>, String> {
+        // R4b-1 — direct callers (tests, `NativeDbHandler`) keep the old
+        // signature: no transport request id is available on this path.
+        self.handle_decoded_with_request_id(session, request, conn, None)
+            .await
+    }
+
+    /// R4b-1 — rid-carrying variant of [`Self::handle_decoded`]. The
+    /// client's OPTIONAL wire `rid` is carried alongside the minted
+    /// [`RequestExecId`] into the in-flight activity entry; it never
+    /// replaces it.
+    pub(crate) async fn handle_decoded_with_request_id(
+        &self,
+        session: &Session,
+        request: DbRequest,
+        conn: &ConnectionServices,
+        client_rid: Option<u32>,
     ) -> Result<Vec<u8>, String> {
         let top_level_canonical = match canon::canonical_db_request(&request) {
             Ok(bytes) => Some(bytes),
@@ -439,7 +495,10 @@ impl ShamirDbHandler {
                 query_version,
                 db,
                 batch,
-            } => self.execute(session, query_version, &db, batch, conn).await,
+            } => {
+                self.execute_with_rid(session, query_version, &db, batch, conn, client_rid)
+                    .await
+            }
             DbRequest::CreateScramUser {
                 name,
                 password,
@@ -487,7 +546,7 @@ impl ShamirDbHandler {
                 repo,
                 isolation,
             } => {
-                self.tx_begin(session, query_version, &db, &repo, isolation)
+                self.tx_begin_with_rid(session, query_version, &db, &repo, isolation, client_rid)
                     .await
             }
             DbRequest::TxExecute {
@@ -496,7 +555,7 @@ impl ShamirDbHandler {
                 tx_handle,
                 batch,
             } => {
-                self.tx_execute(session, query_version, &db, tx_handle, batch)
+                self.tx_execute_with_rid(session, query_version, &db, tx_handle, batch, client_rid)
                     .await
             }
             DbRequest::TxCommit {
@@ -595,276 +654,6 @@ impl ShamirDbHandler {
         }
 
         rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
-    }
-}
-
-impl ShamirDbHandler {
-    /// Run the version check + admin gate, then forward to
-    /// [`ShamirDb::execute`] on the current Tokio worker.
-    pub(super) async fn execute(
-        &self,
-        session: &Session,
-        query_version: u32,
-        db_name: &str,
-        mut batch: BatchRequest,
-        conn: &ConnectionServices,
-    ) -> DbResponse {
-        // Query-language version dispatch — fast reject before any DB work.
-        if let Err(e) = crate::version::check_query_lang(query_version) {
-            return DbResponse::Error {
-                code: "unsupported_query_version".into(),
-                message: e.to_string(),
-            };
-        }
-
-        // Resolve all explicit policies before admission or any writes, including
-        // nested bodies whose outcomes cannot carry a bounded commit receipt.
-        let policy = (|| {
-            let wait = self
-                .transactions
-                .resolve_commit_wait(batch.visibility_wait)?;
-            for visit in BatchTreeVisitor::new(&batch.queries) {
-                let nested = match &visit.entry.op {
-                    shamir_query_types::batch::BatchOp::Batch(sub) => sub.batch.visibility_wait,
-                    shamir_query_types::batch::BatchOp::ForEach(fe) => fe.batch.visibility_wait,
-                    _ => None,
-                };
-                if let Some(nested) = nested {
-                    self.transactions.resolve_wait(nested)?;
-                    if batch.transactional
-                        && matches!(
-                            nested,
-                            shamir_query_types::batch::VisibilityWait::Bounded { .. }
-                        )
-                    {
-                        return Err(shamir_db::DbError::VisibilityWaitInvalid {
-                            reason:
-                                "bounded visibility is unsupported by nested Batch/ForEach bodies"
-                                    .into(),
-                        });
-                    }
-                }
-            }
-            Ok(wait)
-        })();
-        match policy {
-            Ok(wait) => batch.visibility_wait = Some(wait),
-            Err(e) => {
-                return DbResponse::Error {
-                    code: "visibility_wait_invalid".into(),
-                    message: e.to_string(),
-                };
-            }
-        }
-
-        // Admin / auth gate. An explicit 4-op allowlist (`List`,
-        // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
-        // `is_coarse_admin_gate_exempt`) is exempted from this coarse
-        // block; each still runs its own real per-table/per-path
-        // authorization further down the stack.
-        if !session.permissions.is_superuser {
-            for visit in
-                BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
-            {
-                let (alias, entry) = (visit.alias, visit.entry);
-                if entry.op.is_admin() && !is_coarse_admin_gate_exempt(&entry.op) {
-                    return DbResponse::Error {
-                        code: "permission_denied".into(),
-                        message: format!("query '{}' requires superuser (admin/auth op)", alias),
-                    };
-                }
-            }
-        }
-
-        // Read-only replica gate. A `ReadOnly` node rejects any client write
-        // — client writes must go to the leader. Read/introspection ops pass
-        // through. `is_write()` is exhaustive, so any new `BatchOp` variant
-        // is automatically classified and the author must decide read vs
-        // write. This is a no-op when `node_mode == ReadWrite` (the default).
-        // R1: include leader_addr for client redirect. R1c (§4.5): a
-        // follower has no consistent journal+schema view, so EVERY
-        // application-schema arm (status included) is refused first with
-        // the stable `schema_migration_follower_read_only` code.
-        if self.node_mode == NodeMode::ReadOnly {
-            for visit in
-                BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
-            {
-                let (alias, entry) = (visit.alias, visit.entry);
-                if matches!(entry.op, BatchOp::ApplicationSchema(_)) {
-                    return DbResponse::Error {
-                        code: "schema_migration_follower_read_only".into(),
-                        message: format!(
-                            "query '{}': application-schema operations are refused on a \
-                             follower/read replica (no consistent journal+schema view)",
-                            alias
-                        ),
-                    };
-                }
-                if entry.op.is_write() {
-                    return backup_handlers::follower_write_refusal(&entry.op, alias);
-                }
-            }
-        }
-
-        // HMAC policy gate. Every operation classified as gated by the
-        // canonical HMAC policy must carry a tag covering its canonical
-        // bytes, keyed by the per-session derived key. This is not an
-        // authentication gate — TLS+SCRAM already proves the caller — it's
-        // a "did you mean it" guard: the client could not produce the tag
-        // by accident. BatchTreeVisitor checks static ForEach template bodies
-        // before execution; signatures cover unresolved template operations,
-        // not per-iteration values injected through bind_row.
-        if let Err((alias, code, message)) = check_destructive_hmacs(session, db_name, &batch) {
-            return DbResponse::Error {
-                code: code.into(),
-                message: format!("query '{}': {}", alias, message),
-            };
-        }
-
-        // RI-15 (CR-B2) — reserve an upfront, pessimistic estimate from the
-        // global in-flight response-byte budget BEFORE execution begins,
-        // using min(request result size, server result cap) as the estimate,
-        // without modifying the request. This is what
-        // actually bounds EXECUTION-time memory (not just write-path
-        // residency): N concurrent requests can no longer all run to
-        // completion and materialize their full result before any of them
-        // is throttled — the (N+1)-th request now blocks HERE, before
-        // `execute_with_policy` ever runs, once the budget is saturated.
-        //
-        // Deliberately placed AFTER every cheap, budget-free fast-reject
-        // above (version check, admin gate, read-only gate, HMAC gate) —
-        // those should stay free of any budget interaction. The guard is
-        // held locally for the rest of this function and shrunk to the
-        // ACTUAL serialized size once the final response is known (see the
-        // single tail below), rather than stashed immediately: stashing
-        // happens exactly once, at the end, same as before this change.
-        let reserve_bytes = batch
-            .limits
-            .max_result_size
-            .min(self.query_limits.max_result_size_bytes);
-        let mut budget_guard = if self.byte_budget.cap().is_some() {
-            Some(self.byte_budget.acquire(reserve_bytes).await)
-        } else {
-            None
-        };
-
-        let actor = session_actor(session);
-        let repo_observer = self
-            .audit
-            .as_ref()
-            .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
-        let exec_result = self
-            .db
-            .execute_with_policy_and_repo_observer(
-                actor.clone(),
-                db_name,
-                &batch,
-                self.execution_policy(),
-                repo_observer,
-            )
-            .await;
-        let final_response = match exec_result {
-            Ok(mut response) => {
-                // Slow-query logging: WARN line for batches whose total
-                // execution time exceeds the configured threshold. Useful
-                // for spotting unindexed queries in production. Threshold
-                // = 0 disables (e.g. in unit tests).
-                if self.slow_query.threshold_us > 0
-                    && response.execution_time_us > self.slow_query.threshold_us
-                {
-                    tracing::warn!(
-                        elapsed_us = response.execution_time_us,
-                        threshold_us = self.slow_query.threshold_us,
-                        db = db_name,
-                        queries = batch.queries.len(),
-                        request_id = ?response.id,
-                        "slow query",
-                    );
-                }
-                self.persist_table_lifecycle(db_name, &batch);
-                subscribe_handler::activate_subscriptions(
-                    conn,
-                    &self.db,
-                    db_name,
-                    &batch,
-                    &mut response,
-                    actor.clone(),
-                )
-                .await;
-
-                DbResponse::Batch { response }
-            }
-            Err(e) => error_response(&e),
-        };
-
-        // RI-15 (CR-B2) — single convergence point for BOTH the success and
-        // error paths: serialize the final `DbResponse` envelope exactly
-        // ONCE, shrink the upfront reservation down to that actual size
-        // (an error response's tiny actual size still needs its pessimistic
-        // over-reservation narrowed back down), then stash both the guard
-        // and the already-serialized bytes so `RequestHandler::handle`
-        // reuses them instead of encoding the SAME response a second time.
-        //
-        // The guard is stashed in a task-local (`byte_budget::stash_guard`)
-        // rather than returned from this function: `execute`'s return type
-        // is `DbResponse` (asserted on directly by tests) and the caller,
-        // `RequestHandler::handle`, has a fixed `Result<Vec<u8>, String>`
-        // signature owned by `shamir-connect`. `connection::request_loop`
-        // retrieves the guard with `byte_budget::take_stashed_guard` right
-        // after the dispatch future resolves and rides it inside
-        // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
-        // writer task, after the socket write completes — never in this
-        // dispatch task.
-        if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            if bytes.len() > reserve_bytes {
-                // Includes arbitrary error strings, not just successful payloads.
-                // Release before returning; never stash the rejected payload.
-                drop(budget_guard);
-                return DbResponse::Error {
-                    code: "result_too_large".to_string(),
-                    message: format!(
-                        "encoded response is {} bytes; maximum is {reserve_bytes}",
-                        bytes.len(),
-                    ),
-                };
-            }
-            if let Some(guard) = budget_guard.as_mut() {
-                guard.shrink_to(bytes.len());
-            }
-            if let Some(guard) = budget_guard {
-                stash_guard(guard);
-            }
-            stash_serialized_response(bytes);
-        }
-
-        final_response
-    }
-
-    /// Walk through `batch.queries` and record CreateTable/DropTable ops in
-    /// the persistent registry. No-op when `AdminGlue::tables_registry` is
-    /// `None`. Failures here are logged but never break the request — the
-    /// in-memory state already reflects the change; the registry is just a
-    /// boot-replay aid.
-    pub(super) fn persist_table_lifecycle(&self, db_name: &str, batch: &BatchRequest) {
-        let Some(admin) = &self.admin else { return };
-        let Some(reg) = &admin.tables_registry else {
-            return;
-        };
-        for entry in batch.queries.values() {
-            match &entry.op {
-                BatchOp::CreateTable(op) => {
-                    if let Err(e) = reg.add(db_name, &op.repo, &op.create_table) {
-                        tracing::warn!(?e, "tables_registry add failed");
-                    }
-                }
-                BatchOp::DropTable(op) => {
-                    if let Err(e) = reg.remove(db_name, &op.repo, &op.drop_table) {
-                        tracing::warn!(?e, "tables_registry remove failed");
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 }
 

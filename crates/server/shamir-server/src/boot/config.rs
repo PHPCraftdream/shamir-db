@@ -528,6 +528,20 @@ impl Config {
             }
         }
 
+        // R4b-1 follow-up: zero here would strand every request of that
+        // session (see `QueryLimitsConfig::max_in_flight_requests_per_session`'s
+        // doc comment).
+        if self
+            .security
+            .query_limits
+            .max_in_flight_requests_per_session
+            == 0
+        {
+            return Err(ConfigError::Validation(
+                "security.query_limits.max_in_flight_requests_per_session must be >= 1".into(),
+            ));
+        }
+
         // CR-A3: a zero cap would make every cursor unusable (every
         // CreateCursor/FetchNext request would be rejected outright — see
         // `CursorLimitsConfig::max_cursor_page_size`'s doc comment).

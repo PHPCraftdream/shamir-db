@@ -93,6 +93,7 @@ define_op_kinds! {
     StartBackup => "start_backup",
     BackupStatus => "backup_status",
     CancelBackup => "cancel_backup",
+    ListActivity => "list_activity",
     Call => "call",
     ForEach => "for_each",
     Batch => "batch",

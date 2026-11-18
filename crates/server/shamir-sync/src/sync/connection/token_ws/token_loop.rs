@@ -364,13 +364,21 @@ pub async fn run_token_halves<R, W>(
                     return;
                 }
                 let started = tokio::time::Instant::now();
-                let (result, budget) = byte_budget::run_with_handoff(scoped.handle(
-                    &session,
-                    request,
-                    Endpoint::Ws,
-                    &connection,
-                ))
-                .await;
+                // R4b-1 — activity timestamp: all gates (deadline, token
+                // validity, rate limit, alias caps, decode) and the final
+                // validity recheck above have passed; touch the session with
+                // the already-available monotone-wall `now` (no extra
+                // syscall). This feeds the new session-age activity row.
+                session.touch_at(now);
+                let (result, budget) =
+                    byte_budget::run_with_handoff(scoped.handle_with_request_id(
+                        &session,
+                        request,
+                        Endpoint::Ws,
+                        &connection,
+                        request_id,
+                    ))
+                    .await;
                 metrics::histogram!("shamir_token_request_duration_seconds", "endpoint" => "ws")
                     .record(started.elapsed().as_secs_f64());
                 match result {

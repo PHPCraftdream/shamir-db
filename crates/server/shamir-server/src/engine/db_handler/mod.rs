@@ -1,7 +1,11 @@
+#[path = "repo_admin/activity/mod.rs"]
+mod activity;
 mod config;
 mod cursor_handlers;
 #[path = "repo_admin/cursor_support.rs"]
 mod cursor_support;
+#[path = "repo_admin/execute.rs"]
+mod execute;
 mod handler;
 mod handlers;
 #[path = "repo_admin/native_handler.rs"]

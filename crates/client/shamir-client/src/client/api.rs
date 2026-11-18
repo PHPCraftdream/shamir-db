@@ -882,6 +882,50 @@ impl Client {
         crate::visibility::map_response(response)
     }
 
+    /// Read-only operator activity view (release-1 R4b step 1).
+    ///
+    /// Sends the typed `shamir_query_types::batch::BatchOp::ListActivity`
+    /// operation as the sole
+    /// entry of a standalone nontransactional batch; the server answers
+    /// with the dedicated typed page `ActivityPage` wrapped in the
+    /// top-level `DbResponse::ActivityPage` (NOT a `Batch`), returned
+    /// here unwrapped. Request rows of the page carry an OPTIONAL
+    /// `session_handle` (`None` when the batch was admitted without a
+    /// resolvable session; omitted on the wire). This drives the raw
+    /// `roundtrip` primitive directly instead of going through
+    /// [`Client::execute`]. Authorization is server-side: the operation
+    /// is a SCRAM-session surface only (API-token requests are denied),
+    /// `scope: Own` is open to any authenticated user, `scope: All`
+    /// requires the `ActivityView` resource with `Action::Manage`.
+    pub async fn list_activity(
+        &self,
+        db: &str,
+        request: shamir_query_types::admin::activity::ListActivityReq,
+    ) -> Result<shamir_query_types::admin::activity::ActivityPage, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "list_activity",
+            shamir_query_builder::wire::admin::list_activity(request),
+        );
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::ActivityPage { page } => Ok(page),
+            other => Err(ClientError::Protocol(format!(
+                "expected ActivityPage, got {other:?}"
+            ))),
+        }
+    }
+
     /// Close the TLS write half cleanly and abort the reader task.
     ///
     /// After this call the session is dead on the server side too

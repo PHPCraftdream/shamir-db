@@ -122,6 +122,9 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         // R2a 3a: online-backup admin ops are superuser-surface for tokens.
         | BatchOp::StartBackup(_)
         | BatchOp::BackupStatus(_)
+        // R4b-1: a token endpoint must not enumerate other sessions'
+        // activity (Own) or global operator activity (All).
+        | BatchOp::ListActivity(_)
         | BatchOp::CancelBackup(_)
         | BatchOp::ReplicationStatus(_) => "admin-denied",
     }

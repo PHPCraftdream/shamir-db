@@ -107,6 +107,24 @@ fn query_values_with_lossy_wire_variants_are_rejected() {
 }
 
 #[test]
+fn batch_admission_rejects_activity_listing() {
+    // R4b-1: ListActivity is read-only server-state introspection, not a
+    // schema-migration op; it is refused like every other non-DDL op.
+    let rejected = crate::batch::BatchOp::ListActivity(crate::admin::ListActivityReq {
+        scope: crate::admin::ActivityScope::All,
+        kind: crate::admin::ActivityKind::All,
+        limit: None,
+        continuation: None,
+    });
+    assert!(matches!(
+        SchemaMigrationOp::try_from(rejected),
+        Err(SchemaMigrationError::UnsupportedOperation(
+            "activity listing"
+        ))
+    ));
+}
+
+#[test]
 fn batch_admission_rejects_arbitrary_function_invocation() {
     let rejected = crate::batch::BatchOp::Call(crate::CallOp::new(
         "invoke",

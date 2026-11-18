@@ -320,6 +320,9 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         | ApplicationSchema(_)
         // R2a 3a: online-backup ops are not destructive-HMAC gated; they are
         // superuser-only node-local admin ops enforced at the handler.
+        // R4b-1: activity listing is read-only introspection of server-owned
+        // state, not destructive; it is permission-checked at the handler.
+        | ListActivity(_)
         | StartBackup(_)
         | BackupStatus(_)
         | CancelBackup(_) => HmacPolicy::NotGated,

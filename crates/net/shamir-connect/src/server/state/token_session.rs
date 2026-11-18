@@ -2,7 +2,10 @@
 
 use crate::server::auth::token::TokenId;
 use crate::server::state::origin::SessionOrigin;
-use crate::server::state::session::Session;
+use crate::server::state::session::{
+    mint_activity_handle, new_activity_projection, projection_snapshot, projection_update,
+    ActivityProjection, Session,
+};
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
 use std::hash::{BuildHasherDefault, Hash};
@@ -82,6 +85,17 @@ pub struct TokenSessionStore {
     sessions: DashMap<[u8; 32], Arc<Session>, FxBuild>,
     token_counts: DashMap<TokenId, Arc<CounterCell>, FxBuild>,
     owner_counts: DashMap<[u8; 16], Arc<CounterCell>, FxBuild>,
+    /// O(1) mirror of `sessions.len()` feeding activity gauges (same
+    /// accounting as `SessionStore::activity_len`).
+    activity_len: AtomicUsize,
+    /// Lock-free sharded `ArcSwap` projection for the activity view, same
+    /// scheme as `SessionStore` (see `projection_update`/`projection_snapshot`
+    /// in `state/session.rs` — publishes under the shard write guard,
+    /// removals just after their guard is released, ptr_eq-guarded). Handles
+    /// come from the same process-wide minter, so all stored sessions (SCRAM
+    /// and token) have unique operator-facing identities; caps and admission
+    /// are unchanged.
+    activity_projection: ActivityProjection,
 }
 // Synchronous-only API: each DashMap guard is dropped before acquiring another; no guard crosses await.
 impl Default for TokenSessionStore {
@@ -96,6 +110,8 @@ impl TokenSessionStore {
             sessions: DashMap::with_hasher(FxBuild::default()),
             token_counts: DashMap::with_hasher(FxBuild::default()),
             owner_counts: DashMap::with_hasher(FxBuild::default()),
+            activity_len: AtomicUsize::new(0),
+            activity_projection: new_activity_projection(),
         }
     }
     fn reserve(counter: &AtomicUsize, cap: usize) -> bool {
@@ -138,6 +154,13 @@ impl TokenSessionStore {
         let session = Arc::new(session);
         let insertion = match self.sessions.entry(sid) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
+                // Stamp BEFORE publication under this shard write guard (same
+                // scheme as `SessionStore::admit`); projection + mirror +1
+                // before visibility. A wasted mint on DuplicateSid never
+                // publishes, so uniqueness/monotonicity are unaffected.
+                session.stamp_handle(mint_activity_handle());
+                self.activity_len.fetch_add(1, Ordering::Relaxed);
+                projection_update(&self.activity_projection, &sid, None, Some(&session));
                 entry.insert(Arc::clone(&session));
                 Ok(Arc::clone(&session))
             }
@@ -154,6 +177,8 @@ impl TokenSessionStore {
         let Some((_, session)) = self.sessions.remove(sid) else {
             return false;
         };
+        self.activity_len.fetch_sub(1, Ordering::Relaxed);
+        projection_update(&self.activity_projection, sid, Some(&session), None);
         let SessionOrigin::Token(origin) = &session.origin else {
             debug_assert!(false, "only token-origin sessions enter TokenSessionStore");
             return false;
@@ -200,5 +225,26 @@ impl TokenSessionStore {
             .get(id)
             .map(|entry| entry.count.load(Ordering::Acquire))
             .unwrap_or(0)
+    }
+
+    /// Number of currently-live token sessions. O(1): reads the mirror
+    /// atomics maintained at every `sessions` mutation (see
+    /// `SessionStore::len` for the accounting contract).
+    pub fn len(&self) -> usize {
+        self.activity_len.load(Ordering::Relaxed)
+    }
+
+    /// Whether the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Lock-free copy-only activity snapshot of all live token sessions
+    /// (R4b-1), identical contract to [`SessionStore::activity_snapshot`]:
+    /// served from the sharded `ArcSwap` projection — atomic loads and `Arc`
+    /// clones only, no map guard, momentarily torn across shards (D4),
+    /// gauge-balanced after quiescence (`len()` equality).
+    pub fn activity_snapshot(&self) -> Vec<Arc<Session>> {
+        projection_snapshot(&self.activity_projection)
     }
 }

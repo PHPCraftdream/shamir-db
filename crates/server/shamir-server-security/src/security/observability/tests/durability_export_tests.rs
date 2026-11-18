@@ -3,9 +3,7 @@ use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
 use shamir_tx::TxMetrics;
 
 use super::super::durability_export::{record_durability_metrics, register_durability_metrics};
-use super::super::export::transactions::{
-    record_transactions_metrics, register_transactions_metrics,
-};
+use super::super::export::{record_transactions_metrics, register_transactions_metrics};
 
 #[test]
 fn durability_export_uses_repo_labels_and_absolute_snapshots_without_double_counting() {

@@ -516,6 +516,11 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "online-backup inspection",
                 ))
             }
+            BatchOp::ListActivity(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "activity listing",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

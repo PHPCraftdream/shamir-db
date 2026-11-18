@@ -25,9 +25,22 @@ pub type NativeHandler = dyn for<'a> Fn(
     + Send
     + Sync;
 
+/// R4b-1 — internal rid-capable closure shape. The trailing `Option<u32>` is
+/// the client's OPTIONAL transport request id forwarded from the token
+/// WebSocket; the legacy public [`NativeHandler`] alias and signatures are
+/// unchanged and keep flowing through with `None`.
+type NativeHandlerRid = dyn for<'a> Fn(
+        &'a Session,
+        DbRequest,
+        &'a ConnectionServices,
+        Option<u32>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>
+    + Send
+    + Sync;
+
 /// Native typed handler adapter for requests accepted by REST scope policy.
 pub struct ScopedHandler {
-    handler: Arc<NativeHandler>,
+    handler: Arc<NativeHandlerRid>,
 }
 
 impl ScopedHandler {
@@ -36,15 +49,49 @@ impl ScopedHandler {
     where
         H: NativeDbHandler + ?Sized + 'static,
     {
-        let dispatch: Arc<NativeHandler> = Arc::new(move |session, request, conn| {
+        // R4b-1 — the dispatch closure forwards the OPTIONAL client rid into
+        // the rid-carrying native contract so the server can attach it to the
+        // in-flight activity entry; implementors using the trait default
+        // simply ignore it.
+        let dispatch: Arc<NativeHandlerRid> =
+            Arc::new(move |session, request, conn, client_rid| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move {
+                    handler
+                        .handle_decoded_with_request_id(session, request, conn, client_rid)
+                        .await
+                })
+            });
+        Self { handler: dispatch }
+    }
+
+    /// Legacy public constructor over a plain [`NativeHandler`] closure. The
+    /// wrapped closure carries no client rid (`None`), exactly as before.
+    pub fn with_handler(handler: Arc<NativeHandler>) -> Self {
+        let dispatch: Arc<NativeHandlerRid> = Arc::new(move |session, request, conn, _| {
             let handler = Arc::clone(&handler);
-            Box::pin(async move { handler.handle_decoded(session, request, conn).await })
+            Box::pin(async move { handler(session, request, conn).await })
         });
         Self { handler: dispatch }
     }
 
-    pub fn with_handler(handler: Arc<NativeHandler>) -> Self {
-        Self { handler }
+    /// Token auth/scope gate shared by both entry points.
+    fn authorize(
+        &self,
+        session: &Session,
+        request: &DbRequest,
+        endpoint: TokenEndpoint,
+    ) -> Result<(), HandleDenial> {
+        let shamir_connect::server::SessionOrigin::Token(origin) = &session.origin else {
+            return Err(HandleDenial::Forbidden("token_request_denied"));
+        };
+        let (mode, _, databases) = origin.scope();
+        let decision = classify_request(request, mode, databases, endpoint);
+        match decision {
+            Decision::Allowed(_) => Ok(()),
+            Decision::Denied(code) => Err(HandleDenial::Forbidden(code)),
+            Decision::NotSupported(code) => Err(HandleDenial::BadRequest(code)),
+        }
     }
 
     pub async fn handle(
@@ -54,17 +101,27 @@ impl ScopedHandler {
         endpoint: TokenEndpoint,
         conn: &ConnectionServices,
     ) -> Result<Vec<u8>, HandleDenial> {
-        let shamir_connect::server::SessionOrigin::Token(origin) = &session.origin else {
-            return Err(HandleDenial::Forbidden("token_request_denied"));
-        };
-        let (mode, _, databases) = origin.scope();
-        let decision = classify_request(&request, mode, databases, endpoint);
-        match decision {
-            Decision::Allowed(_) => {}
-            Decision::Denied(code) => return Err(HandleDenial::Forbidden(code)),
-            Decision::NotSupported(code) => return Err(HandleDenial::BadRequest(code)),
-        }
-        (self.handler)(session, request, conn)
+        self.authorize(session, &request, endpoint)?;
+        // REST and other non-dispatch callers have no client rid: `None`.
+        (self.handler)(session, request, conn, None)
+            .await
+            .map_err(|_| HandleDenial::ApplicationError)
+    }
+
+    /// R4b-1 — token-WebSocket entry point: forwards the OPTIONAL envelope
+    /// `rid` past the token auth/scope gates into the native dispatch, so it
+    /// reaches the server's in-flight activity registration. Gates, ordering
+    /// and denial codes are identical to [`Self::handle`].
+    pub async fn handle_with_request_id(
+        &self,
+        session: &Session,
+        request: DbRequest,
+        endpoint: TokenEndpoint,
+        conn: &ConnectionServices,
+        request_id: Option<u32>,
+    ) -> Result<Vec<u8>, HandleDenial> {
+        self.authorize(session, &request, endpoint)?;
+        (self.handler)(session, request, conn, request_id)
             .await
             .map_err(|_| HandleDenial::ApplicationError)
     }

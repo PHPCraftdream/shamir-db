@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::options::deserialize_optional_field;
 
+use crate::admin::ActivityPage;
+
 use crate::batch::{
     BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
 };
@@ -407,6 +409,15 @@ pub enum DbResponse {
     ApiUserTokensRevoked {
         /// Number of tokens revoked.
         count: u64,
+    },
+    /// Successful [`crate::batch::BatchOp::ListActivity`] — one bounded page
+    /// of the operator activity view (R4b step 1). Rows carry ids, actor,
+    /// db, op-kind names, timing and state only; never credentials or
+    /// literals (D3).
+    ActivityPage {
+        /// The rendered rows plus the opaque continuation token, if more
+        /// remain.
+        page: ActivityPage,
     },
 
     /// DB-layer failure (permission, planner, query, lock-timeout, …).

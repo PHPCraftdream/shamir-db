@@ -258,6 +258,10 @@ fn classify_batch(
             | BatchOp::StartBackup(_)
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
+            // R4b-1: activity listing is a SCRAM-session surface only — a
+            // token endpoint must not enumerate other sessions' activity
+            // (Own) or global operator activity (All).
+            | BatchOp::ListActivity(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

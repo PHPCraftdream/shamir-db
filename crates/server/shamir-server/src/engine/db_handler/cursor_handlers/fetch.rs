@@ -639,5 +639,12 @@ pub(super) fn cursor_registry_error_response(
         CursorRegistryError::CursorLimitExceeded { limit } => {
             error_response(&BatchError::CursorLimitExceeded { limit })
         }
+        // R4b-1: the id is already held by a live cursor. Stable,
+        // machine-readable code; the message carries no private data
+        // (no filter values, credentials or token material).
+        CursorRegistryError::CursorIdAlreadyOpen => DbResponse::Error {
+            code: "cursor_id_conflict".into(),
+            message: "cursor id already open".into(),
+        },
     }
 }
