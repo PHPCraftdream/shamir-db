@@ -20,8 +20,14 @@
 //! 4. server-recomputed canonical checksum of the submitted body;
 //! 5. already-applied ordinal: identical id/ordinal/checksum → the stored
 //!    applied result as a no-op; changed body → refused without any write;
-//! 6. in-flight owner → `schema_migration_in_progress`; in-doubt journal →
-//!    `schema_migration_in_doubt` (resume/reconcile is step 3b);
+//! 6. in-flight owner / in-doubt journal (R1c step 2b-3b resume): an
+//!    unresolved entry whose id/ordinal/server-recomputed checksum match the
+//!    submission RESUMES (steps 7–9 unchanged, then the durable fence is
+//!    acquired with `recovery = true` at the CURRENT durable generation and
+//!    the runner reconciles per-operation before executing anything new);
+//!    with the in-process gate already held → `schema_migration_in_progress`
+//!    (a live runner of this db process is never taken over); any other
+//!    mismatch → the fresh-path stable refusal codes, nothing written;
 //! 7. expected predecessor == durable journal head; ordinal contiguous with
 //!    the applied prefix (same refusals and stable codes as plan);
 //! 8. function/validator-family operations → one typed, documented refusal
@@ -31,8 +37,9 @@
 //! 9. repository existence of every operation's target repo and §5.2
 //!    authorization of every underlying DDL target through the
 //!    normal access path — before the fence and before any journal write;
-//! 10. the durable fence CAS with `expected_fence_generation` plus the
-//!     in-process per-database gate (§4.3).
+//! 10. the durable fence CAS with `expected_fence_generation` (recovery
+//!     takes over the OWNED fence at the journal's current generation)
+//!     plus the in-process per-database gate (§4.3).
 //!
 //! Any admission refusal writes nothing. Journal write/sync/read-back
 //! failures stop the run before the next effect and are reported in doubt —
@@ -48,9 +55,7 @@ use shamir_query_types::admin::types::schema_migration::{
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
-use crate::shamir_db::system_store::{
-    DatabaseIdentity, FormatEpoch, JournalEventKind, SchemaMigrationContext,
-};
+use crate::shamir_db::system_store::{DatabaseIdentity, FormatEpoch, SchemaMigrationContext};
 
 use super::super::admin_dispatch::ShamirAdminExecutor;
 use super::apply_journal::{applied_value, map_fence_error, plain};
@@ -153,19 +158,52 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
 
-    // (6) In-flight owner / in-doubt journal (resume is step 3b).
+    // (6) Unresolved journal (resume/reconcile, R1c step 2b-3b). A live
+    // runner of THIS db process (in-process gate held) is never taken over;
+    // a matching unresolved migration (same id, same ordinal, checksum equal
+    // to the server-recomputed canonical checksum) resumes; any other
+    // mismatch is refused with the fresh-path stable codes, writing nothing.
+    let mut resume = false;
     if let Some(event) = history.unresolved.last() {
-        let code = match event.kind {
-            JournalEventKind::Started => "schema_migration_in_progress",
-            _ => "schema_migration_in_doubt",
-        };
-        return Err(coded(
-            code,
-            format!(
-                "migration {} (ordinal {}) is unresolved; apply is refused",
-                event.migration.id, event.migration.ordinal
-            ),
-        ));
+        if executor
+            .shamir
+            .schema_migration_gate_generation(&db)
+            .is_some()
+        {
+            return Err(coded(
+                "schema_migration_in_progress",
+                format!(
+                    "migration {} (ordinal {}) is unresolved and a runner already holds \
+                     the in-process gate for database '{db}'",
+                    event.migration.id, event.migration.ordinal
+                ),
+            ));
+        }
+        if event.migration.id != submission.metadata.id
+            || event.migration.ordinal != submission.metadata.ordinal
+        {
+            return Err(coded(
+                "schema_migration_predecessor_mismatch",
+                format!(
+                    "migration {} (ordinal {}) is unresolved; apply cannot substitute \
+                     migration {} (ordinal {})",
+                    event.migration.id,
+                    event.migration.ordinal,
+                    submission.metadata.id,
+                    submission.metadata.ordinal
+                ),
+            ));
+        }
+        if event.checksum != recomputed {
+            return Err(coded(
+                "schema_migration_checksum_mismatch",
+                format!(
+                    "migration {} is unresolved with a different body checksum",
+                    submission.metadata.id
+                ),
+            ));
+        }
+        resume = true;
     }
 
     // (7) Expected predecessor == durable journal head; ordinal contiguous.
@@ -260,13 +298,24 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
     let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+    // Recovery CASes the fence at the CURRENT durable generation, i.e. the
+    // generation of the latest journal event (the control-record validation
+    // pins control.generation to exactly that value).
+    let expected_generation = if resume {
+        history
+            .events
+            .last()
+            .map_or(0, |event| event.fence_generation)
+    } else {
+        request.expected_fence_generation
+    };
     let generation = store
         .acquire_schema_migration_fence(
             serving,
-            request.expected_fence_generation,
+            expected_generation,
             submission.metadata.clone(),
             body.clone(),
-            false,
+            resume,
             &context,
         )
         .await
@@ -282,6 +331,7 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         body: &body,
         protocol_version: request.protocol_version,
         generation,
+        resume,
         context: &context,
     })
     .await

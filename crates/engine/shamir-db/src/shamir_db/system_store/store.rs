@@ -623,6 +623,13 @@ impl SystemStore {
         }
     }
 
+    /// Whether the persistent schema-migration journal exists at all (R1c
+    /// step 2b-3b: the open-time fence rebuild is a no-op on in-memory
+    /// stores, which have nothing durable to be in doubt about).
+    pub(crate) fn schema_migration_journal_durable(&self) -> bool {
+        self.durable_journal
+    }
+
     pub(crate) async fn schema_migration_admin_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.schema_migration_admin.lock().await
     }

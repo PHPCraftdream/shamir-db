@@ -163,23 +163,28 @@ impl JournalEvent {
                 | JournalEventKind::InDoubt
                 | JournalEventKind::Failed
         );
+        let evidence_present = self
+            .evidence
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        // An operation intent may record its pre-state as evidence (resume
+        // reconcile, R1c step 2b-3b); absence stays valid for every earlier
+        // journal.
+        let evidence_optional = matches!(self.kind, JournalEventKind::OperationIntent);
+        // An in-doubt marker may name the operation it blocks (resume
+        // reconcile, R1c step 2b-3b); the open-time marker carries none.
+        let operation_allowed = operation_required || self.kind == JournalEventKind::InDoubt;
         if body_required != self.body.is_some()
-            || operation_required != self.operation_index.is_some()
-            || evidence_required
-                != self
-                    .evidence
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+            || (operation_required && self.operation_index.is_none())
+            || (!evidence_optional && evidence_required != evidence_present)
         {
             return Err(DbError::Internal(format!(
                 "schema migration journal row {row_id}: body, operation, or evidence fields are invalid for event kind {:?}",
                 self.kind
             )));
         }
-        if !matches!(
-            self.kind,
-            JournalEventKind::OperationIntent | JournalEventKind::OperationComplete
-        ) && (self.operation_index.is_some() || self.operation_identity.is_some())
+        if !operation_allowed
+            && (self.operation_index.is_some() || self.operation_identity.is_some())
         {
             return Err(DbError::Internal(format!(
                 "schema migration journal row {row_id}: non-operation event contains operation fields"

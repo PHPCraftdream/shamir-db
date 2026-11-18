@@ -14,6 +14,17 @@
 //! durable journal). The migration's own DDL handlers are invoked directly
 //! and do not traverse the batch entries, so they are unaffected.
 //!
+//! R1c step 2b-3b: the fence survives restart. At database open,
+//! `init_inner` consults the durable journal once per database and seeds an
+//! IN-DOUBT marker (`schema_migration_gate_in_doubt`) when the control
+//! record still OWNS the fence and the journal is unresolved — i.e. a
+//! runner crashed or the server restarted before resume. While only the
+//! marker is present, the same write/DDL/`CallOp` refusals carry
+//! `schema_migration_in_doubt`; a resumed runner's `hold` clears the marker
+//! and installs the live gate (`in_progress`), and its RAII release removes
+//! it as before. The marker is in-memory only: it never widens the durable
+//! contract.
+//!
 //! Release is guaranteed on every apply exit path by an RAII guard in
 //! `apply.rs`; the durable fence generation itself is released through the
 //! step-2a `SystemStore` API only after the `applied` event is durable.
@@ -30,9 +41,16 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 
 use crate::query::batch::{BatchError, BatchOp, BatchRequest};
 use crate::shamir_db::shamir_db::ShamirDb;
+use crate::shamir_db::system_store::DatabaseIdentity;
+use crate::DbResult;
 
-/// Stable §5.3 code used for every maintenance-fence refusal.
+/// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
+
+/// Stable §5.3 code for a fence that is still durably OWNED but has NO live
+/// runner in this process (R1c step 2b-3b: the runner crashed or the server
+/// restarted before resume) — seeded at database open from the journal.
+const IN_DOUBT: &str = "schema_migration_in_doubt";
 
 impl ShamirDb {
     /// §4.5: lower the server's node mode into the engine. Called once at
@@ -55,11 +73,65 @@ impl ShamirDb {
     }
 
     /// Mark `db` as fenced in-process under `generation`. Only the winner of
-    /// the durable fence CAS (step-2a `acquire_schema_migration_fence`)
-    /// reaches this, so the blind insert cannot oversubscribe the gate.
+    /// the durable fence CAS (step-2a `acquire_schema_migration_fence`, fresh
+    /// or recovery) reaches this, so the blind insert cannot oversubscribe
+    /// the gate. It also clears any open-time in-doubt marker: a resumed
+    /// runner converts the in-doubt fence into a live one.
     pub(in crate::shamir_db) fn hold_schema_migration_gate(&self, db: &str, generation: u64) {
+        self.schema_migration_gate_in_doubt.remove(db);
         self.schema_migration_gate
             .insert(db.to_string(), generation);
+    }
+
+    /// The generation of the fence the open-time rebuild recorded as durably
+    /// OWNED with an unresolved journal entry — i.e. in doubt, no runner.
+    /// Absent once a resumed runner has held the gate.
+    pub(in crate::shamir_db) fn schema_migration_gate_in_doubt_generation(
+        &self,
+        db: &str,
+    ) -> Option<u64> {
+        self.schema_migration_gate_in_doubt
+            .get(db)
+            .map(|entry| *entry)
+    }
+
+    /// Convert a LIVE gate into an IN-DOUBT marker: the run exited while the
+    /// durable fence is still OWNED with an unresolved journal (in-doubt or
+    /// postcondition-failure exit). The live entry is removed under the same
+    /// generation guard as a plain release, and the marker is installed with
+    /// the run's generation so a later resume's `hold` (higher generation)
+    /// converts it back to a live gate; writes stay refused with
+    /// `schema_migration_in_doubt` until then.
+    pub(in crate::shamir_db) fn mark_schema_migration_gate_in_doubt(
+        &self,
+        db: &str,
+        generation: u64,
+    ) {
+        self.release_schema_migration_gate(db, generation);
+        self.schema_migration_gate_in_doubt
+            .insert(db.to_string(), generation);
+    }
+
+    /// One-time open-time seed of the in-doubt marker: every database whose
+    /// control record still OWNS the durable fence while its journal is
+    /// unresolved is marked in doubt (in-memory only). A no-op without a
+    /// durable journal. Called by `init_inner` only; never on the batch path.
+    pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(
+        &self,
+        identities: &[(String, DatabaseIdentity)],
+    ) -> DbResult<()> {
+        let store = self.system_store();
+        if !store.schema_migration_journal_durable() {
+            return Ok(());
+        }
+        for (name, identity) in identities {
+            let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await?;
+            if let Some(generation) = owned {
+                self.schema_migration_gate_in_doubt
+                    .insert(name.clone(), generation);
+            }
+        }
+        Ok(())
     }
 
     /// Release the in-process gate, but only if the recorded generation still
@@ -86,8 +158,21 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
     db_name: &str,
     request: &BatchRequest,
 ) -> Option<BatchError> {
-    // Gate not held for this database → nothing to refuse.
-    shamir.schema_migration_gate_generation(db_name)?;
+    // Nothing is held for this database: neither a live runner's gate nor an
+    // open-time in-doubt marker → nothing to refuse.
+    let live = shamir.schema_migration_gate_generation(db_name);
+    let in_doubt = shamir.schema_migration_gate_in_doubt_generation(db_name);
+    if live.is_none() && in_doubt.is_none() {
+        return None;
+    }
+    // A live runner of this process is authoritative over the open-time
+    // in-doubt marker (hold clears it anyway); the code distinguishes the
+    // two states for callers.
+    let code = if live.is_some() {
+        IN_PROGRESS
+    } else {
+        IN_DOUBT
+    };
     for visit in BatchTreeVisitor::new(&request.queries) {
         let op = &visit.entry.op;
         // The application-schema operations keep working during a fence:
@@ -105,7 +190,7 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
                      calls are refused until it completes",
                     visit.alias
                 ),
-                code: Some(IN_PROGRESS.to_string()),
+                code: Some(code.to_string()),
             });
         }
     }
