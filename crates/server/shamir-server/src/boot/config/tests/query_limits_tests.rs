@@ -38,9 +38,16 @@ fn omitted_field_resolves_to_conn_max_in_flight() {
 /// A nonzero explicit value in the file is accepted and kept verbatim.
 #[test]
 fn explicit_nonzero_field_is_accepted() {
+    let newline = if EXAMPLE.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let text = EXAMPLE.replacen(
-        "query_limits: {",
-        "query_limits: { max_in_flight_requests_per_session: 17",
+        &format!("query_limits: {{{newline}"),
+        &format!(
+            "query_limits: {{{newline}        max_in_flight_requests_per_session: 17{newline}"
+        ),
         1,
     );
     assert_ne!(text, EXAMPLE, "injection point must exist in the example");

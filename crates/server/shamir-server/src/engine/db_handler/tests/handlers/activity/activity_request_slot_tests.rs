@@ -56,21 +56,24 @@ const CAP: usize = 2;
 
 /// A stamped session: inserted through a [`SessionStore`], which mints a
 /// nonzero activity handle (the precondition for cap enforcement). The
-/// session id (bearer token) is derived deterministically and non-secretly
-/// from the user id (`[user[0]; 32]`) so distinct users NEVER share a sid —
-/// a shared sid would make the second `insert` a same-sid REPLACEMENT of
-/// the first user's live session instead of an independent one.
-fn stamped_session(store: &SessionStore, name: &str, user: [u8; 16]) -> Arc<Session> {
+/// bearer sid is derived deterministically from the user id plus the
+/// explicit `index` argument (`[user[0], index, 0..; 32]`): distinct
+/// sessions pass distinct indexes, while the same-bearer replacement test
+/// deliberately re-uses one index to re-admit the same sid.
+fn stamped_session(store: &SessionStore, name: &str, user: [u8; 16], index: u8) -> Arc<Session> {
+    let mut session_id = [0u8; 32];
+    session_id[0] = user[0];
+    session_id[1] = index;
     let session = Session::new(
         user,
         name.to_string(),
         SessionPermissions::new(false, false, Vec::new()),
         TransportKind::Tcp,
         BindingMode::None,
-        [user[0]; 32],
+        [0u8; 32],
         1_000,
     );
-    let stamped = store.insert(session.session_id, session);
+    let stamped = store.insert(session_id, session);
     assert_ne!(
         stamped.activity_handle(),
         0,
@@ -127,7 +130,7 @@ async fn write_fixture() -> (ShamirDbHandler, Arc<Session>, Arc<SessionStore>) {
             .expect("open resource");
     }
     let store = Arc::new(SessionStore::new());
-    let alice = stamped_session(&store, "alice", [0xAB; 16]);
+    let alice = stamped_session(&store, "alice", [0xAB; 16], 1);
     let handler = ShamirDbHandler::new(Arc::new(db))
         .with_query_limits(QueryLimitsCap {
             max_in_flight_requests_per_session: 1,
@@ -182,8 +185,8 @@ const RACING_WORKERS: usize = 8;
 fn concurrent_admission_admits_exactly_cap_and_other_session_unaffected() {
     on_big_stack(|| async {
         let (handler, store) = fixture_with_cap().await;
-        let alice = stamped_session(&store, "alice", [1u8; 16]);
-        let bob = stamped_session(&store, "bob", [2u8; 16]);
+        let alice = stamped_session(&store, "alice", [1u8; 16], 1);
+        let bob = stamped_session(&store, "bob", [2u8; 16], 2);
 
         // All RACING_WORKERS start on the barrier and race the SAME real
         // stamped session; each HOLDS its guard (if admitted) and hands it
@@ -258,7 +261,7 @@ fn same_bearer_replacement_gets_no_additional_slot_while_permit_is_held() {
     on_big_stack(|| async {
         let (handler, store) = fixture_with_cap().await;
         let user = [5u8; 16];
-        let alice = stamped_session(&store, "alice", user);
+        let alice = stamped_session(&store, "alice", user, 1);
 
         // Hold the FULL cap on the first generation so the replacement
         // genuinely races a saturated shared counter.
@@ -276,7 +279,7 @@ fn same_bearer_replacement_gets_no_additional_slot_while_permit_is_held() {
 
         // The same user + same sid is re-admitted through the store: the
         // replacement generation of the same bearer identity.
-        let replacement = stamped_session(&store, "alice", user);
+        let replacement = stamped_session(&store, "alice", user, 1);
 
         // The replacement INHERITS the first generation's minted activity
         // handle (occupied same-sid re-admission preserves the minted
@@ -324,7 +327,7 @@ fn same_bearer_replacement_gets_no_additional_slot_while_permit_is_held() {
 fn early_return_and_panic_release_the_slot_for_the_same_session() {
     on_big_stack(|| async {
         let (handler, store) = fixture_with_cap().await;
-        let alice = stamped_session(&store, "alice", [3u8; 16]);
+        let alice = stamped_session(&store, "alice", [3u8; 16], 1);
         // Early-return release: a guard dropped on a non-panic path frees
         // the slot for the next admission.
         fn early_return(handler: &ShamirDbHandler, s: &Session) -> bool {
@@ -363,7 +366,7 @@ fn early_return_and_panic_release_the_slot_for_the_same_session() {
 fn stateless_handle_zero_session_skips_the_cap() {
     on_big_stack(|| async {
         let (handler, store) = fixture_with_cap().await;
-        let alice = stamped_session(&store, "alice", [4u8; 16]);
+        let alice = stamped_session(&store, "alice", [4u8; 16], 1);
 
         let _g1 = handler
             .try_track_activity_request(&alice, "app", "read", None)

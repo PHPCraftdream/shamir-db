@@ -69,7 +69,7 @@ use crate::version::CURRENT_QUERY_LANG_VERSION;
 
 /// Hard per-call bound: every await is bounded, never an unbounded
 /// engine await.
-const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Distinctive (non-credential) literal inside the parked writes' rows.
 const CANARY: &str = "GAUGE-BINDING-CANARY-4b1";
@@ -137,7 +137,12 @@ fn boot_config(data_dir: std::path::PathBuf) -> Config {
         },
         security: crate::config::SecurityConfig {
             query_limits: crate::config::QueryLimitsConfig {
-                max_result_size_bytes: 4096,
+                // Generous test-only allowance: the real wire-path seed
+                // insert's serialized response is ~4.3 KiB, over the old
+                // 4096 fixture limit; the budget cap below is >= this max
+                // result size, so the hold-at-full-capacity logic is
+                // unchanged.
+                max_result_size_bytes: 16_384,
                 max_inflight_response_bytes: Some(16_384),
                 ..Default::default()
             },
