@@ -757,6 +757,15 @@ Prometheus text format. Метрики:
 || `shamir_interner_high_water{db,repo}` | gauge | Персистентный high-water mark интернера |
 || `shamir_export_tables_truncated{db,repo}` | gauge (1/0) | Усечение по лимитам кардинальности активно |
 || `shamir_export_tables_known{db,repo}` | gauge | Всего открытых таблиц, известных репозиторию |
+|| `shamir_backup_started_total{kind}` | counter | Запущенные online-backup прогоны (`kind=online`) |
+|| `shamir_backup_completed_total{kind}` | counter | Успешно завершённые online-backup прогоны (`kind=online`) |
+|| `shamir_backup_failed_total{kind,stage}` | counter | Неудачные online-backup прогоны по стадии сбоя (`stage=preparing\|captured\|copying\|sealing\|verifying`) |
+|| `shamir_backup_active` | gauge (0/1) | 1, пока online-backup выполняется |
+|| `shamir_backup_bytes_copied` | gauge (bytes) | Кумулятивные байты, скопированные завершёнными online-backup прогонами |
+|| `shamir_backup_duration_seconds` | gauge (seconds) | Длительность последнего завершённого online-backup прогона (не выставляется до первого завершения) |
+|| `shamir_backup_writer_block_seconds{phase}` | gauge (seconds) | Длительность барьера блокировки writer'ов (`phase=capture\|seal`); не экспортируется, пока адаптер не измеряет длительность барьеров |
+|| `shamir_backup_pin_seconds` | gauge (seconds) | Длительность удержания truncation-pin; не экспортируется, пока не измеряется |
+|| `shamir_backup_wal_segments_copied_total` | counter | Скопированные сегменты WAL; не экспортируется, пока протокол не отдаёт счётчик сегментов |
 
 Серии WAL/storage (R4a-2) — снапшоты за scrape, метки только `db`/`repo`
 (у bucket-серий дополнительно `le`):
@@ -844,6 +853,36 @@ intent для алерта — неограниченный рост без но
 Серии нагрузки `shamir_sessions_active`, `shamir_connections_active`, `shamir_connections_rejected_total` и `shamir_admission_queue_depth` в этом изменении не добавляются: активные сессии не привязаны к БД на доступном пути наблюдения, общей очереди admission нет, а проверенные hook sites не утверждаются. Rate-limit отказ уже представлен существующими метриками token-auth и token-request, без дублирующей серии.
 
 `process_*` опрашиваются каждые 5 секунд (crate `metrics-process`).
+
+Серии online backup `shamir_backup_*` (R2a, дизайн `online-backup.md` §4.8) —
+счётчики несут метку `kind=online` (offline-прогоны, если появятся, получат
+`kind=offline`); `shamir_backup_failed_total` дополнительно — `stage`, стадию,
+на которой протокол зафиксировал сбой (`preparing|captured|copying|sealing|verifying`).
+
+`shamir_backup_started_total` / `shamir_backup_completed_total` /
+`shamir_backup_failed_total{kind,stage}` — кумулятивные счётчики прогонов за
+время жизни процесса. В норме completed растёт вместе с started, а failed
+остаётся нулевым; рост failed по конкретной стадии указывает, где деградирует
+backup (например, `stage=sealing` — не успевает seal-фаза).
+
+`shamir_backup_active` — gauge 0/1: выполняется ли online-backup прямо сейчас.
+Одновременный допускается только один (одна блокировка на сервер); `1` дольше
+ожидаемого — признак зависшего прогона.
+
+`shamir_backup_bytes_copied` — кумулятивные байты, скопированные завершёнными
+прогонами (счётчики хешированных байтов протокола); по rate() оценивают
+скорость копирования.
+
+`shamir_backup_duration_seconds` — длительность последнего завершённого
+прогона в секундах; не выставляется до первого завершения. Сравнивают между
+себя последовательные значения, а не с абсолютной нормой.
+
+`shamir_backup_writer_block_seconds{phase=capture|seal}`,
+`shamir_backup_pin_seconds` и `shamir_backup_wal_segments_copied_total`
+зарезервированы и описаны, но **не экспортируются**: текущий адаптер не
+измеряет длительность capture/seal-барьеров и удержание truncation-pin, а
+протокол не отдаёт счётчик сегментов WAL (заявленный пробел — см. отчёт
+шага; серии появятся без изменения имён, как только появятся данные).
 
 `shamir_function_duration_seconds` — гистограмма длительности вызовов WASM в секундах, с метками `db`,`repo` (без метки функции); серии `*_bucket` имеют дополнительную метку `le`, это кумулятивные gauge, `*_count` — counter, `*_sum` — gauge в секундах. Учитывается только внешний вызов глубины 0, включая вложенное время, ошибки и отмену; обычно — микросекунды–миллисекунды. Снимки берутся при scrape без блокировок и I/O экспортера; реестр ограничен 64 именованными парами с агрегатом `(other)`.
 
@@ -1021,6 +1060,14 @@ audit-лог и его ротации, TLS PEM) в каталог `<to>/YYYYMMDD
 > остановленному серверу. Копия, снятая на фоне работающего сервера (mid-WAL-write
 > / mid-SST-flush), может быть повреждена и **молчаливо непригодна к
 > восстановлению** — дефект всплывёт только при restore.
+
+Метрики online backup — серии `shamir_backup_*` (`kind=online`): счётчики
+`shamir_backup_started_total` / `shamir_backup_completed_total` /
+`shamir_backup_failed_total{kind,stage}`, gauges `shamir_backup_active`,
+`shamir_backup_bytes_copied`, `shamir_backup_duration_seconds`; описаны в
+разделе `/metrics` выше. Зарезервированные, но пока не экспортируемые серии:
+`shamir_backup_writer_block_seconds{phase}`, `shamir_backup_pin_seconds`,
+`shamir_backup_wal_segments_copied_total`.
 
 In-process online-snapshot без downtime — запланированное улучшение **P2**,
 пока не реализовано

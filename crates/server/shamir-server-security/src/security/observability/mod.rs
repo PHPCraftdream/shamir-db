@@ -72,6 +72,9 @@ pub use export::replication::{
     install_replication_metrics_source, ReplicationSnapshot, StreamState, STREAM_STATES,
 };
 
+pub use crate::security::backup_metrics::{install_backup_metrics_source, BackupMetricsSnapshot};
+
+use crate::security::backup_metrics::{record_backup_metrics, register_backup_metrics};
 use durability_export::{record_durability_metrics, register_durability_metrics};
 use export::functions::{record_functions_metrics, register_functions_metrics};
 use export::replication::{record_replication_metrics, register_replication_metrics};
@@ -474,6 +477,9 @@ pub async fn spawn_with_byte_budget(
     // interner gauges and the cardinality companion gauges.
     register_index_interner_metrics();
     register_replication_metrics();
+    // R2a step 3a §4.8: online-backup family (owner-installed snapshot
+    // source, same pattern as replication).
+    register_backup_metrics();
     register_transactions_metrics();
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
@@ -620,6 +626,7 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
             }
             record_functions_metrics();
             record_replication_metrics();
+            record_backup_metrics();
             (StatusCode::OK, h.render()).into_response()
         }
         None => (

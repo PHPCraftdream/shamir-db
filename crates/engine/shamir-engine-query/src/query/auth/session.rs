@@ -577,6 +577,14 @@ impl SessionPermissions {
             // database-level Read here. The handler re-checks with the
             // real action (Read for status, Manage for plan/apply later).
             BatchOp::ApplicationSchema(_) => (Action::Read, Resource::Global),
+
+            // Backup admin ops — authorized like the rest of the global
+            // admin surface: StartBackup/CancelBackup are mutating cluster
+            // actions (global Alter), BackupStatus is read-only
+            // introspection (global Read) — same split as the
+            // replication-DDL arms above.
+            BatchOp::StartBackup(_) | BatchOp::CancelBackup(_) => (Action::Alter, Resource::Global),
+            BatchOp::BackupStatus(_) => (Action::Read, Resource::Global),
         }
     }
 

@@ -82,6 +82,13 @@ pub trait OnlineBackupPort {
     /// point `V*`.
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError>;
 
+    /// Ends the seal hold for `repo` after that repo's seal re-copy
+    /// (design 1d (a): the hold returned by `seal_point` keeps the stores
+    /// frozen until this drops it). Idempotent: ending an unheld or
+    /// already-ended seal is a no-op. Called on every failure and
+    /// cancellation path for every repo sealed but not yet ended.
+    fn end_seal(&self, repo: &str);
+
     /// Step G and failure cleanup: release every truncation pin. Idempotent.
     fn release_pins(&self);
 }

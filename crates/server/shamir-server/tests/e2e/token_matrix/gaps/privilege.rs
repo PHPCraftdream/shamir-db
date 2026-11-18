@@ -119,6 +119,10 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         | BatchOp::ListSubscriptions(_)
         // R1c: application-schema operations are admin ops for tokens.
         | BatchOp::ApplicationSchema(_)
+        // R2a 3a: online-backup admin ops are superuser-surface for tokens.
+        | BatchOp::StartBackup(_)
+        | BatchOp::BackupStatus(_)
+        | BatchOp::CancelBackup(_)
         | BatchOp::ReplicationStatus(_) => "admin-denied",
     }
 }

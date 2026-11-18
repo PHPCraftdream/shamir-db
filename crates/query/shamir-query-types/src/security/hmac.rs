@@ -317,7 +317,12 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         | ReplicationStatus(_)
         // R1c: application-schema ops are not destructive-HMAC gated; the
         // apply step enforces its own integrity via the body checksum.
-        | ApplicationSchema(_) => HmacPolicy::NotGated,
+        | ApplicationSchema(_)
+        // R2a 3a: online-backup ops are not destructive-HMAC gated; they are
+        // superuser-only node-local admin ops enforced at the handler.
+        | StartBackup(_)
+        | BackupStatus(_)
+        | CancelBackup(_) => HmacPolicy::NotGated,
     }
 }
 /// Canonical bytes for a whole operation; every applicable DTO is destructured without `..`.

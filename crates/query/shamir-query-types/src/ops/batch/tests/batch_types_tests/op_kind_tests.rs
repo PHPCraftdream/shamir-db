@@ -192,6 +192,10 @@ fn fixture(kind: OpKind, key: &str) -> Value {
                 }
             }
         }),
+        OpKind::StartBackup => json!({
+            "to": "/backups/snap-1"
+        }),
+        OpKind::BackupStatus | OpKind::CancelBackup => json!({}),
     };
 
     let marker = match kind {
@@ -209,7 +213,10 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         OpKind::AccessTree
         | OpKind::ListPublications
         | OpKind::ListSubscriptions
-        | OpKind::ReplicationStatus => json!(true),
+        | OpKind::ReplicationStatus
+        | OpKind::StartBackup
+        | OpKind::BackupStatus
+        | OpKind::CancelBackup => json!(true),
         OpKind::ChangesSince | OpKind::Unsubscribe => json!(1),
         OpKind::Subscribe => json!([]),
         OpKind::List => json!("databases"),
@@ -363,6 +370,9 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::ListSubscriptions(_) => OpKind::ListSubscriptions,
         BatchOp::ReplicationStatus(_) => OpKind::ReplicationStatus,
         BatchOp::ApplicationSchema(_) => OpKind::ApplicationSchema,
+        BatchOp::StartBackup(_) => OpKind::StartBackup,
+        BatchOp::BackupStatus(_) => OpKind::BackupStatus,
+        BatchOp::CancelBackup(_) => OpKind::CancelBackup,
         BatchOp::Call(_) => OpKind::Call,
         BatchOp::ForEach(_) => OpKind::ForEach,
         BatchOp::Batch(_) => OpKind::Batch,

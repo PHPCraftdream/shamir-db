@@ -911,3 +911,31 @@ fn new_function_ops_need_no_hmac() {
         assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
     }
 }
+
+#[test]
+fn online_backup_ops_are_not_hmac_gated() {
+    // R2a 3a: node-local online-backup admin ops mirror the application-
+    // schema policy — NotGated, and no canonical v2 arm (they carry no
+    // destructive payload requiring integrity binding). The canonical
+    // encoder therefore rejects them as unsupported, the same as every
+    // other NotGated op without an explicit canonical encoding.
+    for wire in [
+        serde_json::json!({
+            "start_backup": true,
+            "to": "/backups/snap-1"
+        }),
+        serde_json::json!({
+            "backup_status": true
+        }),
+        serde_json::json!({
+            "cancel_backup": true
+        }),
+    ] {
+        let op: BatchOp = serde_json::from_value(wire).unwrap();
+        assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+        assert!(matches!(
+            canonical_batch_op("", &op),
+            Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
+        ));
+    }
+}

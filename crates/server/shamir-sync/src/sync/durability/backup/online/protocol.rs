@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult};
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
@@ -61,6 +62,27 @@ pub enum OnlineBackupFailure {
     Io(#[from] std::io::Error),
     #[error("snapshot self-verification failed: {0}")]
     Verify(String),
+    #[error("seal re-copy cap exceeded: {0}")]
+    RecopyCap(String),
+}
+
+/// Fail-closed cap (design "Step E re-copy versus R3" / Q12) bounding each
+/// repo's seal re-copy, after which the backup FAILS CLOSED (`Failed` at
+/// `BackupStage::Sealing`, `OnlineBackupFailure::RecopyCap`) instead of
+/// blocking writers unboundedly. `None` means unlimited (bytes: the whole
+/// store; clock: unbounded), so existing callers keep working — production
+/// callers should always set both (the re-copy runs while writers'
+/// visibility is paused, so an uncapped large store stalls commits).
+/// The clock cap is enforced at the per-repo re-copy boundary and stage
+/// boundaries only: the copy engine has no per-file deadline support.
+#[derive(Debug, Clone, Default)]
+pub struct SealRecopyCap {
+    /// Maximum bytes a single repo's seal re-copy (WAL dir + store dir)
+    /// may copy.
+    pub max_bytes: Option<u64>,
+    /// Maximum wall-clock seconds from step E entry past a repo's seal
+    /// re-copy completion.
+    pub max_seconds: Option<u64>,
 }
 
 /// Protocol failure carrying the stage it failed at.
@@ -229,6 +251,38 @@ fn self_verify(dest_dir: &Path, raw: &str) -> Result<(), OnlineBackupFailure> {
     Ok(())
 }
 
+/// Per-repo seal re-copy outputs whose final hashes define the snapshot
+/// (design 4.2 step E): consistency points, per-repo WAL dirs, repo store
+/// files (snapshot-relative paths) and the residual store pass covering
+/// everything outside the repo store/WAL dirs (system store, top-level
+/// files).
+#[derive(Default)]
+struct SealRecopy {
+    points: Vec<(String, CapturedPoint)>,
+    wal_final: Vec<(String, String, Vec<CopiedFile>)>,
+    store_files: Vec<CopiedFile>,
+    residual: CopyPassResult,
+}
+
+fn recopy_bytes(files: &[CopiedFile]) -> u64 {
+    files.iter().map(|file| file.size_bytes).sum()
+}
+
+fn clock_cap_exceeded(cap: &SealRecopyCap, started: &Instant) -> bool {
+    cap.max_seconds
+        .is_some_and(|max| started.elapsed().as_secs() > max)
+}
+
+/// Store-destination directory relative to the snapshot root: the store
+/// dir's path relative to the data dir, or the captured point's reported
+/// relative store dir as a fallback.
+fn store_dest_rel(source_root: &Path, repo: &RepoSource, point: &CapturedPoint) -> String {
+    repo.store_dir
+        .strip_prefix(source_root)
+        .map(rel_slash)
+        .unwrap_or_else(|_| point.store_dir.clone())
+}
+
 /// Run the online backup protocol steps A-G (design 4.2).
 pub fn run_online_backup(
     port: &dyn OnlineBackupPort,
@@ -237,17 +291,16 @@ pub fn run_online_backup(
     cancel: &CancelFlag,
     progress: &mut BackupProgress,
     options: &CopyOptions,
+    cap: &SealRecopyCap,
 ) -> Result<BackupReport, OnlineBackupError> {
-    let mut dest_dir: Option<PathBuf> = None;
-    let result = run_steps(
-        port,
-        source_root,
-        to,
-        &mut dest_dir,
-        cancel,
-        progress,
-        options,
-    );
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Preparing,
+        });
+    }
+    let dir = to.join(utc_timestamp());
+    fs::create_dir(&dir).map_err(|error| failed(BackupStage::Preparing, error))?;
+    let result = run_steps(port, source_root, &dir, cancel, progress, options, cap);
     match result {
         Ok(report) => {
             port.release_pins();
@@ -255,9 +308,7 @@ pub fn run_online_backup(
             Ok(report)
         }
         Err(error) => {
-            if let Some(dir) = &dest_dir {
-                let _ = fs::remove_dir_all(dir);
-            }
+            let _ = fs::remove_dir_all(&dir);
             port.release_pins();
             progress.record_failure(error.stage(), &error);
             Err(error)
@@ -268,11 +319,11 @@ pub fn run_online_backup(
 fn run_steps(
     port: &dyn OnlineBackupPort,
     source_root: &Path,
-    to: &Path,
-    dest_dir_slot: &mut Option<PathBuf>,
+    dest_dir: &Path,
     cancel: &CancelFlag,
     progress: &mut BackupProgress,
     options: &CopyOptions,
+    cap: &SealRecopyCap,
 ) -> Result<BackupReport, OnlineBackupError> {
     // A. Prepare: catalogue snapshot, pins, atomic destination create.
     if cancel.is_cancelled() {
@@ -291,9 +342,6 @@ fn run_steps(
         .collect();
     port.acquire_pins()
         .map_err(|error| failed(BackupStage::Preparing, error))?;
-    let dest_dir = to.join(utc_timestamp());
-    fs::create_dir(&dest_dir).map_err(|error| failed(BackupStage::Preparing, error))?;
-    *dest_dir_slot = Some(dest_dir.clone());
 
     // B. Capture barrier: per-repo flushed positions + system store.
     if cancel.is_cancelled() {
@@ -320,14 +368,14 @@ fn run_steps(
     copy_wal_dirs(
         &repos,
         source_root,
-        &dest_dir,
+        dest_dir,
         cancel,
         options,
         BackupStage::Copying,
     )?;
     copy_engine::run_copy_pass(
         source_root,
-        &dest_dir,
+        dest_dir,
         SKIP_TOP_LEVEL_DIRS,
         &wal_dirs,
         cancel,
@@ -335,37 +383,112 @@ fn run_steps(
     )
     .map_err(|error| copy_failed(BackupStage::Copying, error))?;
 
-    // E. Seal barrier: V* per repo, then the seal re-copy (WAL then
-    // stores) whose final hashes define the snapshot.
+    // E. Seal (design "Step 1d decisions" (a)/(b), Q12): per repo —
+    // seal_point, THAT repo's seal re-copy (WAL dir then store dir) whose
+    // final hashes define the snapshot, then end_seal; the seal hold lives
+    // exactly through its re-copy. The re-copy runs while writers'
+    // visibility is paused (drain pause survives seal_point), bounded by
+    // `cap`: exceeding the byte cap fails closed; the clock cap is checked
+    // at each repo's re-copy completion and at the stage boundary. Any
+    // failure or cancellation ends every seal still open (`end_seal` is
+    // idempotent) before propagating.
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Sealing,
         });
     }
-    let mut seal_points: Vec<(String, CapturedPoint)> = Vec::with_capacity(repos.len());
-    for repo in &repos {
-        let point = port
-            .seal_point(&repo.name)
-            .map_err(|error| failed(BackupStage::Sealing, error))?;
-        seal_points.push((repo.name.clone(), point));
+    let mut sealed_open: Vec<String> = Vec::new();
+    let started = Instant::now();
+    let cap_failed = |what: String| -> OnlineBackupError {
+        failed(BackupStage::Sealing, OnlineBackupFailure::RecopyCap(what))
+    };
+    let recopy = (|| -> Result<SealRecopy, OnlineBackupError> {
+        let mut recopy = SealRecopy::default();
+        // Repo store/WAL dirs are re-copied per repo below; the residual
+        // store pass at the end must not copy them again.
+        let mut exclude = wal_dirs.clone();
+        for repo in &repos {
+            exclude.push(repo.store_dir.clone());
+        }
+        for repo in &repos {
+            let point = port
+                .seal_point(&repo.name)
+                .map_err(|error| failed(BackupStage::Sealing, error))?;
+            sealed_open.push(repo.name.clone());
+            let mut bytes = 0u64;
+            if repo.wal_dir.is_some() {
+                let wal = copy_wal_dirs(
+                    std::slice::from_ref(repo),
+                    source_root,
+                    dest_dir,
+                    cancel,
+                    options,
+                    BackupStage::Sealing,
+                )?;
+                bytes += wal
+                    .iter()
+                    .map(|(_, _, files)| recopy_bytes(files))
+                    .sum::<u64>();
+                recopy.wal_final.extend(wal);
+            }
+            let store_rel = store_dest_rel(source_root, repo, &point);
+            let store = run_pass(
+                &repo.store_dir,
+                &dest_dir.join(&store_rel),
+                &[],
+                cancel,
+                options,
+                BackupStage::Sealing,
+            )?;
+            bytes += recopy_bytes(&store.files);
+            for file in store.files {
+                recopy.store_files.push(CopiedFile {
+                    rel_path: format!("{store_rel}/{}", file.rel_path),
+                    sha256: file.sha256,
+                    size_bytes: file.size_bytes,
+                });
+            }
+            if let Some(max) = cap.max_bytes {
+                if bytes > max {
+                    return Err(cap_failed(format!(
+                        "repo {} copied {bytes} bytes, cap {max}",
+                        repo.name
+                    )));
+                }
+            }
+            if clock_cap_exceeded(cap, &started) {
+                return Err(cap_failed(format!(
+                    "repo {} seal re-copy exceeded {}s",
+                    repo.name,
+                    cap.max_seconds.unwrap_or_default()
+                )));
+            }
+            port.end_seal(&repo.name);
+            sealed_open.retain(|open| open != &repo.name);
+            recopy.points.push((repo.name.clone(), point));
+        }
+        recopy.residual = copy_engine::run_copy_pass(
+            source_root,
+            dest_dir,
+            SKIP_TOP_LEVEL_DIRS,
+            &exclude,
+            cancel,
+            options,
+        )
+        .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+        if clock_cap_exceeded(cap, &started) {
+            return Err(cap_failed(format!(
+                "seal re-copy exceeded {}s",
+                cap.max_seconds.unwrap_or_default()
+            )));
+        }
+        Ok(recopy)
+    })();
+    // Failure/cancellation inside the seal loop: end every hold still open.
+    for repo in &sealed_open {
+        port.end_seal(repo);
     }
-    let wal_final = copy_wal_dirs(
-        &repos,
-        source_root,
-        &dest_dir,
-        cancel,
-        options,
-        BackupStage::Sealing,
-    )?;
-    let store_final = copy_engine::run_copy_pass(
-        source_root,
-        &dest_dir,
-        SKIP_TOP_LEVEL_DIRS,
-        &wal_dirs,
-        cancel,
-        options,
-    )
-    .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+    let recopy = recopy?;
 
     // F. Verify + manifest: manifest from the final pass, written last
     // with fsync, then self-verification.
@@ -374,7 +497,8 @@ fn run_steps(
             stage: BackupStage::Verifying,
         });
     }
-    let per_repo: BTreeMap<String, _> = seal_points
+    let per_repo: BTreeMap<String, _> = recopy
+        .points
         .iter()
         .map(|(repo, point)| (repo.clone(), point.to_consistency(repo)))
         .collect();
@@ -382,12 +506,14 @@ fn run_steps(
         per_repo,
         system_store_version,
     };
-    let dirs = wal_final
+    let dirs = recopy
+        .wal_final
         .iter()
         .map(|(repo, dir_rel, files)| build_wal_dir_entry(repo, dir_rel, files))
         .collect();
     let wal = WalSection { dirs };
-    let mut files: Vec<ManifestFileEntry> = store_final
+    let mut files: Vec<ManifestFileEntry> = recopy
+        .residual
         .files
         .iter()
         .map(|file| ManifestFileEntry {
@@ -396,7 +522,14 @@ fn run_steps(
             size_bytes: file.size_bytes,
         })
         .collect();
-    for (_, dir_rel, wal_files) in &wal_final {
+    for file in &recopy.store_files {
+        files.push(ManifestFileEntry {
+            path: file.rel_path.clone(),
+            sha256: file.sha256.clone(),
+            size_bytes: file.size_bytes,
+        });
+    }
+    for (_, dir_rel, wal_files) in &recopy.wal_final {
         for file in wal_files {
             files.push(ManifestFileEntry {
                 path: format!("{dir_rel}/{}", file.rel_path),
@@ -417,16 +550,15 @@ fn run_steps(
     );
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
-    manifest::write_manifest(&dest_dir, &encoded)
+    manifest::write_manifest(dest_dir, &encoded)
         .map_err(|error| failed(BackupStage::Verifying, error))?;
-    manifest::write_backup_meta(&dest_dir)
-        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    manifest::write_backup_meta(dest_dir).map_err(|error| failed(BackupStage::Verifying, error))?;
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
-    self_verify(&dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
+    self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
 
     Ok(BackupReport {
-        dest_dir,
+        dest_dir: dest_dir.to_path_buf(),
         files_hashed,
         total_bytes,
     })

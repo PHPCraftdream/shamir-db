@@ -97,7 +97,7 @@ use super::admin::{
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::error_response;
 use super::cursor_support::authorize_cursor_read;
-use super::handlers::token_admin;
+use super::handlers::{backup_handlers, token_admin};
 use super::repo_audit;
 use super::subscribe_handler;
 
@@ -701,13 +701,7 @@ impl ShamirDbHandler {
                     };
                 }
                 if entry.op.is_write() {
-                    return DbResponse::Error {
-                        code: "read_only_replica".into(),
-                        message: format!(
-                            "query '{}' is a write; this node is a read-only replica",
-                            alias
-                        ),
-                    };
+                    return backup_handlers::follower_write_refusal(&entry.op, alias);
                 }
             }
         }

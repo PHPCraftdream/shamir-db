@@ -254,6 +254,10 @@ fn classify_batch(
             | BatchOp::ListSubscriptions(_)
             // R1c: token requests may not run application-schema operations.
             | BatchOp::ApplicationSchema(_)
+            // Backup admin ops are superuser-surface: denied for token requests.
+            | BatchOp::StartBackup(_)
+            | BatchOp::BackupStatus(_)
+            | BatchOp::CancelBackup(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

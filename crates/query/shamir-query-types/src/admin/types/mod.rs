@@ -38,7 +38,8 @@ pub use index_ops::{CreateIndexOp, DropIndexOp, RenameIndexOp};
 pub use interner_ops::{InternerDumpOp, InternerTouchOp};
 pub use list_ops::ListOp;
 pub use migration_ops::{
-    CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp, StartMigrationOp,
+    BackupStatusOp, CancelBackupOp, CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp,
+    StartBackupOp, StartMigrationOp,
 };
 pub use repl_ops::{
     AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
