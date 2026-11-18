@@ -103,10 +103,14 @@ fn plain_session() -> Session {
     )
 }
 
-/// In-memory engine with the stub port installed (no journal/catalogue is
-/// touched, so no persistent system store is needed).
+/// In-memory engine with database `app` created on the engine and the
+/// stub port installed. The handler resolves the addressed database before
+/// the admin dispatch reaches the stub port, so the catalogue row for
+/// `app` must exist; no journal/repo is touched, so the in-memory system
+/// store suffices (engine tests create databases on `init_memory` too).
 async fn build_handler() -> (ShamirDbHandler, Arc<StubPort>) {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    shamir.create_db("app").await.expect("create app db");
     let stub = Arc::new(StubPort::default());
     shamir.set_online_backup_admin_port(Arc::clone(&stub) as Arc<dyn OnlineBackupAdminPort>);
     (ShamirDbHandler::new(Arc::new(shamir)), stub)

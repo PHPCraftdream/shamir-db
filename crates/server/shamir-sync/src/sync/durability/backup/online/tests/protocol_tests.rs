@@ -247,8 +247,10 @@ fn file_deleted_mid_copy_is_absent_from_the_manifest() {
     let cancel = CancelFlag::default();
     let report = run(&port, &source, &to, &cancel).expect("run");
     let manifest = fs::read_to_string(report.dest_dir.join("manifest.json")).expect("manifest");
+    // beta is a non-catalogue directory, copied without barriers — only
+    // alpha's deleted file must be absent.
     assert!(
-        !manifest.contains("store.bin"),
+        !manifest.contains("repos/alpha/store.bin"),
         "deleted file must not be in the manifest"
     );
     verify_manifest(&report.dest_dir).expect("snapshot must verify");

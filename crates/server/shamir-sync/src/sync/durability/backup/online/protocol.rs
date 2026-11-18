@@ -73,15 +73,17 @@ pub enum OnlineBackupFailure {
 /// store; clock: unbounded), so existing callers keep working — production
 /// callers should always set both (the re-copy runs while writers'
 /// visibility is paused, so an uncapped large store stalls commits).
-/// The clock cap is enforced at the per-repo re-copy boundary and stage
-/// boundaries only: the copy engine has no per-file deadline support.
+/// The clock cap is enforced at the per-repo re-copy completion and stage
+/// boundaries only: the copy engine has no per-file deadline support. It is
+/// a wall-clock bound with sub-second resolution (a cap of 0 seconds still
+/// fails closed on a fast run).
 #[derive(Debug, Clone, Default)]
 pub struct SealRecopyCap {
     /// Maximum bytes a single repo's seal re-copy (WAL dir + store dir)
     /// may copy.
     pub max_bytes: Option<u64>,
-    /// Maximum wall-clock seconds from step E entry past a repo's seal
-    /// re-copy completion.
+    /// Maximum wall-clock seconds (sub-second resolution) from step E entry
+    /// past a repo's seal re-copy completion.
     pub max_seconds: Option<u64>,
 }
 
@@ -269,8 +271,10 @@ fn recopy_bytes(files: &[CopiedFile]) -> u64 {
 }
 
 fn clock_cap_exceeded(cap: &SealRecopyCap, started: &Instant) -> bool {
+    // Sub-second resolution: a cap of 0 seconds fails closed even on a fast
+    // run. Checked at each repo's re-copy completion and stage boundaries.
     cap.max_seconds
-        .is_some_and(|max| started.elapsed().as_secs() > max)
+        .is_some_and(|max| started.elapsed().as_secs_f64() > max as f64)
 }
 
 /// Store-destination directory relative to the snapshot root: the store
@@ -293,11 +297,6 @@ pub fn run_online_backup(
     options: &CopyOptions,
     cap: &SealRecopyCap,
 ) -> Result<BackupReport, OnlineBackupError> {
-    if cancel.is_cancelled() {
-        return Err(OnlineBackupError::Cancelled {
-            stage: BackupStage::Preparing,
-        });
-    }
     let dir = to.join(utc_timestamp());
     fs::create_dir(&dir).map_err(|error| failed(BackupStage::Preparing, error))?;
     let result = run_steps(port, source_root, &dir, cancel, progress, options, cap);
@@ -411,10 +410,14 @@ fn run_steps(
             exclude.push(repo.store_dir.clone());
         }
         for repo in &repos {
+            // The repo counts as seal-open from the attempt on:
+            // `end_seal` is documented idempotent, so ending a repo whose
+            // seal never opened is a no-op; ending one whose hold IS open
+            // on an error path is mandatory (fail-closed).
+            sealed_open.push(repo.name.clone());
             let point = port
                 .seal_point(&repo.name)
                 .map_err(|error| failed(BackupStage::Sealing, error))?;
-            sealed_open.push(repo.name.clone());
             let mut bytes = 0u64;
             if repo.wal_dir.is_some() {
                 let wal = copy_wal_dirs(
