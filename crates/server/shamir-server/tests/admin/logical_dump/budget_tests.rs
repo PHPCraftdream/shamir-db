@@ -32,7 +32,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use shamir_server::logical_dump;
 use shamir_server::logical_import;
 use shamir_sync::replication_seed::{
     decode_canonical, verify_dump_file, DumpReport, PortableItem, SectionKind, SectionRecord,
@@ -41,7 +40,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::logical_dump::fixture::{
-    build_streaming_fixture_scaled, export_args, import_args, runtime,
+    build_streaming_fixture_scaled, export_args, export_waiting_for_locks, import_args, runtime,
 };
 
 /// Wire overhead of one item frame: 4-byte big-endian length plus the
@@ -203,11 +202,7 @@ fn run_streaming_budget_checks(
     let artifact: PathBuf = root.join("dump.mpack");
     let args = export_args("app", &artifact, false);
     let exported: DumpReport = rt
-        .block_on(timeout(
-            DATA_BUDGET,
-            logical_dump::export(root, &args, CancellationToken::new()),
-        ))
-        .unwrap()
+        .block_on(timeout(DATA_BUDGET, export_waiting_for_locks(root, &args)))
         .unwrap();
     assert!(exported.items > 0);
 

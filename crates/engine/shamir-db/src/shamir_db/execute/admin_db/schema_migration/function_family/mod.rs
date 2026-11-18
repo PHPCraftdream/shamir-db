@@ -2,6 +2,7 @@
 
 pub(super) mod admission;
 mod binding;
+pub(super) mod execution;
 pub(super) mod gate;
 pub(super) mod reconcile;
 mod registration;

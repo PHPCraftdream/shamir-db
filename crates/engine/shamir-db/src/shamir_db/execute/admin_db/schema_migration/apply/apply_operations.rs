@@ -12,7 +12,7 @@ use crate::query::admin::{
     AddSchemaRuleOp, CreateIndexOp, CreateTableOp, DropIndexOp, DropTableOp, RemoveSchemaRuleOp,
     SetTableSchemaOp,
 };
-use crate::query::batch::{AdminExecutor, BatchError, BatchOp};
+use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
@@ -23,7 +23,7 @@ use shamir_query_types::admin::types::schema_migration::{
 };
 
 use super::super::super::admin_dispatch::ShamirAdminExecutor;
-use super::super::function_family::{admission, reconcile};
+use super::super::function_family::{admission, execution, reconcile};
 use super::super::plan::{coded, map_store_error};
 use super::apply_journal::{
     append_step, applied_value, durability_error, plain, record_in_doubt,
@@ -522,7 +522,7 @@ async fn execute_operation(
             Box::pin(admission::authorize_family_operation(executor, operation)).await?;
             let op = admission::family_batch_op(operation)
                 .ok_or_else(|| plain("unsupported migration operation".to_string()))?;
-            Box::pin(AdminExecutor::execute_admin(executor, &op)).await?;
+            Box::pin(execution::execute(executor, &op)).await?;
         }
     }
     Ok(())

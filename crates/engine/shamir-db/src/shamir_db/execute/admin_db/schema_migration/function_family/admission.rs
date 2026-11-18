@@ -6,11 +6,11 @@ use shamir_query_types::admin::types::schema_migration::{
 use shamir_query_types::admin::{CheckFunctionOp, CheckFunctionSpec};
 
 use crate::access::{Action, ResourcePath};
-use crate::query::batch::{AdminExecutor, BatchError, BatchOp};
+use crate::query::batch::{BatchError, BatchOp};
 
 use super::super::super::admin_dispatch::ShamirAdminExecutor;
 use super::super::plan::coded;
-use super::registration;
+use super::{execution, registration};
 
 pub(in crate::shamir_db::execute::admin_db_schema_migration) fn family_batch_op(
     operation: &SchemaMigrationOp,
@@ -122,7 +122,7 @@ pub(in crate::shamir_db::execute::admin_db_schema_migration) async fn preflight_
             _ => continue,
         };
         let op = BatchOp::CheckFunction(CheckFunctionOp { check_function });
-        Box::pin(executor.execute_admin(&op)).await?;
+        Box::pin(execution::execute(executor, &op)).await?;
     }
     Ok(())
 }
