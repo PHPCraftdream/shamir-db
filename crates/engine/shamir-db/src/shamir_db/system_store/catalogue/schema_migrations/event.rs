@@ -163,13 +163,17 @@ impl JournalEvent {
                 | JournalEventKind::InDoubt
                 | JournalEventKind::Failed
         );
+        let evidence_present = self
+            .evidence
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+        // An operation intent may record its pre-state as evidence (resume
+        // reconcile, R1c step 2b-3b); absence stays valid for every earlier
+        // journal.
+        let evidence_optional = matches!(self.kind, JournalEventKind::OperationIntent);
         if body_required != self.body.is_some()
             || operation_required != self.operation_index.is_some()
-            || evidence_required
-                != self
-                    .evidence
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+            || (!evidence_optional && evidence_required != evidence_present)
         {
             return Err(DbError::Internal(format!(
                 "schema migration journal row {row_id}: body, operation, or evidence fields are invalid for event kind {:?}",
