@@ -12,6 +12,7 @@ pub mod shamir_db;
 
 pub use gateway::curl_gateway;
 pub use gateway::curl_gateway::CurlNetGateway;
+pub use gateway::online_backup::{OnlineBackupAdminError, OnlineBackupAdminPort};
 pub use gateway::ports;
 pub use gateway::ports::{
     PortError, PortErrorKind, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort,

@@ -154,9 +154,18 @@ fn is_regular_file(meta: &fs::Metadata) -> bool {
     meta.is_file()
 }
 
+/// File names skipped in every listing pass. `lock` is fjall's
+/// active-store lock artifact: the live engine holds a range lock on it,
+/// so on Windows copying it can never succeed while the server is up. It
+/// is a runtime artifact, not data (restore recreates it on first open),
+/// and the skip is applied on ALL OSes so the snapshot manifest does not
+/// differ across platforms.
+const SKIP_FILE_NAMES: &[&str] = &["lock"];
+
 /// Deterministic listing of every regular file under `source_root`
 /// (sorted per directory), skipping top-level directories named in
-/// `skip_top_level_dirs` and any non-regular entry.
+/// `skip_top_level_dirs`, any non-regular entry, and files named in
+/// [`SKIP_FILE_NAMES`] (runtime lock artifacts, see above).
 fn list_files(source_root: &Path, skip_top_level_dirs: &[&str]) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![source_root.to_path_buf()];
@@ -181,6 +190,13 @@ fn list_files(source_root: &Path, skip_top_level_dirs: &[&str]) -> std::io::Resu
                 }
                 stack.push(entry);
             } else if is_regular_file(&meta) {
+                let name = entry
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if SKIP_FILE_NAMES.contains(&name.as_str()) {
+                    continue;
+                }
                 out.push(entry);
             }
         }

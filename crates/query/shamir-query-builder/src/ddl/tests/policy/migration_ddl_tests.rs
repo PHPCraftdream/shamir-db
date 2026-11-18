@@ -91,3 +91,50 @@ fn migration_status_wire() {
     );
     assert!(op.is_admin());
 }
+
+// ============================================================================
+// Online backup (R2a step 3a) — node-local superuser-only admin ops
+// ============================================================================
+
+#[test]
+fn start_backup_wire() {
+    let op = ddl::start_backup("/backups/snap-1");
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "start_backup": true,
+            "to": "/backups/snap-1"
+        })
+    );
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn backup_status_wire() {
+    let op = ddl::backup_status();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "backup_status": true
+        })
+    );
+    assert!(op.is_admin());
+    assert!(!op.is_write());
+}
+
+#[test]
+fn cancel_backup_wire() {
+    let op = ddl::cancel_backup();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "cancel_backup": true
+        })
+    );
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}

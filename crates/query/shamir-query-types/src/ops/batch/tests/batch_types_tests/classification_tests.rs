@@ -657,3 +657,36 @@ fn repl_stream_defaults_to_pull_readonly() {
         _ => panic!("expected CreateReplicationProfile"),
     }
 }
+
+// ========================================================================
+// Node-local online-backup admin ops (R2a step 3a) -----------------------
+// ========================================================================
+//
+// All three are admin ops with no database target (`required_access ==
+// None`): authorization is superuser-only and enforced in `shamir-db`'s
+// admin handler. `BackupStatus` is read-only; `StartBackup` and
+// `CancelBackup` mutate persistent node-side backup state.
+
+#[test]
+fn backup_ops_are_admin_and_node_local() {
+    let start = roundtrip_op(mpack!({
+        "start_backup": true,
+        "to": "/backups/snap-1"
+    }));
+    assert!(matches!(start, BatchOp::StartBackup(_)));
+    assert!(start.is_admin());
+    assert!(start.is_write());
+    assert_eq!(start.required_access("mydb"), None);
+
+    let status = roundtrip_op(mpack!({"backup_status": true}));
+    assert!(matches!(status, BatchOp::BackupStatus(_)));
+    assert!(status.is_admin());
+    assert!(!status.is_write());
+    assert_eq!(status.required_access("mydb"), None);
+
+    let cancel = roundtrip_op(mpack!({"cancel_backup": true}));
+    assert!(matches!(cancel, BatchOp::CancelBackup(_)));
+    assert!(cancel.is_admin());
+    assert!(cancel.is_write());
+    assert_eq!(cancel.required_access("mydb"), None);
+}

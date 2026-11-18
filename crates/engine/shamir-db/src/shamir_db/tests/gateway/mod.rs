@@ -1,4 +1,5 @@
 mod curl_gateway_injection_tests;
 mod curl_gateway_tests;
 mod facade_gateway_acl_tests;
+mod online_backup_capture_tests;
 mod wasm_compiler_permission_tests;

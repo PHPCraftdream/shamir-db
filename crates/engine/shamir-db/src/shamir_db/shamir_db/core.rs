@@ -113,6 +113,9 @@ pub struct ShamirDb {
     // Resume): contention is nil, no guard is held across an `.await`.
     pub(crate) replication_resume_probe:
         Arc<std::sync::RwLock<Option<Arc<dyn crate::ResumeProbe>>>>,
+    // Startup-only injected online-backup registry (D6; `gateway::online_backup`).
+    pub(crate) online_backup_port:
+        Arc<std::sync::RwLock<Option<Arc<dyn crate::OnlineBackupAdminPort>>>>,
     pub(super) dbs: Arc<DashMap<String, DbInstance, THasher>>,
     pub(super) system_store: SystemStore,
     /// Per-user lock map used only for schema read-modify-write operations
@@ -341,6 +344,7 @@ impl ShamirDb {
         let shamir = Self {
             replication_control_lock: Arc::new(Mutex::new(())),
             replication_resume_probe: Arc::new(std::sync::RwLock::new(None)),
+            online_backup_port: Arc::new(std::sync::RwLock::new(None)),
             dbs,
             system_store,
             admin_user_locks,

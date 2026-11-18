@@ -506,6 +506,16 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "application-schema admin operation",
                 ))
             }
+            BatchOp::StartBackup(_) | BatchOp::CancelBackup(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "online-backup admin operation",
+                ))
+            }
+            BatchOp::BackupStatus(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "online-backup inspection",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

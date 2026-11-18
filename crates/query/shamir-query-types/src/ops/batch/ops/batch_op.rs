@@ -10,18 +10,19 @@ use shamir_types::types::value::{QueryValue, Value};
 use crate::admin::types::schema_migration::SchemaMigrationAdminOp;
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp,
-    AlterRepoOp, AlterSubscriptionOp, BindValidatorOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp,
-    ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
-    CreateGroupOp, CreateIndexOp, CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp,
-    CreateSubscriptionOp, CreateTableOp, CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp,
-    DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
-    DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
-    ExportFunctionOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
+    AlterRepoOp, AlterSubscriptionOp, BackupStatusOp, BindValidatorOp, CancelBackupOp,
+    ChangesSinceOp, CheckFunctionOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
+    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreatePublicationOp,
+    CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
+    CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp, DescribeTableOp, DropDbOp,
+    DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp, DropReplicationProfileOp,
+    DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp, ExportFunctionOp,
+    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
     ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
     ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
-    StartMigrationOp, UnbindValidatorOp,
+    StartBackupOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -200,6 +201,14 @@ pub enum BatchOp {
     /// enforced inside `shamir-db`'s admin handler (Read or Manage on the
     /// target database, design §5.2), so `required_access` returns `None`.
     ApplicationSchema(SchemaMigrationAdminOp),
+
+    /// Node-local online-backup admin ops (R2a step 3a). Superuser-only and
+    /// node-local (not database-scoped): authorization is enforced inside
+    /// `shamir-db`'s admin handler, so `required_access` returns `None`.
+    /// `BackupStatus` is read-only; `StartBackup` / `CancelBackup` are writes.
+    StartBackup(StartBackupOp),
+    BackupStatus(BackupStatusOp),
+    CancelBackup(CancelBackupOp),
 }
 
 impl Serialize for BatchOp {
@@ -300,6 +309,9 @@ impl Serialize for BatchOp {
                     )
                 }
             },
+            BatchOp::StartBackup(op) => op.serialize(serializer),
+            BatchOp::BackupStatus(op) => op.serialize(serializer),
+            BatchOp::CancelBackup(op) => op.serialize(serializer),
         }
     }
 }
@@ -517,6 +529,15 @@ impl<'de> Deserialize<'de> for BatchOp {
                     OpKind::ApplicationSchema => {
                         SchemaMigrationAdminOp::deserialize(value).map(BatchOp::ApplicationSchema)
                     }
+                    OpKind::StartBackup => {
+                        StartBackupOp::deserialize(value).map(BatchOp::StartBackup)
+                    }
+                    OpKind::BackupStatus => {
+                        BackupStatusOp::deserialize(value).map(BatchOp::BackupStatus)
+                    }
+                    OpKind::CancelBackup => {
+                        CancelBackupOp::deserialize(value).map(BatchOp::CancelBackup)
+                    }
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
@@ -646,7 +667,10 @@ impl BatchOp {
             | BatchOp::ListPublications(_)
             | BatchOp::ListSubscriptions(_)
             | BatchOp::ReplicationStatus(_)
-            | BatchOp::ApplicationSchema(_) => return None,
+            | BatchOp::ApplicationSchema(_)
+            | BatchOp::StartBackup(_)
+            | BatchOp::BackupStatus(_)
+            | BatchOp::CancelBackup(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -757,6 +781,9 @@ impl BatchOp {
                 | BatchOp::ListSubscriptions(_)
                 | BatchOp::ReplicationStatus(_)
                 | BatchOp::ApplicationSchema(_)
+                | BatchOp::StartBackup(_)
+                | BatchOp::BackupStatus(_)
+                | BatchOp::CancelBackup(_)
         )
     }
 
@@ -801,6 +828,11 @@ impl BatchOp {
             BatchOp::ListPublications(_) => false,
             BatchOp::ListSubscriptions(_) => false,
             BatchOp::ReplicationStatus(_) => false,
+            // Online-backup admin ops: status is pure introspection; start
+            // and cancel change persistent node-side backup state (R2a 3a).
+            BatchOp::BackupStatus(_) => false,
+            BatchOp::StartBackup(_) => true,
+            BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan
             // arms do not mutate state; the apply arm does (design §5.2).
             BatchOp::ApplicationSchema(

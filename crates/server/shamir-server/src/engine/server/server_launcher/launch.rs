@@ -25,6 +25,7 @@ use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::boot::config::diagnostics::backup_online::OnlineBackupRegistry;
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
@@ -424,6 +425,20 @@ impl ServerLauncher {
         crate::restore::consume_restore_marker(&config.data_dir, &shamir)
             .await
             .map_err(|e| BootError::ShamirDbInit(format!("restore history epoch: {e}")))?;
+
+        // R2a step 3a (design D6): construct the per-server online-backup
+        // registry over this process's data dir and install it as the
+        // engine's `OnlineBackupAdminPort`, so the node-local
+        // `StartBackup`/`BackupStatus`/`CancelBackup` admin ops reach it.
+        // The registry holds an `Arc<ShamirDb>` clone, so the port must be
+        // installed after the engine is wrapped — same one-shot discipline
+        // as the `set_replication_resume_probe` seam.
+        let online_backup_registry = Arc::new(OnlineBackupRegistry::new(
+            Arc::clone(&shamir),
+            config.data_dir.clone(),
+            tokio::runtime::Handle::current(),
+        ));
+        shamir.set_online_backup_admin_port(online_backup_registry);
 
         // F-15: opt into the experimental online storage-migration API when
         // the operator explicitly set `security.enable_experimental_migration_api`

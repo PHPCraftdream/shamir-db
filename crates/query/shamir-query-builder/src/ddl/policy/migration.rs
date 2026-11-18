@@ -1,5 +1,6 @@
 use shamir_query_types::admin::{
-    CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp, StartMigrationOp,
+    BackupStatusOp, CancelBackupOp, CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp,
+    StartBackupOp, StartMigrationOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -152,5 +153,27 @@ impl TryIntoBatchOp for RollbackMig {
 pub fn migration_status(id: impl Into<String>) -> BatchOp {
     BatchOp::MigrationStatus(MigrationStatusOp {
         migration_status: id.into(),
+    })
+}
+
+/// Start an online backup into the operator-supplied destination root path.
+pub fn start_backup(to: impl Into<String>) -> BatchOp {
+    BatchOp::StartBackup(StartBackupOp {
+        start_backup: true,
+        to: to.into(),
+    })
+}
+
+/// Query the status of the online backup.
+pub fn backup_status() -> BatchOp {
+    BatchOp::BackupStatus(BackupStatusOp {
+        backup_status: true,
+    })
+}
+
+/// Cancel the running online backup.
+pub fn cancel_backup() -> BatchOp {
+    BatchOp::CancelBackup(CancelBackupOp {
+        cancel_backup: true,
     })
 }

@@ -3,15 +3,18 @@ use crate::repo::instance::support::metrics::{EngineMetrics, EngineMetricsSnapsh
 use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
 use crate::repo::repo_types::BoxRepo;
 pub use crate::repo::version_provider::repo_token;
-// R2a-1d: the tx-layer test tree names the typed barrier failures. The
-// `pub` re-export the R2a-3 server adapter needs is that step's widening.
+// R2a-1d: the tx-layer test tree names the typed barrier failures. R2a
+// step 3a (server adapter) additionally needs to NAME `SealHold`,
+// `OnlineBackupError` (barrier failures / seal holds) and
+// `TruncationPinGuard` (step-A pins held until step G) — pure re-exports,
+// no semantics changed.
 use crate::repo::DurabilityHandle;
 use crate::table::{TableCatalog, TableConfig, TableManager};
 use crate::tx::cold_reconcile::lifecycle::ForegroundLifecycle;
 use crate::tx::commit::pipeline::admission::gate::CommitAdmissionGate;
+pub use crate::tx::drain::truncation_pin_guard::TruncationPinGuard;
 use crate::tx::CommitTailBarrier;
-#[cfg(test)]
-pub(crate) use lifecycle::OnlineBackupError;
+pub use lifecycle::{OnlineBackupError, SealHold};
 use shamir_query_types::batch::VisibilityWait;
 #[cfg(test)]
 use shamir_storage::error::DbResult;

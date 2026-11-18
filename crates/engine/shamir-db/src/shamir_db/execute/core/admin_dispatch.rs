@@ -10,6 +10,7 @@ use crate::shamir_db::ports::RepoAdminObserver;
 use shamir_query_types::admin::AlterRepoOp;
 
 use super::super::shamir_db::ShamirDb;
+use super::helpers::admin_result;
 
 /// AdminExecutor that operates on ShamirDb.
 pub(super) struct ShamirAdminExecutor {
@@ -119,6 +120,19 @@ impl AdminExecutor for ShamirAdminExecutor {
             // nested-Batch stack overflow; same mechanism as dispatch_repl).
             op @ BatchOp::ApplicationSchema(_) => Self::dispatch_schema_migration(self, op).await,
 
+            // ── Node-local online backup (R2a step 3a, design D6) ─────
+            // Boxed dispatcher for the same Windows nested-Batch stack
+            // reason as above; all three are node-local, NOT
+            // database-scoped, and run through the injected
+            // `OnlineBackupAdminPort` (server registry).
+            op if matches!(
+                op,
+                BatchOp::StartBackup(_) | BatchOp::BackupStatus(_) | BatchOp::CancelBackup(_)
+            ) =>
+            {
+                Self::dispatch_online_backup(self, op).await
+            }
+
             // ── Replication DDL (386-a) ────────────────────────────────
             // Round-14: routed through `dispatch_repl` so the replication
             // arms' await state stays out of `execute_admin`'s own future
@@ -203,6 +217,56 @@ impl ShamirAdminExecutor {
                 }),
             }
         })
+    }
+
+    /// R2a step 3a (design D6): node-local online-backup dispatcher, boxed
+    /// for the same Windows nested-Batch stack reason as
+    /// `dispatch_schema_migration`.
+    #[inline(never)]
+    fn dispatch_online_backup<'a>(&'a self, op: &'a BatchOp) -> AdminDispatchFuture<'a> {
+        Box::pin(async move {
+            match op {
+                BatchOp::StartBackup(_) => self.handle_online_backup(op).await,
+                BatchOp::BackupStatus(_) => self.handle_online_backup(op).await,
+                BatchOp::CancelBackup(_) => self.handle_online_backup(op).await,
+                _ => Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "Not an online-backup operation".to_string(),
+                    code: None,
+                }),
+            }
+        })
+    }
+
+    /// Node-local online backup (design `online-backup.md` §4.7, D6):
+    /// delegate to the injected `OnlineBackupAdminPort` (the server's
+    /// `OnlineBackupRegistry`) and wrap the returned record in the standard
+    /// single-record admin result. NOT database-scoped — no per-database
+    /// authorization here; the superuser gate is the server handler bridge
+    /// (`handler.rs` `entry.op.is_admin()`).
+    async fn handle_online_backup(&self, op: &BatchOp) -> Result<QueryResult, BatchError> {
+        let error = |error: crate::OnlineBackupAdminError| BatchError::QueryError {
+            alias: String::new(),
+            message: error.to_string(),
+            code: Some(error.code().to_string()),
+        };
+        let port = self
+            .shamir
+            .online_backup_admin_port()
+            .ok_or_else(|| error(crate::OnlineBackupAdminError::NotConfigured))?;
+        let value = match op {
+            BatchOp::StartBackup(op) => port.start(op.to.clone()).await,
+            BatchOp::BackupStatus(_) => port.status().await,
+            BatchOp::CancelBackup(_) => port.cancel().await,
+            _ => {
+                return Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "Not an online-backup operation".to_string(),
+                    code: None,
+                });
+            }
+        };
+        value.map(admin_result).map_err(error)
     }
 
     /// S5c-X Round-11 (item 5): ALTER REPO dispatcher, kept OUT of

@@ -2,6 +2,7 @@
 //! response byte budgeting, observability endpoints and OS service
 //! management.
 
+pub mod backup_metrics;
 pub mod observability;
 mod perimeter;
 pub mod service;
