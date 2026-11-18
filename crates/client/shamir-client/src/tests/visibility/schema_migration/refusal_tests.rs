@@ -100,10 +100,13 @@ async fn rust_migration_changed_checksum_or_gap_fails_before_apply() {
     let (client_to_server, server_reader) = tokio::io::duplex(64 * 1024);
     let (server_writer, client_reader) = tokio::io::duplex(64 * 1024);
     let client = client_on(client_reader, client_to_server);
+    // The first two entries ARE the local set (matching ids and checksums);
+    // everything after them lies beyond it.
+    let local_checksums = set.checksums();
     let beyond = populated_status_value(
         &[
-            ("j1", 1, [1u8; 32]),
-            ("j2", 2, [2u8; 32]),
+            ("mig_items", 1, local_checksums[0]),
+            ("mig_audit", 2, local_checksums[1]),
             ("j3", 3, [3u8; 32]),
             ("j4", 4, [5u8; 32]),
             ("elsewhere", 5, [4u8; 32]),

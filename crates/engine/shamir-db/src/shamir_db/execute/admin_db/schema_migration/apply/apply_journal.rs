@@ -129,6 +129,11 @@ pub(super) fn durability_error(error: crate::DbError, intents_durable: bool) -> 
                  migration is in doubt and left resumable: {error}"
             ),
         )
+    } else if error.to_string().contains("fence CAS conflict") {
+        // Superseded before any effect: another runner took the fence over
+        // (a resume racing a fresh apply). That is the fencing/progress
+        // state, not a durability fault.
+        map_fence_error(error)
     } else {
         map_store_error(error)
     }
