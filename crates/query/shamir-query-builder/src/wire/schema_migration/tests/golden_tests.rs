@@ -126,8 +126,11 @@ fn msgpack_round_trip_preserves_checksum_and_nested_binary_values() {
         QueryValue::Bin(vec![0, 255, 1]),
         QueryValue::List(vec![QueryValue::Bin(vec![4, 5])]),
     ]);
-    let op = crate::ddl::create_index("ix", "t")
-        .functional_with_args(vec!["a".to_owned()], "lower", vec![nested])
+    // Nested values travel through the schema constraint `one_of`: functional index
+    // arguments are refused by admission and cannot carry this coverage.
+    let op = crate::ddl::add_schema_rule("t")
+        .rule(crate::ddl::field(["a"]).one_of(vec![nested]))
+        .build()
         .unwrap();
     let body = SchemaMigration::new("bin", 1, "binary")
         .op(op)
