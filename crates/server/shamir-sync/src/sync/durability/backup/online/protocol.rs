@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+use super::copy_engine::test_seams;
 use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult};
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
 use super::progress::{BackupProgress, BackupStage, CancelFlag};
@@ -372,6 +374,12 @@ fn run_steps(
         options,
         BackupStage::Copying,
     )?;
+    // Test-only seam: raise cancellation exactly at the C→D boundary
+    // (after the WAL passes, before the first store pass — a point no
+    // copy-pass hook can reach); the store pass's per-file loop top is
+    // the existing cancellation check that observes it.
+    #[cfg(test)]
+    test_seams::fire_before_boundary(BackupStage::Copying);
     copy_engine::run_copy_pass(
         source_root,
         dest_dir,
@@ -391,6 +399,11 @@ fn run_steps(
     // at each repo's re-copy completion and at the stage boundary. Any
     // failure or cancellation ends every seal still open (`end_seal` is
     // idempotent) before propagating.
+    // Test-only seam: raise cancellation exactly at the D→E boundary
+    // (a point no copy-pass hook can reach); must stay before the
+    // existing cancellation check below.
+    #[cfg(test)]
+    test_seams::fire_before_boundary(BackupStage::Sealing);
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Sealing,
@@ -495,6 +508,11 @@ fn run_steps(
 
     // F. Verify + manifest: manifest from the final pass, written last
     // with fsync, then self-verification.
+    // Test-only seam: raise cancellation exactly at the E→F boundary
+    // (all seal holds already ended); must stay before the existing
+    // cancellation check below.
+    #[cfg(test)]
+    test_seams::fire_before_boundary(BackupStage::Verifying);
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Verifying,
@@ -563,6 +581,15 @@ fn run_steps(
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
     self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
+    // Test-only seam: observe the point after successful
+    // self-verification, immediately before Done. Deliberately NO
+    // cancellation check here — production keeps finishing the run: the
+    // snapshot is already verified and published as a unit, and there is
+    // no cancellation cleanup possible at this point (the destination is
+    // final and about to be reported Done). A cancellation raised by the
+    // hook still ends Done.
+    #[cfg(test)]
+    test_seams::fire_before_boundary(BackupStage::Done);
 
     Ok(BackupReport {
         dest_dir: dest_dir.to_path_buf(),

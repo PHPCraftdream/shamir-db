@@ -444,6 +444,20 @@ impl Snapshot {
         recorded
     }
 
+    /// Replace ONLY the staged repo store directory with a fresh
+    /// `copy_tree` of the now-flushed LIVE store (which carries the
+    /// post-seal commit above `V*`), keeping the staged WAL directory and
+    /// the manifest's recorded captured point `V*` untouched, then re-hash
+    /// the manifest from the resulting files so the verifier accepts the
+    /// snapshot: the store's contents are ABOVE the recorded point, which
+    /// replay to `V*` must tolerate.
+    pub fn stage_above_v_star_store(&self, fixture: &Fixture) {
+        let staged = self.dir.join("repos").join(REPO);
+        fs::remove_dir_all(&staged).expect("remove staged store");
+        copy_tree(&fixture.workspace.join(format!("repos/{REPO}")), &staged);
+        self.rewrite_manifest();
+    }
+
     /// Remove ONLY the captured repo's store directory from the snapshot,
     /// keeping the WAL directory and the manifest's WAL listing route, and
     /// re-hash the manifest so the verifier passes and restore reaches the
@@ -453,31 +467,28 @@ impl Snapshot {
         self.rewrite_manifest();
     }
 
-    /// Remove the committed `rows` table route from the SNAPSHOT's system
-    /// catalogue through the public `SystemStore::remove_table` (opened
-    /// offline on the inspected copy; the live engine is untouched). The
-    /// kept `extra` table remains, so replay raises `MissingTableRoute`,
-    /// not `EmptyTableScope`. This variant may synthesize ONLY the system
-    /// `lock` for the inspected copy; the handle is dropped (fjall lock
-    /// released) BEFORE the manifest is re-hashed.
-    pub fn remove_probe_table_route(&self, fixture: &Fixture) {
+    /// Open the snapshot's system catalogue offline (inspected copy; the
+    /// live engine is untouched). This variant may synthesize ONLY the
+    /// system `lock` for the inspected copy; the handle must be dropped
+    /// (fjall lock released) BEFORE the manifest is re-hashed — use
+    /// [`Snapshot::release_snapshot_system_lock_and_rehash`].
+    fn open_snapshot_system_store(&self, fixture: &Fixture) -> SystemStore {
         let system_dir = self.dir.join(SYSTEM_DIR);
         let store_dir = system_dir.clone();
         fs::File::create_new(system_dir.join("lock")).expect("inspected copy system lock");
-        let system = fixture
+        fixture
             .runtime
             .block_on(bounded("open snapshot system store", async {
                 SystemStore::init(SystemStoreConfig::Fjall(store_dir)).await
             }))
-            .expect("open snapshot system store");
-        fixture
-            .runtime
-            .block_on(bounded(
-                "remove table route",
-                system.remove_table(DB_NAME, REPO, PROBE_TABLE),
-            ))
-            .expect("remove table route");
-        drop(system);
+            .expect("open snapshot system store")
+    }
+
+    /// Drop the system handle, wait for the OS fjall lock on the inspected
+    /// copy to be actually released (bounded probe loop), then re-hash the
+    /// manifest from the ordinary files on disk.
+    fn release_snapshot_system_lock_and_rehash(&self, fixture: &Fixture) {
+        let system_dir = self.dir.join(SYSTEM_DIR);
         // The fjall handle release is asynchronous relative to the OS lock;
         // probe the lock from the fixture runtime in a bounded loop until
         // the directory can actually be reopened, then re-hash whatever
@@ -504,6 +515,45 @@ impl Snapshot {
             }
         }
         self.rewrite_manifest();
+    }
+
+    /// Remove the committed `rows` table route from the SNAPSHOT's system
+    /// catalogue through the public `SystemStore::remove_table` (opened
+    /// offline on the inspected copy; the live engine is untouched). The
+    /// kept `extra` table remains, so replay raises `MissingTableRoute`,
+    /// not `EmptyTableScope`.
+    pub fn remove_probe_table_route(&self, fixture: &Fixture) {
+        let system = self.open_snapshot_system_store(fixture);
+        fixture
+            .runtime
+            .block_on(bounded(
+                "remove table route",
+                system.remove_table(DB_NAME, REPO, PROBE_TABLE),
+            ))
+            .expect("remove table route");
+        drop(system);
+        self.release_snapshot_system_lock_and_rehash(fixture);
+    }
+
+    /// Remove the CAPTURED repo's row from the SNAPSHOT's system catalogue
+    /// through the public `SystemStore::remove_repository`, which deletes
+    /// only the repository row and RETAINS the table rows (the natural
+    /// orphan shape of `remove_repo_locked`). The captured store/WAL
+    /// directories and the manifest's WAL route stay untouched; the
+    /// manifest is re-hashed so the verifier still accepts the snapshot.
+    /// Restore must tolerate the resulting captured orphan (no row → not
+    /// registered on boot) while still replaying its WAL strictly.
+    pub fn drop_captured_repo_row(&self, fixture: &Fixture) {
+        let system = self.open_snapshot_system_store(fixture);
+        fixture
+            .runtime
+            .block_on(bounded(
+                "remove repo row",
+                system.remove_repository(DB_NAME, REPO),
+            ))
+            .expect("remove repo row");
+        drop(system);
+        self.release_snapshot_system_lock_and_rehash(fixture);
     }
 
     /// Re-walk the snapshot, re-hash every ordinary file, rebuild the WAL

@@ -20,11 +20,17 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write;
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::backup_online::{OnlineBackupRegistry, StartBackupError};
+use crate::backup_online::{
+    EngineBackupPort, OnlineBackupRegistry, PortRunState, StartBackupError,
+};
 use crate::sync::durability::backup::online::manifest;
+use crate::sync::durability::backup::online::progress::BackupStage;
+use crate::sync::durability::backup::online::wal_capture::{OnlineBackupPort, PortError};
+use crate::sync::durability::backup::verify_manifest;
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -217,6 +223,146 @@ async fn cancel_flips_flag_ends_run_and_leaves_engine_open() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A deterministic asynchronous failure (not a synchronous `start`
+/// refusal): a `manifest.json.tmp/` directory seeded at the top level of
+/// the data root is copied verbatim by the protocol's residual pass (only
+/// `cache` is skipped at the top level) and then blocks the tmp-then-rename
+/// manifest write (step F) — the `port_fault_injection_tests`
+/// `manifest_write_conflict` seam over the REAL engine. The run ends with
+/// the failure recorded, no snapshot dir and the destination cleaned; the
+/// engine stays fully open and a second `start` (after the blocker is
+/// removed) succeeds and completes to `Done`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
+    // Failure-only diagnostics: the watchdog dumps the phase timeline
+    // after 150 s, below the 180 s nextest per-test kill, so a hang
+    // reports where it stuck instead of being silently reaped.
+    let guard = FlakeGuard::with_watchdog(
+        "async_failure_then_second_start_succeeds_and_engine_stays_usable",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    // RAII tempdirs: kept alive to the end of the test, removed on drop —
+    // no manual `remove_dir_all` on success or panic paths.
+    let root_dir = tempfile::tempdir().expect("tempdir");
+    let to_dir = tempfile::tempdir().expect("tempdir");
+    let other_dir = tempfile::tempdir().expect("tempdir");
+    let root = root_dir.path().to_path_buf();
+    let to = to_dir.path().to_path_buf();
+    let other = other_dir.path().to_path_buf();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let (db, registry) =
+        tokio::time::timeout(deadline - tokio::time::Instant::now(), fixture(&root))
+            .await
+            .expect("fixture within deadline");
+    std::fs::create_dir_all(root.join("manifest.json.tmp")).expect("blocker dir");
+    let blocker_bytes: &[u8] = b"block";
+    std::fs::write(root.join("manifest.json.tmp/blocker"), blocker_bytes).expect("blocker file");
+
+    registry.start(to.clone()).expect("start");
+    assert!(
+        wait_until(|| !registry.status().running),
+        "the failing run must end on its own"
+    );
+    let snapshot = registry.status();
+    assert!(
+        snapshot.last_error.is_some(),
+        "the manifest-write conflict must be recorded as the last error"
+    );
+    assert_eq!(
+        snapshot.stage,
+        BackupStage::Failed,
+        "the failed stage must surface typed in the status"
+    );
+    assert_eq!(
+        format!("{:?}", snapshot.stage),
+        "Failed",
+        "the failed stage must surface in the status"
+    );
+    assert_eq!(
+        snapshot.progress.failed_stage,
+        Some(BackupStage::Verifying),
+        "the manifest write happens in the Verifying stage"
+    );
+    assert_eq!(
+        std::fs::read(root.join("manifest.json.tmp/blocker")).expect("blocker bytes"),
+        blocker_bytes,
+        "the failed run must not touch the source-side blocker"
+    );
+    assert_eq!(
+        snapshot.dest_dir, None,
+        "a failed run records no snapshot dir"
+    );
+    assert_eq!(
+        std::fs::read_dir(&to).expect("to dir").count(),
+        0,
+        "the failed run must have cleaned the destination root"
+    );
+
+    // The engine is fully open: with the blocker removed and one more row
+    // typed into the SAME live engine (a bounded write through the
+    // fixture's db, not a new one), a fresh run passes the whole protocol
+    // and reaches `Done` with a manifest that `verify_manifest` accepts.
+    std::fs::remove_dir_all(root.join("manifest.json.tmp")).expect("remove blocker");
+    let mut batch = Batch::new();
+    let mut row_c = new_map();
+    row_c.insert("n".to_string(), QueryValue::Int(3));
+    batch.op(
+        "ins_c",
+        write::Insert::with_repo("main", "rows").row(QueryValue::Map(row_c)),
+    );
+    tokio::time::timeout(
+        deadline - tokio::time::Instant::now(),
+        db.execute("app", &batch.build()),
+    )
+    .await
+    .expect("insert after failure within deadline")
+    .expect("insert after failure");
+    tokio::time::timeout(
+        deadline - tokio::time::Instant::now(),
+        db.flush_all_waiting(),
+    )
+    .await
+    .expect("flush after failure within deadline")
+    .expect("flush after failure");
+    let (second_id, destination) = registry
+        .start(other.clone())
+        .expect("restart after failure");
+    assert!(second_id.starts_with("ob-"), "backup id shape: {second_id}");
+    assert_ne!(
+        second_id, snapshot.backup_id,
+        "each start gets a fresh backup id"
+    );
+    assert_eq!(destination, other);
+    assert!(
+        wait_until(|| !registry.status().running),
+        "the second run must complete on its own"
+    );
+    let after = registry.status();
+    assert!(
+        after.last_error.is_none(),
+        "the second run must be clean: {:?}",
+        after.last_error
+    );
+    assert_eq!(
+        after.stage,
+        BackupStage::Done,
+        "the second run must reach the final stage (typed)"
+    );
+    assert_eq!(
+        format!("{:?}", after.stage),
+        "Done",
+        "the second run must reach the final stage"
+    );
+    let dest_dir = after.dest_dir.expect("second run records the snapshot dir");
+    assert!(
+        dest_dir.join("manifest.json").exists(),
+        "the second run wrote a manifest"
+    );
+    verify_manifest(&dest_dir).expect("second snapshot must verify");
+    guard.note("second-run", "Done + verified");
+}
+
 /// The finished-run status survives until the next `start` (§4.7): the
 /// successful run's stage, snapshot dir, per-repo progress and the manifest
 /// (with the facade-derived system-store version) all remain readable, and
@@ -297,5 +443,150 @@ async fn status_survives_until_next_start_and_shows_stage_progress() {
     cancel_and_wait(&registry);
     let _ = std::fs::remove_dir_all(snapshot.dest_dir.as_ref().expect("dest dir"));
     let _ = std::fs::remove_dir_all(&other);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A repository dropped from the live engine between the adapter's step-A
+/// catalogue snapshot and `acquire_pins` must fail with the typed
+/// `PinAcquire` port error — before the fix this path re-entered the
+/// adapter's own pins mutex (self-deadlock), so the typed error and the
+/// follow-up successful run on the SAME engine are the regression
+/// evidence. The dropped repo's dir stays behind; a fresh registry run
+/// completes `Done` and captures only `app/main`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() {
+    // Failure-only diagnostics: the watchdog dumps the phase timeline
+    // after 150 s, below the 180 s nextest per-test kill, so a hang
+    // reports where it stuck instead of being silently reaped.
+    let guard = FlakeGuard::with_watchdog(
+        "dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    // RAII tempdirs kept alive to the end of the test.
+    let root_dir = tempfile::tempdir().expect("tempdir");
+    let to_dir = tempfile::tempdir().expect("tempdir");
+    let root = root_dir.path().to_path_buf();
+    let to = to_dir.path().to_path_buf();
+    // Bounded setup, insert and flush included.
+    let (db, registry) = tokio::time::timeout(WAIT, fixture(&root))
+        .await
+        .expect("fixture within the bound");
+    tokio::time::timeout(
+        WAIT,
+        db.add_repo(
+            "app",
+            RepoConfig::new("extra", BoxRepoFactory::fjall_raw(root.join("repos/extra")))
+                .add_table(TableConfig::new("rows")),
+        ),
+    )
+    .await
+    .expect("add second repo within the bound")
+    .expect("add second repo");
+
+    // The adapter's step-A snapshot: both repos captured.
+    let run_state = Arc::new(PortRunState::new());
+    // The port bridges facade calls through `Handle::block_on`, which must
+    // never run on a runtime worker: drive it from a bounded OS worker.
+    // The port is shared as an `Arc` (its methods take `&self`), so the
+    // snapshot thread cannot move it away from the later pin-phase uses.
+    let port = Arc::new(EngineBackupPort::new(
+        Arc::clone(&db),
+        root.clone(),
+        tokio::runtime::Handle::current(),
+        Arc::clone(&run_state),
+    ));
+    // Named clones of the shared `Arc` port: each spawned thread gets its
+    // own clone so neither closure moves the original, which stays alive
+    // here for the later pin-phase checks.
+    let port_for_catalogue = Arc::clone(&port);
+    let (catalogue_tx, catalogue_rx) = std::sync::mpsc::channel();
+    let catalogue_thread = std::thread::spawn(move || {
+        let _ = catalogue_tx.send(port_for_catalogue.catalogue());
+    });
+    let sources = catalogue_rx
+        .recv_timeout(WAIT)
+        .expect("catalogue within the bound")
+        .expect("catalogue must succeed");
+    catalogue_thread
+        .join()
+        .expect("catalogue thread joins cleanly");
+    let names: Vec<&str> = sources.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"app/main") && names.contains(&"app/extra"),
+        "both repos must be in the snapshot: {names:?}"
+    );
+
+    // Drop the repo AFTER the snapshot: the port's captured set still
+    // names `app/extra`, but there is no live instance to pin.
+    let removed = tokio::time::timeout(WAIT, db.remove_repo("app", "extra"))
+        .await
+        .expect("remove within the bound")
+        .expect("remove must not error");
+    assert!(removed, "extra must have been removable");
+
+    // Acquire through the port: typed `PinAcquire`, bounded, no deadlock.
+    let port_for_pins = Arc::clone(&port);
+    let (pins_tx, pins_rx) = std::sync::mpsc::channel();
+    let pins_thread = std::thread::spawn(move || {
+        let _ = pins_tx.send(port_for_pins.acquire_pins());
+    });
+    let pins = pins_rx
+        .recv_timeout(WAIT)
+        .expect("acquire_pins within the bound");
+    pins_thread
+        .join()
+        .expect("acquire_pins thread joins cleanly");
+    assert!(
+        matches!(pins, Err(PortError::PinAcquire)),
+        "a dropped repo must fail pin acquisition typed: {pins:?}"
+    );
+    // R4, directly on the SAME adapter: the failing acquisition must have
+    // released every pin it took (the follow-up registry run below uses a
+    // different port instance and proves nothing about this one's pins).
+    assert_eq!(
+        port.test_held_pins(),
+        0,
+        "a failed acquire_pins must leave no pins held on the adapter"
+    );
+
+    // The engine is fully open: a real registry run on the SAME engine
+    // completes `Done`, capturing only `app/main` (the dropped repo's dir
+    // is an inert orphan excluded from capture).
+    registry.start(to.clone()).expect("start after pin failure");
+    assert!(
+        wait_until(|| !registry.status().running),
+        "the follow-up run must complete on its own"
+    );
+    let snapshot = registry.status();
+    assert!(
+        snapshot.last_error.is_none(),
+        "the follow-up run must be clean: {:?}",
+        snapshot.last_error
+    );
+    assert_eq!(
+        format!("{:?}", snapshot.stage),
+        "Done",
+        "the follow-up run must reach the final stage"
+    );
+    let repo_progress = &snapshot.progress.per_repo;
+    assert_eq!(repo_progress.len(), 1, "one repo captured");
+    assert_eq!(repo_progress[0].repo, "app/main");
+    assert!(
+        repo_progress[0].bytes_hashed > 0,
+        "the captured repo's hashed bytes must be visible"
+    );
+    assert!(
+        snapshot
+            .dest_dir
+            .as_ref()
+            .expect("dest dir")
+            .join("manifest.json")
+            .is_file(),
+        "the follow-up run wrote a manifest"
+    );
+    guard.note("followup-run", "Done");
+    let _ = std::fs::remove_dir_all(snapshot.dest_dir.as_ref().expect("dest dir"));
+    let _ = std::fs::remove_dir_all(&to);
     let _ = std::fs::remove_dir_all(&root);
 }

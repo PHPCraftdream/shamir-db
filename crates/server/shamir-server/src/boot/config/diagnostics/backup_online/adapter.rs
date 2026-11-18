@@ -245,7 +245,11 @@ impl OnlineBackupPort for EngineBackupPort {
         let mut pins = self.pins.lock();
         for key in &keys {
             let Some(repo) = self.resolve(key) else {
-                self.release_pins();
+                // Clear under the already-held pins lock: calling
+                // `release_pins` here would re-lock the same non-reentrant
+                // mutex (self-deadlock).
+                pins.clear();
+                drop(pins);
                 return Err(PortError::PinAcquire);
             };
             // Floor 0: retain the whole WAL history for the copy's duration
@@ -331,6 +335,14 @@ impl OnlineBackupPort for EngineBackupPort {
 }
 
 impl EngineBackupPort {
+    /// Test-only narrow access: number of step-A pins currently held on
+    /// this adapter (the production surface stays closed; regression
+    /// evidence that a failed `acquire_pins` released everything).
+    #[cfg(test)]
+    pub(crate) fn test_held_pins(&self) -> usize {
+        self.pins.lock().len()
+    }
+
     /// The captured repo's store dir path relative to the data dir, from
     /// the step-A snapshot (the instance exposes no path accessor).
     fn store_dir_for(&self, repo: &str) -> String {

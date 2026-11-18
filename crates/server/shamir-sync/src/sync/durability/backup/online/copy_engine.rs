@@ -78,8 +78,25 @@ fn hex_encode(digest: &[u8]) -> String {
     out
 }
 
+/// Test-only injection seams for the failure-injection suite (the
+/// module body lives in `tests/copy_seams.rs`). Compiled ONLY under
+/// `#[cfg(test)]` — no release build carries any of this code, and no
+/// production behaviour reads it. Each hook is a scoped thread-local
+/// cleared when its guard drops, so no state can leak between tests;
+/// the protocol runs on the caller's thread, so the hooks observe
+/// exactly the copy/hash calls of the run under test.
+#[cfg(test)]
+#[path = "tests/copy_seams.rs"]
+pub(crate) mod test_seams;
+
 /// Stream-hash a file, returning lowercase-hex SHA-256 and size.
 pub fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
+    #[cfg(test)]
+    {
+        if let Some(result) = test_seams::fire_hash_file(path) {
+            return result;
+        }
+    }
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; STREAM_BUFFER_SIZE];
@@ -130,6 +147,8 @@ fn copy_once(source: &Path, dest: &Path) -> std::io::Result<(String, u64)> {
             break;
         }
         output.write_all(&buf[..read])?;
+        #[cfg(test)]
+        test_seams::fire_after_first_write(source)?;
         hasher.update(&buf[..read]);
         size += read as u64;
     }
@@ -154,18 +173,22 @@ fn is_regular_file(meta: &fs::Metadata) -> bool {
     meta.is_file()
 }
 
-/// File names skipped in every listing pass. `lock` is fjall's
-/// active-store lock artifact: the live engine holds a range lock on it,
-/// so on Windows copying it can never succeed while the server is up. It
-/// is a runtime artifact, not data (restore recreates it on first open),
-/// and the skip is applied on ALL OSes so the snapshot manifest does not
-/// differ across platforms.
-const SKIP_FILE_NAMES: &[&str] = &["lock"];
+/// File names skipped in every listing pass, on ALL OSes so the
+/// snapshot manifest does not differ across platforms. Both are runtime
+/// lock artifacts, not data (restore recreates them on first open):
+/// `lock` is fjall's active-store lock artifact — the live engine holds
+/// a range lock on it, so on Windows copying it can never succeed while
+/// the server is up; `.shamir.lock` is the data-dir maintenance lock
+/// (`maintenance_lock.rs`, `fs4` exclusive try-lock, PID inside) held
+/// for the whole life of the live server, so the same Windows
+/// sharing-violation applies and the file is process state, not data.
+const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 
 /// Deterministic listing of every regular file under `source_root`
 /// (sorted per directory), skipping top-level directories named in
 /// `skip_top_level_dirs`, any non-regular entry, and files named in
-/// [`SKIP_FILE_NAMES`] (runtime lock artifacts, see above).
+/// [`SKIP_FILE_NAMES`] (`.shamir.lock` and `lock` — runtime lock
+/// artifacts, see above).
 fn list_files(source_root: &Path, skip_top_level_dirs: &[&str]) -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![source_root.to_path_buf()];
@@ -210,8 +233,9 @@ fn list_files(source_root: &Path, skip_top_level_dirs: &[&str]) -> std::io::Resu
 /// retry, then a second hash pass over every SOURCE file that defines the
 /// snapshot. A source file changed between copy and hash is re-copied up
 /// to twice more; one still mismatching fails the pass. A source file
-/// deleted mid-copy is excluded from the result. Files under any of
-/// `exclude_dirs` (absolute source paths) are left to their own pass.
+/// deleted mid-copy is excluded from the result. Files named in
+/// [`SKIP_FILE_NAMES`] (`.shamir.lock`, `lock`) and files under any of
+/// `exclude_dirs` (absolute source paths) are left out entirely.
 pub fn run_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -263,6 +287,8 @@ pub fn run_copy_pass(
                 });
             }
         };
+        #[cfg(test)]
+        test_seams::fire_after_copy(&source_path);
         copied.push((rel_slash, source_path, dest_path, copy.0, copy.1));
     }
     for dir in &synced_dirs {
