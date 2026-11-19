@@ -162,9 +162,11 @@ impl RequestEntry {
 static MONOTONIC_EPOCH: std::sync::LazyLock<std::time::Instant> =
     std::sync::LazyLock::new(std::time::Instant::now);
 
-/// Monotonic now, in nanoseconds since process start.
+/// Monotonic now, in nanoseconds since process start, offset by one so a
+/// stamp is never zero: the epoch is initialised by the first call, and a
+/// coarse clock (Windows) can report zero elapsed for it.
 pub(in crate::engine::db_handler) fn monotonic_now_ns() -> u64 {
-    MONOTONIC_EPOCH.elapsed().as_nanos() as u64
+    (MONOTONIC_EPOCH.elapsed().as_nanos() as u64).saturating_add(1)
 }
 
 /// In-flight table + gauge mirror. Clone-share via `Arc` (the handler
