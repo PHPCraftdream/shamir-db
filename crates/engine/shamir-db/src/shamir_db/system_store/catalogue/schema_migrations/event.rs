@@ -267,6 +267,39 @@ pub(super) fn event_row(event: &JournalEvent) -> DbResult<crate::types::value::Q
     Ok(crate::types::value::QueryValue::Map(row))
 }
 
+/// Header-only probe of recognized EVENT payload bytes, run once at open:
+/// deserializes ONLY the independently readable `database_identity` field
+/// (named map; every other field is skipped, no body decode or validation).
+/// Undecodable, field-less or unparseable payloads keep the OUTER envelope
+/// trusted (the row stays attributable and its body damage is quarantined
+/// per database). A READABLE payload identity contradicting the routed key
+/// proves no ownership (routing both fields to another database could let
+/// one partition bypass the check) — WHOLE-OPEN typed failure.
+pub(super) fn probe_event_payload_identity(
+    row_id: &str,
+    routed_identity: DatabaseIdentity,
+    bytes: &[u8],
+) -> DbResult<()> {
+    #[derive(serde::Deserialize)]
+    struct RoutingHeader {
+        #[serde(default)]
+        database_identity: Option<String>,
+    }
+    let Ok(header) = rmp_serde::from_slice::<RoutingHeader>(bytes) else {
+        return Ok(());
+    };
+    let payload_identity = header
+        .database_identity
+        .and_then(|text| text.parse::<DatabaseIdentity>().ok());
+    if payload_identity.is_some_and(|payload_identity| payload_identity != routed_identity) {
+        return Err(DbError::SchemaMigrationJournalUnreadable(format!(
+            "unattributable schema migration journal record {row_id}: \
+             readable event payload identity contradicts the row's routed key"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn decode_event(bytes: &[u8], row_id: &str) -> DbResult<JournalEvent> {
     let event: JournalEvent = rmp_serde::from_slice(bytes).map_err(|error| {
         DbError::Internal(format!(

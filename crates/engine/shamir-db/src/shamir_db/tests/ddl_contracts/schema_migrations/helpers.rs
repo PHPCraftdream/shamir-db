@@ -175,7 +175,22 @@ pub(super) async fn flush_and_reopen(
 /// engine can hold its fjall lock until the background handles finish
 /// (`FjallError: Locked`, seen on Windows), so retry ONLY that error under a
 /// bounded deadline; every other error fails at once. Never a bare reopen.
+/// Result-returning variant: a startup that is EXPECTED to fail closed
+/// (unattributable journal row) observes the typed error through
+/// [`try_init_waiting_for_locks`].
 pub(super) async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> ShamirDb {
+    try_init_waiting_for_locks(system_path)
+        .await
+        .unwrap_or_else(|error| panic!("reopen the system store: {error}"))
+}
+
+/// Like [`init_waiting_for_locks`], but returns the open error instead of
+/// panicking: the bounded Locked-only retry still applies, and every other
+/// error is surfaced to the caller untouched (typed journal failures keep
+/// their code, no message matching).
+pub(super) async fn try_init_waiting_for_locks(
+    system_path: std::path::PathBuf,
+) -> Result<ShamirDb, crate::DbError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         match tokio::time::timeout(
@@ -185,14 +200,14 @@ pub(super) async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> S
         .await
         .expect("reopen attempt timed out")
         {
-            Ok(db) => return db,
+            Ok(db) => return Ok(db),
             Err(error)
                 if error.to_string().contains("Locked")
                     && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(error) => panic!("reopen the system store: {error}"),
+            Err(error) => return Err(error),
         }
     }
 }

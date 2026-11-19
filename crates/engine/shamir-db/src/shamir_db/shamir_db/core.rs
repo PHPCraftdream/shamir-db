@@ -434,7 +434,7 @@ impl ShamirDb {
             }
         }
         // R1c step 2b-3b: one-time open-time seed of the in-doubt marker.
-        Box::pin(shamir.seed_schema_migration_in_doubt(&db_identities)).await;
+        Box::pin(shamir.seed_schema_migration_in_doubt(&db_identities)).await?;
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {
                 if name != SYSTEM_DB_NAME {

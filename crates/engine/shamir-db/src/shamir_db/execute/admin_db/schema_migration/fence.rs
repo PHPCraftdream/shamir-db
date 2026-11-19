@@ -43,6 +43,7 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use crate::query::batch::{BatchError, BatchOp, BatchRequest};
 use crate::shamir_db::shamir_db::ShamirDb;
 use crate::shamir_db::system_store::DatabaseIdentity;
+use crate::{DbError, DbResult};
 
 /// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
@@ -58,25 +59,30 @@ const GATE_PENDING: u64 = u64::MAX;
 /// restarted before resume) — seeded at database open from the journal.
 const IN_DOUBT: &str = "schema_migration_in_doubt";
 
-/// Stable code of the lifecycle refusal (R1c-4 follow-up defect 2): any
-/// database lifecycle op (RENAME/DROP/seed publication) targeting a database
-/// with an in-doubt marker reports `schema_migration_in_doubt`. Narrow
-/// accessor — the constant itself stays file-private.
+/// Stable code of the lifecycle refusal (R1c-4 FINAL follow-up 3, decision
+/// 2): any database lifecycle op (RENAME/DROP) targeting a database with a
+/// LIVE or RESERVED in-process gate OR an in-doubt marker reports
+/// `schema_migration_in_doubt` (the one lifecycle wire code for both
+/// states). Narrow accessor — the constant itself stays file-private.
 pub(in crate::shamir_db) const fn schema_migration_lifecycle_code() -> &'static str {
     IN_DOUBT
 }
 
 /// Shared message shape of the lifecycle refusal (no per-callsite text
 /// drift; the direct-call guards wrap it in `DbError::Validation`, the wire
-/// handlers pair it with [`schema_migration_lifecycle_code`]).
+/// handlers pair it with [`schema_migration_lifecycle_code`]). Truthful
+/// about both gated states: a LIVE/RESERVED fence (active runner) and an
+/// IN-DOUBT marker (unresolved journal) refuse alike.
 pub(in crate::shamir_db) fn schema_migration_lifecycle_refusal_message(
     op: &str,
     db: &str,
 ) -> String {
     format!(
-        "cannot {op} database '{db}': an application-schema migration journal \
-         is in doubt for it; resume or repair the migration and reopen the \
-         database first"
+        "cannot {op} database '{db}': an application-schema migration is \
+         active or its journal is unresolved for it; if a migration runner \
+         is active, wait for it to finish, otherwise recover the in-doubt \
+         migration (resume with the identical stored body; reopen the \
+         database only after repairing the journal on disk)"
     )
 }
 
@@ -167,21 +173,32 @@ impl ShamirDb {
         self.schema_migration_gate_in_doubt.contains_key(db)
     }
 
+    /// Lifecycle-guard predicate (R1c-4 FINAL follow-up 3, decision 2):
+    /// one source of truth for the database lifecycle checks (rename/drop):
+    /// TRUE for any live fence state — reserved/held gate (`GATE_PENDING`
+    /// included, from the reservation on) or open-time in-doubt marker.
+    /// Seed publication stays marker-only by decision. Defined only here.
+    pub(in crate::shamir_db) fn schema_migration_lifecycle_blocked(&self, db: &str) -> bool {
+        self.schema_migration_gate_generation(db).is_some() || self.schema_migration_in_doubt(db)
+    }
+
     /// Convert a LIVE gate into an IN-DOUBT marker: the run exited while the
     /// durable fence is still OWNED with an unresolved journal (in-doubt or
-    /// postcondition-failure exit). The live entry is removed under the same
-    /// generation guard as a plain release, and the marker is installed with
-    /// the run's generation so a later resume's `hold` (higher generation)
-    /// converts it back to a live gate; writes stay refused with
-    /// `schema_migration_in_doubt` until then.
+    /// postcondition-failure exit). The marker is installed BEFORE the live
+    /// entry is removed (same generation guard as a plain release), so the
+    /// transition never exposes a false free interval to a concurrent
+    /// lifecycle check; the marker carries the run's generation so a later
+    /// resume's `hold` (higher generation) converts it back to a live gate;
+    /// writes stay refused with `schema_migration_in_doubt` until then.
     pub(in crate::shamir_db) fn mark_schema_migration_gate_in_doubt(
         &self,
         db: &str,
         generation: u64,
     ) {
-        self.release_schema_migration_gate(db, generation);
+        // Marker first: no free interval between live and in-doubt states.
         self.schema_migration_gate_in_doubt
             .insert(db.to_string(), Some(generation));
+        self.release_schema_migration_gate(db, generation);
     }
 
     /// One-time open-time seed of the in-doubt marker: every database whose
@@ -193,19 +210,34 @@ impl ShamirDb {
     /// established)
     /// is marked with the unknown-generation variant (`None`): admission
     /// fails closed with `schema_migration_durability_unavailable`. A single
-    /// payload-free `warn!` covers all failures. Never propagates an error:
-    /// the seed must not block database open. The marker is in-memory only
-    /// and is NOT cleared by repairing the journal on disk alone — the
-    /// affected databases must be reopened for a fresh seed. A no-op without
-    /// a durable journal. Called by `init_inner` only; never on the batch path.
+    /// payload-free `warn!` covers all failures. The TYPED journal error
+    /// (`DbError::SchemaMigrationJournalUnreadable` — an unattributable row)
+    /// is PROPAGATED: startup fails closed before any per-database
+    /// quarantine (the routing validation above normally catches it first;
+    /// this is the typed backstop). Every other error (e.g.
+    /// `Locked`, backend failures) is swallowed into the unknown-generation
+    /// marker as before and never re-labeled as journal corruption. The
+    /// marker is in-memory only and is NOT cleared by repairing the journal
+    /// on disk alone — the affected databases must be reopened for a fresh
+    /// seed. A no-op without a durable journal. Called by `init_inner` only;
+    /// never on the batch path.
     pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(
         &self,
         identities: &[(String, DatabaseIdentity)],
-    ) {
+    ) -> DbResult<()> {
         let store = self.system_store();
         if !store.schema_migration_journal_durable() {
-            return;
+            return Ok(());
         }
+        // ONE structural routing validation of the durable journal BEFORE the
+        // per-database quarantine loop: an unattributable row (undecodable
+        // physical row, missing/malformed record_key, key-vs-envelope or
+        // readable-payload identity contradiction) fails the WHOLE startup
+        // closed with the typed `schema_migration_durability_unavailable`,
+        // even with zero databases. Non-journal failures (e.g. `Locked`)
+        // propagate unchanged, never masked.
+        // Boxed: keeps the scan future out of the caller's init future.
+        Box::pin(store.validate_schema_migration_journal_routing()).await?;
         let mut unreadable = false;
         for (name, identity) in identities {
             let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await;
@@ -213,6 +245,13 @@ impl ShamirDb {
                 Ok(Some(generation)) => {
                     self.schema_migration_gate_in_doubt
                         .insert(name.clone(), Some(generation));
+                }
+                // An unattributable journal row: startup itself fails closed,
+                // typed — never masked as a per-database boot failure.
+                Err(DbError::SchemaMigrationJournalUnreadable(_)) => {
+                    return Err(DbError::SchemaMigrationJournalUnreadable(
+                        "unattributable schema migration journal row at boot".into(),
+                    ));
                 }
                 // The control record read failed: mark unknown, never guess.
                 Err(_) => {
@@ -230,6 +269,7 @@ impl ShamirDb {
                  until repaired and REOPENED"
             );
         }
+        Ok(())
     }
 
     /// Release the in-process gate, but only if the recorded generation still

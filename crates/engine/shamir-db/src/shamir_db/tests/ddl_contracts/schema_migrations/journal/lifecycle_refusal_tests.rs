@@ -121,6 +121,172 @@ async fn assert_beta_stays_healthy(
     assert_eq!(str_field(&applied, "migration_id"), "beta-002");
 }
 
+/// Target-side invariants that hold in EVERY fence state (reserved gate,
+/// held gate, marker, free): the stable identity still resolves under
+/// `name`, and the sentinel table survives.
+async fn assert_alpha_target_intact(
+    db: &ShamirDb,
+    alpha: &DatabaseIdentity,
+    name: &str,
+    context: &str,
+) {
+    let identity_now = db
+        .system_store()
+        .schema_migration_identity(name)
+        .await
+        .unwrap_or_else(|e| panic!("{context}: '{name}' still resolves its identity: {e}"));
+    assert_eq!(
+        identity_now, *alpha,
+        "{context}: '{name}' identity replaced"
+    );
+    let instance = db
+        .get_db(name)
+        .unwrap_or_else(|| panic!("{context}: '{name}' still serves"));
+    assert!(
+        instance.has_table("main", "sentinel_items"),
+        "{context}: the real table sentinel must survive untouched"
+    );
+}
+
+/// R1c-4 FINAL follow-up 3, decision 2: the database lifecycle guards
+/// refuse RENAME/DROP (cascade — the sentinel child proves the refusal
+/// happened BEFORE mutation) while a LIVE fence exists for the target —
+/// both at the pre-CAS reservation and at the held gate — and admit both
+/// operations once the run releases the gate (`mark_succeeded` + RAII
+/// drop, no durable history needed): the rename preserves the target's
+/// stable identity and sentinel, the cascade drop then removes the target.
+#[test]
+fn rename_and_drop_are_refused_under_a_live_gate_then_admitted_after_release() {
+    on_big_stack(|| async {
+        let guard = FlakeGuard::with_watchdog(
+            "rename_and_drop_are_refused_under_a_live_gate_then_admitted_after_release",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            // The TempDir stays alive for the whole test (no reopen here).
+            let (_dir, db) = persistent_db().await;
+            db.create_db("alpha").await.unwrap();
+            db.create_db("beta").await.unwrap();
+            prepare_database(&db, "alpha").await;
+            prepare_database(&db, "beta").await;
+            let alpha = db
+                .system_store()
+                .schema_migration_identity("alpha")
+                .await
+                .unwrap();
+
+            // A REAL sentinel table in ALPHA: only a CASCADE drop destroys
+            // it, so its survival proves the refusal happened before any
+            // mutation.
+            let mut sentinel_batch = Batch::new();
+            sentinel_batch.op(
+                "ct",
+                ddl::create_table("sentinel_items").repo("main").build(),
+            );
+            let request = sentinel_batch.to_request_via_msgpack().unwrap();
+            db.execute_as(OWNER, "alpha", &request)
+                .await
+                .expect("the sentinel create-table runs before the fence exists");
+
+            // Reserve the in-process gate for ALPHA (pre-CAS
+            // `GATE_PENDING`): in-memory only, no durable history.
+            let mut fence = db
+                .reserve_schema_migration_gate("alpha")
+                .expect("the alpha gate is free for the reservation");
+
+            // Under the RESERVATION: rename and cascade drop from the
+            // HEALTHY session B are refused typed, target untouched.
+            let rename_error =
+                run_admin_op(&db, "beta", "rn", ddl::rename_db("alpha", "alpha2").build())
+                    .await
+                    .expect_err("rename under a reserved gate must be refused");
+            assert_in_doubt(rename_error, "rename under a reserved gate");
+            assert!(!db.has_db("alpha2"), "no shadow rename target may appear");
+            let drop_error = run_admin_op(
+                &db,
+                "beta",
+                "dd",
+                ddl::drop_db("alpha")
+                    .hmac("test-hmac")
+                    .cascade()
+                    .build()
+                    .expect("typed drop-db operation"),
+            )
+            .await
+            .expect_err("cascade drop under a reserved gate must be refused");
+            assert_in_doubt(drop_error, "cascade drop under a reserved gate");
+            assert!(db.has_db("alpha"), "alpha must survive the refused drop");
+            assert_alpha_target_intact(&db, &alpha, "alpha", "under a reserved gate").await;
+
+            // HOLD the gate (live runner): the same two operations stay
+            // refused typed, target untouched.
+            fence.hold(7);
+            assert_eq!(
+                db.schema_migration_gate_generation("alpha"),
+                Some(7),
+                "the held gate is visible to the fence map"
+            );
+            let rename_error =
+                run_admin_op(&db, "beta", "rn", ddl::rename_db("alpha", "alpha2").build())
+                    .await
+                    .expect_err("rename under a held gate must be refused");
+            assert_in_doubt(rename_error, "rename under a held gate");
+            let drop_error = run_admin_op(
+                &db,
+                "beta",
+                "dd",
+                ddl::drop_db("alpha")
+                    .hmac("test-hmac")
+                    .cascade()
+                    .build()
+                    .expect("typed drop-db operation"),
+            )
+            .await
+            .expect_err("cascade drop under a held gate must be refused");
+            assert_in_doubt(drop_error, "cascade drop under a held gate");
+            assert_alpha_target_intact(&db, &alpha, "alpha", "under a held gate").await;
+
+            // Release: the succeeded run drops the RAII without leaving an
+            // in-doubt marker, so no false quarantine remains.
+            fence.mark_succeeded();
+            drop(fence);
+            assert!(
+                !db.schema_migration_in_doubt("alpha"),
+                "a succeeded release must not seed an in-doubt marker"
+            );
+
+            // ADMITTED rename alpha -> alpha2 via B: the stable identity
+            // and the sentinel travel with the re-keyed instance.
+            let renamed =
+                run_admin_op(&db, "beta", "rn", ddl::rename_db("alpha", "alpha2").build())
+                    .await
+                    .expect("the rename is admitted once the gate is released");
+            assert_eq!(str_field(&renamed, "renamed_db"), "alpha");
+            assert!(!db.has_db("alpha"), "the old name is gone after the rename");
+            assert_alpha_target_intact(&db, &alpha, "alpha2", "after the admitted rename").await;
+
+            // ADMITTED cascade drop of alpha2 via B: no target remains.
+            run_admin_op(
+                &db,
+                "beta",
+                "dd",
+                ddl::drop_db("alpha2")
+                    .hmac("test-hmac")
+                    .cascade()
+                    .build()
+                    .expect("typed drop-db operation"),
+            )
+            .await
+            .expect("the cascade drop is admitted once the gate is released");
+            assert!(!db.has_db("alpha2"), "no target remains after the drop");
+        });
+        tokio::time::timeout(Duration::from_secs(300), scenario)
+            .await
+            .expect("live-gate lifecycle scenario exceeded its 300 s bound");
+        guard.mark("scenario done");
+    });
+}
+
 #[test]
 fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journal_survive() {
     on_big_stack(|| async {

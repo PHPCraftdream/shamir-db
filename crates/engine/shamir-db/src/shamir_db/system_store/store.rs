@@ -182,6 +182,12 @@ impl SystemStore {
 
     /// Create the journal's unique record-key index when it is missing. Boxed at
     /// the call site: the index-creation future must not widen the init future.
+    ///
+    /// Journal-specific failure mapping: a `UniqueIndexCreationFailed` HERE
+    /// can only be the journal record-key index (this is its dedicated
+    /// creation site), so it is mapped to the typed journal error — without
+    /// echoing the engine's duplicate sample. Generic repo-open failures
+    /// (locks, backend errors) propagate unchanged, never masked.
     async fn ensure_journal_index(db: &DbInstance) -> DbResult<()> {
         let journal = db
             .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
@@ -192,7 +198,17 @@ impl SystemStore {
         {
             journal
                 .create_unique_index("schema_migration_record_key", &["record_key"])
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    DbError::UniqueIndexCreationFailed(..) => {
+                        DbError::SchemaMigrationJournalUnreadable(
+                            "the schema migration record-key unique index could not be \
+                             created on open: a journal row's record_key is corrupt"
+                                .into(),
+                        )
+                    }
+                    other => other,
+                })?;
         }
         Ok(())
     }

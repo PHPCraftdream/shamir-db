@@ -8,23 +8,25 @@
 //! `schema_migration_in_doubt`), while a healthy database on the same
 //! journal table keeps its full status/plan/actual-apply path.
 //!
+//! UNATTRIBUTABLE damage — a missing routing key, or a key whose identity
+//! contradicts the row's `database_identity` — is quarantined by NOBODY:
+//! the one-shot open-time routing scan fails the WHOLE startup closed with
+//! the typed `schema_migration_durability_unavailable`
+//! (`DbError::SchemaMigrationJournalUnreadable` surfaced through `code()`;
+//! covered in `unattributable_*` below). The sowing seams use
+//! only keys the unique `record_key` index admits: B's colliding CONTROL
+//! key is already occupied once B has journal traffic (the physical
+//! `TableManager::set` validates unique indexes before write, so the old
+//! colliding-with-B's-LIVE-key variant was unreachable and is gone); the
+//! scenarios below instead target B's UNUSED canonical keys while B has no
+//! journal rows.
+//!
 //! The control row is damaged ONLY through the existing raw test seams
 //! (`rows`/`overwrite_row`/`TableManager::delete`); every request is built
-//! through `shamir-query-builder`. Every variant is PERSISTED: the damaged
-//! row is flushed durably and the store is reopened through the bounded
-//! lock-only retry before any assertion, so none of the covered cases can
-//! pass by a before-fix in-memory accident.
-//!
-//! Counterfactuals covered: for the colliding-key variant the BEFORE-fix
-//! reader matched the control row by `record_key` alone, so the damaged row
-//! of A (key `control/{beta}`, generation set to B's ACTUAL status-derived
-//! current generation, 2 after its one applied migration's release) matched
-//! B's pre-CAS lookup/CAS predicate (duplicate/corrupt) and B FAILED — the healthy-B assertions
-//! below are exactly the behavior the identity-conditioned lookup/CAS fix
-//! makes true, not a pin of old behavior. The physical-delete, retyped-row
-//! and drift variants pin fail-closed refusals that the pre-fix open-time
-//! read (which trusted the control record it found) reported as a FREE
-//! fence.
+//! through `shamir-query-builder`. The per-database variants are PERSISTED:
+//! the damaged row is flushed durably and the store is reopened through the
+//! bounded lock-only retry before any assertion, so none of the covered
+//! cases can pass by a before-fix in-memory accident.
 
 use std::time::Duration;
 
@@ -36,7 +38,7 @@ use super::super::helpers::on_big_stack;
 use super::super::helpers::{
     body, checksum, context, fence_generation_from_status, field, flush_and_reopen, journal_table,
     overwrite_row, persistent_db, predecessor, prepare_database, rows, run_admin_op, run_apply,
-    run_plan, run_status, str_field, submission, OWNER,
+    run_plan, run_status, str_field, submission, try_init_waiting_for_locks, OWNER,
 };
 use crate::engine::table::TableManager;
 use crate::query::batch::BatchError;
@@ -48,22 +50,15 @@ use shamir_types::types::record_id::RecordId;
 /// Which persisted damage the scenario sows into ALPHA's control plane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Damage {
-    /// ALPHA's control row `record_key` is overwritten with BETA's EXACT
-    /// legitimate `control/{beta}` key (the identity-collision case the
-    /// lookup/CAS fix conditions on), `database_identity` untouched; the
-    /// `generation` is set to BETA's ACTUAL status-derived current
-    /// generation so the CAS predicate's existing `record_key`/`generation`
-    /// pair really collides on BETA's first acquire.
-    KeyCollidesWithOtherDatabase,
     /// ALPHA's whole control ROW is physically deleted; the owned `Started`
     /// event stays. A key-less (field-only) mutation would not exercise the
     /// physical lookup, so the row itself is removed.
     ControlRowDeleted,
     /// ALPHA's control row survives but its `record_type` is changed, so it
     /// no longer reads as a control record; the owned `Started` event stays.
+    /// Routing still follows the KEY prefix, so the row stays attributable
+    /// to ALPHA (its own quarantine), never BETA's.
     RecordTypeChanged,
-    /// ALPHA's control row loses its `record_key` field entirely.
-    KeyDeleted,
     /// ALPHA's `Started` event row is deleted; the owned control row stays.
     StartedEventDeleted,
     /// ALPHA's control `sequence` is advanced past the journal tail.
@@ -72,54 +67,61 @@ enum Damage {
     GenerationDrift,
 }
 
+/// Which UNATTRIBUTABLE damage the startup-failure scenario sows: the row's
+/// routing key is missing or points at another database's identity, so no
+/// partition can own it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UnattributableDamage {
+    /// ALPHA's control row key is re-pointed at BETA's canonical CONTROL key
+    /// while BETA has no journal rows yet (so the key is unoccupied and the
+    /// unique `record_key` index admits the write).
+    ControlKeyPointsToForeignControl,
+    /// ALPHA's started EVENT row key is re-pointed at BETA's canonical but
+    /// UNUSED `event/{beta}/1` (BETA has no journal traffic).
+    EventKeyPointsToForeignEvent,
+    /// ALPHA's control row loses its `record_key` field entirely. The
+    /// unique-index validator skips a record whose new key is absent, so the
+    /// write persists (and drops the old posting).
+    ControlKeyDeleted,
+    /// ALPHA's started event payload is rewritten IN PLACE (raw seam) so the
+    /// serialized `JournalEvent.database_identity` names BETA while the row's
+    /// envelope and key still route to ALPHA. Uniquely admitted: the
+    /// `record_key` is untouched. Readable payload identity contradicting
+    /// the routed key proves no ownership — whole-open typed failure, while
+    /// the ordinary reader keeps BETA isolated until open.
+    EventPayloadIdentityContradictsKey,
+}
+
 /// The persisted system row of ALPHA's control record, for raw damage.
 async fn alpha_control_row(db: &ShamirDb, alpha: &DatabaseIdentity) -> (RecordId, QueryValue) {
+    alpha_row(db, alpha, "control").await
+}
+
+/// The persisted system row of ALPHA's started EVENT record, for raw damage.
+async fn alpha_event_row(db: &ShamirDb, alpha: &DatabaseIdentity) -> (RecordId, QueryValue) {
+    alpha_row(db, alpha, "event").await
+}
+
+async fn alpha_row(
+    db: &ShamirDb,
+    alpha: &DatabaseIdentity,
+    record_type: &str,
+) -> (RecordId, QueryValue) {
     let table = journal_table(db).await;
     rows(&table)
         .await
         .into_iter()
         .find(|(_, row)| {
-            row.get("record_type").and_then(QueryValue::as_str) == Some("control")
+            row.get("record_type").and_then(QueryValue::as_str) == Some(record_type)
                 && row.get("database_identity").and_then(QueryValue::as_str)
                     == Some(alpha.to_string().as_str())
         })
-        .unwrap_or_else(|| panic!("alpha control row is persisted"))
+        .unwrap_or_else(|| panic!("alpha {record_type} row is persisted"))
 }
 
 /// Sow the chosen damage with the raw test seams ONLY.
-async fn sow_damage(
-    db: &ShamirDb,
-    damage: Damage,
-    alpha: &DatabaseIdentity,
-    beta: &DatabaseIdentity,
-) {
+async fn sow_damage(db: &ShamirDb, damage: Damage, alpha: &DatabaseIdentity) {
     match damage {
-        Damage::KeyCollidesWithOtherDatabase => {
-            // BETA's EXACT legitimate key, not arbitrary garbage: the reader
-            // must condition the control lookup on `database_identity` so
-            // the colliding row of A neither matches BETA's lookup nor
-            // poisons BETA's MVCC CAS.
-            //
-            // The `generation` is matched to BETA's status-derived current
-            // generation: the CAS predicate is `(record_key, generation)`,
-            // so only a colliding generation makes BETA's first acquire
-            // really collide.
-            let beta_generation = fence_generation_from_status(db, "beta", beta).await;
-            let (event_id, mut envelope) = alpha_control_row(db, alpha).await;
-            let QueryValue::Map(fields) = &mut envelope else {
-                panic!("the control row envelope is a map");
-            };
-            fields.insert(
-                "record_key".into(),
-                QueryValue::Str(format!("control/{beta}")),
-            );
-            fields.insert(
-                "generation".into(),
-                QueryValue::Str(beta_generation.to_string()),
-            );
-            let table = journal_table(db).await;
-            overwrite_row(&table, event_id, envelope).await;
-        }
         Damage::ControlRowDeleted => {
             // The control ROW itself is gone; the owned Started event row
             // remains readable, so the failure below is purely the missing
@@ -143,18 +145,6 @@ async fn sow_damage(
                 panic!("the control row envelope is a map");
             };
             fields.insert("record_type".into(), QueryValue::Str("event".into()));
-            let table = journal_table(db).await;
-            overwrite_row(&table, event_id, envelope).await;
-        }
-        Damage::KeyDeleted => {
-            let (event_id, mut envelope) = alpha_control_row(db, alpha).await;
-            let QueryValue::Map(fields) = &mut envelope else {
-                panic!("the control row envelope is a map");
-            };
-            assert!(
-                fields.shift_remove("record_key").is_some(),
-                "the control row carried a record_key before the damage",
-            );
             let table = journal_table(db).await;
             overwrite_row(&table, event_id, envelope).await;
         }
@@ -331,9 +321,9 @@ async fn assert_batches_refused_in_doubt(db: &ShamirDb, scenario: &str) {
 
 /// The healthy database keeps its full path across the damaged neighbor's
 /// failures: status reports its applied prefix, plan of the next ordinal
-/// works, and an ACTUAL apply lands — including through the control lookup
-/// and MVCC CAS that the colliding-key row of A tries to hijack. The apply
-/// generation is taken from B's OWN status, never a magic constant.
+/// works, and an ACTUAL apply lands — through the identity-conditioned
+/// control lookup and MVCC CAS. The apply generation is taken from B's OWN
+/// status, never a magic constant.
 async fn assert_beta_stays_healthy(
     db: &ShamirDb,
     beta: &DatabaseIdentity,
@@ -424,8 +414,8 @@ async fn control_integrity_scenario(damage: Damage) {
         .unwrap();
 
     // BETA: one fully applied migration, so BETA owns a control row of its
-    // own; the colliding-key damage matches BETA's status-derived
-    // generation so its first acquire really collides.
+    // own and the identity-conditioned lookup/CAS has a REAL neighbor row to
+    // skip while reading ALPHA's damaged partition.
     let beta_first = body("beta-001", 1);
     let applied = run_apply(
         &db,
@@ -439,7 +429,7 @@ async fn control_integrity_scenario(damage: Damage) {
     .expect("database B applies its first migration in the clean setup");
     assert_eq!(str_field(&applied, "status"), "applied");
 
-    sow_damage(&db, damage, &alpha, &beta).await;
+    sow_damage(&db, damage, &alpha).await;
 
     // Persist the damaged rows durably, drop the engine, REOPEN: the
     // assertions below must hold across a cold restart of the store.
@@ -489,6 +479,161 @@ async fn control_integrity_scenario(damage: Damage) {
     }
 }
 
+/// Sow the UNATTRIBUTABLE damage with the raw test seams ONLY. Every target
+/// key is a canonical key of BETA that is UNOCCUPIED (BETA has no journal
+/// traffic in this scenario), so the unique `record_key` index admits the
+/// raw write.
+async fn sow_unattributable_damage(
+    db: &ShamirDb,
+    damage: UnattributableDamage,
+    alpha: &DatabaseIdentity,
+    beta: &DatabaseIdentity,
+) {
+    let (row_id, mut envelope) = match damage {
+        UnattributableDamage::EventKeyPointsToForeignEvent
+        | UnattributableDamage::EventPayloadIdentityContradictsKey => {
+            alpha_event_row(db, alpha).await
+        }
+        _ => alpha_control_row(db, alpha).await,
+    };
+    let QueryValue::Map(fields) = &mut envelope else {
+        panic!("the journal row envelope is a map");
+    };
+    match damage {
+        UnattributableDamage::ControlKeyPointsToForeignControl => {
+            fields.insert(
+                "record_key".into(),
+                QueryValue::Str(format!("control/{beta}")),
+            );
+        }
+        UnattributableDamage::EventKeyPointsToForeignEvent => {
+            fields.insert(
+                "record_key".into(),
+                QueryValue::Str(format!("event/{beta}/1")),
+            );
+        }
+        UnattributableDamage::ControlKeyDeleted => {
+            assert!(
+                fields.shift_remove("record_key").is_some(),
+                "the control row carried a record_key before the damage",
+            );
+        }
+        UnattributableDamage::EventPayloadIdentityContradictsKey => {
+            // Envelope and key stay ALPHA-routed; only the payload's typed
+            // `JournalEvent.database_identity` is mutated and re-serialized
+            // in the actual named format — no generic field round-trip.
+            let QueryValue::Bin(bytes) =
+                fields.get("event").expect("event payload present").clone()
+            else {
+                panic!("the event row payload is binary");
+            };
+            let mut event: crate::shamir_db::system_store::JournalEvent =
+                rmp_serde::from_slice(&bytes).expect("started event payload decodes");
+            event.database_identity = *beta;
+            let mutated =
+                rmp_serde::to_vec_named(&event).expect("mutated started event payload re-encodes");
+            fields.insert("event".into(), QueryValue::Bin(mutated));
+        }
+    }
+    let table = journal_table(db).await;
+    overwrite_row(&table, row_id, envelope).await;
+}
+
+/// Unattributable-row scenario: two databases, BETA with NO journal traffic
+/// (its canonical keys stay unoccupied and writable); ALPHA with a durable
+/// OWNED Started event; the chosen unattributable damage sown. BEFORE the
+/// restart the damage splits: the routed payload disagreement (the event
+/// envelope stays ALPHA-attributable, only its payload identity is
+/// contradicted) keeps BETA healthy beside ALPHA's fail-closed status, while
+/// the outer key defects leave the row unroutable and BOTH databases' status
+/// fails closed. After the durable flush and a cold restart the WHOLE startup
+/// fails closed with the typed `schema_migration_durability_unavailable`
+/// (observed through `DbError::code()`, never message matching), using the
+/// bounded Locked-only retry.
+async fn unattributable_row_scenario(damage: UnattributableDamage) {
+    let (dir, db) = persistent_db().await;
+    db.create_db("alpha").await.unwrap();
+    db.create_db("beta").await.unwrap();
+    prepare_database(&db, "alpha").await;
+    prepare_database(&db, "beta").await;
+    let alpha = db
+        .system_store()
+        .schema_migration_identity("alpha")
+        .await
+        .unwrap();
+    let beta = db
+        .system_store()
+        .schema_migration_identity("beta")
+        .await
+        .unwrap();
+
+    let alpha_body = body("alpha-001", 1);
+    db.system_store()
+        .acquire_schema_migration_fence(
+            alpha,
+            0,
+            alpha_body.metadata.clone(),
+            alpha_body,
+            false,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    sow_unattributable_damage(&db, damage, &alpha, &beta).await;
+
+    // BEFORE the restart: the OWNING request (ALPHA) always fails closed
+    // with the typed code. For key/envelope-level damage the row is
+    // unroutable, so BETA's ordinary read fails too; for the payload
+    // contradiction the row still routes to ALPHA, so BETA stays healthy
+    // (isolation) — only the open-time probe takes the whole store down.
+    let alpha_error = run_status(&db, "alpha", &alpha)
+        .await
+        .expect_err("alpha status must fail closed on an unattributable row");
+    assert_unavailable(
+        alpha_error,
+        &format!("pre-restart alpha status with {damage:?}"),
+    );
+    match damage {
+        UnattributableDamage::EventPayloadIdentityContradictsKey => {
+            run_status(&db, "beta", &beta)
+                .await
+                .expect("beta status stays healthy pre-restart beside the contradicted payload");
+        }
+        _ => {
+            let beta_error = run_status(&db, "beta", &beta)
+                .await
+                .expect_err("beta status must fail closed on an unroutable row");
+            assert_unavailable(beta_error, "pre-restart beta status");
+        }
+    }
+
+    let table: TableManager = journal_table(&db).await;
+    let system_path = dir.path().join("system");
+    db.system_store()
+        .flush_system_repo_durable(&table)
+        .await
+        .expect("the damaged journal rows flush durably before the restart");
+    drop(table);
+    drop(db);
+    let Err(error) = try_init_waiting_for_locks(system_path).await else {
+        panic!("startup must fail closed on an unattributable journal row");
+    };
+    assert_unavailable_error(&error, &format!("restart with {damage:?}"));
+    // Keep the tempdir alive to the end of the scenario.
+    drop(dir);
+}
+
+/// The DbError-side twin of [`assert_unavailable`]: typed code, not message
+/// matching.
+fn assert_unavailable_error(error: &crate::DbError, scenario: &str) {
+    assert_eq!(
+        error.code(),
+        Some("schema_migration_durability_unavailable"),
+        "{scenario}: wrong startup failure code; message: {error}"
+    );
+}
+
 /// Whole-scenario bound (>=120 s: the Windows runner is up to 10x slower)
 /// with the failure-only diagnostic watchdog: it fires BELOW the runner's
 /// slow-timeout kill so the timeline dumps first.
@@ -503,12 +648,16 @@ fn control_integrity_test(name: &'static str, damage: Damage) {
     });
 }
 
-#[test]
-fn collided_control_key_of_one_database_fails_it_closed_and_never_blocks_another_database() {
-    control_integrity_test(
-        "collided_control_key_of_one_database_fails_it_closed_and_never_blocks_another_database",
-        Damage::KeyCollidesWithOtherDatabase,
-    );
+/// Same bound for the unattributable-row startup-failure scenarios.
+fn unattributable_test(name: &'static str, damage: UnattributableDamage) {
+    on_big_stack(move || async move {
+        let guard = FlakeGuard::with_watchdog(name, Duration::from_secs(150));
+        let scenario = Box::pin(unattributable_row_scenario(damage));
+        tokio::time::timeout(Duration::from_secs(300), scenario)
+            .await
+            .expect("unattributable-row scenario exceeded its 300 s bound");
+        guard.mark("scenario done");
+    });
 }
 
 #[test]
@@ -528,10 +677,34 @@ fn retyped_control_row_fails_the_database_closed_with_started_event_remaining() 
 }
 
 #[test]
-fn deleted_control_record_key_fails_the_database_closed_after_a_restart() {
-    control_integrity_test(
-        "deleted_control_record_key_fails_the_database_closed_after_a_restart",
-        Damage::KeyDeleted,
+fn deleted_control_record_key_fails_startup_closed_as_unattributable() {
+    unattributable_test(
+        "deleted_control_record_key_fails_startup_closed_as_unattributable",
+        UnattributableDamage::ControlKeyDeleted,
+    );
+}
+
+#[test]
+fn control_key_pointing_at_another_database_fails_startup_closed_as_unattributable() {
+    unattributable_test(
+        "control_key_pointing_at_another_database_fails_startup_closed_as_unattributable",
+        UnattributableDamage::ControlKeyPointsToForeignControl,
+    );
+}
+
+#[test]
+fn event_key_pointing_at_another_database_fails_startup_closed_as_unattributable() {
+    unattributable_test(
+        "event_key_pointing_at_another_database_fails_startup_closed_as_unattributable",
+        UnattributableDamage::EventKeyPointsToForeignEvent,
+    );
+}
+
+#[test]
+fn started_event_payload_identity_contradicting_its_key_fails_startup_closed_as_unattributable() {
+    unattributable_test(
+        "started_event_payload_identity_contradicting_its_key_fails_startup_closed_as_unattributable",
+        UnattributableDamage::EventPayloadIdentityContradictsKey,
     );
 }
 
