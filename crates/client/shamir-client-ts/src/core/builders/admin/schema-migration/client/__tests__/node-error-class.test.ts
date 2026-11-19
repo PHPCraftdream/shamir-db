@@ -38,7 +38,12 @@ function transport(behavior: Behavior): {
   execute(
     db: string,
     batch: object,
-  ): Promise<{ results: Record<string, { records: unknown[] }> }>;
+  ): Promise<{
+    id: number;
+    results: Record<string, { records: Array<Record<string, never>> }>;
+    execution_plan: string[][];
+    execution_time_us: number;
+  }>;
   readonly seenAliases: string[];
 } {
   const seenAliases: string[] = [];
@@ -53,7 +58,14 @@ function transport(behavior: Behavior): {
       for (const alias of aliases) {
         const outcome = behavior(alias);
         if (!outcome.ok) throw outcome.error;
-        return { results: { [alias]: { records: [outcome.record] } } };
+        return {
+          id: 1,
+          results: {
+            [alias]: { records: [outcome.record as Record<string, never>] },
+          },
+          execution_plan: [],
+          execution_time_us: 0,
+        };
       }
       throw new Error('scripted transport received no known alias');
     },

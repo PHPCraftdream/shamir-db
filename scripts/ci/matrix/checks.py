@@ -335,7 +335,7 @@ def run_checks(root, metadata, edge_text, content_provider=None, source_paths=No
     for edge in edges:
         unknown = set(edge.get("crates", ())) - members
         findings.extend(f"edges.toml names unknown workspace crate {name}" for name in sorted(unknown))
-        unsupported = set(edge.get("flags", ())) - {"ts"}
+        unsupported = set(edge.get("flags", ())) - {"ts", "node"}
         findings.extend(f"edges.toml has unsupported edge flag {flag}" for flag in sorted(unsupported))
     sources = source_paths if source_paths is not None else _tracked_rust(root)
     if content_provider is None:
