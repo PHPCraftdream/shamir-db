@@ -28,7 +28,7 @@ use super::harness::{
     boot, overwrite_profile, profile_env, profile_text, run_shell, run_shell_ok, seed_catalogue,
     seed_shell_user, write_profile, write_profile_with_pin, ShellFixture, ShellRun, DB_NAME,
     FN_NAME, INDEXED_TABLE, INDEX_NAME, INDEX_ODD_NAME, PLAIN_TABLE, PROFILE_NAME, REPO_NAME,
-    SCHEMA_TABLE, SERVER_BIN, SHELL_USER,
+    SCHEMA_TABLE, SHELL_USER,
 };
 
 /// `shell/output.rs` `sanitize` (upper hex `{:04X}`) of [`super::harness::INDEX_ODD_NAME`]: the DECODED record string the projection emits — backslash-u literals, the exact expected text.
@@ -264,12 +264,18 @@ fn run_catalogue_matrix(fixture: &ShellFixture) {
     assert_eq!(got, Some(SCHEMA_TABLE));
     let repo = record.pointer("/data/repo").and_then(Value::as_str);
     assert_eq!(repo, Some(REPO_NAME));
-    // `Int` projects to decimal text (read via `as_str` + parse); seeded table version zero.
+    // `Int` projects to decimal text (read via `as_str` + parse). The harness
+    // applies the schema through ONE `SetTableSchema` call on a table created
+    // WITHOUT a `schema_version` field: the server defaults the absent field
+    // to 0 (`admin_schema.rs:401-405`) and then increments to 1
+    // (`admin_schema.rs:498`), persisting and echoing 1
+    // (`admin_schema.rs:579-584`); `GetTableSchema` reads that same catalogue
+    // field back (`admin_schema.rs:968-983`) — so the projected version is 1.
     let version = record
         .pointer("/data/schema_version")
         .and_then(Value::as_str)
         .and_then(|text| text.parse::<u64>().ok());
-    assert_eq!(version, Some(0), "schema_version is the projected Int 0");
+    assert_eq!(version, Some(1), "schema_version is the projected Int 1");
     let schema = record
         .pointer("/data/schema")
         .and_then(Value::as_array)
@@ -380,6 +386,7 @@ const DEFERRAL_MESSAGE: &str =
 const RESUME_MESSAGE: &str = "session resume is never used by the admin shell; log in fresh";
 
 /// The fixed Windows `--secret-fd` refusal message.
+#[cfg(windows)]
 const FD_MESSAGE: &str = "--secret-fd is Unix-only; use --secret-stdin";
 
 /// The fixed non-superuser denial message.
@@ -549,7 +556,7 @@ fn spawn_direct(
     fixture.guard.mark("shell: direct spawn");
     let outcome = fixture.rt.run(async move {
         tokio::time::timeout(Duration::from_secs(120), async move {
-            let mut command = tokio::process::Command::new(SERVER_BIN);
+            let mut command = super::harness::server_command();
             command
                 .args(&argv)
                 .env(env_key, env_value)
@@ -954,7 +961,7 @@ fn shell_transport_scripted_interactive() {
         &mut input,
         &mut stderr,
         &terminal,
-        path.parent().expect("fixture profiles root"),
+        Some(path.parent().expect("fixture profiles root")),
     );
     assert_eq!(exit, 0, "scripted interactive session must succeed");
     // Human tables go to the injected stderr: both command heads ran (a

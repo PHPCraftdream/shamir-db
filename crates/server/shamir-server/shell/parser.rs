@@ -15,8 +15,9 @@
 //! bounded by [`super::connect::REQUEST_TIMEOUT`]; Ctrl+C maps to
 //! [`ShellError::Interrupted`]. For the in-package `tests/admin/` acceptance
 //! (no TTY in CI), [`run_scripted`] drives the SAME loop from injected
-//! input/stderr/terminal/profile root; the production dispatch never uses
-//! it and stdout stays silent in it.
+//! input/stderr/terminal/profile root; the production interactive arm
+//! delegates to the same entry with the real handles and `None` profile
+//! root, and stdout stays silent in it.
 
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
@@ -234,83 +235,62 @@ enum FunctionCommand {
 }
 
 /// Shell entry point; argv after the leading `shell` token. Returns the
-/// design §5 exit code.
+/// design §5 exit code. The locks are taken up front (locking is
+/// side-effect-free); the §5 TTY gate still runs inside [`run_scripted`]
+/// only after the policy refusals, exactly as before.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
-    run_inner(args)
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut input = stdin.lock();
+    let mut stderr = stderr.lock();
+    run_scripted(
+        args,
+        &mut input,
+        &mut stderr,
+        terminal::secret::os_terminal(),
+        None,
+    )
 }
 
-/// Scripted-regression entry for the in-package `tests/admin/` target (no
-/// TTY in CI): identical argv handling, parsing, policy refusals, profile
-/// loading, secret resolution, SCRAM dialing and dispatch as [`run`], with
-/// `input`/`stderr`/`terminal`/`profile_root` injected. No production TTY
-/// gate; batch mode after `--` is refused; no global environment is read;
-/// never used by the production dispatch.
-///
-/// `#[cfg(test)] pub(crate)`, not plain `pub`: no production caller uses it,
-/// so `cfg(test)` keeps it out of the production build entirely; the binary's
-/// own `#[cfg(test)]` build and the `tests/admin/` integration target both
-/// reference it, keeping it alive under `-D warnings`.
-#[cfg(test)]
+/// The ONE dispatch implementation (design §5): argv handling (secret
+/// refusal, batch split, fixed help), option parsing, runtime build, policy
+/// refusals, then batch or interactive over the context handles. BOTH
+/// callers land here, so the seam the `tests/admin/` acceptance target
+/// drives is literally the production code path: the live dispatch
+/// ([`run`]) passes `profile_root: None` with the real stdin/stderr locks
+/// and OS terminal (the operator profile directory still resolves lazily
+/// inside `connect::load`, and the TTY gate runs after the policy
+/// refusals, exactly as before), while the no-TTY acceptance target passes
+/// injected `input`/`stderr`/`terminal` and an explicit `profile_root`
+/// (`Some`), which additionally refuses batch mode after `--` and never
+/// reads the process-global environment.
 pub(crate) fn run_scripted(
     args: impl IntoIterator<Item = OsString>,
     input: &mut dyn Read,
     stderr: &mut dyn Write,
     terminal: &dyn Terminal,
-    profile_root: &Path,
+    profile_root: Option<&Path>,
 ) -> u8 {
+    let live = profile_root.is_none();
     let argv: Vec<OsString> = args.into_iter().collect();
     if let Some(code) = refuse_argv_secret(&argv) {
         return code;
     }
     let (option_tokens, command_tokens) = split_batch(&argv);
-    // Fixed `--help` through the injected writer so the capture sees it.
-    if option_tokens.iter().any(|arg| arg == "--help") {
+    // Fixed help through the caller's writer (either spelling in the live
+    // dispatch; the scripted seam never treats a bare `help` command as
+    // help). Never argv-derived text, no stdout record.
+    let help_requested = option_tokens.iter().any(|arg| arg == "--help")
+        || (live
+            && matches!(command_tokens.as_deref(), Some([one]) if *one == *OsStr::new("help")));
+    if help_requested {
         let _ = stderr.write_all(INTERACTIVE_HELP.as_bytes());
         let _ = stderr.flush();
         return 0;
     }
-    if command_tokens.is_some() {
+    if !live && command_tokens.is_some() {
+        // Scripted seam: batch mode after `--` is refused outright.
         return pre_refuse(ShellError::Usage);
-    }
-    let shell = match <ShellArgs as ClapParser>::try_parse_from(
-        iter::once(OsString::from("shell")).chain(option_tokens.iter().cloned()),
-    ) {
-        Ok(shell) => shell,
-        Err(_) => return pre_refuse(ShellError::Usage),
-    };
-    let runtime = match build_runtime() {
-        Ok(runtime) => runtime,
-        Err(err) => return pre_refuse(err),
-    };
-    if shell.resume {
-        return pre_refuse(ShellError::Resume);
-    }
-    if shell.auth.as_deref() == Some("token") {
-        return pre_refuse(ShellError::Token);
-    }
-    if shell.output_version.is_some_and(|version| version != 1) {
-        return pre_refuse(ShellError::OutputVersion);
-    }
-    let mut ctx = Ctx {
-        input,
-        stderr,
-        terminal,
-        profile_root: Some(profile_root),
-    };
-    run_interactive(&shell, &runtime, &mut ctx)
-}
-
-fn run_inner(args: impl IntoIterator<Item = OsString>) -> u8 {
-    let argv: Vec<OsString> = args.into_iter().collect();
-    if let Some(code) = refuse_argv_secret(&argv) {
-        return code;
-    }
-    let (option_tokens, command_tokens) = split_batch(&argv);
-    let help_requested = option_tokens.iter().any(|arg| arg == "--help")
-        || matches!(command_tokens.as_deref(), Some([one]) if *one == *OsStr::new("help"));
-    if help_requested {
-        write_fixed_stderr(INTERACTIVE_HELP);
-        return 0;
     }
     let shell = match <ShellArgs as ClapParser>::try_parse_from(
         iter::once(OsString::from("shell")).chain(option_tokens.iter().cloned()),
@@ -320,27 +300,24 @@ fn run_inner(args: impl IntoIterator<Item = OsString>) -> u8 {
         // ever surfaced.
         Err(_) => return pre_refuse(ShellError::Usage),
     };
+    // Exactly one runtime, built before any policy refusal (§5 ordering).
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(err) => return pre_refuse(err),
     };
     match command_tokens {
         Some(tokens) => {
-            // Stack-owned locks, borrowed by the context for the dispatch only.
-            let stdin = io::stdin();
-            let stderr = io::stderr();
-            let mut input = stdin.lock();
-            let mut stderr = stderr.lock();
             let mut ctx = Ctx {
-                input: &mut input,
-                stderr: &mut stderr,
-                terminal: terminal::secret::os_terminal(),
+                input,
+                stderr,
+                terminal,
                 profile_root: None,
             };
             run_batch(&shell, tokens, &runtime, &mut ctx)
         }
         None => {
-            // Interactive policy refusals stay stderr-only.
+            // Interactive policy refusals stay stderr-only and precede the
+            // TTY gate (§5 ordering; shared by live and scripted callers).
             if shell.resume {
                 return pre_refuse(ShellError::Resume);
             }
@@ -350,19 +327,16 @@ fn run_inner(args: impl IntoIterator<Item = OsString>) -> u8 {
             if shell.output_version.is_some_and(|version| version != 1) {
                 return pre_refuse(ShellError::OutputVersion);
             }
-            // The TTY gate runs before any lock is taken.
-            if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            // The live TTY gate runs only here, after the refusals; the
+            // scripted caller has no gate (injected handles, CI has no TTY).
+            if live && (!io::stdin().is_terminal() || !io::stdout().is_terminal()) {
                 return pre_refuse(ShellError::MissingTty);
             }
-            let stdin = io::stdin();
-            let stderr = io::stderr();
-            let mut input = stdin.lock();
-            let mut stderr = stderr.lock();
             let mut ctx = Ctx {
-                input: &mut input,
-                stderr: &mut stderr,
-                terminal: terminal::secret::os_terminal(),
-                profile_root: None,
+                input,
+                stderr,
+                terminal,
+                profile_root,
             };
             run_interactive(&shell, &runtime, &mut ctx)
         }
@@ -504,13 +478,6 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
             return exit;
         }
     }
-}
-
-/// Writes one fixed, locally authored text block to stderr.
-fn write_fixed_stderr(text: &str) {
-    let mut stderr = io::stderr();
-    let _ = stderr.write_all(text.as_bytes());
-    let _ = stderr.flush();
 }
 
 /// Stable space-separated command id for the JSON v1 `command` field.

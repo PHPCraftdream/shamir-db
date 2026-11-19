@@ -17,14 +17,20 @@
 //! the accumulator is cleared, memory stays bounded) until the line's LF/CR
 //! terminator; byte 3 still interrupts during the discard. Only then is
 //! [`ShellError::SecretTooLong`] reported. The reader never joins a second
-//! line and never consumes bytes past the first terminator, so a multi-line
-//! paste cannot leak its tail into the command stream. A real OS read
+//! line and never joins a second line: bytes after the first terminator
+//! only reach this reader if the OS already delivered them in the same
+//! 64-byte chunk (they are dropped here); anything still queued for the tty
+//! goes to the next reader, so a multi-line paste cannot leak its tail into
+//! the command stream as part of THIS line. A real OS read
 //! failure is distinct from this policy: it is reported as
 //! [`ShellError::SecretTerminal`] (the terminal itself failed) and cannot
 //! wait for a terminator that may never come. A clean EOF mid-line remains
 //! an incomplete-line refusal ([`ShellError::InvalidSecret`]).
-//! Backspace (the tty's `VERASE` character) edits the line; LF and CR both
-//! terminate it. `/dev/tty` is used, not stdin, so an explicitly requested
+//! Backspace (the tty's `VERASE` character) edits the line; the FIRST CR or
+//! LF terminates it (`secret::is_hidden_enter` — the one shared TTY framing
+//! rule: Enter arrives as CR, LF, or CRLF and the reader never waits for an
+//! optional LF after a CR, so a single-CR console Enter submits at once;
+//! a CR is always a terminator here, never password content). `/dev/tty` is used, not stdin, so an explicitly requested
 //! batch prompt works with redirected stdin.
 
 use std::fs::{File, OpenOptions};
@@ -34,7 +40,9 @@ use zeroize::Zeroizing;
 
 use crate::shell::output::ShellError;
 
-use super::secret::{finish_session, HiddenLineSession, Terminal, SECRET_MAX_BYTES};
+use super::secret::{
+    finish_session, is_hidden_enter, HiddenLineSession, Terminal, SECRET_MAX_BYTES,
+};
 
 /// Ctrl+C arrives as byte 3 once `ISIG` is off (design: recognize byte 3 →
 /// interrupt with restore).
@@ -164,7 +172,7 @@ fn read_hidden_raw(tty: &File, erase_byte: u8) -> Result<Zeroizing<Vec<u8>>, She
         for &byte in &chunk[..read] {
             match byte {
                 INTR_BYTE => return Err(ShellError::Interrupted),
-                b'\n' | b'\r' => {
+                byte if is_hidden_enter(u16::from(byte)) => {
                     if over_limit {
                         return Err(ShellError::SecretTooLong);
                     }

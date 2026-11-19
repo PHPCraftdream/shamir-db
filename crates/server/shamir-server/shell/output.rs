@@ -48,6 +48,8 @@ pub(crate) enum ShellError {
     InsecureProfile,
     InvalidSecret,
     InsecureSecret,
+    /// Windows-only: `--secret-fd` is refused there (Unix reads the fd).
+    #[cfg(windows)]
     SecretFdWindows,
     ArgvSecret,
     SecretTerminal,
@@ -80,6 +82,7 @@ impl ShellError {
             ShellError::InsecureProfile => "insecure_profile",
             ShellError::InvalidSecret => "invalid_secret",
             ShellError::InsecureSecret => "insecure_secret",
+            #[cfg(windows)]
             ShellError::SecretFdWindows => "secret_fd_windows",
             ShellError::ArgvSecret => "secret_on_argv_refused",
             ShellError::SecretTerminal => "secret_prompt_unavailable",
@@ -129,6 +132,7 @@ impl ShellError {
             ShellError::InsecureSecret => {
                 "the requested secret source is refused; use --secret-stdin, --secret-fd, or --secret-env"
             }
+            #[cfg(windows)]
             ShellError::SecretFdWindows => "--secret-fd is Unix-only; use --secret-stdin",
             ShellError::ArgvSecret => {
                 "secrets on the command line are refused; use --secret-stdin, --secret-fd, or --secret-env"
@@ -168,11 +172,12 @@ impl ShellError {
             | ShellError::InsecureProfile
             | ShellError::InvalidSecret
             | ShellError::InsecureSecret
-            | ShellError::SecretFdWindows
             | ShellError::ArgvSecret
             | ShellError::SecretTerminal
             | ShellError::SecretTooLong
             | ShellError::SecretSourceConflict => 6,
+            #[cfg(windows)]
+            ShellError::SecretFdWindows => 6,
             ShellError::Timeout => 7,
             ShellError::Interrupted => 130,
         }

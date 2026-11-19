@@ -28,7 +28,13 @@
 //! multi-line paste cannot leak its tail into the command stream. A real
 //! OS read failure (`ReadConsoleW` returning zero) is distinct from policy:
 //! it is reported immediately as [`ShellError::SecretTerminal`] — the
-//! terminal itself failed and a terminator may never come. No flush of the
+//! terminal itself failed and a terminator may never come. Termination
+//! follows the ONE shared TTY framing rule (`secret::is_hidden_enter`):
+//! Enter arrives as CR, LF, or CRLF and the FIRST CR or LF ends the line —
+//! the reader never waits for an optional LF after a CR, so a native
+//! console Enter that delivers a single CR submits the line at once.
+//! Unlike the piped reader, a CR is always a terminator here, never
+//! password content. No flush of the
 //! console input buffer after the terminator is implemented: flushing would
 //! require an unchecked `FlushConsoleInputBuffer` call, which this module
 //! deliberately avoids. The exact limitation: bytes the OS delivered in the
@@ -52,7 +58,9 @@ use zeroize::Zeroizing;
 
 use crate::shell::output::ShellError;
 
-use super::secret::{finish_session, HiddenLineSession, Terminal, SECRET_MAX_BYTES};
+use super::secret::{
+    finish_session, is_hidden_enter, HiddenLineSession, Terminal, SECRET_MAX_BYTES,
+};
 
 /// Ctrl+C arrives as this character once `ENABLE_PROCESSED_INPUT` is off.
 const INTR_CHAR: u16 = 3;
@@ -215,7 +223,7 @@ fn read_hidden_utf16(guard: &ConsoleEchoOffGuard) -> Result<Zeroizing<Vec<u8>>, 
             if unit == INTR_CHAR {
                 return Err(ShellError::Interrupted);
             }
-            if unit == b'\r' as u16 || unit == b'\n' as u16 {
+            if is_hidden_enter(unit) {
                 if let Some(err) = pending_error {
                     return Err(err);
                 }

@@ -1,36 +1,15 @@
 //! Offline / output-contract acceptance for the administrative shell
-//! (R5 PR1, design `docs/dev-artifacts/design/admin-shell.md` §§2, 5, 8),
-//! against the REAL production binary (`CARGO_BIN_EXE_shamir-server`,
-//! driven exactly as an operator would):
+//! (R5 PR1, design `docs/dev-artifacts/design/admin-shell.md` §§2, 5, 8)
+//! against the REAL production binary: one LF-terminated JSON record per
+//! local command; typed POST-parse errors carry the FULL golden record;
+//! `--output-version` precedes any dial; no server config reads. The
+//! scripted loop captures disable → write → flush → read → restore; the
+//! direct prompt-seam tests feed the fake RAW bytes in every Enter shape
+//! (CR, LF, CRLF), split with the PRODUCTION `is_hidden_enter` rule. The
+//! shared bounded reader keeps interior CRs and enforces the cap. The
+//! canary never reaches the profile home; no history file exists.
 //!
-//! * one LF-terminated JSON Lines v1 record per local `profile` command on
-//!   stdout, nothing on stderr; argv secrets refused pre-parse on stderr
-//!   ONLY; a typed POST-parse error carries the FULL golden record;
-//! * `--output-version 1` succeeds on a LIVE `ping`; `--output-version 2`
-//!   is a POST-parse typed error (`op: null`, exit 1) on the SAME live
-//!   profile, proving the version check precedes any dial;
-//! * the `--` grammar is exact; interactive mode refused on piped streams,
-//!   stderr only; the shell never reads server config, while `run` and the
-//!   offline `format-migrate` keep requiring and validating `--config`;
-//! * the scripted interactive loop (`run_scripted` seam) captures
-//!   disable → prompt write/flush → read → restore on success and failure
-//!   paths, with the REAL fixture canary as the scripted secret and the
-//!   actual `ping` result rendered; a scripted failed explicit `connect`
-//!   then `ping` proves one prompt attempt, no source reread, and the
-//!   typed second-command `connection_failed` refusal;
-//! * the direct prompt-seam tests drive `read_secret_with_writer` with no
-//!   fixture boot (success, interrupted read, restore precedence, write
-//!   failure);
-//! * the shared bounded secret reader (`read_line_bounded`, driven directly
-//!   through its byte-source seam on every OS) keeps interior and
-//!   unterminated CRs, strips only one CR paired with the LF terminator,
-//!   and enforces the 4096-byte cap (`secret_too_long`, never truncated)
-//!   plus the empty/non-UTF-8 typed refusals;
-//! * the fixture canary never reaches any file under the profile home and
-//!   no history file exists (secret-leak byte-scan, design §8).
-//!
-//! Assertion discipline: captured child bytes are never formatted into a
-//! panic message (they may carry a canary or peer-supplied text).
+//! Captured child bytes are never formatted into a panic message.
 
 use std::cell::RefCell;
 use std::io::{Cursor, Write};
@@ -77,19 +56,17 @@ const USAGE_MESSAGE: &str = "invalid command usage";
 const INVALID_SECRET_CODE: &str = "invalid_secret";
 const CONNECTION_CODE: &str = "connection_failed";
 
-// ── Direct binary runner (server-mode probes use this small local
-//    helper; the harness runner is shell-shaped) ──────────────────────
+// ── Direct binary runner ─────────────────────────────────────────────
 
-/// One direct run of the production binary: exit status plus captured
-/// streams, bounded by [`BINARY_BOUND`] (hang detector, not a latency
-/// assertion); on elapse the child is killed and the panic names the
-/// bound. Stdin is piped and closed at once: no probe here reads stdin.
+/// One direct run of the production binary via the harness's sanitized
+/// env helper (`server_command`), bounded by [`BINARY_BOUND`]; stdin is
+/// piped and closed at once: no probe reads stdin.
 fn run_binary(cwd: &Path, env: Option<(&'static str, String)>, args: &[&str]) -> harness::ShellRun {
     let cwd = cwd.to_path_buf();
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let runtime = harness::TestRuntime::new();
     runtime.run(async move {
-        let mut command = tokio::process::Command::new(harness::SERVER_BIN);
+        let mut command = harness::server_command();
         command
             .args(&args)
             .current_dir(&cwd)
@@ -105,9 +82,8 @@ fn run_binary(cwd: &Path, env: Option<(&'static str, String)>, args: &[&str]) ->
         // both the EOF the contract expects and the no-secret discipline.
         drop(child.stdin.take());
         match tokio::time::timeout(BINARY_BOUND, child.wait_with_output()).await {
-            // Both timeout and io layers matched: a pipe-capture failure is
-            // a typed local panic, never a misread of a half-collected
-            // `Output`.
+            // A pipe-capture failure is a typed local panic, never a
+            // misread of a half-collected `Output`.
             Ok(Ok(output)) => harness::ShellRun {
                 exit_code: output.status.code().unwrap_or(-1),
                 stdout: output.stdout,
@@ -264,8 +240,7 @@ fn assert_no_canary(run: &harness::ShellRun, canary: &str) {
     );
 }
 
-/// Secret-leak byte-scan over the profile home: the canary must appear in
-/// NO file there and no history file may exist (design §5, §8).
+/// Secret-leak scan: canary in NO profile-home file, no history file.
 fn assert_no_canary_on_disk(fixture: &harness::ShellFixture) {
     let canary = fixture.canary.as_bytes();
     let mut stack = vec![fixture.profile_home.path().to_path_buf()];
@@ -519,6 +494,39 @@ fn shell_runs_without_server_config_from_isolated_cwd() {
 }
 
 #[test]
+fn real_binary_shell_help_is_local_only_menu_without_prompt_or_dial() {
+    // REAL binary `shell --help`, isolated empty cwd, env stripped
+    // (`server_command`), stdin piped/closed: no profile exists, so no
+    // dial can happen. A few STABLE menu lines asserted whitespace-exact
+    // per line; no typed error and no secret prompt may appear.
+    let cwd = TempDir::new().expect("help cwd tempdir");
+    let run = run_binary(cwd.path(), None, &["shell", "--help"]);
+    assert_eq!(run.exit_code, 0, "shell --help exits 0");
+    assert!(
+        run.stdout.is_empty(),
+        "help must not write a stdout record ({} bytes)",
+        run.stdout.len()
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    for line in [
+        "commands:",
+        "  ping",
+        "  profile list | profile show NAME",
+        "  quit | exit",
+        "secret source flags: --secret-stdin | --secret-fd N (Unix only) | --secret-env NAME | --secret-prompt",
+    ] {
+        assert!(
+            stderr.lines().any(|found| found == line),
+            "stderr must carry the exact menu line {line:?}"
+        );
+    }
+    assert!(
+        !stderr.contains("password: "),
+        "help must not prompt for a secret"
+    );
+}
+
+#[test]
 fn shell_refuses_explicit_config_flag_as_usage() {
     let fixture = harness::boot("shell_output_config_flag_refused");
     harness::write_profile(&fixture);
@@ -531,8 +539,7 @@ fn shell_refuses_explicit_config_flag_as_usage() {
     assert_pre_refusal("config flag", &run, 1, USAGE_CODE, USAGE_MESSAGE);
 }
 
-/// One pre-existing (legacy subcommand) config-path probe: exact exit code
-/// and a local diagnostic marker in stderr (never a clap echo).
+/// Legacy config-path probe: exact exit code, local stderr marker.
 fn expect_legacy_config_outcome(cwd: &Path, args: &[&str], exit: i32, marker: &str) {
     let run = run_binary(cwd, None, args);
     assert_eq!(
@@ -625,8 +632,8 @@ impl ScriptLog {
     }
 }
 
-/// Scripted fake terminal: scripted outcomes per seam step plus the call
-/// order on the SHARED log; it never restores on its own.
+/// Scripted fake terminal: RAW outcomes per seam step plus the call
+/// order on the SHARED log. Success `read` payloads end in a terminator.
 struct FakeTerminal {
     read: Result<Zeroizing<Vec<u8>>, ShellError>,
     restore: Result<(), ShellError>,
@@ -653,10 +660,17 @@ struct FakeSession {
 impl HiddenLineSession for FakeSession {
     fn read_line(&mut self) -> Result<Zeroizing<Vec<u8>>, ShellError> {
         self.log.push("read");
-        match &self.read {
-            Ok(bytes) => Ok(bytes.clone()),
-            Err(error) => Err(*error),
-        }
+        let raw = match &self.read {
+            Ok(bytes) => bytes.clone(),
+            Err(error) => return Err(*error),
+        };
+        // The PRODUCTION Enter rule (`is_hidden_enter`): first CR/LF
+        // ends the line, no optional-LF wait; EOF mid-line is refused.
+        let end = raw
+            .iter()
+            .position(|byte| crate::shell::terminal::secret::is_hidden_enter(u16::from(*byte)))
+            .ok_or(ShellError::InvalidSecret)?;
+        Ok(Zeroizing::new(raw[..end].to_vec()))
     }
 
     fn restore(self: Box<Self>) -> Result<(), ShellError> {
@@ -674,8 +688,7 @@ fn fake_terminal(
     FakeTerminal { read, restore, log }
 }
 
-/// One direct prompt attempt through the scripted seams, NO fixture boot:
-/// one shared log timeline, captured stderr (optional prompt-write failure).
+/// One direct prompt attempt through the scripted seams, NO fixture boot.
 fn direct_prompt(
     read: Result<Zeroizing<Vec<u8>>, ShellError>,
     restore: Result<(), ShellError>,
@@ -688,8 +701,7 @@ fn direct_prompt(
     (secret, log, stderr.sink)
 }
 
-/// One complete prompt attempt: disable → write → flush → read → restore,
-/// each observed exactly once (no retry, no reread).
+/// One prompt attempt: disable → write → flush → read → restore, once.
 fn assert_single_prompt_attempt(log: &ScriptLog, label: &str) {
     log.assert_subsequence(
         label,
@@ -702,37 +714,41 @@ fn assert_single_prompt_attempt(log: &ScriptLog, label: &str) {
 
 #[test]
 fn prompt_success_disables_reads_then_restores() {
-    // Success: the secret round-trips, the prompt was written+flushed
-    // once, and the PRODUCTION code restored the terminal — with no boot.
-    let (secret, log, sink) = direct_prompt(
-        Ok(Zeroizing::new(b"scripted-secret".to_vec())),
-        Ok(()),
-        false,
-    );
-    let secret = secret.expect("prompt read succeeds");
-    assert_eq!(
-        secret.as_slice(),
-        b"scripted-secret",
-        "secret bytes round-trip"
-    );
-    assert_single_prompt_attempt(&log, "prompt success");
-    let prompts = String::from_utf8_lossy(&sink).matches("password: ").count();
-    assert_eq!(prompts, 1, "password prompt written once");
+    // RAW scripted bytes in every Enter shape (CR, LF, CRLF, plus bytes
+    // past the terminator), split with the PRODUCTION `is_hidden_enter`
+    // rule — never pretrimmed, never blocking on an optional LF.
+    let shapes: [&[u8]; 5] = [
+        b"scripted-secret\r",
+        b"scripted-secret\n",
+        b"scripted-secret\r\n",
+        &b"scripted-secret\r\ntrailing"[..],
+        &b"scripted-secret\rmore"[..],
+    ];
+    for raw in shapes {
+        let (secret, log, sink) = direct_prompt(Ok(Zeroizing::new(raw.to_vec())), Ok(()), false);
+        assert_eq!(
+            secret.expect("prompt read succeeds").as_slice(),
+            b"scripted-secret",
+            "the FIRST CR/LF ends the line; later bytes never read"
+        );
+        assert_single_prompt_attempt(&log, "prompt success");
+        let prompts = String::from_utf8_lossy(&sink).matches("password: ").count();
+        assert_eq!(prompts, 1, "password prompt written once");
+    }
 }
 
 #[test]
 fn prompt_failure_paths_restore_in_order_and_report() {
-    // Failure paths, no boot: restore STILL happens on every path; an
-    // interrupted read reports the read error; a failed restore outranks
-    // the read outcome (the production match arms decide the precedence).
+    // Failure paths, no boot: restore STILL happens on every path; a
+    // failed restore outranks the read outcome (production precedence).
     let (secret, log, _) = direct_prompt(Err(ShellError::Interrupted), Ok(()), false);
     let error = secret.expect_err("an interrupted read is a typed refusal");
     assert_eq!(error, ShellError::Interrupted, "read error reported");
     assert_single_prompt_attempt(&log, "prompt interrupted");
     for (read, label) in [
         (
-            Ok(Zeroizing::new(b"scripted-secret".to_vec())),
-            "restore wins over success",
+            Ok(Zeroizing::new(b"scripted-secret\n".to_vec())),
+            "restore wins",
         ),
         (Err(ShellError::Interrupted), "restore wins over read error"),
     ] {
@@ -742,10 +758,10 @@ fn prompt_failure_paths_restore_in_order_and_report() {
         assert_single_prompt_attempt(&log, label);
     } // restore-error precedence loop
 
-    // Prompt-write failure after disable: restore BEFORE reporting; the
-    // reader never runs and the secret never reaches the writer.
+    // Prompt-write failure after disable: restore BEFORE reporting; no
+    // read and no secret at the writer.
     let (secret, log, sink) =
-        direct_prompt(Ok(Zeroizing::new(b"never-read".to_vec())), Ok(()), true);
+        direct_prompt(Ok(Zeroizing::new(b"never-read\n".to_vec())), Ok(()), true);
     let error = secret.expect_err("a failed prompt write must fail the prompt");
     assert_eq!(
         error,
@@ -765,20 +781,19 @@ fn prompt_failure_paths_restore_in_order_and_report() {
 
 #[test]
 fn in_process_shell_run_help_is_reachable_and_exits_zero() {
-    // Reachability root: fixed `--help` needs no config, dial or secret.
+    // Reachability root: `--help` needs no config, dial or secret.
     let exit = crate::shell::run(["--help".into()]);
     assert_eq!(exit, 0, "the fixed --help path exits 0");
 }
 
 // ── Scripted interactive REPL (coordinated `run_scripted` seam) ─────
 
-// `run_scripted(args, input, stderr, terminal, profile_root)` drives the
-// REAL interactive loop in-process: scripted stdin, captured stderr, the
-// [`FakeTerminal`], and an explicit profile root replacing the env lookup.
+// `run_scripted` drives the REAL interactive loop in-process: scripted
+// stdin, captured stderr, the [`FakeTerminal`], an injected profile root.
 /// A scripted stderr for [`crate::shell::parser::run_scripted`]: captures
 /// every byte AND logs each write into the SHARED [`ScriptLog`] (exact
-/// `password: ` prompt → `prompt-write` + its ONE trailing flush →
-/// `prompt-flush`, REPL prompt → `repl-prompt`, else `stderr-write`).
+/// `password: ` prompt → `prompt-write`, its flush → `prompt-flush`,
+/// REPL prompt → `repl-prompt`, else `stderr-write`).
 struct ScriptedStderr {
     log: ScriptLog,
     sink: Vec<u8>,
@@ -828,9 +843,8 @@ impl Write for ScriptedStderr {
     }
 }
 
-/// One scripted REPL session: the fixture profile LEAF is written and its
-/// PARENT (the profiles root `connect::load_from` verifies — NOT the
-/// profile home) is the injected profile root; SHARED timeline.
+/// One scripted REPL session: the fixture profile LEAF is written and
+/// its PARENT is the injected profile root; SHARED timeline.
 fn scripted_session(
     fixture: &harness::ShellFixture,
     lines: &str,
@@ -851,21 +865,24 @@ fn scripted_session(
         &mut input,
         &mut stderr,
         &terminal,
-        &root,
+        Some(&root),
     );
     (exit, log, stderr.sink)
 }
 
 #[test]
 fn scripted_prompt_success_orders_disable_write_read_restore() {
-    // Scripted `ping` then `quit`: the FULL cross-seam ordering, the REAL
-    // fixture canary as the scripted secret (the dial authenticates), and
-    // the actual `ping` RESULT proved (the rendered `ok true` row).
+    // Scripted `ping` then `quit`: FULL cross-seam ordering, the REAL
+    // fixture canary as the secret, the rendered `ok true` row proved.
     let fixture = harness::boot("shell_output_scripted_prompt_order");
+    // The fake REQUIRES a terminator: raw canary bytes ending in LF,
+    // exactly as a real terminal Enter delivers them.
+    let mut canary_raw = fixture.canary.as_bytes().to_vec();
+    canary_raw.push(b'\n');
     let (exit, log, sink) = scripted_session(
         &fixture,
         "ping\nquit\n",
-        Ok(Zeroizing::new(fixture.canary.as_bytes().to_vec())),
+        Ok(Zeroizing::new(canary_raw)),
         Ok(()),
     );
     assert_eq!(exit, 0, "the scripted session ends cleanly on quit");
@@ -914,12 +931,10 @@ fn scripted_failed_explicit_connect_then_ping_has_no_retry_or_source_reread() {
 
 // ── Shared bounded reader: CR / LF terminator + cap discipline ───────
 
-// The shared reader (`read_line_bounded` in the production secret module)
-// strips exactly one CR paired with the LF terminator; interior and
-// unterminated CRs are CONTENT, never truncated secrets. Bytes are
-// injected through the reader's `pub(crate)` byte-source seam (a closure
-// over the payload slice), so the REAL reader loop is driven
-// byte-for-byte on EVERY OS — no fd, no platform split.
+// The shared reader strips one CR paired with the LF terminator;
+// interior and unterminated CRs are CONTENT. Bytes are injected through
+// the byte-source seam (a closure over the payload slice), so the REAL
+// reader loop is driven byte-for-byte on EVERY OS — no platform split.
 
 /// Read one line through the REAL shared bounded reader.
 fn reader_line(payload: &[u8]) -> Result<Zeroizing<Vec<u8>>, ShellError> {

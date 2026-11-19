@@ -385,6 +385,19 @@ pub(crate) fn read_line_bounded(
     finish_session(bytes)
 }
 
+/// The ONE hidden-TTY line-termination rule (FOLLOW-UP 2), shared by the
+/// real Unix adapter (byte-at-a-time, `u8` widened here), the real Windows
+/// adapter (UTF-16 units, native `u16`) and the scripted test fake
+/// (`tests/admin/shell/output.rs`): a terminal Enter arrives as CR, LF, or
+/// CRLF, and the FIRST CR or LF ends the hidden line — the reader never
+/// waits for an optional LF after a CR, so a single-CR console Enter
+/// submits at once. Unlike the piped reader ([`read_line_bounded`], where
+/// a CR paired with an LF is stripped), a hidden TTY password can never
+/// contain a CR: the first CR is always a terminator, never content.
+pub(crate) fn is_hidden_enter(unit: u16) -> bool {
+    unit == u16::from(b'\r') || unit == u16::from(b'\n')
+}
+
 /// Shared final validation for a finished line (cross-sibling helper the
 /// platform readers use too): empty is refused (BSTDIN precedent), non-UTF-8
 /// is refused; validation borrows the bytes, so no unzeroized clone or temp

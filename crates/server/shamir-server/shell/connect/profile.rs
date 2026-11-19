@@ -424,19 +424,20 @@ fn read_verified_profile(root: &Path, name: &str) -> Result<Zeroizing<Vec<u8>>, 
     read_bounded(file)
 }
 
-/// Verified directory listing (Unix) via rustix `Dir::read` (the pinned
-/// rustix 1.1.6 removed `Iterator for Dir`).
+/// Verified directory listing (Unix) via rustix `Dir::read` (rustix 1.1.6
+/// also implements `Iterator for Dir` as `next` calling `Self::read` on
+/// both the linux_raw and libc backends; iterating directly is equivalent).
 #[cfg(unix)]
 fn verified_dir_names(root: &Path) -> Result<Vec<String>, ShellError> {
     let fd = open_verified_dir(root)?;
-    let mut dir = rustix::fs::Dir::new(fd).map_err(|_| ShellError::InsecureProfile)?;
+    let dir = rustix::fs::Dir::new(fd).map_err(|_| ShellError::InsecureProfile)?;
     let mut names = Vec::new();
-    while let Some(entry) = dir.read() {
+    for entry in dir {
         let entry = entry.map_err(|_| ShellError::InsecureProfile)?;
         let name = entry
             .file_name()
             .to_str()
-            .ok_or_else(|| ShellError::InsecureProfile)?;
+            .ok_or(ShellError::InsecureProfile)?;
         if name != "." && name != ".." {
             names.push(name.to_string());
         }

@@ -36,9 +36,6 @@ use shamir_private_dir::create_private_dir;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::BatchRequest;
-use shamir_query_types::auth::CreateUserOp;
-use shamir_query_types::auth::SecretString;
-use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac as canon;
 use shamir_server::config::ListenerConfig;
 use shamir_server::config::ListenerKind;
@@ -637,14 +634,31 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
             .any(|w| w == needle.as_bytes())
 }
 
+/// A child `Command` for [`SERVER_BIN`] with EVERY variable the production
+/// shell actually reads (audited `shell/` reads: `XDG_CONFIG_HOME`+`HOME`,
+/// `LOCALAPPDATA`, `SHAMIR_SHELL_PASSWORD`; plus `USERPROFILE` so a Windows
+/// caller's real home cannot survive a regression) stripped BEFORE the
+/// per-fixture overrides the callers apply.
+pub(super) fn server_command() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(SERVER_BIN);
+    for var in [
+        "SHAMIR_SHELL_PASSWORD",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+    ] {
+        command.env_remove(var);
+    }
+    command
+}
+
 /// Run the REAL production binary exactly as an operator would
 /// (`shamir-server shell --profile fixture --secret-stdin -- <command…>`);
 /// `args` with a `--` delimiter is used AS SUPPLIED, otherwise `--` is
 /// inserted before the command. The secret travels stdin-only; the child's
-/// home is the fixture's isolated owner-only root. Bounded by `SHELL_BOUND`
-/// — the panic names the bound, never captured output or raw argv. A
-/// refusal run may exit before reading stdin, so stdin writes tolerate a
-/// broken pipe (and only a broken pipe).
+/// home is the fixture's isolated owner-only root; the run is bounded by
+/// `SHELL_BOUND`.
 pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
     fixture.guard.mark("shell: spawn");
     let (env_key, env_value) = profile_env(fixture);
@@ -663,19 +677,18 @@ pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
         argv.extend(args.iter().map(ToString::to_string));
     }
     // An EMPTY `args` is a bare interactive probe: appending `--` there
-    // would flip the parser into command-consuming mode with nothing after
-    // it. The canary travels stdin-only — a hard fixture check, never argv.
+    // would flip the parser into command-consuming mode with nothing after it.
     assert!(
         !argv.iter().any(|arg| arg.contains(fixture.canary.as_str())),
         "fixture canary leaked into the assembled argv",
     );
     let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
-    // The child's whole home is the isolated profile home, so no history
-    // or state can land in the real user home even under a regression.
+    // The child's whole home is the isolated profile home: no state can
+    // land in the real user home even under a regression.
     let home_dir = profile_home_path(fixture);
 
     let outcome = fixture.rt.run(bound(SHELL_BOUND, async move {
-        let mut command = tokio::process::Command::new(SERVER_BIN);
+        let mut command = server_command();
         command
             .args(&argv)
             .env(env_key, env_value)
@@ -689,9 +702,8 @@ pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
         #[cfg(windows)]
         command.env("USERPROFILE", &home_dir);
         let mut child = command.spawn().expect("spawn shell child");
-        // Secret travels stdin-only; close the pipe so the child sees EOF.
-        // An early-exit refusal closes the pipe first: broken pipe is
-        // expected there, anything else is a fixture bug.
+        // stdin-only; close the pipe for EOF. An early-exit refusal closes
+        // the pipe first, so only `BrokenPipe` is tolerated downstream.
         if let Some(mut stdin) = child.stdin.take() {
             write_secret_stdin(&mut stdin, password.as_slice()).await;
             drop(stdin);
@@ -716,7 +728,7 @@ pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
 
 /// Write the canary line to the child's stdin, then flush+shutdown.
 /// `ErrorKind::BrokenPipe` is accepted (early-exit refusal); every other
-/// error is a fixture bug and panics.
+/// error is a fixture bug and panics. The line is `Zeroizing`-scrubbed.
 async fn write_secret_stdin(stdin: &mut tokio::process::ChildStdin, secret: &[u8]) {
     // Preallocated (secret + LF), zeroized so the assembled line is
     // scrubbed on drop.
@@ -796,10 +808,11 @@ async fn seed_expect(
 }
 
 /// Seed the catalogue over the REAL wire with the existing builders only:
-/// one database, one repository, two plain tables plus one with a NONEMPTY
-/// schema, a plain index, a control/ESC-byte index and one known function
-/// — every execute validated via [`seed_expect`]; indexes carry an
-/// EXPLICIT `.repo(REPO_NAME)` (create_index defaults to repo `"main"`).
+/// one database, one repository with ALL three tables (the schema-bearing
+/// one starts PLAIN — its rules land via `set_table_schema` below), a plain
+/// index, a control/ESC-byte index and one known function — every execute
+/// validated via [`seed_expect`]; indexes carry an EXPLICIT
+/// `.repo(REPO_NAME)` (create_index defaults to repo `"main"`).
 pub fn seed_catalogue(fixture: &ShellFixture) {
     fixture.guard.mark("seed: catalogue");
     let tls_addr = fixture.tls_addr;
@@ -809,12 +822,15 @@ pub fn seed_catalogue(fixture: &ShellFixture) {
         let client = connect_tls_owned(tls_addr, pin, password)
             .await
             .expect("seed: fixture verified TLS connect");
-        // Reflection self-check: without control bytes the escape tests
-        // below would assert nothing.
+        // Reflection self-check: without control bytes the escape tests assert nothing.
         assert!(
             INDEX_ODD_NAME.chars().any(char::is_control),
             "reflection index name lost its control chars",
         );
+        // `seed_expect` bound to `DB_NAME` — keeps every call one line.
+        async fn seed_db(c: &Client, alias: &str, batch: BatchRequest, field: &str, want: &str) {
+            seed_expect(c, DB_NAME, alias, batch, field, want).await;
+        }
 
         let mut b = Batch::new();
         b.id("mk_shell_db");
@@ -827,38 +843,41 @@ pub fn seed_catalogue(fixture: &ShellFixture) {
             "mkrepo",
             ddl::create_repo(REPO_NAME)
                 .engine(ddl::RepoEngine::Fjall)
-                .tables([PLAIN_TABLE, INDEXED_TABLE]),
+                .tables([PLAIN_TABLE, INDEXED_TABLE, SCHEMA_TABLE]),
         );
-        seed_expect(
-            &client,
-            DB_NAME,
-            "mkrepo",
-            b.build(),
-            "created_repo",
-            REPO_NAME,
-        )
-        .await;
+        seed_db(&client, "mkrepo", b.build(), "created_repo", REPO_NAME).await;
 
-        // `table describe` / `table schema` only emit `schema` rule rows
-        // for tables CREATED with rules.
+        // The schema table starts PLAIN (registered with the repo above) —
+        // an ordinary `CreateTable` NEVER applies rules, so they reach the
+        // catalogue only through the typed `set_table_schema` op. Assert its
+        // FULL actual echo (persist + activate; `admin_schema.rs:583-588`).
         let mut b = Batch::new();
-        b.id("mk_shell_schema_table");
-        b.create_table(
-            "mkschematable",
-            ddl::create_table(SCHEMA_TABLE).repo(REPO_NAME).schema([
+        b.id("mk_shell_schema_apply");
+        b.set_table_schema(
+            "mkset",
+            ddl::set_table_schema(SCHEMA_TABLE).repo(REPO_NAME).rules([
                 ddl::field(["score"]).int().required().build(),
                 ddl::field(["label"]).string().build(),
             ]),
         );
-        seed_expect(
-            &client,
-            DB_NAME,
-            "mkschematable",
-            b.build(),
-            "created_table",
-            SCHEMA_TABLE,
-        )
-        .await;
+        let response = client
+            .execute(DB_NAME, b.build())
+            .await
+            .expect("seed batch executes");
+        let result = response
+            .results
+            .get("mkset")
+            .expect("seed response carries the alias");
+        assert_eq!(
+            result.records.len(),
+            1,
+            "set_table_schema returns one record"
+        );
+        let record = &result.records[0];
+        assert_eq!(record.get_value_str("set_table_schema"), Some(SCHEMA_TABLE));
+        assert_eq!(record.get_value_str("repo"), Some(REPO_NAME));
+        assert_eq!(record.get_value_bool("ok"), Some(true));
+        assert_eq!(record.get_value_i64("schema_version"), Some(1));
 
         let mut b = Batch::new();
         b.id("mk_shell_index");
@@ -868,18 +887,9 @@ pub fn seed_catalogue(fixture: &ShellFixture) {
                 .repo(REPO_NAME)
                 .field("score"),
         );
-        seed_expect(
-            &client,
-            DB_NAME,
-            "mkindex",
-            b.build(),
-            "created_index",
-            INDEX_NAME,
-        )
-        .await;
+        seed_db(&client, "mkindex", b.build(), "created_index", INDEX_NAME).await;
 
-        // Distinct field, so it never collides with `by_score`; the name
-        // travels verbatim through the echo and list rows — escape it.
+        // Distinct field, so it never collides with `by_score` — escape it.
         let mut b = Batch::new();
         b.id("mk_shell_odd_index");
         b.create_index(
@@ -888,17 +898,9 @@ pub fn seed_catalogue(fixture: &ShellFixture) {
                 .repo(REPO_NAME)
                 .field("label"),
         );
-        seed_expect(
-            &client,
-            DB_NAME,
-            "mkoddindex",
-            b.build(),
-            "created_index",
-            INDEX_ODD_NAME,
-        )
-        .await;
+        let odd = INDEX_ODD_NAME;
+        seed_db(&client, "mkoddindex", b.build(), "created_index", odd).await;
 
-        // Known function from raw WASM — no wasm32 toolchain needed.
         let mut b = Batch::new();
         b.id("mk_shell_function");
         b.create_function(
@@ -908,15 +910,7 @@ pub fn seed_catalogue(fixture: &ShellFixture) {
                 .build()
                 .expect("echo function builder"),
         );
-        seed_expect(
-            &client,
-            DB_NAME,
-            "mkfn",
-            b.build(),
-            "created_function",
-            FN_NAME,
-        )
-        .await;
+        seed_db(&client, "mkfn", b.build(), "created_function", FN_NAME).await;
 
         client.close().await;
     }));
@@ -945,10 +939,12 @@ fn echo_wasm_b64() -> String {
 }
 
 /// Create the non-superuser shell account over the REAL wire and return
-/// its password — a SECOND per-run unique zeroizing canary, distinct from
-/// the admin canary. NO roles, so every `authorize_access`-gated catalogue
-/// op denies the account. HMAC follows the `user_admin_port_wire.rs` seam:
-/// canonical unsigned op → session-keyed tag → typed builder `.hmac`.
+/// its password — a SECOND per-run unique zeroizing canary. NO roles, so
+/// every `authorize_access`-gated catalogue op denies the account. Both the
+/// canonical and the transmitted op come from the typed builder only: the
+/// canonical form EXCLUDES `hmac` (and the password), so a placeholder tag
+/// yields canonical bytes equal to the real op's; the wire op carries the
+/// real session-keyed tag.
 pub fn seed_shell_user(fixture: &ShellFixture) -> Zeroizing<String> {
     fixture.guard.mark("seed: shell user");
     let tls_addr = fixture.tls_addr;
@@ -960,13 +956,11 @@ pub fn seed_shell_user(fixture: &ShellFixture) -> Zeroizing<String> {
             .await
             .expect("seed: fixture verified TLS connect (shell user)");
 
-        let unsigned = BatchOp::CreateUser(CreateUserOp {
-            create_user: SHELL_USER.to_string(),
-            password: SecretString::from(user_password.as_str().to_owned()),
-            roles: Vec::new(),
-            database: None,
-            hmac: None,
-        });
+        let placeholder = "0".repeat(64);
+        let unsigned = ddl::create_user(SHELL_USER, user_password.as_str())
+            .hmac(&placeholder)
+            .build()
+            .expect("typed create-user builder (placeholder tag)");
         let key = canon::derive_session_hmac_key(&client.session_id());
         let canonical = canon::canonical_batch_op(ROUTING_DB, &unsigned)
             .expect("canonical form of the create-user op");
