@@ -142,11 +142,33 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2"
 captrack = { workspace = true }
 
+# Admin shell (PR1, design §7/§9): strict profile directory ownership checks.
+# In-workspace path edge only — no new registry crate.
+shamir-private-dir = { path = "../../foundation/shamir-private-dir" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = "0.5"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", default-features = false, features = [
+    "std",
+    "fs",
+    "process",
+    "termios",
+    "stdio",
+] }
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
