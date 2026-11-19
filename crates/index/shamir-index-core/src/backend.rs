@@ -133,6 +133,7 @@ pub fn contextualize_db_error(error: DbError, context: String) -> DbError {
             },
         )),
         structured @ (DbError::UniqueIndexCreationFailed(..)
+        | DbError::SchemaMigrationJournalUnreadable(_)
         | DbError::WriteCommittedVisibilityPending { .. }
         | DbError::AsOfFutureVersion { .. }
         | DbError::AsOfReopenRequired { .. }

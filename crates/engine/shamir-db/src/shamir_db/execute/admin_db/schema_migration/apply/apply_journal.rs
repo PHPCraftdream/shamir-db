@@ -148,6 +148,13 @@ pub(super) fn durability_error(error: crate::DbError, intents_durable: bool) -> 
 /// `apply_fence_error_mapping_tests.rs`: any wording change fails CI instead
 /// of silently degrading to `schema_migration_durability_unavailable`.
 pub(in crate::shamir_db) fn map_fence_error(error: crate::DbError) -> BatchError {
+    // Typed journal corruption (the ordinary reader turned damaged while the
+    // run was between its preflight read and the durable CAS) is never a
+    // fencing/progress state: straight to the availability code, before any
+    // string match can misroute a message that happens to contain "fence".
+    if matches!(error, crate::DbError::SchemaMigrationJournalUnreadable(_)) {
+        return map_store_error(error);
+    }
     let text = error.to_string();
     let code = if text.contains("already owned") || text.contains("fence") {
         "schema_migration_in_progress"

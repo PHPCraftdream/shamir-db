@@ -61,6 +61,20 @@ propagate = "tests"
 reason = "wasm-host's gateway unit test includes this exact shamir-db source target"
 
 [[edge]]
+paths = ["crates/engine/shamir-db/src/shamir_db/system_store/catalogue/schema_migrations/**", "crates/engine/shamir-db/src/shamir_db/execute/admin_db/schema_migration/**"]
+crates = []
+propagate = "tests"
+flags = ["node", "ts"]
+reason = "typed schema-migration producer: Node binding and TS client compatibility suites exercise these engine paths"
+
+[[edge]]
+paths = ["crates/client/shamir-client-ts/src/core/builders/admin/schema-migration/**"]
+crates = []
+propagate = "tests"
+flags = ["node"]
+reason = "Node binding tests consume the TS schema-migration builder"
+
+[[edge]]
 paths = ["Cargo.lock"]
 crates = ["shamir-storage"]
 propagate = "tests"

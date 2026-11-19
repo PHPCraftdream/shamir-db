@@ -187,9 +187,11 @@ pub struct ShamirDb {
     /// Lock-free (`DashMap` entries, admin/DDL frequency only); the ONLY
     /// accessors are in `execute/admin_db/schema_migration/fence.rs`.
     pub(in crate::shamir_db) schema_migration_gate: Arc<DashMap<String, u64, THasher>>,
-    /// R1c step 2b-3b — open-time in-doubt fence marker (db name → durable
-    /// owned generation); refusals then carry `schema_migration_in_doubt`
-    /// until a resumed runner's `hold` clears it. In-memory only, not durable.
+    /// R1c step 2b-3b — open-time in-doubt fence marker: db name → durable
+    /// owned generation (ALWAYS known: corrupt journal damage fails the
+    /// whole startup with the typed journal error instead of leaving an
+    /// unknowable marker). In-memory only, not durable; accessors in
+    /// `execute/admin_db/schema_migration/fence.rs`.
     pub(in crate::shamir_db) schema_migration_gate_in_doubt: Arc<DashMap<String, u64, THasher>>,
     /// R1c §4.5 — engine-side read-only (follower) flag lowered by the server
     /// at launch (`set_node_read_only`); application-schema apply fails closed

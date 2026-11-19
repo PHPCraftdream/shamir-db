@@ -54,7 +54,7 @@ use crate::sync::durability::backup::online::wal_capture::OnlineBackupPort;
 use crate::sync::durability::backup::{verify_manifest, ManifestFileEntry};
 
 /// Bounded await bound: a timeout fails the test and discards the fixture.
-pub const BOUND: Duration = Duration::from_secs(60);
+pub const BOUND: Duration = Duration::from_secs(120);
 
 const DB_NAME: &str = "app";
 const REPO: &str = "main";

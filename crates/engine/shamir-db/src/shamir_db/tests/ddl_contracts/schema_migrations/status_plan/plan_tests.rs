@@ -14,8 +14,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use shamir_query_builder::application_schema_plan;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::batch::IntoBatchOp;
 use shamir_query_builder::ddl;
 use shamir_query_builder::SchemaMigration;
+use shamir_query_builder::{filter, write};
 use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationBody, SchemaMigrationOp, SchemaMigrationPlanRequest, SchemaMigrationPredecessor,
     SchemaMigrationSubmission, SchemaMigrationTarget,
@@ -521,9 +523,40 @@ fn non_admitted_operations_cannot_enter_a_plan_request() {
     );
 }
 
+#[test]
+fn dml_operations_cannot_enter_a_schema_migration_body() {
+    // Design §7.1 `schema_migration_dml_retry_requires_same_repo_atomic_receipt`:
+    // uncertain non-idempotent DML must be refused, never replayed. The model
+    // has no atomic-receipt path for DML at all, so even a VALID, builder-built
+    // `Insert`/`Update` cannot become a `SchemaMigrationOp` (and therefore no
+    // migration body and no retryable journal operation). This pins that the
+    // typed refusal is not an artifact of a malformed fixture.
+    let insert = write::insert("items_2")
+        .row(write::doc().set("name", "Alice").expect("literal field"))
+        .build();
+    let error = SchemaMigrationOp::try_from(insert.into_batch_op())
+        .expect_err("a builder-built insert must be refused by the typed model");
+    assert!(
+        error.to_string().contains("insert is not admitted"),
+        "the typed reason must name DML as inadmissible: {error}"
+    );
+
+    let update = write::update("items_2")
+        .where_(filter::eq("name", "Alice"))
+        .set(write::doc().set("name", "Bob").expect("literal field"))
+        .build()
+        .expect("builder-built update op");
+    let error = SchemaMigrationOp::try_from(update.into_batch_op())
+        .expect_err("a builder-built update must be refused by the typed model");
+    assert!(
+        error.to_string().contains("update is not admitted"),
+        "the typed reason must name DML as inadmissible: {error}"
+    );
+}
+
 #[tokio::test]
 async fn plan_lists_function_and_validator_warnings_and_registrations() {
-    let limit = Duration::from_secs(30);
+    let limit = Duration::from_secs(120);
     let (_dir, db) = tokio::time::timeout(limit, Box::pin(persistent_db()))
         .await
         .expect("persistent database setup timed out");

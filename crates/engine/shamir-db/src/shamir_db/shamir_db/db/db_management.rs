@@ -141,6 +141,17 @@ impl ShamirDb {
             return Ok(false);
         }
 
+        // R1c-4 FINAL follow-up 3, decision 2: ANY live fence state (gate
+        // map or marker) refuses the drop before the CASCADE teardown can
+        // destroy the fenced database; the wire code stays
+        // `schema_migration_in_doubt`.
+        if self.schema_migration_lifecycle_blocked(name) {
+            return Err(DbError::Validation(
+                crate::shamir_db::execute::admin_db_schema_migration
+                    ::schema_migration_lifecycle_refusal_message("drop", name),
+            ));
+        }
+
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
         self.ensure_destinations_unbound(name, None, "DROP").await?;
@@ -193,10 +204,23 @@ impl ShamirDb {
     /// - `from` must not be `SYSTEM_DB_NAME`.
     /// - The source database must exist (in-memory OR persisted).
     /// - The destination must NOT exist (in-memory AND persisted).
+    /// - The source must not carry a live application-schema fence state
+    ///   (gate or marker; R1c-4 FINAL follow-up 3, decision 2 — the re-key
+    ///   would strand the name-keyed state away from the identity-keyed
+    ///   journal).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // Hold database-create admission through namespace publication.
         let _create_guard = self.db_create_lock().lock().await;
         let _control = self.lock_replication_control().await;
+        // R1c-4 FINAL follow-up 3, decision 2: ANY live fence state refuses
+        // the rename before the re-key strands the name-keyed state; the
+        // wire code stays `schema_migration_in_doubt`.
+        if self.schema_migration_lifecycle_blocked(from) {
+            return Err(DbError::Validation(
+                crate::shamir_db::execute::admin_db_schema_migration
+                    ::schema_migration_lifecycle_refusal_message("rename", from),
+            ));
+        }
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
         // (repo: None — the whole database is the destination set).

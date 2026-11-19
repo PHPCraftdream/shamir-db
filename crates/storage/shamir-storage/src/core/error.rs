@@ -191,6 +191,21 @@ pub enum DbError {
         kind: InternerQuotaKind,
         limit: u64,
     },
+
+    /// R1c: a schema-migration journal row is corrupt — either UNROUTABLE
+    /// (undecodable physical row, missing/malformed routing key, or a key
+    /// whose identity contradicts the row's routing identity) or ROUTED but
+    /// failing its semantic validation (envelope mismatch, unreadable or
+    /// non-admitted event payload, drifted/duplicated control or history).
+    /// The whole journal fails closed — no database can be quarantined —
+    /// until the row is repaired. Storage/read failures (`Locked`, backend
+    /// errors) are NEVER this variant. Wire code:
+    /// `schema_migration_durability_unavailable` (via [`DbError::code`]).
+    /// The Display carries the stable code so string-wrapped startup
+    /// diagnostics (e.g. the server launcher's `BootError::ShamirDbInit`)
+    /// still surface it to operators.
+    #[error("[schema_migration_durability_unavailable] schema migration journal unreadable: {0}")]
+    SchemaMigrationJournalUnreadable(String),
 }
 
 /// Heap payload of [`DbError::SubscriptionCatalogue`].
@@ -300,6 +315,9 @@ impl DbError {
                 Some("replication_destination_quarantined")
             }
             DbError::InternerQuotaExceeded { .. } => Some("interner_quota_exceeded"),
+            DbError::SchemaMigrationJournalUnreadable(_) => {
+                Some("schema_migration_durability_unavailable")
+            }
             _ => None,
         }
     }

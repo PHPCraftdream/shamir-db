@@ -56,7 +56,7 @@ kdf_defaults: {
     argon2_version: 19
 }
 
-argon2_concurrent_max: 4
+argon2_concurrent_max: 64
 
 listeners: [
     {

@@ -276,5 +276,49 @@ class LockAndManifestDiffTest(unittest.TestCase):
             self.assertEqual(global_change["scope"], "all")
 
 
+class MigrationCompatibilityFlagTest(unittest.TestCase):
+    """Committed edges must carry node/ts compatibility flags for migration
+    producer changes; adjacent non-migration paths must stay flag-free."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.config = load_edges(open(os.path.join(os.path.dirname(__file__),
+                                                  "../../matrix/edges.toml"),
+                                      encoding="utf-8").read())
+
+    def test_db_migration_producer_paths_set_node_and_ts(self):
+        packages = [pkg("shamir-db", directory="crates/engine/shamir-db")]
+        for path in ("crates/engine/shamir-db/src/shamir_db/system_store/catalogue/schema_migrations/journal.rs",
+                     "crates/engine/shamir-db/src/shamir_db/execute/admin_db/schema_migration/schema_migration.rs"):
+            result = select([path], packages, self.config)
+            self.assertTrue(result["flags"]["node"], path)
+            self.assertTrue(result["flags"]["ts"], path)
+            self.assertNotEqual(result["scope"], "all", path)
+
+    def test_adjacent_non_migration_db_path_leaves_flags_off(self):
+        packages = [pkg("shamir-db", directory="crates/engine/shamir-db")]
+        result = select(["crates/engine/shamir-db/src/shamir_db/execute/admin_db/other.rs"],
+                        packages, self.config)
+        self.assertFalse(result["flags"]["node"])
+        self.assertFalse(result["flags"]["ts"])
+        self.assertNotEqual(result["scope"], "all")
+
+    def test_ts_migration_producer_sets_node_flag(self):
+        packages = [pkg("shamir-client-ts", directory="crates/client/shamir-client-ts")]
+        result = select(["crates/client/shamir-client-ts/src/core/builders/admin/schema-migration/plan.ts"],
+                        packages, self.config)
+        self.assertTrue(result["flags"]["node"])
+        self.assertTrue(result["flags"]["ts"])
+        self.assertNotEqual(result["scope"], "all")
+
+    def test_adjacent_non_migration_ts_path_leaves_node_off(self):
+        packages = [pkg("shamir-client-ts", directory="crates/client/shamir-client-ts")]
+        result = select(["crates/client/shamir-client-ts/src/core/builders/admin/other/plan.ts"],
+                        packages, self.config)
+        self.assertFalse(result["flags"]["node"])
+        self.assertTrue(result["flags"]["ts"])
+        self.assertNotEqual(result["scope"], "all")
+
+
 if __name__ == "__main__":
     unittest.main()

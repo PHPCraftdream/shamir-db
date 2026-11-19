@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use shamir_collections::TFxSet;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -22,6 +23,105 @@ use shamir_query_types::admin::types::schema_migration::{
     canonical_body_checksum, SchemaMigrationBody, SchemaMigrationMetadata,
 };
 
+/// Record kind proven by a `record_key` routing prefix, never `record_type`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordRoute {
+    Control {
+        identity: DatabaseIdentity,
+    },
+    Event {
+        identity: DatabaseIdentity,
+        /// Key-sequence ROUTING proof: an unparseable suffix makes the row
+        /// UNATTRIBUTABLE; `sequence` FIELD drift stays attributable.
+        sequence: u64,
+    },
+}
+
+impl RecordRoute {
+    fn identity(&self) -> DatabaseIdentity {
+        match self {
+            RecordRoute::Control { identity } | RecordRoute::Event { identity, .. } => *identity,
+        }
+    }
+
+    fn record_type(&self) -> &'static str {
+        match self {
+            RecordRoute::Control { .. } => "control",
+            RecordRoute::Event { .. } => "event",
+        }
+    }
+
+    fn canonical_key(&self) -> String {
+        match self {
+            RecordRoute::Control { identity } => format!("control/{identity}"),
+            RecordRoute::Event { identity, sequence } => format!("event/{identity}/{sequence}"),
+        }
+    }
+}
+
+/// Parse the routing identity out of a stored `record_key`; `Err` means the
+/// row is UNATTRIBUTABLE. The respelling check rejects non-canonical keys.
+fn record_key_routing(record_key: &str) -> Result<RecordRoute, String> {
+    let route = if let Some(identity) = record_key.strip_prefix("control/") {
+        identity
+            .parse::<DatabaseIdentity>()
+            .map(|identity| RecordRoute::Control { identity })
+            .map_err(|error| format!("control record_key carries an invalid identity: {error}"))?
+    } else {
+        let Some(rest) = record_key.strip_prefix("event/") else {
+            return Err("record_key is neither control/ nor event/ routed".into());
+        };
+        let Some((identity, sequence)) = rest.rsplit_once('/') else {
+            return Err("event record_key has no sequence suffix".into());
+        };
+        let identity = identity
+            .parse::<DatabaseIdentity>()
+            .map_err(|error| format!("event record_key carries an invalid identity: {error}"))?;
+        let sequence = sequence.parse::<u64>().map_err(|error| {
+            format!("event record_key sequence suffix cannot match a valid key: {error}")
+        })?;
+        if sequence == 0 {
+            return Err("event record_key sequence is zero".into());
+        }
+        RecordRoute::Event { identity, sequence }
+    };
+    // Canonical spelling only: the key must be exactly the routed form.
+    if record_key != route.canonical_key() {
+        return Err("record_key is not in canonical routed form".into());
+    }
+    Ok(route)
+}
+
+/// Typed WHOLE-OPEN failure: no partition can own this row.
+fn unattributable(row_id: &str, cause: String) -> DbError {
+    DbError::SchemaMigrationJournalUnreadable(format!(
+        "unattributable schema migration journal record {row_id}: {cause}"
+    ))
+}
+
+/// Full routing envelope of one row, shared by the open scan and history
+/// read (readable body identity is probed separately).
+fn row_route(row_id: &str, value: &QueryValue) -> DbResult<RecordRoute> {
+    let stored_identity = value
+        .get("database_identity")
+        .and_then(QueryValue::as_str)
+        .ok_or_else(|| unattributable(row_id, "missing or non-string database_identity".into()))?
+        .parse::<DatabaseIdentity>()
+        .map_err(|error| unattributable(row_id, format!("invalid database_identity: {error}")))?;
+    let record_key = value
+        .get("record_key")
+        .and_then(QueryValue::as_str)
+        .ok_or_else(|| unattributable(row_id, "missing or non-string record_key".into()))?;
+    let route = record_key_routing(record_key).map_err(|cause| unattributable(row_id, cause))?;
+    if route.identity() != stored_identity {
+        return Err(unattributable(
+            row_id,
+            "record_key routing identity contradicts the row's database_identity".into(),
+        ));
+    }
+    Ok(route)
+}
+
 #[derive(Clone, Debug)]
 struct ControlRecord {
     row_id: String,
@@ -37,6 +137,24 @@ impl SystemStore {
         super::ensure_database_identity(self, database).await
     }
 
+    /// ONE startup scan of the durable journal (shared `row_route`, no
+    /// payload decode): the distinct routed identities — loaded databases
+    /// and orphan histories alike. ANY unattributable row fails the WHOLE
+    /// startup closed with the typed `SchemaMigrationJournalUnreadable`.
+    pub(crate) async fn schema_migration_journal_routed_identities(
+        &self,
+    ) -> DbResult<Vec<DatabaseIdentity>> {
+        if !self.schema_migration_journal_durable() {
+            return Ok(Vec::new());
+        }
+        let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
+        let mut identities = TFxSet::default();
+        for (row_id, value) in read_journal_partition_records(&table).await? {
+            identities.insert(row_route(&row_id, &value)?.identity());
+        }
+        Ok(identities.into_iter().collect())
+    }
+
     pub async fn read_schema_migration_history(
         &self,
         identity: DatabaseIdentity,
@@ -46,7 +164,24 @@ impl SystemStore {
         let records = read_journal_partition_records(&table).await?;
         let mut rows = Vec::with_capacity(records.len());
         let mut partition_control = None;
+        // Route on persisted envelope keys BEFORE any payload decode: A's
+        // unreadable event must not block B (§5.3); unroutable rows fail
+        // closed for every reader, owned rows are never omitted.
         for (row_id, value) in records {
+            let route = row_route(&row_id, &value)?;
+            if route.identity() != identity {
+                continue;
+            }
+            let stored_record_type = value
+                .get("record_type")
+                .and_then(QueryValue::as_str)
+                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_type"))?;
+            if stored_record_type != route.record_type() {
+                return Err(corrupt(
+                    &row_id,
+                    "record_type contradicts the record_key routing prefix",
+                ));
+            }
             let record_version = value
                 .get("record_version")
                 .and_then(QueryValue::as_str)
@@ -59,21 +194,11 @@ impl SystemStore {
                     &format!("unknown mandatory record version {record_version}"),
                 ));
             }
-            let record_type = value
-                .get("record_type")
-                .and_then(QueryValue::as_str)
-                .ok_or_else(|| corrupt(&row_id, "missing or non-string record_type"))?;
-            let stored_identity = value
-                .get("database_identity")
-                .and_then(QueryValue::as_str)
-                .ok_or_else(|| corrupt(&row_id, "missing or non-string database_identity"))?
-                .parse::<DatabaseIdentity>()
-                .map_err(|error| {
-                    corrupt(&row_id, &format!("invalid database_identity: {error}"))
-                })?;
-            let selected_partition = stored_identity == identity;
-            match record_type {
-                "event" => {
+            match route {
+                RecordRoute::Event {
+                    sequence: key_sequence,
+                    ..
+                } => {
                     let bytes = value
                         .get("event")
                         .and_then(|value| match value {
@@ -81,48 +206,51 @@ impl SystemStore {
                             _ => None,
                         })
                         .ok_or_else(|| corrupt(&row_id, "missing or non-binary event payload"))?;
-                    let event = decode_event(bytes, &row_id)?;
+                    let event = decode_event(bytes, &row_id).map_err(|error| {
+                        DbError::SchemaMigrationJournalUnreadable(error.to_string())
+                    })?;
+                    let routed_identity = route.identity();
+                    // Readable payload identity contradicting the routed key
+                    // proves no ownership: typed failure, never ignored.
+                    if event.database_identity != routed_identity {
+                        return Err(unattributable(
+                            &row_id,
+                            "readable event payload identity contradicts the row's routed key"
+                                .into(),
+                        ));
+                    }
                     if event.event_id
                         != value
                             .get("event_id")
                             .and_then(QueryValue::as_str)
                             .unwrap_or_default()
-                        || event.database_identity != stored_identity
+                        || event.sequence != key_sequence
                         || event.sequence.to_string()
                             != value
                                 .get("sequence")
                                 .and_then(QueryValue::as_str)
                                 .unwrap_or_default()
-                        || format!("event/{}/{}", stored_identity, event.sequence)
-                            != value
-                                .get("record_key")
-                                .and_then(QueryValue::as_str)
-                                .unwrap_or_default()
                     {
                         return Err(corrupt(&row_id, "event payload differs from row envelope"));
                     }
-                    if selected_partition {
-                        rows.push((event, row_id));
-                    }
+                    rows.push((event, row_id));
                 }
-                "control" => {
-                    let control = decode_control(&value, &row_id, stored_identity, 0)?;
-                    if selected_partition
-                        && partition_control
-                            .replace((row_id.clone(), control))
-                            .is_some()
+                RecordRoute::Control { .. } => {
+                    let control = decode_control(&value, &row_id, route.identity(), 0)?;
+                    if partition_control
+                        .replace((row_id.clone(), control))
+                        .is_some()
                     {
                         return Err(corrupt(&row_id, "duplicate partition control record"));
                     }
                 }
-                _ => return Err(corrupt(&row_id, "unknown mandatory journal record type")),
             }
         }
         let history = validate_history(identity, rows)?;
         match partition_control {
             Some((row_id, control)) => validate_control_history(&control, &history, &row_id)?,
             None if history.last_sequence != 0 => {
-                return Err(DbError::Internal(format!(
+                return Err(DbError::SchemaMigrationJournalUnreadable(format!(
                     "schema migration control record missing for non-empty history {identity}"
                 )));
             }
@@ -456,26 +584,20 @@ impl SystemStore {
     }
 
     /// Open-time fence snapshot (R1c step 2b-3b): the durable generation of
-    /// the partition's fence iff the control record still OWNS it and the
-    /// journal has an unresolved entry — the state a crashed runner or a
-    /// server restart leaves behind. `None` when the fence is free or the
-    /// journal carries nothing unresolved. One-shot read for
-    /// `ShamirDb::init_inner`; never on the batch path.
+    /// the partition's fence iff the journal carries an unresolved entry,
+    /// else `None`. The full ordinary-journal validation runs first, so a
+    /// damaged journal or control record fails closed with the typed error
+    /// rather than silently reporting the fence free. One-shot read at boot;
+    /// never on the batch path.
     pub async fn owned_schema_migration_fence(
         &self,
         identity: DatabaseIdentity,
     ) -> DbResult<Option<u64>> {
-        let Some(control) = self.load_control(identity).await? else {
-            return Ok(None);
-        };
-        if control.state != "owned" {
-            return Ok(None);
-        }
         let history = self.read_schema_migration_history(identity).await?;
-        if history.unresolved.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(control.generation))
+        Ok(history
+            .unresolved
+            .last()
+            .map(|event| event.fence_generation))
     }
 
     async fn flush_journal_tail(&self) -> DbResult<()> {
@@ -492,6 +614,8 @@ impl SystemStore {
             if value.get("record_type").and_then(QueryValue::as_str) == Some("control")
                 && value.get("record_key").and_then(QueryValue::as_str)
                     == Some(control_key(identity).as_str())
+                && value.get("database_identity").and_then(QueryValue::as_str)
+                    == Some(identity.to_string().as_str())
                 && found.replace((row_id.clone(), value)).is_some()
             {
                 return Err(corrupt(&row_id, "duplicate control record"));
@@ -502,9 +626,17 @@ impl SystemStore {
         };
         let refs = new_map();
         let context = table.info_store_read_view().filter_context(&refs).await?;
-        let mut query = ReadQuery::new(TABLE_SCHEMA_MIGRATION_EVENTS).filter(Filter::Eq {
-            field: vec!["record_key".into()],
-            value: FilterValue::String(control_key(identity)),
+        let mut query = ReadQuery::new(TABLE_SCHEMA_MIGRATION_EVENTS).filter(Filter::And {
+            filters: vec![
+                Filter::Eq {
+                    field: vec!["record_key".into()],
+                    value: FilterValue::String(control_key(identity)),
+                },
+                Filter::Eq {
+                    field: vec!["database_identity".into()],
+                    value: FilterValue::String(identity.to_string()),
+                },
+            ],
         });
         query.with_version = true;
         let result = table.read(&query, &context).await?;
@@ -571,6 +703,10 @@ impl SystemStore {
                     Filter::Eq {
                         field: vec!["record_key".into()],
                         value: FilterValue::String(control_key(event.database_identity)),
+                    },
+                    Filter::Eq {
+                        field: vec!["database_identity".into()],
+                        value: FilterValue::String(event.database_identity.to_string()),
                     },
                     Filter::Eq {
                         field: vec!["generation".into()],
@@ -640,28 +776,30 @@ async fn read_journal_partition_records(
     let mut records = Vec::new();
     let mut stream = Box::pin(table.list_stream(256));
     while let Some(batch) = stream.next().await {
-        for (id, record) in batch? {
+        // A raw codec failure is physical corruption — typed whole-open,
+        // redacted; infra failures pass through unmasked.
+        let batch = batch.map_err(|error| match error {
+            DbError::Codec(_) => DbError::SchemaMigrationJournalUnreadable(
+                "the schema migration journal scan hit undecodable raw bytes".into(),
+            ),
+            other => other,
+        })?;
+        for (id, record) in batch {
             let row_id = id.to_string();
-            row_id.parse::<RecordId>().map_err(|error| {
-                corrupt(&row_id, &format!("invalid physical record id: {error}"))
-            })?;
+            row_id
+                .parse::<RecordId>()
+                .map_err(|_| unattributable(&row_id, "invalid physical record id".into()))?;
+            let materialize_failed = || unattributable(&row_id, "record bytes undecodable".into());
             let value = match record {
-                crate::engine::table::record_cow::RecordCow::Borrowed(bytes) => {
-                    let value = interner
-                        .record_bytes_to_query_value(&bytes)
-                        .map_err(|error| {
-                            corrupt(&row_id, &format!("record materialization failed: {error}"))
-                        })?
-                        .ok_or_else(|| {
-                            corrupt(&row_id, "record bytes are not a supported value")
-                        })?;
-                    value
-                }
-                crate::engine::table::record_cow::RecordCow::Owned(value) => {
-                    interner.inner_to_query_value(&value).map_err(|error| {
-                        corrupt(&row_id, &format!("record materialization failed: {error}"))
-                    })?
-                }
+                crate::engine::table::record_cow::RecordCow::Borrowed(bytes) => interner
+                    .record_bytes_to_query_value(&bytes)
+                    .map_err(|_| materialize_failed())?
+                    .ok_or_else(|| {
+                        unattributable(&row_id, "record bytes are not a supported value".into())
+                    })?,
+                crate::engine::table::record_cow::RecordCow::Owned(value) => interner
+                    .inner_to_query_value(&value)
+                    .map_err(|_| materialize_failed())?,
             };
             records.push((row_id, value));
         }
@@ -846,7 +984,7 @@ fn parse_counter(value: Option<&str>, row_id: &str, field: &str) -> DbResult<u64
 }
 
 fn corrupt(row_id: &str, cause: &str) -> DbError {
-    DbError::Internal(format!(
+    DbError::SchemaMigrationJournalUnreadable(format!(
         "corrupt schema migration journal record {row_id}: {cause}"
     ))
 }

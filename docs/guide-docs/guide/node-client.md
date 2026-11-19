@@ -6,6 +6,8 @@
 
 Батчи собираются билдерами из `@shamir/client` (`Batch`, `ddl`, `write`, `Query`, `filter`): `Batch.create(id).add(alias, операция)....build()`. Объект `{ id, queries }` руками не пишется.
 
+Схемные миграции приложения из Node идут через типизированный API `@shamir/client` (`ApplicationMigrationClient`, `ApplicationMigrationSet`) поверх этого же биндинга как транспорта — см. [`SCHEMA_MIGRATIONS.md`](../../../crates/client/shamir-client-ts/docs/SCHEMA_MIGRATIONS.md).
+
 ```js
 const { Batch, ddl, write, Query, filter } = require('@shamir/client');
 ```

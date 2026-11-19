@@ -8,14 +8,21 @@
 //! acquire(1), intent(2), complete(3), applied(4), release(5), and arming
 //! `skip = 2k-2, n = 1` fails the run exactly BEFORE append `k` is written.
 
+use std::time::Duration;
+
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::SchemaMigration;
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
 
+use shamir_test_diag::FlakeGuard;
+use tokio::time::timeout;
+
+use super::super::helpers::on_big_stack;
 use super::helpers::{
     apply_request, assert_code, completions_for, empty_predecessor, field, identity, journal_kinds,
-    journal_prefix, persistent_owner_db, reopen_owner_db, run_apply, str_field, submission,
+    journal_prefix, persistent_owner_db, persistent_owner_db_fjall_repo, reopen_owner_db,
+    run_apply, str_field, submission,
 };
 use crate::shamir_db::system_store::JournalEventKind;
 use crate::shamir_db::ShamirDb;
@@ -122,6 +129,94 @@ async fn crash_after_started_resumes_and_runs_first_operation() {
     assert_eq!(history.applied[0].fence_generation, 2);
     assert!(history.unresolved.is_empty());
     assert!(db.get_db("testdb").unwrap().has_table("main", "items_1"));
+}
+
+#[test]
+fn crash_after_intent_before_ddl_resumes_once() {
+    on_big_stack(|| async {
+        // Whole-scenario bound (>=120 s: the Windows runner is up to 10x
+        // slower) with the failure-only diagnostic watchdog of the
+        // boot-oracle pattern: the watchdog fires BELOW the runner's
+        // slow-timeout kill so the timeline dumps first; the timeout itself
+        // fails the test.
+        let guard = FlakeGuard::with_watchdog(
+            "crash_after_intent_before_ddl_resumes_once",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            // The FILE-BACKED repo fixture: this test's pre/post-restart assertions
+            // are about the physical table, so the repo must survive the reopen
+            // (an in-memory repo would be re-created empty and make them vacuous).
+            let (dir, db) = persistent_owner_db_fjall_repo().await;
+            let migration = super::super::helpers::body("alpha-001", 1);
+
+            // Crash built directly in the journal (see `journal_prefix`): the crash
+            // point must not depend on how many durable tails a DDL effect spends.
+            // Crash AFTER the operation-0 intent is durable but BEFORE the DDL
+            // effect ran — the window between `crash_after_started…` (started only)
+            // and the post-effect windows. The intent records the pre-state evidence
+            // a live apply would have written (`pre_state=absent`): a pending create
+            // without it refuses as uncertain (apply_operations.rs reconcile table),
+            // which is a different scenario.
+            journal_prefix(
+                &db,
+                &migration,
+                &[(
+                    JournalEventKind::OperationIntent,
+                    0,
+                    Some("pre_state=absent"),
+                )],
+            )
+            .await;
+            let instance = db.get_db("testdb").unwrap();
+            assert!(
+                !instance.has_table("main", "items_1"),
+                "the crash window is before the DDL: the effect has not run"
+            );
+            // The owned DbInstance clone keeps repository handles alive: release it
+            // before the reopen or the Windows lock retry spins to its cap.
+            drop(instance);
+            drop(db);
+
+            let db = reopen_owner_db(&dir).await;
+            let target = identity(&db).await;
+            let value = run_apply(
+                &db,
+                apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+            )
+            .await
+            .expect("an intent without an effect resumes by RUNNING the operation once");
+            assert_eq!(str_field(&value, "status"), "applied");
+
+            // The operation ran exactly ONCE through the normal path under the
+            // recovery fence: the resume path (`resume_operation` ExecuteOnce)
+            // appends the completion WITHOUT a second intent, then applied,
+            // released — the durable completion sequence is the replay guard.
+            assert_eq!(
+                journal_kinds(&db).await,
+                vec![
+                    JournalEventKind::Started,
+                    JournalEventKind::OperationIntent,
+                    JournalEventKind::RecoveryAcquired,
+                    JournalEventKind::OperationComplete,
+                    JournalEventKind::Applied,
+                    JournalEventKind::FenceReleased,
+                ],
+            );
+            let history = db
+                .system_store()
+                .read_schema_migration_history(target)
+                .await
+                .unwrap();
+            assert_eq!(completions_for(&history, 0), 1);
+            assert_eq!(history.applied.len(), 1);
+            assert!(db.get_db("testdb").unwrap().has_table("main", "items_1"));
+        });
+        timeout(Duration::from_secs(180), scenario)
+            .await
+            .expect("restart scenario exceeded its 180 s whole-scenario bound");
+        guard.mark("scenario done");
+    });
 }
 
 #[tokio::test]

@@ -37,6 +37,17 @@ impl ShamirDb {
         #[cfg(not(feature = "fjall"))]
         let _ = image;
         receipt.validate()?;
+        // R1c-4 follow-up defect 2: refuse seed publication onto a database
+        // with an in-doubt marker — the install persists a `databases` row
+        // (and repository/table rows) under this name, replacing the
+        // identity the unresolved migration was applied to. Name-keyed
+        // marker; the journal follows the stable identity.
+        if self.schema_migration_in_doubt(db) {
+            return Err(DbError::Validation(
+                crate::shamir_db::execute::admin_db_schema_migration
+                    ::schema_migration_lifecycle_refusal_message("publish seed onto", db),
+            ));
+        }
         if receipt.source_db != db || receipt.source_repo != repo {
             return Err(DbError::Storage(
                 "seed destination names differ from receipt".into(),

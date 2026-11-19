@@ -19,10 +19,13 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::application_schema_plan;
 use shamir_query_builder::application_schema_status;
+use shamir_query_builder::apply_application_schema_migration;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::SchemaMigration;
 use shamir_query_types::admin::types::schema_migration::{
-    SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
-    SchemaMigrationTarget,
+    SchemaMigrationApplyRequest, SchemaMigrationPlanRequest, SchemaMigrationPredecessor,
+    SchemaMigrationStatusRequest, SchemaMigrationSubmission, SchemaMigrationTarget,
 };
 
 use crate::db_handler::config::NodeMode;
@@ -166,4 +169,75 @@ async fn read_write_node_serves_application_schema_status() {
         matches!(resp, DbResponse::Batch { .. }),
         "ReadWrite node should serve status, got: {resp:?}"
     );
+}
+
+/// Apply is the strongest primary-only operation (design §4.5): the same
+/// single `BatchOp::ApplicationSchema` gate must refuse it on a ReadOnly
+/// node with the stable follower code — the real server-handler path, not
+/// only the engine-level follower check. The body is typed
+/// builder-built (`SchemaMigration` + `create_table`), never wire JSON.
+fn apply_batch() -> shamir_query_builder::BatchRequest {
+    let create = ddl::create_table("follower_refused_items").build();
+    let migration = SchemaMigration::new("alpha-001", 1, "follower refusal probe")
+        .op(create)
+        .expect("typed create-table operation is admitted")
+        .build()
+        .expect("test migration body is valid");
+    let mut b = Batch::new();
+    b.op(
+        "apply",
+        apply_application_schema_migration(SchemaMigrationApplyRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: shamir_types::types::record_id::RecordId::from_ts_seq(
+                    1_700_000_000_000_000,
+                    7,
+                ),
+            },
+            expected_predecessor: SchemaMigrationPredecessor {
+                migration_id: None,
+                ordinal: 0,
+                checksum: [0; 32],
+            },
+            expected_fence_generation: 0,
+            migration: SchemaMigrationSubmission::new(&migration, [0; 32]),
+        }),
+    );
+    b.build()
+}
+
+#[tokio::test]
+async fn follower_refuses_application_schema_apply_as_stale() {
+    let fut = async {
+        let handler = build_handler(NodeMode::ReadOnly).await;
+        let session = alice_session();
+        let conn = ConnectionServices::without_push(0);
+
+        handler
+            .execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                apply_batch(),
+                &conn,
+            )
+            .await
+    };
+
+    // Bounded wait: if the follower gate regresses to blocking (e.g. by
+    // attempting a real apply on a read-replica), this test must fail fast
+    // instead of hanging the CI suite.
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(180), Box::pin(fut))
+        .await
+        .expect("apply refusal must complete within 180s");
+
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "schema_migration_follower_read_only",
+                "wrong code; message: {message}"
+            );
+        }
+        other => panic!("follower must refuse apply, got: {other:?}"),
+    }
 }
