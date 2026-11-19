@@ -26,7 +26,19 @@ mod logical_import;
 mod migration_api_gating;
 #[path = "identity/permission_e2e/mod.rs"]
 mod permission_e2e;
+#[path = "shell/mod.rs"]
+mod shell_tests;
 #[path = "identity/user_admin_port_wire.rs"]
 mod user_admin_port_wire;
+
+/// The REAL production shell package, included in-tree so the scripted
+/// terminal-restore tests (`shell_tests::output`) drive the actual
+/// orchestration (`read_secret_with_writer` Prompt path) through the
+/// [`Terminal`] seam — the production module reaches `crate::shell` paths
+/// against THIS crate root, no duplicate module exists. `shell::run` is
+/// additionally invoked (`--help`) so the included production tree is a
+/// live root for dead-code analysis.
+#[path = "../../shell/mod.rs"]
+mod shell;
 #[path = "identity/user_directory/mod.rs"]
 mod user_directory;

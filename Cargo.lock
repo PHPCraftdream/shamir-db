@@ -3968,6 +3968,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "rmp-serde",
  "rust_decimal",
+ "rustix 1.1.6",
  "rustls",
  "scc",
  "sd-notify",
@@ -3981,6 +3982,7 @@ dependencies = [
  "shamir-collections",
  "shamir-connect",
  "shamir-db",
+ "shamir-private-dir",
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-server-security",
@@ -4005,6 +4007,7 @@ dependencies = [
  "tracing-subscriber",
  "wat",
  "windows-service",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

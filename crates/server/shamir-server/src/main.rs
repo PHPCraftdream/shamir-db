@@ -28,6 +28,8 @@ static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(AL
 mod bootstrap_cli_tests;
 #[path = "../../shamir-server-security/src/security/service/bootstrap_stdin.rs"]
 mod bootstrap_stdin;
+#[path = "../shell/mod.rs"]
+mod shell;
 
 use std::path::PathBuf;
 
@@ -214,6 +216,12 @@ enum Subcmd {
     /// Offline format migration of a stopped server data directory.
     FormatMigrate(shamir_server::migrate::FormatMigrateArgs),
 
+    /// Interactive administration shell (design:
+    /// `docs/dev-artifacts/design/admin-shell.md`). Dispatched before any
+    /// config or logging setup; `--config` is not required for this
+    /// subcommand. Must be the first argument: `shamir-server shell ...`.
+    Shell,
+
     /// Verify and optionally repair table integrity. **Offline only** — the
     /// server for this `data_dir` must be stopped first (opens the data
     /// directory directly via `ShamirDb::init`). Scans all tables (or a
@@ -285,7 +293,27 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run_main() -> anyhow::Result<u8> {
+    // Early `shell` dispatch, immediately before `Cli::parse()` (design §2,
+    // §9 PR1): the shell never touches server config or logging, so `--config`
+    // is not required. Match the first argument EXACTLY: any later `shell`
+    // token (e.g. `--config x shell`) goes through clap instead and is
+    // rejected below.
+    let mut raw_args = std::env::args_os();
+    let _argv0 = raw_args.next();
+    if raw_args
+        .next()
+        .is_some_and(|arg| arg == std::ffi::OsStr::new("shell"))
+    {
+        return Ok(shell::run(raw_args));
+    }
+
     let cli = Cli::parse();
+
+    // A `shell` token anywhere but the first argument falls through to clap;
+    // reject it before any configuration/logging/runtime work.
+    if matches!(cli.command.as_ref(), Some(Subcmd::Shell)) {
+        anyhow::bail!("`shell` must be the first argument: run `shamir-server shell ...`");
+    }
 
     if let Some(Subcmd::FormatMigrate(args)) = cli.command.as_ref() {
         let mut config = Config::from_file(&cli.config)?;
@@ -528,6 +556,9 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
         }
         Some(Subcmd::FormatMigrate(_)) => {
             anyhow::bail!("format-migrate dispatch must occur before logging initialization")
+        }
+        Some(Subcmd::Shell) => {
+            anyhow::bail!("`shell` must be the first argument: run `shamir-server shell ...`")
         }
         Some(Subcmd::Run { .. }) | None => {}
     }
