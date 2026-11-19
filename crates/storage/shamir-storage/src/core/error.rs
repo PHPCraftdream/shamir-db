@@ -192,11 +192,14 @@ pub enum DbError {
         limit: u64,
     },
 
-    /// R1c: a schema-migration journal row could not be attributed to a
-    /// database (undecodable physical row, missing/malformed routing key, or
-    /// a key whose identity contradicts the row's routing identity). The
-    /// whole journal fails closed — no database can be quarantined — until
-    /// the row is repaired. Wire code:
+    /// R1c: a schema-migration journal row is corrupt — either UNROUTABLE
+    /// (undecodable physical row, missing/malformed routing key, or a key
+    /// whose identity contradicts the row's routing identity) or ROUTED but
+    /// failing its semantic validation (envelope mismatch, unreadable or
+    /// non-admitted event payload, drifted/duplicated control or history).
+    /// The whole journal fails closed — no database can be quarantined —
+    /// until the row is repaired. Storage/read failures (`Locked`, backend
+    /// errors) are NEVER this variant. Wire code:
     /// `schema_migration_durability_unavailable` (via [`DbError::code`]).
     /// The Display carries the stable code so string-wrapped startup
     /// diagnostics (e.g. the server launcher's `BootError::ShamirDbInit`)

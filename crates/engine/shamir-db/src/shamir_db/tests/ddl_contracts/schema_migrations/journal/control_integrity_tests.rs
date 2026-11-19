@@ -2,50 +2,29 @@
 //! design §4.2/§5.3): while a durable OWNED `Started` event remains, a
 //! deleted, retyped, or drifted control record fails its own database
 //! closed on status, plan and apply with
-//! `schema_migration_durability_unavailable` (the open-time seed cannot
-//! establish ownership, so the unknown-generation in-doubt marker stands
-//! and ordinary DML, DDL and stored-procedure calls are refused with
-//! `schema_migration_in_doubt`), while a healthy database on the same
-//! journal table keeps its full status/plan/actual-apply path.
-//!
-//! UNATTRIBUTABLE damage — a missing routing key, or a key whose identity
-//! contradicts the row's `database_identity` — is quarantined by NOBODY:
-//! the one-shot open-time routing scan fails the WHOLE startup closed with
-//! the typed `schema_migration_durability_unavailable`
-//! (`DbError::SchemaMigrationJournalUnreadable` surfaced through `code()`;
-//! covered in `unattributable_*` below). The sowing seams use
-//! only keys the unique `record_key` index admits: B's colliding CONTROL
-//! key is already occupied once B has journal traffic (the physical
-//! `TableManager::set` validates unique indexes before write, so the old
-//! colliding-with-B's-LIVE-key variant was unreachable and is gone); the
-//! scenarios below instead target B's UNUSED canonical keys while B has no
-//! journal rows.
-//!
-//! The control row is damaged ONLY through the existing raw test seams
-//! (`rows`/`overwrite_row`/`TableManager::delete`); every request is built
-//! through `shamir-query-builder`. The per-database variants are PERSISTED:
-//! the damaged row is flushed durably and the store is reopened through the
-//! bounded lock-only retry before any assertion, so none of the covered
-//! cases can pass by a before-fix in-memory accident.
+//! `schema_migration_durability_unavailable` in the same process, and on
+//! the cold restart the open-time in-doubt seed reads the damaged
+//! partition with the ordinary history reader — so the WHOLE startup
+//! fails closed with the exact `DbError::SchemaMigrationJournalUnreadable`
+//! and its stable code. There is no damaged-startup success and no
+//! per-database quarantine (asserted by [`assert_restart_fails_closed`]
+//! for every damage below).
 
 use std::time::Duration;
 
-use shamir_query_builder::batch::Batch;
-use shamir_query_builder::{ddl, write};
 use shamir_test_diag::FlakeGuard;
 
 use super::super::helpers::on_big_stack;
 use super::super::helpers::{
-    body, checksum, context, fence_generation_from_status, field, flush_and_reopen, journal_table,
-    overwrite_row, persistent_db, predecessor, prepare_database, rows, run_admin_op, run_apply,
-    run_plan, run_status, str_field, submission, try_init_waiting_for_locks, OWNER,
+    body, context, fence_generation_from_status, find_journal_row, journal_table, persistent_db,
+    predecessor, prepare_database, run_apply, run_plan, run_status, submission,
+    try_init_waiting_for_locks, wal_delete_journal_row, wal_patch_journal_row,
+    wal_replace_journal_row_without_key,
 };
-use crate::engine::table::TableManager;
 use crate::query::batch::BatchError;
 use crate::shamir_db::system_store::DatabaseIdentity;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
-use shamir_types::types::record_id::RecordId;
 
 /// Which persisted damage the scenario sows into ALPHA's control plane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,8 +35,8 @@ enum Damage {
     ControlRowDeleted,
     /// ALPHA's control row survives but its `record_type` is changed, so it
     /// no longer reads as a control record; the owned `Started` event stays.
-    /// Routing still follows the KEY prefix, so the row stays attributable
-    /// to ALPHA (its own quarantine), never BETA's.
+    /// Routing still follows the KEY prefix, so the retyped row stays
+    /// attributable to ALPHA (its own in-doubt partition), never BETA's.
     RecordTypeChanged,
     /// ALPHA's `Started` event row is deleted; the owned control row stays.
     StartedEventDeleted,
@@ -80,126 +59,70 @@ enum UnattributableDamage {
     /// UNUSED `event/{beta}/1` (BETA has no journal traffic).
     EventKeyPointsToForeignEvent,
     /// ALPHA's control row loses its `record_key` field entirely. The
-    /// unique-index validator skips a record whose new key is absent, so the
-    /// write persists (and drops the old posting).
+    /// unique-index validator skips a record whose new key is absent, so
+    /// the WAL-backed delete+insert replacement persists.
     ControlKeyDeleted,
-    /// ALPHA's started event payload is rewritten IN PLACE (raw seam) so the
-    /// serialized `JournalEvent.database_identity` names BETA while the row's
-    /// envelope and key still route to ALPHA. Uniquely admitted: the
-    /// `record_key` is untouched. Readable payload identity contradicting
-    /// the routed key proves no ownership — whole-open typed failure, while
-    /// the ordinary reader keeps BETA isolated until open.
+    /// ALPHA's started event payload is rewritten IN PLACE so the
+    /// serialized `JournalEvent.database_identity` names BETA while the
+    /// row's envelope and key still route to ALPHA. Uniquely admitted: the
+    /// `record_key` is untouched.
     EventPayloadIdentityContradictsKey,
 }
 
-/// The persisted system row of ALPHA's control record, for raw damage.
-async fn alpha_control_row(db: &ShamirDb, alpha: &DatabaseIdentity) -> (RecordId, QueryValue) {
-    alpha_row(db, alpha, "control").await
+/// A merge-patch set-map for the WAL-backed update seam.
+fn patch(pairs: &[(&str, QueryValue)]) -> QueryValue {
+    let mut fields = shamir_types::types::common::new_map();
+    for (name, value) in pairs {
+        fields.insert((*name).to_string(), value.clone());
+    }
+    QueryValue::Map(fields)
 }
 
-/// The persisted system row of ALPHA's started EVENT record, for raw damage.
-async fn alpha_event_row(db: &ShamirDb, alpha: &DatabaseIdentity) -> (RecordId, QueryValue) {
-    alpha_row(db, alpha, "event").await
-}
-
-async fn alpha_row(
-    db: &ShamirDb,
-    alpha: &DatabaseIdentity,
-    record_type: &str,
-) -> (RecordId, QueryValue) {
-    let table = journal_table(db).await;
-    rows(&table)
-        .await
-        .into_iter()
-        .find(|(_, row)| {
-            row.get("record_type").and_then(QueryValue::as_str) == Some(record_type)
-                && row.get("database_identity").and_then(QueryValue::as_str)
-                    == Some(alpha.to_string().as_str())
-        })
-        .unwrap_or_else(|| panic!("alpha {record_type} row is persisted"))
-}
-
-/// Sow the chosen damage with the raw test seams ONLY.
+/// Sow the chosen damage through the WAL-BACKED implicit-transaction seams
+/// ONLY (see `helpers.rs`): every mutation lands in one durable `WalEntryV2`
+/// and therefore survives the cold restart below.
 async fn sow_damage(db: &ShamirDb, damage: Damage, alpha: &DatabaseIdentity) {
     match damage {
         Damage::ControlRowDeleted => {
             // The control ROW itself is gone; the owned Started event row
             // remains readable, so the failure below is purely the missing
             // control record.
-            let (event_id, _) = alpha_control_row(db, alpha).await;
-            let table = journal_table(db).await;
-            assert!(
-                table
-                    .delete(event_id)
-                    .await
-                    .expect("raw test deletion of the control row returns success",),
-                "physical deletion must report the control row existed",
-            );
+            let (_, key, _) = find_journal_row(db, alpha, "control").await;
+            wal_delete_journal_row(db, &key).await;
         }
         Damage::RecordTypeChanged => {
             // Same physical row, no longer typed as a control record — an
             // identity-keyed read that matches on row shape alone must not
             // treat it as ALPHA's control plane.
-            let (event_id, mut envelope) = alpha_control_row(db, alpha).await;
-            let QueryValue::Map(fields) = &mut envelope else {
-                panic!("the control row envelope is a map");
-            };
-            fields.insert("record_type".into(), QueryValue::Str("event".into()));
-            let table = journal_table(db).await;
-            overwrite_row(&table, event_id, envelope).await;
+            let (_, key, _) = find_journal_row(db, alpha, "control").await;
+            wal_patch_journal_row(
+                db,
+                &key,
+                patch(&[("record_type", QueryValue::Str("event".into()))]),
+            )
+            .await;
         }
         Damage::StartedEventDeleted => {
-            let table = journal_table(db).await;
-            let (event_id, _) = rows(&table)
-                .await
-                .into_iter()
-                .find(|(_, row)| {
-                    row.get("record_type").and_then(QueryValue::as_str) == Some("event")
-                        && row.get("database_identity").and_then(QueryValue::as_str)
-                            == Some(alpha.to_string().as_str())
-                })
-                .expect("alpha started event row is persisted");
-            assert!(
-                table
-                    .delete(event_id)
-                    .await
-                    .expect("raw test deletion of the started event row returns success"),
-                "physical deletion must report the event row existed"
-            );
+            let (_, key, _) = find_journal_row(db, alpha, "event").await;
+            wal_delete_journal_row(db, &key).await;
         }
-        Damage::SequenceDrift => {
-            let (event_id, mut envelope) = alpha_control_row(db, alpha).await;
-            let QueryValue::Map(fields) = &mut envelope else {
-                panic!("the control row envelope is a map");
+        Damage::SequenceDrift | Damage::GenerationDrift => {
+            let field_name = match damage {
+                Damage::SequenceDrift => "sequence",
+                _ => "generation",
             };
-            let sequence = fields
-                .get("sequence")
+            let (_, key, envelope) = find_journal_row(db, alpha, "control").await;
+            let counter = envelope
+                .get(field_name)
                 .and_then(QueryValue::as_str)
                 .and_then(|value| value.parse::<u64>().ok())
-                .expect("control sequence is a counter string");
-            fields.insert(
-                "sequence".into(),
-                QueryValue::Str((sequence + 1).to_string()),
-            );
-            let table = journal_table(db).await;
-            overwrite_row(&table, event_id, envelope).await;
-        }
-        Damage::GenerationDrift => {
-            let (event_id, mut envelope) = alpha_control_row(db, alpha).await;
-            let QueryValue::Map(fields) = &mut envelope else {
-                panic!("the control row envelope is a map");
-            };
-            let generation = fields
-                .get("generation")
-                .and_then(QueryValue::as_str)
-                .and_then(|value| value.parse::<u64>().ok())
-                .expect("control generation is a counter string");
-            fields.insert(
-                "generation".into(),
-                QueryValue::Str((generation + 1).to_string()),
-            );
-            let table = journal_table(db).await;
-            overwrite_row(&table, event_id, envelope).await;
+                .unwrap_or_else(|| panic!("control {field_name} is a counter string"));
+            wal_patch_journal_row(
+                db,
+                &key,
+                patch(&[(field_name, QueryValue::Str((counter + 1).to_string()))]),
+            )
+            .await;
         }
     }
 }
@@ -242,133 +165,36 @@ async fn assert_alpha_fails_closed(db: &ShamirDb, alpha: &DatabaseIdentity, scen
     assert_unavailable(apply_error, &format!("{scenario}: apply"));
 }
 
-/// One ordinary DML, one DDL and one stored-procedure call batch against the
-/// damaged database: each is refused typed in-doubt by the batch fence,
-/// never executed. The DML targets the REAL `sentinel_items` table created
-/// in the clean setup — the refusal must not have touched it.
-async fn assert_batches_refused_in_doubt(db: &ShamirDb, scenario: &str) {
-    let mut write_batch = Batch::new();
-    write_batch.insert(
-        "w",
-        write::insert("sentinel_items")
-            .row(write::doc().set("id", 1i64).expect("typed doc field"))
-            .build(),
-    );
-    let request = write_batch.to_request_via_msgpack().unwrap();
-    let error = db
-        .execute_as(OWNER, "alpha", &request)
+/// Shared damaged-restart oracle: flush the journal rows durably, drop the
+/// engine's handles and REOPEN expecting FAILURE — the open-time in-doubt
+/// seed reads every routed partition with the ordinary history reader, so
+/// persisted damage (attributable or not) fails the WHOLE startup closed.
+/// Asserts the exact `DbError::SchemaMigrationJournalUnreadable` variant
+/// (not just any `durability_unavailable`-coded error) plus its stable
+/// `.code()` and the scenario in the message; the bounded Locked-only
+/// retry of [`try_init_waiting_for_locks`] still applies.
+async fn assert_restart_fails_closed(dir: tempfile::TempDir, db: ShamirDb, scenario: &str) {
+    let table = journal_table(&db).await;
+    db.system_store()
+        .flush_system_repo_durable(&table)
         .await
-        .expect_err(&format!(
-            "{scenario}: ordinary DML must be refused in doubt"
-        ));
-    assert_eq!(
-        error.code(),
-        Some("schema_migration_in_doubt"),
-        "{scenario}: wrong DML refusal code; message: {error}"
-    );
-
-    let mut ddl_batch = Batch::new();
-    ddl_batch.op(
-        "ct",
-        ddl::create_table("blocked_items").repo("main").build(),
-    );
-    let request = ddl_batch.to_request_via_msgpack().unwrap();
-    let error = db
-        .execute_as(OWNER, "alpha", &request)
-        .await
-        .expect_err(&format!("{scenario}: DDL must be refused in doubt"));
-    assert_eq!(
-        error.code(),
-        Some("schema_migration_in_doubt"),
-        "{scenario}: wrong DDL refusal code; message: {error}"
-    );
-
-    let mut call_batch = Batch::new();
-    call_batch.call("proc", "blocked_procedure", [] as [i64; 0]);
-    let request = call_batch.to_request_via_msgpack().unwrap();
-    let error = db
-        .execute_as(OWNER, "alpha", &request)
-        .await
-        .expect_err(&format!("{scenario}: call must be refused in doubt"));
-    assert_eq!(
-        error.code(),
-        Some("schema_migration_in_doubt"),
-        "{scenario}: wrong call refusal code; message: {error}"
-    );
-
-    // The sentinel table survives and stays EMPTY: the refused DML inserted
-    // no row (a surviving table alone would not prove that, so the rows are
-    // counted), and the refused DDL created nothing beside it.
-    let instance = db.get_db("alpha").unwrap();
-    assert!(
-        instance.has_table("main", "sentinel_items"),
-        "{scenario}: the real sentinel table must survive untouched"
-    );
-    assert!(
-        !instance.has_table("main", "blocked_items"),
-        "{scenario}: the refused DDL must not have executed"
-    );
-    let sentinel = db
-        .get_table("alpha", "main", "sentinel_items")
-        .await
-        .expect("the sentinel table is readable after the refusals");
-    assert_eq!(
-        rows(&sentinel).await.len(),
-        0,
-        "{scenario}: the refused DML must not have inserted any sentinel row"
-    );
-}
-
-/// The healthy database keeps its full path across the damaged neighbor's
-/// failures: status reports its applied prefix, plan of the next ordinal
-/// works, and an ACTUAL apply lands — through the identity-conditioned
-/// control lookup and MVCC CAS. The apply generation is taken from B's OWN
-/// status, never a magic constant.
-async fn assert_beta_stays_healthy(
-    db: &ShamirDb,
-    beta: &DatabaseIdentity,
-    beta_first: &shamir_query_types::admin::types::schema_migration::SchemaMigrationBody,
-) {
-    let beta_next = body("beta-002", 2);
-    let status = run_status(db, "beta", beta)
-        .await
-        .expect("database B status stays healthy beside the damaged A control row");
-    assert_eq!(str_field(&status, "last_applied_id"), "beta-001");
-    assert_eq!(field(&status, "last_applied_ordinal").as_i64(), Some(1));
-    assert_eq!(str_field(&status, "checksum_validation"), "valid");
-    let planned = run_plan(
-        db,
-        "beta",
-        predecessor(Some("beta-001"), 1, checksum(beta_first)),
-        vec![submission(beta_first), submission(&beta_next)],
-        beta,
-    )
-    .await
-    .expect("database B plans its next migration beside the damaged A control row");
-    assert_eq!(str_field(field(&planned, "migration"), "id"), "beta-002");
-    let applied = run_apply(
-        db,
-        "beta",
-        predecessor(Some("beta-001"), 1, checksum(beta_first)),
-        fence_generation_from_status(db, "beta", beta).await,
-        submission(&beta_next),
-        beta,
-    )
-    .await
-    .expect("database B actually applies its second migration beside the damaged A control row");
-    assert_eq!(str_field(&applied, "status"), "applied");
-    assert_eq!(str_field(&applied, "migration_id"), "beta-002");
-    let status_after = run_status(db, "beta", beta)
-        .await
-        .expect("database B status after its own apply stays healthy");
-    assert_eq!(str_field(&status_after, "last_applied_id"), "beta-002");
+        .expect("the damaged journal rows flush durably before the restart");
+    drop(table);
+    drop(db);
+    let Err(error) = try_init_waiting_for_locks(dir.path().join("system")).await else {
+        panic!("{scenario}: startup must fail closed on the persisted damage");
+    };
+    assert_unavailable_error(&error, scenario);
+    // Keep the tempdir alive to the end of the scenario.
+    drop(dir);
 }
 
 /// Shared persisted scenario: two databases, each with journal traffic;
-/// ALPHA left with a durable OWNED Started event and a REAL sentinel table;
-/// the chosen damage sown into ALPHA's control plane; durable flush; cold
-/// restart; then the fail-closed, refused-DML/DDL/call and healthy-neighbor
-/// assertions.
+/// ALPHA left with a durable OWNED Started event; the chosen damage sown
+/// into ALPHA's control plane. The pre-restart
+/// oracle fails ALPHA's own status, plan and apply closed in the SAME
+/// process; then the durable flush + cold restart fails the WHOLE startup
+/// closed ([`assert_restart_fails_closed`]).
 async fn control_integrity_scenario(damage: Damage) {
     let (dir, db) = persistent_db().await;
     db.create_db("alpha").await.unwrap();
@@ -385,18 +211,6 @@ async fn control_integrity_scenario(damage: Damage) {
         .schema_migration_identity("beta")
         .await
         .unwrap();
-
-    // A REAL table sentinel in ALPHA, BEFORE any fence: the in-doubt DML/DDL
-    // refusals below must leave it untouched.
-    let mut sentinel_batch = Batch::new();
-    sentinel_batch.op(
-        "ct",
-        ddl::create_table("sentinel_items").repo("main").build(),
-    );
-    let request = sentinel_batch.to_request_via_msgpack().unwrap();
-    db.execute_as(OWNER, "alpha", &request)
-        .await
-        .expect("the sentinel create-table runs before the fence exists");
 
     // ALPHA: durable OWNED fence with one Started event — the in-flight
     // state a crashed runner leaves behind. Never applied, never released.
@@ -427,103 +241,90 @@ async fn control_integrity_scenario(damage: Damage) {
     )
     .await
     .expect("database B applies its first migration in the clean setup");
-    assert_eq!(str_field(&applied, "status"), "applied");
+    assert_eq!(
+        applied.get("status").and_then(QueryValue::as_str),
+        Some("applied"),
+        "database B applies its first migration in the clean setup"
+    );
 
     sow_damage(&db, damage, &alpha).await;
 
-    // Persist the damaged rows durably, drop the engine, REOPEN: the
-    // assertions below must hold across a cold restart of the store.
-    let table: TableManager = journal_table(&db).await;
-    let db = flush_and_reopen(dir.path(), db, table).await;
-
-    let scenario = format!("restart with {damage:?}");
+    // BEFORE the restart the damage — already committed through the
+    // WAL-backed seam (`affected == 1` asserted there) — fails ALPHA's own
+    // status, plan and apply closed in the SAME process; BETA's status stays
+    // readable (its full apply flow lives in `isolation_tests`).
+    let scenario = format!("pre-restart alpha with {damage:?}");
     assert_alpha_fails_closed(&db, &alpha, &scenario).await;
-    assert_batches_refused_in_doubt(&db, &scenario).await;
-    assert_beta_stays_healthy(&db, &beta, &beta_first).await;
-
-    // Physical-delete variant: after boot, the healthy serving database B
-    // must not be able to rename or cascade-drop the quarantined A —
-    // database-level admin ops authorize at Root, but the target-side guard
-    // refuses on A's persisted in-doubt marker. Root principal, as every
-    // database-level admin op requires.
-    if damage == Damage::ControlRowDeleted {
-        let rename_error =
-            run_admin_op(&db, "beta", "rn", ddl::rename_db("alpha", "alpha2").build())
-                .await
-                .expect_err("rename of a quarantined database must be refused");
-        assert_eq!(
-            rename_error.code(),
-            Some("schema_migration_in_doubt"),
-            "rename via healthy serving B: wrong refusal code; message: {rename_error}"
-        );
-        assert!(!db.has_db("alpha2"), "no shadow rename target may appear");
-
-        let drop_error = run_admin_op(
-            &db,
-            "beta",
-            "dd",
-            ddl::drop_db("alpha")
-                .hmac("test-hmac")
-                .cascade()
-                .build()
-                .expect("typed drop-db operation"),
-        )
+    run_status(&db, "beta", &beta)
         .await
-        .expect_err("cascade drop of a quarantined database must be refused");
-        assert_eq!(
-            drop_error.code(),
-            Some("schema_migration_in_doubt"),
-            "cascade drop via healthy serving B: wrong refusal code; message: {drop_error}"
-        );
-        assert!(db.has_db("alpha"), "alpha must survive the refused drop");
-    }
+        .expect("beta status stays readable beside ALPHA's attributable damage");
+
+    // Persist the damaged rows durably, drop the engine, REOPEN: the
+    // open-time in-doubt seed fails the WHOLE startup closed.
+    let scenario = format!("restart with {damage:?}");
+    assert_restart_fails_closed(dir, db, &scenario).await;
 }
 
-/// Sow the UNATTRIBUTABLE damage with the raw test seams ONLY. Every target
-/// key is a canonical key of BETA that is UNOCCUPIED (BETA has no journal
-/// traffic in this scenario), so the unique `record_key` index admits the
-/// raw write.
+/// Sow the UNATTRIBUTABLE damage through the WAL-BACKED implicit-transaction
+/// seams ONLY (see `helpers.rs`). Every target key is a canonical key of
+/// BETA that is UNOCCUPIED (BETA has no journal traffic in this scenario),
+/// so the unique `record_key` index admits the raw write at commit time.
 async fn sow_unattributable_damage(
     db: &ShamirDb,
     damage: UnattributableDamage,
     alpha: &DatabaseIdentity,
     beta: &DatabaseIdentity,
 ) {
-    let (row_id, mut envelope) = match damage {
+    let (record_key, envelope) = match damage {
         UnattributableDamage::EventKeyPointsToForeignEvent
         | UnattributableDamage::EventPayloadIdentityContradictsKey => {
-            alpha_event_row(db, alpha).await
+            let (_, key, row) = find_journal_row(db, alpha, "event").await;
+            (key, row)
         }
-        _ => alpha_control_row(db, alpha).await,
-    };
-    let QueryValue::Map(fields) = &mut envelope else {
-        panic!("the journal row envelope is a map");
+        _ => {
+            let (_, key, row) = find_journal_row(db, alpha, "control").await;
+            (key, row)
+        }
     };
     match damage {
         UnattributableDamage::ControlKeyPointsToForeignControl => {
-            fields.insert(
-                "record_key".into(),
-                QueryValue::Str(format!("control/{beta}")),
-            );
+            wal_patch_journal_row(
+                db,
+                &record_key,
+                patch(&[("record_key", QueryValue::Str(format!("control/{beta}")))]),
+            )
+            .await;
         }
         UnattributableDamage::EventKeyPointsToForeignEvent => {
-            fields.insert(
-                "record_key".into(),
-                QueryValue::Str(format!("event/{beta}/1")),
-            );
+            wal_patch_journal_row(
+                db,
+                &record_key,
+                patch(&[("record_key", QueryValue::Str(format!("event/{beta}/1")))]),
+            )
+            .await;
         }
         UnattributableDamage::ControlKeyDeleted => {
+            // Merge-patch cannot REMOVE a field: the key-less replacement is
+            // one atomic WAL-backed delete+insert of the same envelope
+            // without its `record_key`.
+            let mut keyless = envelope;
+            let QueryValue::Map(fields) = &mut keyless else {
+                panic!("the control row envelope is a map");
+            };
             assert!(
                 fields.shift_remove("record_key").is_some(),
                 "the control row carried a record_key before the damage",
             );
+            wal_replace_journal_row_without_key(db, &record_key, keyless).await;
         }
         UnattributableDamage::EventPayloadIdentityContradictsKey => {
             // Envelope and key stay ALPHA-routed; only the payload's typed
             // `JournalEvent.database_identity` is mutated and re-serialized
             // in the actual named format — no generic field round-trip.
-            let QueryValue::Bin(bytes) =
-                fields.get("event").expect("event payload present").clone()
+            let QueryValue::Bin(bytes) = envelope
+                .get("event")
+                .expect("event payload present")
+                .clone()
             else {
                 panic!("the event row payload is binary");
             };
@@ -532,11 +333,14 @@ async fn sow_unattributable_damage(
             event.database_identity = *beta;
             let mutated =
                 rmp_serde::to_vec_named(&event).expect("mutated started event payload re-encodes");
-            fields.insert("event".into(), QueryValue::Bin(mutated));
+            wal_patch_journal_row(
+                db,
+                &record_key,
+                patch(&[("event", QueryValue::Bin(mutated))]),
+            )
+            .await;
         }
     }
-    let table = journal_table(db).await;
-    overwrite_row(&table, row_id, envelope).await;
 }
 
 /// Unattributable-row scenario: two databases, BETA with NO journal traffic
@@ -608,25 +412,22 @@ async fn unattributable_row_scenario(damage: UnattributableDamage) {
         }
     }
 
-    let table: TableManager = journal_table(&db).await;
-    let system_path = dir.path().join("system");
-    db.system_store()
-        .flush_system_repo_durable(&table)
-        .await
-        .expect("the damaged journal rows flush durably before the restart");
-    drop(table);
-    drop(db);
-    let Err(error) = try_init_waiting_for_locks(system_path).await else {
-        panic!("startup must fail closed on an unattributable journal row");
-    };
-    assert_unavailable_error(&error, &format!("restart with {damage:?}"));
-    // Keep the tempdir alive to the end of the scenario.
-    drop(dir);
+    // The routed payload disagreement keeps BETA healthy pre-restart
+    // (isolation); the shared helper then proves the cold restart fails the
+    // WHOLE startup closed.
+    let scenario = format!("restart with {damage:?}");
+    assert_restart_fails_closed(dir, db, &scenario).await;
 }
 
-/// The DbError-side twin of [`assert_unavailable`]: typed code, not message
-/// matching.
+/// The DbError-side twin of [`assert_unavailable`]: the EXACT
+/// `DbError::SchemaMigrationJournalUnreadable` variant (not just any
+/// `durability_unavailable`-coded error), its stable `.code()`, and the
+/// scenario in the message.
 fn assert_unavailable_error(error: &crate::DbError, scenario: &str) {
+    assert!(
+        matches!(error, crate::DbError::SchemaMigrationJournalUnreadable(_)),
+        "{scenario}: wrong startup failure variant; message: {error}"
+    );
     assert_eq!(
         error.code(),
         Some("schema_migration_durability_unavailable"),

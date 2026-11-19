@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use shamir_collections::TFxSet;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -136,26 +137,22 @@ impl SystemStore {
         super::ensure_database_identity(self, database).await
     }
 
-    /// One structural pass at open: routing envelope plus the header-only
-    /// EVENT payload identity probe (bodies stay undecoded; body damage is
-    /// per-database quarantine). Any unattributable row fails the WHOLE
-    /// startup closed, even with zero databases; infra errors pass through.
-    pub(crate) async fn validate_schema_migration_journal_routing(&self) -> DbResult<()> {
+    /// ONE startup scan of the durable journal (shared `row_route`, no
+    /// payload decode): the distinct routed identities — loaded databases
+    /// and orphan histories alike. ANY unattributable row fails the WHOLE
+    /// startup closed with the typed `SchemaMigrationJournalUnreadable`.
+    pub(crate) async fn schema_migration_journal_routed_identities(
+        &self,
+    ) -> DbResult<Vec<DatabaseIdentity>> {
         if !self.schema_migration_journal_durable() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
+        let mut identities = TFxSet::default();
         for (row_id, value) in read_journal_partition_records(&table).await? {
-            let route = row_route(&row_id, &value)?;
-            let RecordRoute::Event { identity, .. } = route else {
-                continue;
-            };
-            let Some(QueryValue::Bin(bytes)) = value.get("event") else {
-                continue; // missing payload: attributable body damage
-            };
-            super::event::probe_event_payload_identity(&row_id, identity, bytes)?;
+            identities.insert(row_route(&row_id, &value)?.identity());
         }
-        Ok(())
+        Ok(identities.into_iter().collect())
     }
 
     pub async fn read_schema_migration_history(
@@ -209,7 +206,9 @@ impl SystemStore {
                             _ => None,
                         })
                         .ok_or_else(|| corrupt(&row_id, "missing or non-binary event payload"))?;
-                    let event = decode_event(bytes, &row_id)?;
+                    let event = decode_event(bytes, &row_id).map_err(|error| {
+                        DbError::SchemaMigrationJournalUnreadable(error.to_string())
+                    })?;
                     let routed_identity = route.identity();
                     // Readable payload identity contradicting the routed key
                     // proves no ownership: typed failure, never ignored.
@@ -251,7 +250,7 @@ impl SystemStore {
         match partition_control {
             Some((row_id, control)) => validate_control_history(&control, &history, &row_id)?,
             None if history.last_sequence != 0 => {
-                return Err(DbError::Internal(format!(
+                return Err(DbError::SchemaMigrationJournalUnreadable(format!(
                     "schema migration control record missing for non-empty history {identity}"
                 )));
             }
@@ -587,9 +586,9 @@ impl SystemStore {
     /// Open-time fence snapshot (R1c step 2b-3b): the durable generation of
     /// the partition's fence iff the journal carries an unresolved entry,
     /// else `None`. The full ordinary-journal validation runs first, so a
-    /// damaged journal or control record fails closed (design §4.2/§4.3)
-    /// rather than silently reporting the fence free. One-shot read for
-    /// `ShamirDb::init_inner`; never on the batch path; no second scan.
+    /// damaged journal or control record fails closed with the typed error
+    /// rather than silently reporting the fence free. One-shot read at boot;
+    /// never on the batch path.
     pub async fn owned_schema_migration_fence(
         &self,
         identity: DatabaseIdentity,
@@ -985,7 +984,7 @@ fn parse_counter(value: Option<&str>, row_id: &str, field: &str) -> DbResult<u64
 }
 
 fn corrupt(row_id: &str, cause: &str) -> DbError {
-    DbError::Internal(format!(
+    DbError::SchemaMigrationJournalUnreadable(format!(
         "corrupt schema migration journal record {row_id}: {cause}"
     ))
 }

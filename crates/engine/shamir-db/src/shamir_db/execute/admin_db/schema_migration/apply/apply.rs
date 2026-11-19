@@ -93,16 +93,6 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
 
-    // Boot-durability marker (R1c step 2b-3b): when the open-time
-    // in-doubt marker stands for a boot failure (state unknowable at open),
-    // fail closed before any journal byte is read — after the follower
-    // refusal, preserving §4.5 precedence.
-    if let Some(refusal) =
-        super::super::fence::schema_migration_gate_boot_unavailable_refusal(&executor.shamir, &db)
-    {
-        return Err(refusal);
-    }
-
     let store = executor.shamir.system_store();
     let serving = store
         .schema_migration_identity(&db)

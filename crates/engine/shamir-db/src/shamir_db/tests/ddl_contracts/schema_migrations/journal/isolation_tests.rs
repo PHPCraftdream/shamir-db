@@ -1,30 +1,51 @@
 //! Journal isolation (R1c step 4, design §5.3): a deliberately corrupted /
 //! unadmitted journal event of database A fails A closed with its own typed
 //! error on status, plan and apply, while database B's status, plan and a
-//! healthy apply keep working on the same journal table.
+//! healthy apply keep working on the same journal table. The RESTART variant
+//! sows the same body damage through the WAL-backed implicit-transaction
+//! seam (`helpers.rs`) and expects the WHOLE OPEN after the cold restart to
+//! fail closed with the typed `DbError::SchemaMigrationJournalUnreadable`.
 //!
 //! Requests are built ONLY through `shamir-query-builder` and executed
 //! through the normal batch entry point (`execute` / `execute_as`).
 
 use std::time::Duration;
 
-use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationOp;
 
 use super::super::helpers::on_big_stack;
 use super::super::helpers::{
-    body, checksum, context, fence_generation_from_status, field, flush_and_reopen, journal_table,
-    overwrite_row, persistent_db, predecessor, prepare_database, rows, run_apply, run_plan,
-    run_status, str_field, submission, OWNER,
+    body, checksum, context, fence_generation_from_status, field, journal_table, overwrite_row,
+    persistent_db, predecessor, prepare_database, rows, run_apply, run_plan, run_status, str_field,
+    submission, try_init_waiting_for_locks, wal_patch_journal_row,
 };
 use crate::query::batch::BatchError;
 use crate::shamir_db::system_store::JournalEvent;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
+/// Append one REAL extra allowed operation to a stored `JournalEvent`
+/// payload: the record stays well-formed and admitted — only the checksum no
+/// longer matches its stored body.
+fn append_extra_operation(payload: &[u8]) -> Vec<u8> {
+    let mut event: JournalEvent = rmp_serde::from_slice(payload).unwrap();
+    let body = event
+        .body
+        .as_mut()
+        .expect("started event stores its migration body");
+    // A REAL extra allowed operation is appended, so the record is well-formed
+    // and admitted — only the checksum no longer matches its stored body.
+    let extra = ddl::create_table("unplanned_items").build();
+    body.operations
+        .push(SchemaMigrationOp::try_from(extra).expect("typed operation is admitted"));
+    rmp_serde::to_vec_named(&event).unwrap()
+}
+
 /// Corrupt ONLY the stored body of the first journal event: the reader must
-/// refuse it as an integrity failure for its own database.
+/// refuse it as an integrity failure for its own database. Same-process
+/// variant: the raw no-WAL seam (`overwrite_row`) is enough — the engine is
+/// never dropped, so nothing has to survive recovery.
 async fn corrupt_first_event_body(db: &ShamirDb) {
     let table = journal_table(db).await;
     let (event_id, mut envelope) = rows(&table)
@@ -36,61 +57,73 @@ async fn corrupt_first_event_body(db: &ShamirDb) {
         Some(QueryValue::Bin(bytes)) => bytes.clone(),
         _ => panic!("started event payload is binary"),
     };
-    let mut event: JournalEvent = rmp_serde::from_slice(&payload).unwrap();
-    let body = event
-        .body
-        .as_mut()
-        .expect("started event stores its migration body");
-    // A REAL extra allowed operation is appended, so the record is well-formed
-    // and admitted — only the checksum no longer matches its stored body.
-    let extra = ddl::create_table("unplanned_items").build();
-    body.operations
-        .push(SchemaMigrationOp::try_from(extra).expect("typed operation is admitted"));
     if let QueryValue::Map(fields) = &mut envelope {
         fields.insert(
             "event".into(),
-            QueryValue::Bin(rmp_serde::to_vec_named(&event).unwrap()),
+            QueryValue::Bin(append_extra_operation(&payload)),
         );
     }
     overwrite_row(&table, event_id, envelope).await;
 }
 
-fn assert_closed(error: BatchError, context: &str, detailed: bool) {
+/// RESTART variant: the same body damage, but committed through the
+/// WAL-BACKED implicit-transaction seam (builder-only typed update on the
+/// unique `record_key`) — see `helpers.rs`. The no-WAL raw seam above would
+/// be lost on reopen: recovery replays the last committed WAL state and
+/// rematerializes the CLEAN body, which is exactly what the pre-fix restart
+/// fixture observed.
+async fn corrupt_first_event_body_via_wal(db: &ShamirDb) {
+    let table = journal_table(db).await;
+    let envelope = rows(&table)
+        .await
+        .into_iter()
+        .find(|(_, row)| row.get("record_type").and_then(QueryValue::as_str) == Some("event"))
+        .expect("the started event row is persisted")
+        .1;
+    drop(table);
+    let record_key = envelope
+        .get("record_key")
+        .and_then(QueryValue::as_str)
+        .expect("the started event row carries its record_key")
+        .to_string();
+    let payload = match envelope.get("event") {
+        Some(QueryValue::Bin(bytes)) => bytes.clone(),
+        _ => panic!("started event payload is binary"),
+    };
+    let mutated = append_extra_operation(&payload);
+    let mut fields = shamir_types::types::common::new_map();
+    fields.insert("event".to_string(), QueryValue::Bin(mutated));
+    wal_patch_journal_row(db, &record_key, QueryValue::Map(fields)).await;
+}
+
+fn assert_closed(error: BatchError, context: &str) {
     assert_eq!(
         error.code(),
         Some("schema_migration_durability_unavailable"),
         "{context}: wrong refusal code; message: {error}"
     );
-    if detailed {
-        // Same-process: the corruption cause carries through. After a restart
-        // the open-time in-doubt marker reports the generic refusal, so the
-        // detailed message is asserted only for the no-reopen variant.
-        assert!(
-            error
-                .to_string()
-                .contains("body metadata/checksum mismatch"),
-            "{context}: expected the journal corruption cause, got: {error}"
-        );
-    }
-}
-
-/// A plain DDL writer batch against the damaged database, pinned to the
-/// database's `main` repository: after a restart the open-time in-doubt
-/// marker must refuse it with the TYPED in-doubt code, never a silent
-/// success (and never an actually executed create-table).
-fn writer_batch() -> Batch {
-    let mut b = Batch::new();
-    b.op(
-        "ct",
-        ddl::create_table("blocked_items").repo("main").build(),
+    // The corruption cause carries through in the error message.
+    assert!(
+        error
+            .to_string()
+            .contains("body metadata/checksum mismatch"),
+        "{context}: expected the journal corruption cause, got: {error}"
     );
-    b
 }
 
-async fn run_writer(db: &ShamirDb, database: &str) -> Result<(), BatchError> {
-    let request = writer_batch().to_request_via_msgpack().unwrap();
-    db.execute_as(OWNER, database, &request).await?;
-    Ok(())
+/// The DbError-side twin of [`assert_closed`]: the EXACT
+/// `DbError::SchemaMigrationJournalUnreadable` variant (not just any
+/// `durability_unavailable`-coded error) and its stable `.code()`.
+fn assert_unreadable(error: &crate::DbError, scenario: &str) {
+    assert!(
+        matches!(error, crate::DbError::SchemaMigrationJournalUnreadable(_)),
+        "{scenario}: wrong startup failure variant; message: {error}"
+    );
+    assert_eq!(
+        error.code(),
+        Some("schema_migration_durability_unavailable"),
+        "{scenario}: wrong startup failure code; message: {error}"
+    );
 }
 
 #[test]
@@ -101,7 +134,7 @@ fn corrupted_event_of_one_database_fails_it_closed_and_never_blocks_another_data
     on_big_stack(|| async {
         tokio::time::timeout(
             Duration::from_secs(300),
-            Box::pin(corrupted_event_scenario(false)),
+            Box::pin(corrupted_event_scenario()),
         )
         .await
         .expect("journal isolation scenario timed out");
@@ -110,21 +143,21 @@ fn corrupted_event_of_one_database_fails_it_closed_and_never_blocks_another_data
 
 #[test]
 fn corrupted_event_of_one_database_fails_it_closed_after_a_cold_restart() {
-    // Same scenario, but the damaged journal is flushed durably and the
-    // system store is REOPENED before the assertions: the corruption must
-    // fail database A closed across a restart too, while B stays healthy.
+    // Same body damage, but committed through the WAL-backed seam and
+    // flushed durably before the engine is dropped: the cold restart must
+    // FAIL THE WHOLE OPEN closed with the typed journal-unreadable error.
     on_big_stack(|| async {
         tokio::time::timeout(
             Duration::from_secs(300),
-            Box::pin(corrupted_event_scenario(true)),
+            Box::pin(corrupted_event_whole_open_scenario()),
         )
         .await
         .expect("journal isolation restart scenario timed out");
     });
 }
 
-async fn corrupted_event_scenario(reopen: bool) {
-    let (dir, db) = persistent_db().await;
+async fn corrupted_event_scenario() {
+    let (_dir, db) = persistent_db().await;
     db.create_db("alpha").await.unwrap();
     db.create_db("beta").await.unwrap();
     prepare_database(&db, "alpha").await;
@@ -155,14 +188,6 @@ async fn corrupted_event_scenario(reopen: bool) {
         .await
         .unwrap();
     corrupt_first_event_body(&db).await;
-    let db = if reopen {
-        // Persist the damaged journal row durably, then drop the engine and
-        // reopen: the corruption must survive a cold restart of the store.
-        let table = journal_table(&db).await;
-        flush_and_reopen(dir.path(), db, table).await
-    } else {
-        db
-    };
 
     // B is untouched by A's damaged record: its apply succeeds. The apply
     // generation comes from B's OWN status, never a magic constant.
@@ -205,7 +230,7 @@ async fn corrupted_event_scenario(reopen: bool) {
     let status_error = run_status(&db, "alpha", &alpha)
         .await
         .expect_err("database A status must fail closed on its corrupted journal");
-    assert_closed(status_error, "status", !reopen);
+    assert_closed(status_error, "status");
     let plan_error = run_plan(
         &db,
         "alpha",
@@ -215,7 +240,7 @@ async fn corrupted_event_scenario(reopen: bool) {
     )
     .await
     .expect_err("database A plan must fail closed on its corrupted journal");
-    assert_closed(plan_error, "plan", !reopen);
+    assert_closed(plan_error, "plan");
     let apply_error = run_apply(
         &db,
         "alpha",
@@ -226,31 +251,7 @@ async fn corrupted_event_scenario(reopen: bool) {
     )
     .await
     .expect_err("database A apply must fail closed on its corrupted journal");
-    assert_closed(apply_error, "apply", !reopen);
-
-    if reopen {
-        // After the restart the open-time in-doubt marker refuses a plain
-        // DDL writer against A with the EXACT in-doubt code, and the
-        // refused create-table was never executed.
-        let writer_error = run_writer(&db, "alpha")
-            .await
-            .expect_err("restart: database A must refuse a DDL writer");
-        assert_eq!(
-            writer_error.code(),
-            Some("schema_migration_in_doubt"),
-            "restart: wrong writer refusal code; message: {writer_error}"
-        );
-        let instance = db.get_db("alpha").unwrap();
-        assert!(
-            !instance.has_table("main", "blocked_items"),
-            "the refused writer must not have executed its create-table"
-        );
-
-        // Positive control for the healthy database is already asserted
-        // above: B's apply through the normal batch succeeded after the
-        // restart and its status still reports the unchanged control row
-        // (beta-001, ordinal 1).
-    }
+    assert_closed(apply_error, "apply");
 
     // B still reads healthy after A's failures: nothing in A's journal
     // poisoned B's view.
@@ -258,4 +259,51 @@ async fn corrupted_event_scenario(reopen: bool) {
         .await
         .expect("database B status stays healthy after A's refusals");
     assert_eq!(str_field(&status_after, "last_applied_id"), "beta-001");
+}
+
+async fn corrupted_event_whole_open_scenario() {
+    let (dir, db) = persistent_db().await;
+    db.create_db("alpha").await.unwrap();
+    prepare_database(&db, "alpha").await;
+    let alpha = db
+        .system_store()
+        .schema_migration_identity("alpha")
+        .await
+        .unwrap();
+
+    // The same Started-event body damage as the same-process scenario.
+    let damaged = body("alpha-001", 1);
+    db.system_store()
+        .acquire_schema_migration_fence(
+            alpha,
+            0,
+            damaged.metadata.clone(),
+            damaged,
+            false,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    // Sow the damage through the WAL-BACKED seam, flush durably, drop the
+    // engine: only the WAL-backed damage survives a cold restart.
+    corrupt_first_event_body_via_wal(&db).await;
+    let table = journal_table(&db).await;
+    let system_path = dir.path().join("system");
+    db.system_store()
+        .flush_system_repo_durable(&table)
+        .await
+        .expect("the damaged journal row flushes durably before the restart");
+    drop(table);
+    drop(db);
+
+    // Whole-open on body damage: the cold restart must FAIL CLOSED with the
+    // typed journal-unreadable error — never a partial open, and therefore
+    // never any post-open action to assert on.
+    let Err(error) = try_init_waiting_for_locks(system_path).await else {
+        panic!("restart must fail closed on the corrupted journal row");
+    };
+    assert_unreadable(&error, "restart on a corrupted journal body");
+    // Keep the tempdir alive to the end of the scenario.
+    drop(dir);
 }

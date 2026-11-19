@@ -16,6 +16,7 @@ use shamir_query_builder::{
     application_schema_plan, application_schema_status, apply_application_schema_migration,
     SchemaMigration,
 };
+use shamir_query_builder::{filter, write};
 use shamir_query_types::admin::types::schema_migration::{
     canonical_body_checksum, SchemaMigrationApplyRequest, SchemaMigrationBody,
     SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
@@ -118,6 +119,160 @@ where
         .expect("spawn test thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+// ---------------------------------------------------------------------------
+// WAL-BACKED DAMAGE SEAMS — used ONLY by the RESTART fixtures.
+//
+// HAZARD: the plain raw seams above (`overwrite_row` = `TableManager::set`,
+// and a direct `TableManager::delete`) write NO durable transaction WAL
+// entry, so after a cold restart the recovery floor (seeded from the last
+// committed WAL marker / clean checkpoint) cannot see them — and an OLD WAL
+// entry can rematerialize the clean row over the damaged bytes. Every seam
+// below therefore routes the damage through the system repo's implicit
+// batch transaction (`run_implicit_batch_tx`), whose commit folds the
+// mutation into ONE durable `WalEntryV2` exactly like
+// `journal.rs::commit_transition`, so it replays on reopen. Operations are
+// built through `shamir-query-builder` and filter on the UNIQUE
+// `record_key` (exactly one physical record); each asserts `affected == 1`.
+// ---------------------------------------------------------------------------
+
+const JOURNAL_TABLE: &str = "schema_migration_events";
+
+fn journal_key_filter(record_key: &str) -> shamir_query_types::filter::Filter {
+    filter::eq("record_key", record_key)
+}
+
+/// A journal row by record kind (`"control"` / `"event"`) and database
+/// identity: (record id, unique `record_key`, full envelope). The ordinary
+/// reader (`rows`) is the same view the journal's own partition reader uses.
+pub(super) async fn find_journal_row(
+    db: &ShamirDb,
+    identity: &DatabaseIdentity,
+    record_type: &str,
+) -> (RecordId, String, QueryValue) {
+    let table = journal_table(db).await;
+    rows(&table)
+        .await
+        .into_iter()
+        .find_map(|(id, row)| {
+            let routed = row.get("record_type").and_then(QueryValue::as_str) == Some(record_type)
+                && row.get("database_identity").and_then(QueryValue::as_str)
+                    == Some(identity.to_string().as_str());
+            routed.then(|| {
+                let key = row
+                    .get("record_key")
+                    .and_then(QueryValue::as_str)
+                    .unwrap_or_else(|| panic!("journal {record_type} row carries its record_key"))
+                    .to_string();
+                (id, key, row)
+            })
+        })
+        .unwrap_or_else(|| panic!("a persisted {record_type} row of {identity} exists"))
+}
+
+/// WAL-backed UPDATE of one journal row, addressed by its UNIQUE
+/// `record_key`. `patch` is the partial set-map of `execute_update_tx`
+/// (merge-patch onto the stored record). Asserts exactly one row changed.
+pub(super) async fn wal_patch_journal_row(db: &ShamirDb, record_key: &str, patch: QueryValue) {
+    let table = journal_table(db).await;
+    let op = write::update(JOURNAL_TABLE)
+        .where_(journal_key_filter(record_key))
+        .set(patch)
+        .build()
+        .expect("typed journal row update operation");
+    let result = db
+        .system_store()
+        .update_via_implicit_tx(&table, &op)
+        .await
+        .expect("WAL-backed journal row update commits through the implicit tx");
+    assert_eq!(
+        result.affected, 1,
+        "the unique-key update must hit exactly one row (key {record_key})"
+    );
+}
+
+/// WAL-backed physical DELETE of one journal row, addressed by its UNIQUE
+/// `record_key`. The store's `delete_via_implicit_tx` is not visible to the
+/// tests, so the same production path is spelled out here (mirroring
+/// `SystemStore::delete_via_implicit_tx` / the `query_runner` Delete arm).
+pub(super) async fn wal_delete_journal_row(db: &ShamirDb, record_key: &str) {
+    let table = journal_table(db).await;
+    let op = write::delete(JOURNAL_TABLE)
+        .where_(journal_key_filter(record_key))
+        .build()
+        .expect("typed journal row delete operation");
+    let repo = db.system_store().system_repo().expect("system repo");
+    let owned = (table.clone(), op);
+    let result = repo
+        .run_implicit_batch_tx(Actor::System, "test_journal_row_delete", move |tx| {
+            Box::pin(async move {
+                let (table, op) = owned;
+                let refs = shamir_types::types::common::new_map();
+                let ctx = table.info_store_read_view().filter_context(&refs).await?;
+                table
+                    .execute_delete_tx(&op, &ctx, tx, None, &Actor::System)
+                    .await
+            })
+        })
+        .await
+        .expect("WAL-backed journal row delete commits through the implicit tx");
+    assert_eq!(
+        result.affected, 1,
+        "the unique-key delete must hit exactly one row (key {record_key})"
+    );
+}
+
+/// WAL-backed DELETE + re-INSERT of one journal row inside ONE implicit
+/// transaction, with the new envelope carried as-is (`row_without_key`).
+/// Needed where merge-patch semantics cannot express the damage — a
+/// MISSING `record_key` field cannot be produced by an update (a partial
+/// set-map only adds/replaces fields), so the row is atomically replaced.
+/// `commit_tx` emits ONE durable WAL entry for the whole pair, so the
+/// key-less replacement replays on reopen exactly as committed.
+pub(super) async fn wal_replace_journal_row_without_key(
+    db: &ShamirDb,
+    record_key: &str,
+    row_without_key: QueryValue,
+) {
+    let table = journal_table(db).await;
+    let delete = write::delete(JOURNAL_TABLE)
+        .where_(journal_key_filter(record_key))
+        .build()
+        .expect("typed journal row delete operation");
+    let insert = write::insert(JOURNAL_TABLE).row(row_without_key).build();
+    let repo = db.system_store().system_repo().expect("system repo");
+    let owned = (table.clone(), delete, insert);
+    let result = repo
+        .run_implicit_batch_tx(Actor::System, "test_journal_row_replace", move |tx| {
+            Box::pin(async move {
+                let (table, delete, insert) = owned;
+                let refs = shamir_types::types::common::new_map();
+                let ctx = table.info_store_read_view().filter_context(&refs).await?;
+                let deleted = table
+                    .execute_delete_tx(&delete, &ctx, tx, None, &Actor::System)
+                    .await?;
+                assert_eq!(
+                    deleted.affected, 1,
+                    "the unique-key delete leg must hit exactly one row"
+                );
+                let inserted = table
+                    .execute_insert_tx(&insert, tx, false, None, &Actor::System)
+                    .await?;
+                assert_eq!(
+                    inserted.affected, 1,
+                    "the replacement insert leg must affect exactly one row"
+                );
+                Ok(crate::query::write::WriteResult {
+                    affected: 1,
+                    records: Vec::new(),
+                    execution_time_us: 0,
+                })
+            })
+        })
+        .await
+        .expect("WAL-backed journal row replace commits through the implicit tx");
+    assert_eq!(result.affected, 1, "the replace transaction commits once");
 }
 
 // ---------------------------------------------------------------------------

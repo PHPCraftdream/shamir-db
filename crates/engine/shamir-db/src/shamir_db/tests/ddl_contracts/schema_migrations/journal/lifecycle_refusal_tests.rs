@@ -1,11 +1,12 @@
-//! Lifecycle refusals for a quarantined database (R1c-4 follow-up P1,
-//! design §5.3): with a durable OWNED `Started` event and an open-time
-//! in-doubt marker standing after a cold restart, database-level admin DDL
-//! — rename via a healthy session database, rename via the quarantined
-//! session itself, CASCADE drop, plain drop, and create (no-op and typed
-//! `exists` refusal) — is refused with `schema_migration_in_doubt` before
-//! any mutation, the stable identity and unresolved journal survive intact,
-//! and a healthy neighbor keeps its full status/plan/actual-apply path.
+//! Lifecycle refusals for a database in the HEALTHY UNRESOLVED IN-DOUBT
+//! state (R1c-4 follow-up P1, design §5.3): with a durable OWNED `Started`
+//! event and an open-time in-doubt marker standing after a cold restart,
+//! database-level admin DDL — rename via a healthy session database, rename
+//! via the in-doubt session itself, CASCADE drop, plain drop, and create
+//! (no-op and typed `exists` refusal) — is refused with
+//! `schema_migration_in_doubt` before any mutation, the stable identity and
+//! healthy unresolved journal survive intact, and a healthy neighbor keeps
+//! its full status/plan/actual-apply path.
 //!
 //! Database-level admin DDL authorizes at `ResourcePath::Root`, so every
 //! admin op runs through the root principal (`db.execute` =
@@ -39,8 +40,8 @@ fn assert_in_doubt(error: BatchError, context: &str) {
 }
 
 /// ALPHA is still exactly as the refusals left it: same stable identity,
-/// unresolved owned journal intact under that identity, sentinel table
-/// present, marker still refusing an ordinary write.
+/// healthy unresolved owned journal intact under that identity, sentinel
+/// table present, marker still refusing an ordinary write.
 async fn assert_alpha_intact(db: &ShamirDb, alpha: &DatabaseIdentity, context: &str) {
     let identity_now = db
         .system_store()
@@ -62,8 +63,8 @@ async fn assert_alpha_intact(db: &ShamirDb, alpha: &DatabaseIdentity, context: &
         instance.has_table("main", "sentinel_items"),
         "{context}: the real table sentinel must survive untouched"
     );
-    // The quarantine still refuses an ordinary write on ALPHA: nothing in
-    // the refused lifecycle operations cleared the marker.
+    // The in-doubt state still refuses an ordinary write on ALPHA: nothing
+    // in the refused lifecycle operations cleared the marker.
     let mut b = Batch::new();
     b.insert(
         "w",
@@ -247,7 +248,7 @@ fn rename_and_drop_are_refused_under_a_live_gate_then_admitted_after_release() {
             assert_alpha_target_intact(&db, &alpha, "alpha", "under a held gate").await;
 
             // Release: the succeeded run drops the RAII without leaving an
-            // in-doubt marker, so no false quarantine remains.
+            // in-doubt marker, so no false in-doubt state remains.
             fence.mark_succeeded();
             drop(fence);
             assert!(
@@ -288,10 +289,10 @@ fn rename_and_drop_are_refused_under_a_live_gate_then_admitted_after_release() {
 }
 
 #[test]
-fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journal_survive() {
+fn rename_and_drop_of_an_in_doubt_database_are_refused_and_identity_and_journal_survive() {
     on_big_stack(|| async {
         let guard = FlakeGuard::with_watchdog(
-            "rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journal_survive",
+            "rename_and_drop_of_an_in_doubt_database_are_refused_and_identity_and_journal_survive",
             Duration::from_secs(150),
         );
         let scenario = Box::pin(async {
@@ -356,7 +357,7 @@ fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journa
             assert_eq!(str_field(&applied, "status"), "applied");
 
             // Durable flush, drop, REOPEN: ALPHA comes back with the
-            // open-time in-doubt marker seeded from the owned journal.
+            // open-time in-doubt marker seeded from its owned journal.
             let table = journal_table(&db).await;
             let db = flush_and_reopen(dir.path(), db, table).await;
 
@@ -384,7 +385,7 @@ fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journa
             let rename_error =
                 run_admin_op(&db, "beta", "rn", ddl::rename_db("alpha", "alpha2").build())
                     .await
-                    .expect_err("rename of a quarantined database must be refused");
+                    .expect_err("rename of an in-doubt database must be refused");
             assert_in_doubt(rename_error, "rename via healthy serving B");
             assert!(!db.has_db("alpha2"), "no shadow rename target may appear");
             assert_alpha_intact(&db, &alpha, "after the refused rename via B").await;
@@ -398,7 +399,7 @@ fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journa
                 ddl::rename_db("alpha", "alpha3").build(),
             )
             .await
-            .expect_err("rename from the quarantined session must be refused");
+            .expect_err("rename from the in-doubt session must be refused");
             assert_in_doubt(rename_error_self, "rename via A");
             assert_alpha_intact(&db, &alpha, "after the refused rename via A").await;
 
@@ -416,7 +417,7 @@ fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journa
                     .expect("typed drop-db operation"),
             )
             .await
-            .expect_err("cascade drop of a quarantined database must be refused");
+            .expect_err("cascade drop of an in-doubt database must be refused");
             assert_in_doubt(drop_error, "cascade drop via healthy serving B");
             assert!(db.has_db("alpha"), "alpha must survive the refused drop");
             assert_alpha_intact(&db, &alpha, "after the refused cascade drop").await;
@@ -432,13 +433,13 @@ fn rename_and_drop_of_a_quarantined_database_are_refused_and_identity_and_journa
                     .expect("typed drop-db operation"),
             )
             .await
-            .expect_err("drop from the quarantined session must be refused");
+            .expect_err("drop from the in-doubt session must be refused");
             assert_in_doubt(drop_error_self, "drop via A");
             assert_alpha_intact(&db, &alpha, "after the refused drop via A").await;
 
             // CREATE DATABASE alpha IF NOT EXISTS: a no-op for the existing
             // name — and it must NOT replace ALPHA's stable identity or
-            // clear the quarantine.
+            // clear the in-doubt state.
             let created = run_admin_op(
                 &db,
                 "beta",

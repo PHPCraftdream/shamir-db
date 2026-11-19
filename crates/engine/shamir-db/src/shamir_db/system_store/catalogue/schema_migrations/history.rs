@@ -306,7 +306,7 @@ pub(super) fn validate_history(
 }
 
 fn corrupt(row_id: &str, cause: &str) -> DbError {
-    DbError::Internal(format!(
+    DbError::SchemaMigrationJournalUnreadable(format!(
         "corrupt schema migration journal record {row_id}: {cause}"
     ))
 }
