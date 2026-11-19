@@ -36,7 +36,7 @@ Decisions (owner-level ones repeated in section 8):
 | # | Decision | Where |
 |---|---|---|
 | D1 | Recommended option: copy + WAL replay (option C of section 3) | 3.6 |
-| D2 | Two short write barriers (capture, seal); writers blocked only for flushes, never for the copy | 4.2 |
+| D2 | Capture barrier stays short (flush time only); at seal, admission closes THROUGH SETTLE per repository — the seal sample and the WAL/store re-copy run inside that window — bounded by the cooperative 8 s per-repo deadline; writers wait up to 15 s, then a typed retryable refusal | 4.2 |
 | D3 | Consistency point = per-repo (and system store) highest fully-captured WAL version recorded in the manifest | 4.3 |
 | D4 | WAL truncation pinned below the seal point for the whole copy via a NEW truncation pin (`RetentionGate` is a write-refusal flag, not a truncation pin — see 4.4) | 4.4 |
 | D5 | Online backup is a server-side operation; the CLI `backup --to` stays offline-only and is not given a `--online` flag in R2a | 4.7 |
@@ -110,7 +110,7 @@ Each requirement is stated so a test can decide pass/fail. "Copy" = the online b
 
 * **R1 Consistency point.** Restoring a completed copy yields the state in which all repositories and the system store were consistent at one instant: for every repo, the restored store state plus replayed WAL equals the live state exactly at that repo's recorded consistency version (manifest field, 4.5); catalogues, repos and the registry agree with each other. Weaker guarantee NOT taken: per-repo independent instants (rejected — cross-repo references via the catalogue would dangle).
 * **R2 No lost acknowledged write.** Every write whose acknowledgement reached the client before the capture barrier (step B, 4.2) survives restore. Verified with an acknowledged-writes oracle (6.1): acked writes with timestamp < capture instant ⊆ restored state; acked writes after capture are NOT required (R2b may relax further; here the seal barrier pins the upper edge too).
-* **R3 Writer-block bound.** Writers are blocked only inside the two barriers; each barrier lasts at most the per-repo flush time plus a constant, measured and asserted (`shamir_backup_writer_block_seconds`, 4.8). The file copy itself never holds the write barrier. Default bound to assert in tests: p99 barrier < 2 s on CI-sized data (6.4).
+* **R3 Writer-block bound.** The FIRST copy pass runs with writers running; writers are blocked inside the capture barrier and inside the per-repository seal window (admission closed through settle — barrier, seal sample and re-copy). The seal window is bounded by the COOPERATIVE monotonic deadline — 8 s per repository INCLUDING the barrier — checked at barrier step boundaries and during the re-copy between files, I/O chunks/read/hash, and retry waits; in-flight writes/syscalls cannot be interrupted and may overrun. There is NO byte cap by default in the server: the re-copy rewrites whole changed files, not only the delta, so the size of a mutable active WAL/journal/LSM store is not a writer latency bound. The sync protocol retains an OPTIONAL explicit byte cap (cumulative, including retries) in `SealRecopyCap`, but it is not an operator config knob unless code exposes one. Exceeding the deadline is a typed `Failed(Sealing)` plus cleanup — the gate stays closed until the failing step finishes safely and the re-copy guard releases before the gate reopens. A writer arriving during a closed seal window waits up to 15 s (`ADMISSION_REOPEN_WAIT_CAP`) and may then receive a typed retryable refusal; it is never held by the deadline mechanism itself. Measured and asserted (`shamir_backup_writer_block_seconds`, 4.8). Default bound to assert in tests: p99 barrier < 2 s on CI-sized data (6.4).
 * **R4 Failure isolation.** A failed or cancelled copy leaves the source untouched (no mutation, no truncation, truncation pin released) and removes its partial output directory; a crash leaving partial output leaves a directory that `verify_manifest` refuses and restore never adopts. Same discipline as restore's staged temp dir (`restore.rs:216-222,422`).
 * **R5 Offline verifiability.** `verify` of a copy directory (online or offline kind) runs without a server, re-hashes every manifest file, checks the manifest self-consistency (file set, versions, WAL positions) and reports the stamp observation — today's `verify_manifest` (`backup.rs:411`) extended, not replaced.
 * **R6 No source degradation.** During and after a copy, the live server meets its existing durability guarantees (WAL sync on commit, `segment_set.rs:706`; per-commit persist, `repo.rs:114-119`) and WAL retention does not lose recoverable history beyond the pre-copy retention policy.
@@ -248,7 +248,7 @@ R2c extension point: `manifest.json` gains a preserved-unknown `encryption` obje
 ## 5. Restore and verification for online copies
 
 * **Replay or none (D10).** `kind = "offline"`: today's path, unchanged, no replay (`restore.rs:158-329`). `kind = "online"`: after the swap's step-3 copy into the staged dir (`restore.rs:186-222`), run the replay entry of 4.1 against the staged copy: replay goes through the BOOT-RECOVERY path (`add_repo_with_durability`), which replays the ENTIRE retained WAL unconditionally — `recover` = `SegmentSet::replay` over all segments (`repo_wal_manager.rs:182-184`), `recover_inflight_v2` sorts by commit_version and applies all (`v2.rs:339-383,440-447`) — NOT "from the recorded `wal_position`": the watermark only seeds the version floor (`v2.rs:357-372`). Replay MUST use cold recovery semantics — `CounterDelta` is NOT applied on the cold path (`v2.rs:155-186`), never the warm drainer counter path (`drain_step.rs:786-812` increments). Replay fails closed on unresolved table tokens (restore-mode flag; live code warns+Ok, `v2.rs:97-110,170-181,220-232`). Replay failure aborts before the swap (`restore.rs:230-243` discipline) with `data_dir` untouched.
-* **Consistency check.** After replay, the staged copy is opened once through `ShamirDb::init` (the same init the next boot would do, `launch.rs:415`) with a read-only consistency pass: catalogue rows ↔ repo directories ↔ the captured repo-set (Q9, not the live one); a mismatch refuses the restore. The check must TOLERATE a post-V* store state — store files may legitimately contain drain effects above V* (4.2 E). Replay must be run with cold-recovery semantics (above). (Same fail-closed bias as the stamp gate, `restore.rs:180`.)
+* **Consistency check.** After replay, the staged copy is opened once through `ShamirDb::init` (the same init the next boot would do, `launch.rs:415`) with a read-only consistency pass: catalogue rows ↔ repo directories ↔ the captured repo-set (Q9, not the live one); a mismatch refuses the restore. Strict restore refuses store contents or WAL **above** the recorded point `V*` — an above-point WAL segment or a store version above `V*` is a typed refusal with NO trim (corrective delta, 2026-11-19: supersedes the earlier "must TOLERATE a post-V* store" wording; the guide's claim that such a state is impossible by construction is likewise corrected). A store state at or below the point is NOT treated as corruption when the WAL covers it up to the point. Replay must be run with cold-recovery semantics (above). (Same fail-closed bias as the stamp gate, `restore.rs:180`.)
 * **Stamp refusal.** Unchanged: `restore_snapshot_gate` (`restore.rs:180`) on the snapshot's copied stamp; newer epoch refused, older allowed for rollback (`format-stamp.md` 5.2). The manifest `format_epoch` is cross-checked against the copied stamp — a mismatched manifest/stamp pair is refused as corrupt.
 * **Clean-machine restore.** `data_dir` absent: steps 3-7 of `restore.rs` already handle the fresh target (`restore.rs:303-310`). For an online copy the replay step runs on the staged dir before the single rename; the machine needs no prior state.
 * **Offline verify (R5).** `verify` extends `verify_manifest` (`backup.rs:411`) to: parse v2; check `kind`; re-hash every `files` entry and every WAL segment; check WAL seq contiguity per repo against the `wal` listing; report `format_epoch`, `binary_version`, `consistency` positions; refuse unmanifested files as today (`backup.rs:104-108`). No engine open — pure file inspection, runs on any machine with the binary.
@@ -260,7 +260,7 @@ All tests run in the PR's CI via `./scripts/test.sh` scopes (`@server`, `@storag
 * **6.1 Property test under continuous write load (the gate test).** Boot a server (e2e harness style), run N writer clients that continuously insert and record each **acknowledged** write in an in-memory oracle, start an online backup mid-stream, keep writing until it completes, stop the server, `restore` the snapshot to a fresh `data_dir`, boot, and read back: (a) every oracle entry acked before the capture barrier is present with its acked value (R2); (b) the restored state equals the live state at the recorded `wal_position` for a probe set of keys (R1); (c) no torn/partial record anywhere. Replay-convergence requirement L1 is exercised here by construction (the copy races the drainer): the property tested is convergence under UNCONDITIONAL replay over a cross-instant file set, plus no silent table-token skips (Q3, inverted). Crate: `shamir-e2e` (server boots live there per CLAUDE.md) or `shamir-server` integration tests; sizes per 6.4.
 * **6.2 Writer-block bound.** Same harness: measure capture/seal barrier durations via the metrics histogram; assert p99 < bound on CI-sized data (R3). Includes a compaction-pressure variant (larger batches forcing fjall flushes during the barrier).
 * **6.3 Failure injection per protocol step.** Injected at each stage of 4.2 using the existing seam style (`segment_set.rs:291,296,309` precedent): fail during A (pin held → assert released on drop), B (flush error → no output dir), C/D (copy error mid-file, deleted source file, Windows sharing violation, hash mismatch on re-pass → source untouched, output removed), E (seal error → Failed(Sealing), WAL consistent), F (manifest write failure → no success report), G (cancel at each boundary → cleanup). Each asserts R4 with a before/after directory snapshot.
-* **6.4 OS differences and CI feasibility.** Full-tier matrix runs Ubuntu/Windows/macOS (CLAUDE.md CI tiers; weekly schedule already covers `shamir-server` + `shamir-e2e` on all three). Windows-specific: sharing-violation retry path and rename-over-open-file behaviour; Linux: directory fsync paths; macOS: no additional assertion beyond the shared protocol. CI-sized budgets: data directory ≤ 200 MB, WAL ≤ 32 MB retained, whole gate test ≤ 3 minutes per OS (within the 180 s per-test default scaled by the harness splitting boot/backup/restore phases into separate tests sharing a fixture — if a single test exceeds the budget it is split; the nextest budget stays untouched).
+* **6.4 OS differences and CI feasibility.** Full-tier matrix runs Ubuntu/Windows/macOS (CLAUDE.md CI tiers; weekly schedule already covers `shamir-server` + `shamir-e2e` on all three). Windows-specific: sharing-violation retry path and rename-over-open-file behaviour; Linux: directory fsync paths; macOS: no additional assertion beyond the shared protocol. CI-sized budgets: data directory ≤ 576 MiB at quiet shutdown (the gate fixture opens eight Fjall journals, each created at 64 MiB logical length and not shrunk on drop, plus the 16 MiB fixture pad, the retained WAL allowance and a 16 MiB margin; the figure is a ceiling that an extra journal or a nested copy would trip, not a per-write cost), WAL ≤ 32 MiB retained, whole gate test ≤ 3 minutes per OS (within the 180 s per-test default scaled by the harness splitting boot/backup/restore phases into separate tests sharing a fixture — if a single test exceeds the budget it is split; the nextest budget stays untouched).
 * **6.5 Restore/verify acceptance.** v2 snapshot restores on a clean machine (no `data_dir`); `verify` refuses: checksum mismatch, WAL seq gap, manifest/stamp epoch mismatch, unmanifested file; v1 offline snapshot still restores and verifies unchanged (back-compat, D7).
 
 ## 7. Implementation plan (≤ 4 PR-sized steps)
@@ -655,15 +655,34 @@ remain PROPOSED work, unchanged in substance from the previous revision.
 
 Section 4.2 E required re-copying every mutable repo-database file inside
 the seal barrier, contradicting R3's "flush time plus a constant". The
-landed protocol runs the seal re-copy with writers running
-(`protocol.rs:338-368`), which is only safe if copied stores provably
-contain nothing above `V*` — exactly what §2 (iii)'s drain-pause provides.
-**Default (settled): keep the re-copy INSIDE the pause window** (pause is
-writer-blocking, so the bound is real data size, not flush time), with an
-explicit bound policy: a per-repo re-copy cap (bytes + wall clock,
-`shamir_backup_writer_block_seconds` extension) after which capture FAILS
-CLOSED instead of blocking unboundedly — R3's wording becomes "each barrier
-lasts at most flush + capped re-copy, with the cap enforced by refusal".
+EARLIER landed behavior ran the seal re-copy with writers running
+(`protocol.rs:338-368`), which was only defensible if copied stores
+provably contained nothing above `V*`; the commit store, however, applies
+its effects INLINE during commit (overlay merge, WAL append), so a
+drain-pause alone freezes the DRAINER, not the commit path — pause-only
+is therefore insufficient, and closing admission through the pause is
+exactly why a valid new snapshot contains no post-point commits through
+seal.
+**Default (settled; corrective delta 2026-11-19).** The FIRST copy pass runs
+with writers running; the seal barrier then CLOSES ADMISSION THROUGH SETTLE —
+the seal sample plus the WAL/store re-copy happen inside that pause — and the
+pause is dropped, after which the gate reopens (supersedes the earlier
+"gate already open while the hold is handed out" ordering of Step 1d). Bound
+policy, with defaults: the 8 s monotonic per-repository deadline INCLUDING
+the barrier; there is NO byte cap by default in the server (the re-copy
+rewrites whole changed files, not only the delta, so a mutable active
+WAL/journal/LSM store's size is not a writer latency bound; the protocol
+keeps an OPTIONAL explicit cumulative byte cap, including retries, in
+`SealRecopyCap` — not an operator config knob unless code exposes one).
+Exceeding the deadline is a typed `Failed(Sealing)` plus cleanup, not an
+unbounded block. The clock is cooperative: it is checked at barrier step
+boundaries and during the re-copy between files, I/O chunks/read/hash, and
+retry waits — in-flight writes/syscalls cannot be interrupted and may
+overrun the bound. On a trip the gate stays CLOSED until the failing step
+finishes safely and the re-copy guard is released, and only then reopens.
+A writer therefore waits (admission closed, no new commit), but after the
+EXISTING 15 s wait it may receive a typed retryable refusal instead of
+committing.
 Alternative (rejected default): move re-copy outside the pause with a
 convergence proof — no such proof exists (post-V* store effects are
 non-convergent, Review finding 4), so it stays an open question (Q12).
@@ -715,7 +734,7 @@ the two hazards above are unaddressed.
 
 #### Step 1d decisions (2026-11-17)
 
-**(a) Seal hold.** The drain pause survives `seal_point`: the barrier
+**(a) Seal hold (historical; superseded on gate timing by (d)).** The drain pause survives `seal_point`: the barrier
 returns a `SealHold` that owns the `DrainPauseGuard` (`Send + 'static`)
 and drops it exactly once, with itself — so on hold drop the gate is
 already open (the close owner was dropped before the hold was handed out,
@@ -730,7 +749,8 @@ the guard there — fail-closed is preserved.
 hold-returning `seal_point` signature; shamir-sync is NOT changed in this
 step — that port change belongs to R2a-3.
 
-**(c) Observed commit-side backpressure under the hold.** Commit execution
+**(c) Observed commit-side backpressure under the hold (historical; the
+gate-reopened premise is superseded by (d)).** Commit execution
 itself does NOT wait on the drainer: with the gate reopened, a commit
 passes admission, performs the Phase-1 interner overlay merge outside
 `commit_lock` (`preparation/pre_commit/prelock.rs:46,85-108`), and the
@@ -755,3 +775,16 @@ its timeout, and the soft undrained-gap brake
 committed and visible in overlay; only the durability promise relaxes).
 So: overlay-only and `Bounded` commits proceed with degraded
 acknowledgement; `Strict` commits block for the duration of the hold.
+
+**(d) Corrective delta (2026-11-19): admission closed through settle.**
+Supersedes (a)/(c) on one point and is the landed note on gate timing:
+the admission gate is NOT already open when the hold is handed out — it
+stays CLOSED through settle (seal sample and WAL/store re-copy run inside
+the pause), and the gate reopens only after the pause guard is dropped.
+The bound policy (8 s per repository cooperative deadline, NO byte cap by
+default in the server, cooperative clock) and the resulting typed retryable writer refusal are stated once
+in Step E above — see it instead of a repeat here. The reserved
+`shamir_backup_writer_block_seconds` gauge now records the latest closed
+window per phase (`capture|seal`), INCLUDING failed holds, and is absent
+until the first window; `shamir_backup_pin_seconds` and
+`shamir_backup_wal_segments_copied_total` remain not exported.

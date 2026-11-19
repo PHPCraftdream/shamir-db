@@ -18,11 +18,41 @@
 //! `<to>/<timestamp>/` directory is then created atomically by the protocol
 //! itself, which refuses existing directories.
 //!
-//! Production seal re-copy cap (Q12): 4 GiB per repo and 1800 s wall clock —
-//! fail-closed bounds on the writer-visibility pause; unlimited (the
-//! `SealRecopyCap::default()`) would let a large store stall commits
-//! unboundedly.
+//! Production seal re-copy cap (R2a-4 follow-up 4): an 8 s monotonic
+//! budget per repo INCLUDING the seal barrier, and NO byte cap
+//! (`max_bytes = None`). The byte cap was removed deliberately: the seal
+//! re-copy is a full-file rewrite, not a delta — the bytes copied depend
+//! on file sizes, not on how much changed, so an arbitrary threshold
+//! failed legitimate large WALs while adding nothing to the real bound.
+//! The binding limits are the two clocks: the 8 s per-repo cooperative
+//! budget (checked INSIDE the copy engine's I/O paths — before every
+//! chunk write, around every fsync, with the sharing-retry sleeps
+//! clamped — never as a detached kill) and the engine's independent 15 s
+//! leader-wait cap on the barrier itself, which stays the larger side of
+//! the pair. A repo whose re-copy cannot finish inside 8 s fails closed
+//! (typed error at `Sealing`, destination removed, commits resume);
+//! explicitly configured tiny byte caps remain supported with their
+//! typed `RecopyCap` failure.
+//!
+//! Panic safety (R2a-4 defect 4): a panic on the detached runner thread
+//! must not leave `running` stuck at `true` or the §4.8 metrics at
+//! `active = 1`. Every run carries a [`RunGuard`] created in `start` and
+//! moved into the closure before spawn; on the unwind path (the guard is
+//! a `run` parameter, so it drops AFTER the permit and after the
+//! protocol's own pins/seals RAII deeper in `run_online_backup`) it
+//! publishes a failed record — guarded by the run's `started_at_unix_ns`
+//! so a replacement run's record is never clobbered — and closes the
+//! metrics. The runner body stamps the guard with the exact verified
+//! snapshot path the moment the protocol returns `Ok`, so the guard
+//! distinguishes a COMPLETED, self-verified snapshot — recorded, never
+//! deleted — from partial protocol output (removed by the protocol's
+//! unwind cleanup; no removal is promised that may not have happened).
+//! Publication ordering makes partial state impossible: metrics publish
+//! with the record lock held, `running = false` LAST. Either way the
+//! `last_error` directs the operator to `verify` before use.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -31,21 +61,38 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use shamir_db::ShamirDb;
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
 use crate::sync::durability::backup::online::copy_engine::CopyOptions;
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
-    run_online_backup, BackupPermit, BackupReport, SealRecopyCap,
+    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, SealRecopyCap,
 };
 
 use super::adapter::{EngineBackupPort, PortRunState};
 use super::metrics as backup_metrics;
+#[cfg(test)]
+use shamir_db::engine::repo::RepoInstance;
 
-/// Production seal re-copy cap: 4 GiB per repo, 1800 s wall clock (Q12;
-/// documented in the step report — unlimited defaults are for tests).
-const SEAL_RECOPY_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const SEAL_RECOPY_MAX_SECONDS: u64 = 1800;
+/// Production seal re-copy cap: 8 s monotonic budget per repo including
+/// the seal barrier, NO byte cap (R2a-4 follow-up 4; module doc). The
+/// budget boundary is the absolute `Instant` handed to
+/// `OnlineBackupPort::seal_point_before`, so the barrier itself counts;
+/// the copy engine checks it cooperatively INSIDE its I/O paths.
+/// Wall-clock caps cannot preempt in-flight syscalls (fail-closed
+/// overrun documented in the module doc).
+const SEAL_RECOPY_MAX_SECONDS: u64 = 8;
+
+/// The production cap (used by `RunJob` and the cap regression test):
+/// 8 s per repo, `max_bytes = None` — the seal re-copy is a full-file
+/// rewrite, so no size threshold belongs here (module doc).
+pub(crate) fn production_seal_cap() -> SealRecopyCap {
+    SealRecopyCap {
+        max_bytes: None,
+        max_seconds: Some(SEAL_RECOPY_MAX_SECONDS),
+    }
+}
 
 /// Failure causes of a `start`.
 #[derive(Debug, thiserror::Error)]
@@ -118,13 +165,57 @@ pub struct OnlineBackupRegistry {
     permit: Arc<BackupPermit>,
     record: Arc<Mutex<RunRecord>>,
     backup_id: Mutex<Option<String>>,
+    /// The server's root shutdown token, when running under the real
+    /// launcher: each run's `CancelFlag` is then backed by a CHILD token
+    /// (`CancelFlag::from_shutdown` derives it per run), so server shutdown
+    /// cancels the run while an admin `CancelBackup` cancels only the child
+    /// (never the server). `None` keeps the default flag: a fresh,
+    /// never-cancelled token (the constructor existing tests use).
+    shutdown: Option<CancellationToken>,
+    /// Test-only (R2a-4 defect 4): a one-shot step callback the NEXT
+    /// `start` moves onto its runner thread, which installs it as this
+    /// thread's arm of the SHARED engine-step dispatcher
+    /// ([`install_test_step_hook`]) before the protocol runs — per-run,
+    /// per-thread state; no process-global arming.
+    #[cfg(test)]
+    pending_step_callback: Mutex<Option<TestStepCallback>>,
 }
+
+/// Test-only step callback: invoked by the engine's barrier-step hook
+/// with the step name, on the armed runner thread.
+#[cfg(test)]
+type TestStepCallback = Box<dyn Fn(&'static str) + Send>;
 
 impl OnlineBackupRegistry {
     /// Build the registry. `runtime` must be the server's runtime handle
     /// (the runner bridges async facade calls through it from a blocking
-    /// thread). `data_dir` is the server's source data dir.
+    /// thread). `data_dir` is the server's source data dir. Runs cancel
+    /// through the default flag — a fresh, never-cancelled token (the
+    /// constructor existing tests use); the production launcher uses
+    /// [`OnlineBackupRegistry::new_with_shutdown`].
     pub fn new(db: Arc<ShamirDb>, data_dir: PathBuf, runtime: Handle) -> Self {
+        Self::new_with_shutdown_inner(db, data_dir, runtime, None)
+    }
+
+    /// Build the registry wired to the server's root shutdown token: every
+    /// run started here takes a child token, so server shutdown cancels the
+    /// in-flight run while an admin `CancelBackup` cancels only that run's
+    /// child (never the server itself).
+    pub fn new_with_shutdown(
+        db: Arc<ShamirDb>,
+        data_dir: PathBuf,
+        runtime: Handle,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self::new_with_shutdown_inner(db, data_dir, runtime, Some(shutdown))
+    }
+
+    fn new_with_shutdown_inner(
+        db: Arc<ShamirDb>,
+        data_dir: PathBuf,
+        runtime: Handle,
+        shutdown: Option<CancellationToken>,
+    ) -> Self {
         let fresh = Self::fresh_record(&data_dir);
         Self {
             db: Arc::downgrade(&db),
@@ -133,6 +224,9 @@ impl OnlineBackupRegistry {
             permit: Arc::new(BackupPermit::new()),
             record: Arc::new(Mutex::new(fresh)),
             backup_id: Mutex::new(None),
+            shutdown,
+            #[cfg(test)]
+            pending_step_callback: Mutex::new(None),
         }
     }
 
@@ -164,12 +258,20 @@ impl OnlineBackupRegistry {
         std::fs::create_dir_all(&to)?;
         let started_at_unix_ns = unix_nanos();
         let backup_id = format!("ob-{started_at_unix_ns}");
-        let cancel = {
+        // Under the real launcher the run cancels on a CHILD token
+        // `from_shutdown` derives from the server's root shutdown token:
+        // shutdown cancels the run, an admin `CancelBackup` (below,
+        // `record.cancel.cancel()`) cancels only the child. Cheap and
+        // synchronous.
+        let cancel = match &self.shutdown {
+            Some(root) => CancelFlag::from_shutdown(root),
+            None => CancelFlag::default(),
+        };
+        {
             let mut record = self.record.lock();
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
-            let cancel = CancelFlag::default();
             *record = RunRecord {
                 running: true,
                 cancel: cancel.clone(),
@@ -182,8 +284,11 @@ impl OnlineBackupRegistry {
                 last_error: None,
             };
             *self.backup_id.lock() = Some(backup_id.clone());
-            cancel
         };
+        // Test-only: take a pending per-run step callback (see
+        // `arm_runner_step_callback`) onto this run's job.
+        #[cfg(test)]
+        let step_callback = self.pending_step_callback.lock().take();
         let job = RunJob {
             db,
             data_dir: self.data_dir.clone(),
@@ -193,17 +298,43 @@ impl OnlineBackupRegistry {
             to: to.clone(),
             run_state: self.record.lock().run.clone(),
             record: Arc::clone(&self.record),
+            #[cfg(test)]
+            step_callback,
         };
         // §4.8 metrics hook: the run counts as started once registration
-        // succeeded; a failed spawn is recorded as a preparing-stage
-        // failure so `shamir_backup_active` cannot stick at 1.
+        // succeeded; a failed spawn is published as a preparing-stage
+        // failure so `shamir_backup_active` cannot stick at 1 and the
+        // registry is left idle. The `started_at_unix_ns` check makes the
+        // publish safe against a replacement run (impossible today — the
+        // stuck `running` flag refuses concurrent starts — but the guard
+        // contract is uniform).
         backup_metrics::note_started();
+        // The guard is created BEFORE the spawn and moved into the closure;
+        // it arms itself only once the runner body begins, so a failed
+        // spawn drops it inertly and the failure is published here instead.
+        let guard = RunGuard::new(
+            Arc::clone(&self.record),
+            Arc::clone(&job.run_state),
+            started_at_unix_ns,
+            to.clone(),
+        );
         let spawned = std::thread::Builder::new()
             .name("online-backup".to_string())
-            .spawn(move || job.run());
-        if let Err(error) = spawned {
-            backup_metrics::note_finished(true, BackupStage::Preparing, 0, Duration::ZERO);
-            return Err(StartBackupError::Io(io::Error::other(error.to_string())));
+            .spawn(move || job.run(guard));
+        if let Err(spawn_error) = spawned {
+            let stage = BackupStage::Preparing;
+            let message = format!("online-backup runner thread failed to spawn: {spawn_error}");
+            let mut record = self.record.lock();
+            if record.running && record.started_at_unix_ns == started_at_unix_ns {
+                record.progress.record_failure(stage, &message);
+                record.dest_dir = None;
+                record.last_error = Some(message);
+                backup_metrics::note_finished(true, stage, 0, Duration::ZERO);
+                record.running = false;
+            }
+            return Err(StartBackupError::Io(io::Error::other(
+                spawn_error.to_string(),
+            )));
         }
         Ok((backup_id, to))
     }
@@ -255,12 +386,19 @@ struct RunJob {
     cancel: CancelFlag,
     run_state: Arc<PortRunState>,
     record: Arc<Mutex<RunRecord>>,
+    /// Test-only: armed on the runner thread before the protocol runs.
+    #[cfg(test)]
+    step_callback: Option<TestStepCallback>,
 }
 
 impl RunJob {
     /// The blocking-thread body: permit, protocol, record update. Never
-    /// holds the record lock across the protocol call.
-    fn run(self) {
+    /// holds the record lock across the protocol call. `guard` is a
+    /// parameter on purpose: parameters drop after the body's locals, so
+    /// on an unwind the permit (and the protocol's own pins/seals RAII,
+    /// deeper still) is released BEFORE the guard publishes the failure.
+    fn run(self, mut guard: RunGuard) {
+        guard.armed = true;
         let Self {
             db,
             data_dir,
@@ -270,9 +408,19 @@ impl RunJob {
             cancel,
             run_state,
             record,
+            #[cfg(test)]
+            step_callback,
         } = self;
+        // Test-only: arm this runner thread with the run's one-shot step
+        // callback (the shared engine hook consults the per-thread slot;
+        // an unarmed thread is a no-op).
+        #[cfg(test)]
+        if let Some(callback) = step_callback {
+            install_test_step_hook();
+            TEST_STEP_CALLBACK.with(|slot| *slot.borrow_mut() = Some(callback));
+        }
         let started_at = Instant::now();
-        let Some(_permit_guard) = permit.try_acquire() else {
+        let Some(permit_guard) = permit.try_acquire() else {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol.
             let mut record = record.lock();
@@ -289,10 +437,7 @@ impl RunJob {
         );
         let mut progress = BackupProgress::new();
         let options = CopyOptions::default();
-        let cap = SealRecopyCap {
-            max_bytes: Some(SEAL_RECOPY_MAX_BYTES),
-            max_seconds: Some(SEAL_RECOPY_MAX_SECONDS),
-        };
+        let cap = production_seal_cap();
         let outcome = run_online_backup(
             &port,
             &data_dir,
@@ -302,6 +447,12 @@ impl RunJob {
             &options,
             &cap,
         );
+        // Stamp the guard with the verified snapshot BEFORE any
+        // panic-prone post-processing: from this point a runner panic
+        // must leave the completed snapshot recorded, never deleted.
+        if let Ok(report) = &outcome {
+            guard.completed_dir = Some(report.dest_dir.clone());
+        }
         // Owner-side final progress: the protocol only notes zeroed
         // per-repo entries (step B) and exposes no progress callback, so
         // the run's hashed bytes/files would otherwise stay invisible in
@@ -313,16 +464,21 @@ impl RunJob {
             }
         }
         let snapshot_count = run_state.snapshot_count();
-        let repos_created_during = live_repo_count(&db, &runtime).saturating_sub(snapshot_count);
-        let mut record = record.lock();
-        record.running = false;
-        record.progress = progress.clone();
-        record.repos_created_during = repos_created_during;
-        record.dest_dir = outcome.as_ref().ok().map(|report| report.dest_dir.clone());
-        record.last_error = outcome.err().map(|error| error.to_string());
-        // §4.8 metrics hook: run counters, copied bytes (the protocol's
-        // hashed-byte counters) and the last run duration. The failure
-        // stage is where the protocol recorded the failure.
+        // Cancelled or shutdown-interrupted runs skip the post-run live
+        // catalogue read: there is nothing to attribute and `block_on` a
+        // straggler store load only extends the teardown on the way out.
+        let repos_created_during = if cancel.is_cancelled() {
+            0
+        } else {
+            live_repo_count(&db, &runtime).saturating_sub(snapshot_count)
+        };
+        // Release the permit before publishing idle, or a new run can be
+        // refused.
+        drop(permit_guard);
+        // §4.8 metrics hook values, prepared BEFORE the record lock: run
+        // counters, copied bytes (the protocol's hashed-byte counters)
+        // and the last run duration; the failure stage is where the
+        // protocol recorded the failure.
         let bytes: u64 = progress.per_repo.iter().map(|repo| repo.bytes_hashed).sum();
         let failed = progress.stage == BackupStage::Failed;
         let stage = if failed {
@@ -330,7 +486,182 @@ impl RunJob {
         } else {
             progress.stage
         };
+        // Publish under the record lock, metrics first, `running = false`
+        // LAST — a final record is atomic (the unwind guard relies on
+        // this: it re-publishes nothing once `running` is false).
+        let mut record = record.lock();
+        record.progress = progress.clone();
+        record.repos_created_during = repos_created_during;
+        record.dest_dir = outcome.as_ref().ok().map(|report| report.dest_dir.clone());
+        record.last_error = outcome.as_ref().err().map(full_error_chain);
         backup_metrics::note_finished(failed, stage, bytes, started_at.elapsed());
+        record.running = false;
+        // Normal completion: disarm the panic guard after the final
+        // status/metrics publish, so its drop is a no-op (the guard still
+        // drops last, after `permit_guard`).
+        guard.armed = false;
+    }
+}
+
+/// Unwind guard of one registered run (R2a-4 defect 4): a panic on the
+/// detached runner thread must not leave the record `running` or the §4.8
+/// metrics with `shamir_backup_active` stuck at 1. Created in `start`
+/// (disarmed — the runner body arms it, so a failed spawn drops it
+/// inertly), moved into the spawn closure, and on the unwind path it
+/// publishes a failed record and closes the metrics. The body sets the
+/// guard's `completed_dir` the moment the protocol returns `Ok` (the
+/// exact verified snapshot path), so the guard at unwind distinguishes a
+/// COMPLETED, self-verified snapshot — recorded, never deleted — from a
+/// partial output (already removed by the protocol's unwind cleanup;
+/// the message never promises a removal that may have failed).
+/// Publication ordering makes partial state impossible: the body
+/// publishes metrics with the record lock held and sets `running = false`
+/// LAST, so a final record is atomic — the guard re-publishes nothing
+/// and re-advances no counter. Either way `last_error` directs the
+/// operator to `verify` before use.
+struct RunGuard {
+    record: Arc<Mutex<RunRecord>>,
+    /// The run's live stage hint, read at unwind time (before the permit
+    /// drops, the adapter's port-call hints are still consistent).
+    run_state: Arc<PortRunState>,
+    started_at_unix_ns: u128,
+    /// The OPERATOR destination root (the snapshot child is created by
+    /// the protocol under it).
+    destination: PathBuf,
+    /// Set by the runner body IMMEDIATELY after the protocol returned
+    /// `Ok` — the exact, atomically created `<to>/<timestamp>` snapshot
+    /// directory the protocol verified and kept. No filesystem probing
+    /// at unwind time: an unrelated `manifest.json` under the operator
+    /// root must never be mistaken for a completed run.
+    completed_dir: Option<PathBuf>,
+    started_at: Instant,
+    armed: bool,
+}
+
+impl RunGuard {
+    fn new(
+        record: Arc<Mutex<RunRecord>>,
+        run_state: Arc<PortRunState>,
+        started_at_unix_ns: u128,
+        destination: PathBuf,
+    ) -> Self {
+        Self {
+            record,
+            run_state,
+            started_at_unix_ns,
+            destination,
+            completed_dir: None,
+            started_at: Instant::now(),
+            armed: false,
+        }
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let stage = self.run_state.stage();
+        let error = match &self.completed_dir {
+            Some(dir) => format!(
+                "online-backup runner panicked after the protocol completed; the self-verified \
+                 snapshot under {} is KEPT — run `verify` before use",
+                dir.display()
+            ),
+            None => format!(
+                "online-backup runner panicked before publishing a result (stage hint {stage:?}); \
+                 any files the protocol may have left under {} must be re-verified with `verify` \
+                 before use",
+                self.destination.display()
+            ),
+        };
+        let mut record = self.record.lock();
+        if record.started_at_unix_ns != self.started_at_unix_ns {
+            // A replacement run (or the failed-spawn reset in `start`)
+            // owns the record: nothing of THIS run may be published.
+            return;
+        }
+        if !record.running {
+            // The body fully published under the record lock (metrics
+            // first, `running = false` LAST) before disarming: a final
+            // record is atomic, so nothing is missing here and no
+            // counter may be re-advanced.
+            return;
+        }
+        // The guard finalizes the record: failed stage, the verified
+        // snapshot's exact path recorded and never deleted (a partial
+        // output was already removed by the protocol's unwind cleanup —
+        // if that removal failed the message still only directs to
+        // `verify`, it does not promise a removal that did not happen).
+        record.progress.record_failure(stage, &error);
+        record.dest_dir = self.completed_dir.clone();
+        record.last_error = Some(error);
+        backup_metrics::note_finished(true, stage, 0, self.started_at.elapsed());
+        record.running = false;
+    }
+}
+
+// THE shared engine-step dispatcher for this test binary (R2a-4): the
+// engine's `ONLINE_BACKUP_STEP_HOOK` slot is a first-wins
+// `fn(&'static str)` `OnceLock`, so every test in this binary that wants
+// barrier-step callbacks must go through this one function instead of
+// installing its own hook (two competing installers would silently
+// break the loser). Dispatch is per-THREAD: the hook is a no-op on any
+// thread that has not armed a callback, so arming is per-run/per-thread
+// state — never process-global.
+#[cfg(test)]
+thread_local! {
+    static TEST_STEP_CALLBACK: RefCell<Option<TestStepCallback>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn shared_test_step_hook(step: &'static str) {
+    TEST_STEP_CALLBACK.with(|slot| {
+        if let Some(callback) = slot.borrow().as_ref() {
+            callback(step);
+        }
+    });
+}
+
+/// Install the shared dispatcher into the engine. The engine's setter is
+/// itself idempotent (first install wins), so this is safe to call from
+/// every arming site.
+#[cfg(test)]
+pub(crate) fn install_test_step_hook() {
+    RepoInstance::set_online_backup_step_hook(shared_test_step_hook);
+}
+
+/// Arm the CURRENT thread: `on_step` fires exactly once when the engine's
+/// barrier reaches `step` on this thread (one-shot; later steps run
+/// unimpeded). Callable from any test that drives its own backup/bridge
+/// thread — arm inside the driving thread before the barrier runs. Never
+/// process-global.
+#[cfg(test)]
+pub(crate) fn arm_backup_step(step: &'static str, on_step: impl FnOnce() + Send + 'static) {
+    install_test_step_hook();
+    let fired_once = std::cell::RefCell::new(Some(on_step));
+    TEST_STEP_CALLBACK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |fired| {
+            if fired == step {
+                if let Some(on_step) = fired_once.borrow_mut().take() {
+                    on_step();
+                }
+            }
+        }));
+    });
+}
+
+#[cfg(test)]
+impl OnlineBackupRegistry {
+    /// Arm a one-shot step callback for this registry's NEXT `start`: the
+    /// callback is moved onto that run's runner thread (and only that
+    /// thread) before the protocol runs, and fires at each engine
+    /// barrier-step boundary through the shared dispatcher
+    /// ([`install_test_step_hook`]). Per-registry opt-in: no other run,
+    /// registry instance or test observes it.
+    pub(crate) fn arm_runner_step_callback(&self, callback: TestStepCallback) {
+        *self.pending_step_callback.lock() = Some(callback);
     }
 }
 
@@ -399,6 +730,22 @@ fn unix_nanos() -> u128 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default()
+}
+
+/// The error's `Display` chain, top error first. The protocol's top-level
+/// `Display` already carries the stage (`failed at stage Sealing`); the
+/// source chain contributes the typed failure detail (e.g. the
+/// `RecopyCap` bytes-vs-cap text) that `to_string()` alone would drop,
+/// so `BackupStatus`'s `last_error` keeps both stage and cap detail.
+fn full_error_chain(error: &OnlineBackupError) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(link) = source {
+        text.push_str(": ");
+        text.push_str(&link.to_string());
+        source = link.source();
+    }
+    text
 }
 
 /// Offline-backup-equivalent destination validation: absolute, and its

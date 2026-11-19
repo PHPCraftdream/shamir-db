@@ -24,18 +24,34 @@
 //! * missing captured repository directory — ONLY the store directory
 //!   removed (WAL and its manifest listing kept), manifest re-hashed,
 //!   refused by the consistency check (typed
-//!   `RestoreError::Consistency { repo, reason }`) on a fresh target.
+//!   `RestoreError::Consistency { repo, reason }`) on a fresh target;
+//! * captured orphan — ONLY the repo row removed from the snapshot's
+//!   catalogue (`SystemStore::remove_repository`, table rows retained):
+//!   restore SUCCEEDS on a fresh target with the orphan tolerated (its
+//!   store/WAL files stay inert, the boot registers nothing);
+//! * captured orphan, strict WAL — the same orphan with the manifest
+//!   point decremented (verifier still accepts) is refused with typed
+//!   `EntryAboveVStar` naming the repo on a fresh target: the orphan's
+//!   WAL still replays strictly;
+//! * store contents ABOVE `V*` — the staged store replaced with a fresh
+//!   copy of the live store AFTER the post-seal write (WAL and recorded
+//!   point untouched): strict replay REFUSES, fail-closed, with the typed
+//!   `ReplayToError::Recovery(DbError::Validation(...))` carrying the
+//!   exact expected-version mismatch (checked BEFORE any WAL entry is
+//!   applied), the fresh target stays absent and no stage/rollback
+//!   sibling is left behind.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use shamir_db::engine::db_instance::replay_to::{ReplayScopeError, ReplayToError};
-use shamir_db::{ShamirDb, SystemStoreConfig};
+use shamir_db::{DbError, ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
 
 use super::fixture::{on_big_stack, Fixture};
+use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::restore::{restore_with_probe, RestoreError, RestoreReport};
 
 const SYSTEM_DIR: &str = "shamir_db_meta.redb";
@@ -338,6 +354,182 @@ fn unresolved_table_token_refuses_replay_as_missing_table_route() {
         drop(fixture);
     })
     .expect("test thread");
+}
+
+/// The captured repository's catalogue row is missing from the snapshot
+/// (ONLY the row removed via the public `SystemStore::remove_repository`
+/// — the repo row deletion that retains the table rows; the store/WAL
+/// directories and the manifest's WAL route stay, manifest re-hashed so
+/// verification passes): restore SUCCEEDS on a fresh target — the orphan
+/// is tolerated, NOT registered on the restored boot, its staged files
+/// stay in place as inert data, and the reported exclusions stay empty
+/// (nothing was in the staged catalogue to exclude).
+#[test]
+fn captured_repo_without_catalogue_row_is_tolerated_inert_orphan() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        snapshot.drop_captured_repo_row(&fixture);
+        snapshot.assert_verifies();
+
+        let report = run_restore(&fixture).expect("a captured orphan must be tolerated");
+        assert!(
+            report.excluded_repositories.is_empty(),
+            "the orphan's row was already gone from the staged catalogue, so \
+             nothing was excluded during restore: {:?}",
+            report.excluded_repositories
+        );
+        assert_eq!(
+            report.pre_restore_backup, None,
+            "a fresh target has no pre-restore backup"
+        );
+
+        // The orphan's store/WAL directories are copied into the target as
+        // inert data (their files exist), but the restored boot has no
+        // repository row for them: `app` opens with zero repos.
+        let target = fixture.target_data_dir();
+        assert!(
+            target.join("repos/main").is_dir(),
+            "the orphan store directory must be present in the restored tree"
+        );
+        assert!(
+            target.join("repos/main.shamirwal").is_dir(),
+            "the orphan WAL directory must be present in the restored tree"
+        );
+        let repos = boot_repo_names(&fixture);
+        assert!(
+            !repos.contains(&"main".to_string()),
+            "the orphan must NOT be registered on the restored boot: {repos:?}"
+        );
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// Companion negative: the SAME orphan snapshot with the manifest point
+/// decremented below the staged WAL's highest entry (verifier still
+/// accepts). The orphan still gets a replay job (nothing is silently
+/// skipped), so its WAL is checked STRICTLY: replay refuses with the
+/// typed `EntryAboveVStar` error naming the repo even though the repo has
+/// no catalogue row, and the fresh target stays absent with staging
+/// cleaned.
+#[test]
+fn captured_orphan_wal_is_replayed_strictly_on_tampered_point() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        snapshot.drop_captured_repo_row(&fixture);
+        let _recorded_point = snapshot.decrement_captured_point();
+        snapshot.assert_verifies();
+
+        match run_restore(&fixture) {
+            Ok(report) => {
+                panic!("an orphan replayed past its recorded point must refuse: {report:?}")
+            }
+            Err(RestoreError::Replay { repo, source }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+                assert!(
+                    matches!(*source, ReplayToError::EntryAboveVStar { .. }),
+                    "expected EntryAboveVStar, got: {source}"
+                );
+            }
+            Err(other) => panic!("expected RestoreError::Replay, got: {other}"),
+        }
+        assert_clean_refusal(&fixture);
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// The recorded captured point (`wal_position`) of `app/main` in the
+/// snapshot's manifest.
+fn captured_point(snapshot_dir: &Path) -> u64 {
+    let raw = fs::read_to_string(snapshot_dir.join("manifest.json")).expect("read manifest");
+    let decoded = manifest::decode(&raw).expect("decode manifest");
+    decoded
+        .consistency
+        .expect("v2 consistency section")
+        .per_repo
+        .get("app/main")
+        .expect("captured repo row")
+        .wal_position
+}
+
+/// Store contents ABOVE the recorded point are REFUSED, fail-closed: the
+/// staged store is replaced with a fresh copy of the live store AFTER the
+/// post-seal write `after_seal` (the staged WAL and the manifest's
+/// recorded point `V*` stay untouched, the manifest re-hashed so the
+/// verifier accepts). Strict replay checks the version read from the
+/// opened store against `V*` BEFORE applying any WAL entry, so restore
+/// REFUSES with the typed `ReplayToError::Recovery` wrapping a
+/// `DbError::Validation` whose message is exactly the expected-version
+/// mismatch, the absent fresh target stays absent and no staged/rollback
+/// sibling is left behind.
+#[test]
+fn store_contents_above_recorded_point_are_refused_fail_closed_on_restore() {
+    on_big_stack(|| {
+        let fixture = Fixture::new();
+        let snapshot = fixture.capture_snapshot(false);
+        let recorded = captured_point(&snapshot.dir);
+        snapshot.stage_above_v_star_store(&fixture);
+        assert_eq!(
+            captured_point(&snapshot.dir),
+            recorded,
+            "the captured point V* must be unchanged by the store replacement"
+        );
+        snapshot.assert_verifies();
+
+        match run_restore(&fixture) {
+            Ok(report) => {
+                panic!("replay against a store above the recorded point must refuse: {report:?}")
+            }
+            Err(RestoreError::Replay { repo, source }) => {
+                assert_eq!(repo, "app/main", "the refusal must name the repository");
+                match &*source {
+                    ReplayToError::Recovery(DbError::Validation(message)) => {
+                        assert_expected_version_mismatch(message, recorded);
+                    }
+                    other => panic!(
+                        "expected Recovery(Validation(expected-version mismatch)), \
+                         got: {other}"
+                    ),
+                }
+            }
+            Err(other) => panic!("expected RestoreError::Replay, got: {other}"),
+        }
+        assert_clean_refusal(&fixture);
+
+        drop(fixture);
+    })
+    .expect("test thread");
+}
+
+/// The validation message must be exactly the strict-replay expected-
+/// version mismatch: `strict WAL replay: expected version {v_star}, got
+/// committed {committed}, allocated {allocated}` with `v_star == recorded`
+/// and the store-opened versions equal to each other and ABOVE `recorded`
+/// (the live store carries the post-seal commit). The committed/allocated
+/// values are parsed from the message, not assumed.
+fn assert_expected_version_mismatch(message: &str, recorded: u64) {
+    let prefix = format!("strict WAL replay: expected version {recorded}, got committed ");
+    let rest = message.strip_prefix(&prefix).unwrap_or_else(|| {
+        panic!("expected the expected-version mismatch naming V*={recorded}, got: {message:?}")
+    });
+    let (committed, allocated) = rest
+        .split_once(", allocated ")
+        .unwrap_or_else(|| panic!("missing allocated version: {message:?}"));
+    let committed: u64 = committed.parse().expect("committed version");
+    let allocated: u64 = allocated.parse().expect("allocated version");
+    assert_eq!(
+        committed, allocated,
+        "the store-opened versions must agree: {message:?}"
+    );
+    assert!(
+        committed > recorded,
+        "the store's versions must sit above V*: {message:?}"
+    );
 }
 
 /// The captured repository's store directory is missing from the snapshot

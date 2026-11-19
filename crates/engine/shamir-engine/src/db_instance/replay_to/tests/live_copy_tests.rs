@@ -1,4 +1,11 @@
-//! Strict replay of a file copy sealed while a live writer spans the backup.
+//! Strict replay of a file copy sealed while a live writer spans the
+//! backup. The post-seal writer attempt is PROVEN parked while the hold
+//! keeps the gate closed: the writer constructs the real commit future
+//! under the hold, polls it once (deterministically `Pending` — nothing
+//! has been appended), and only then does the main task stage the sealed
+//! WAL. The staged WAL provably contains nothing above V* and the replay
+//! converges exactly at the seal point; the hold is released before the
+//! writer's commit is awaited to completion.
 
 use std::fs;
 use std::future::Future;
@@ -141,7 +148,8 @@ async fn replay_of_live_copy_matches_source_at_seal() {
     let (first_tx, first_rx) = oneshot::channel();
     let (store_copied_tx, store_copied_rx) = oneshot::channel();
     let (second_tx, second_rx) = oneshot::channel();
-    let (wal_copied_tx, wal_copied_rx) = oneshot::channel();
+    let (seal_ready_tx, seal_ready_rx) = oneshot::channel();
+    let (attempted_tx, attempted_rx) = oneshot::channel();
     let resolver = Resolver(repo.clone());
     let mut writer = JoinSet::new();
     writer.spawn(async move {
@@ -154,19 +162,24 @@ async fn replay_of_live_copy_matches_source_at_seal() {
         second_tx
             .send(commit(&resolver, "before_seal", VisibilityWait::Strict).await)
             .unwrap();
-        bounded("wait for WAL copy", wal_copied_rx).await.unwrap();
-        let version = commit(
-            &resolver,
-            "after_seal",
-            VisibilityWait::Bounded { timeout_ms: 0 },
-        )
-        .await;
-        // Batch Synced flushes data via drain_all, which cannot run under
-        // SealHold. Fsync only the WAL for the under-hold commit.
-        bounded("sync post-seal WAL", resolver.0.sync_wal())
+        bounded("wait for seal readiness", seal_ready_rx)
             .await
             .unwrap();
-        version
+        // Under the live hold the strict commit parks on the closed
+        // admission gate: one poll is deterministic `Pending` and the
+        // future has appended nothing. The handshake tells the main task
+        // the attempt has been initiated, so the WAL stage that follows
+        // is provably pre-attempt.
+        let mut pending_commit = Box::pin(commit(&resolver, "after_seal", VisibilityWait::Strict));
+        assert!(
+            futures::poll!(pending_commit.as_mut()).is_pending(),
+            "the post-seal commit must stay pending while the seal hold \
+             keeps the admission gate closed"
+        );
+        attempted_tx.send(()).unwrap();
+        // The same pinned future is awaited to completion only after the
+        // main task drops the hold.
+        pending_commit.await
     });
 
     let first = bounded("first commit", first_rx).await.unwrap();
@@ -200,8 +213,14 @@ async fn replay_of_live_copy_matches_source_at_seal() {
     let sealed_rows = rows(&repo).await;
     assert_eq!(sealed_rows, ["before_capture", "before_seal"]);
 
-    // The writer waits until the sealed WAL is staged, then appends V*+1
-    // under the hold as a source-only negative control.
+    // The writer's post-seal commit is initiated under the hold before the
+    // sealed WAL is staged: signal seal readiness, then wait for the
+    // attempt handshake before copying.
+    seal_ready_tx.send(()).unwrap();
+    bounded("await writer attempt under hold", attempted_rx)
+        .await
+        .unwrap();
+
     let copied_wal = staged_wal.clone();
     bounded(
         "copy sealed WAL",
@@ -210,8 +229,37 @@ async fn replay_of_live_copy_matches_source_at_seal() {
     .await
     .unwrap()
     .unwrap();
-    wal_copied_tx.send(()).unwrap();
-    let third = bounded("join under-hold writer", writer.join_next())
+    // While the hold is STILL live the writer attempt is parked and has
+    // appended nothing. Prove the horizon twice: the engine-level
+    // `recoverable_through` certificate and the actual upper version of
+    // the WAL frames read back from disk.
+    let under_hold = bounded("source WAL horizon under hold", repo.wal_group())
+        .await
+        .unwrap();
+    assert_eq!(
+        under_hold.recoverable_through(),
+        v_star,
+        "the source WAL stays through V* while the hold is live"
+    );
+    let wal_upper = under_hold
+        .replay()
+        .await
+        .unwrap()
+        .iter()
+        .map(|entry| entry.commit_version)
+        .max()
+        .expect("the sealed WAL must retain at least one frame");
+    assert_eq!(
+        wal_upper, v_star,
+        "the actual WAL frames end exactly at V* while the hold is live"
+    );
+    drop(under_hold);
+
+    // Release the hold BEFORE the writer's commit is awaited to
+    // completion: the staged WAL keeps the sealed prefix (through V*),
+    // while the source appends V*+1 only after the gate reopened.
+    drop(hold);
+    let third = bounded("join released writer", writer.join_next())
         .await
         .unwrap()
         .unwrap();
@@ -225,9 +273,11 @@ async fn replay_of_live_copy_matches_source_at_seal() {
         .await
         .unwrap();
     assert_eq!(gate.last_committed(), third);
-    assert_eq!(gate.durable_watermark(), v_star);
+    // The released writer's strict commit flushed through drain_all, so the
+    // durable watermark has advanced past V*; it can never lag below the
+    // seal point.
+    assert!(gate.durable_watermark() >= v_star);
     drop(gate);
-    drop(hold);
     drop(pin);
     assert_eq!(
         bounded("settle post-seal commit", repo.capture_point())

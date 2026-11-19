@@ -11,8 +11,10 @@
 //! family) but never emitted with a fabricated value. This step measures
 //! started/completed/failed counters, the active gauge, copied bytes, the
 //! last run duration and the per-stage failure split; the writer-block
-//! barrier durations (`phase=capture|seal`), the pin duration and the WAL
-//! segment count have no observable source yet and stay unset.
+//! windows (`phase=capture|seal`) are the LAST completed close→reopen
+//! window per phase as recorded by the engine (a last-window gauge, not an
+//! aggregate, unset until the first barrier completes); the pin duration
+//! and the WAL segment count have no observable source yet and stay unset.
 
 use std::sync::OnceLock;
 
@@ -44,9 +46,12 @@ pub struct BackupMetricsSnapshot {
     pub bytes_copied_total: u64,
     /// Duration of the last finished run; `None` until a run has finished.
     pub last_duration_seconds: Option<f64>,
-    /// Writer-visibility barrier durations per phase (`capture` / `seal`);
-    /// not observable through the current port adapter — always `None`
-    /// this step (documented gap, §4.8 / release plan).
+    /// Writer-visibility barrier durations per phase (`capture` / `seal`):
+    /// the LAST completed close→reopen window per phase as recorded by the
+    /// engine (last-window gauge; each completed barrier overwrites its
+    /// phase after the gate reopened — success, error, timeout,
+    /// cancellation or unwind). `None` until the first window of that
+    /// phase completes in this process.
     pub writer_block_capture_seconds: Option<f64>,
     pub writer_block_seal_seconds: Option<f64>,
     /// Truncation-pin hold duration; not observable this step.
@@ -102,8 +107,9 @@ pub(crate) fn register_backup_metrics() {
     metrics::describe_gauge!(
         "shamir_backup_writer_block_seconds",
         metrics::Unit::Seconds,
-        "Writer-visibility barrier duration per phase (capture|seal); not \
-         emitted while the adapter cannot measure barrier durations"
+        "Last completed writer-visibility (close-to-reopen) window per phase \
+         (capture|seal); a last-window gauge, not an aggregate — unset until \
+         the first barrier of that phase completes"
     );
     metrics::describe_gauge!(
         "shamir_backup_pin_seconds",

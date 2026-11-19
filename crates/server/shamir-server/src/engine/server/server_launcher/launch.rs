@@ -432,11 +432,15 @@ impl ServerLauncher {
         // `StartBackup`/`BackupStatus`/`CancelBackup` admin ops reach it.
         // The registry holds an `Arc<ShamirDb>` clone, so the port must be
         // installed after the engine is wrapped — same one-shot discipline
-        // as the `set_replication_resume_probe` seam.
-        let online_backup_registry = Arc::new(OnlineBackupRegistry::new(
+        // as the `set_replication_resume_probe` seam. The run registry is
+        // wired to this server's root shutdown token: each run takes a
+        // child token, so shutdown cancels the in-flight run while an
+        // admin `CancelBackup` cancels only the child (never the server).
+        let online_backup_registry = Arc::new(OnlineBackupRegistry::new_with_shutdown(
             Arc::clone(&shamir),
             config.data_dir.clone(),
             tokio::runtime::Handle::current(),
+            shutdown_token.clone(),
         ));
         shamir.set_online_backup_admin_port(online_backup_registry);
 

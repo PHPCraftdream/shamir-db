@@ -26,6 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use shamir_collections::TFxMap;
@@ -35,7 +36,7 @@ use shamir_db::ShamirDb;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::Handle;
 
-use crate::sync::durability::backup::online::progress::BackupStage;
+use crate::sync::durability::backup::online::progress::{BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::wal_capture::{
     CapturedPoint, OnlineBackupPort, PortError, RepoSource,
 };
@@ -138,6 +139,39 @@ impl EngineBackupPort {
     /// (dispatch-depth rule).
     fn bridge<F: std::future::Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(Box::pin(future))
+    }
+
+    /// The engine seal barrier under cancellation and the repo's absolute
+    /// seal budget deadline. The barrier future runs to its NATURAL
+    /// completion — it is never dropped, `select`ed against or wrapped in
+    /// `timeout_at` from outside (R2a follow-up 3): the controlled facade
+    /// [`RepoInstance::seal_point_controlled`] consults the caller's
+    /// cancellation closure and the deadline ONLY at its own named step
+    /// boundaries, strictly between mutating awaits (gate-close RMW,
+    /// zero-lease wait, drain, pause acquisition, recheck, flush). A fired
+    /// checkpoint returns the typed
+    /// [`OnlineBackupError::Cancelled`] / [`OnlineBackupError::DeadlineExceeded`]
+    /// and the engine's RAII owners fail closed on that ordinary error
+    /// return — pause released first, gate reopened last, no snapshot.
+    /// In-flight blocking I/O is not preempted: a barrier step blocked on
+    /// a straggler syscall runs to completion before the next checkpoint
+    /// is observed, so a straggler can extend the closed window —
+    /// fail-closed either way (the protocol removes the destination).
+    fn seal_bridge(
+        &self,
+        repo: &str,
+        instance: RepoInstance,
+        deadline: Option<Instant>,
+        cancel: &CancelFlag,
+    ) -> Result<SealHold, PortError> {
+        // The closure is consulted by the engine at each step boundary;
+        // the flag is a cheap atomic/token check (no locking, no await).
+        let cancel = cancel.clone();
+        self.bridge(instance.seal_point_controlled(deadline, move || cancel.is_cancelled()))
+            .map_err(|error| PortError::Seal {
+                repo: repo.to_string(),
+                source: Self::barrier_error(repo, error),
+            })
     }
 
     /// Resolve the live repo instance for a captured `"db/repo"` key.
@@ -245,7 +279,11 @@ impl OnlineBackupPort for EngineBackupPort {
         let mut pins = self.pins.lock();
         for key in &keys {
             let Some(repo) = self.resolve(key) else {
-                self.release_pins();
+                // Clear under the already-held pins lock: calling
+                // `release_pins` here would re-lock the same non-reentrant
+                // mutex (self-deadlock).
+                pins.clear();
+                drop(pins);
                 return Err(PortError::PinAcquire);
             };
             // Floor 0: retain the whole WAL history for the copy's duration
@@ -298,6 +336,31 @@ impl OnlineBackupPort for EngineBackupPort {
     }
 
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
+        // Direct variant without deadline/cancel: kept for existing tests
+        // (the protocol's step E calls
+        // [`OnlineBackupPort::seal_point_before`]).
+        self.seal_point_before(repo, None, &CancelFlag::default())
+    }
+
+    /// Step E, deadline-aware (R2a-4): the SAME absolute monotonic
+    /// `deadline` the caller computed and the caller's cancellation flag
+    /// are handed to the engine's controlled seal barrier
+    /// ([`RepoInstance::seal_point_controlled`]), which observes them only
+    /// at its own step boundaries — the barrier future itself is NEVER
+    /// dropped mid-await (see [`Self::seal_bridge`]). A fired checkpoint
+    /// refuses the barrier through the engine's ordinary typed error path
+    /// (fail-closed: pause released, gate reopened, no snapshot) and the
+    /// protocol removes the destination. In-flight blocking I/O is not
+    /// preempted: a step blocked on a straggler syscall completes before
+    /// the next checkpoint fires, so a straggler can extend the closed
+    /// window — the run still fails closed. Not covering process teardown
+    /// mid-syscall.
+    fn seal_point_before(
+        &self,
+        repo: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelFlag,
+    ) -> Result<CapturedPoint, PortError> {
         let Some(instance) = self.resolve(repo) else {
             return Err(PortError::Seal {
                 repo: repo.to_string(),
@@ -305,12 +368,7 @@ impl OnlineBackupPort for EngineBackupPort {
             });
         };
         self.run.set_stage(stage_hint::SEALING);
-        let hold = self
-            .bridge(instance.seal_point())
-            .map_err(|error| PortError::Seal {
-                repo: repo.to_string(),
-                source: Self::barrier_error(repo, error),
-            })?;
+        let hold = self.seal_bridge(repo, instance, deadline, cancel)?;
         let point = CapturedPoint {
             wal_position: hold.position(),
             store_dir: self.store_dir_for(repo),
@@ -320,9 +378,30 @@ impl OnlineBackupPort for EngineBackupPort {
         Ok(point)
     }
 
-    fn end_seal(&self, repo: &str) {
+    /// Called at the C start, before the first WAL pass: writers are
+    /// visibly RUNNING again, so the live status publishes the real phase
+    /// `Copying` and e2e tests can prove the copy overlaps the
+    /// writer-running phase.
+    fn begin_copy(&self) {
+        self.run.set_stage(stage_hint::COPYING);
+    }
+
+    /// Called at the real F start: the live status moves from `Sealing`
+    /// to `Verifying` once the seal loop over the repos has finished, so
+    /// end_seal no longer publishes a misleading Verifying stage early.
+    fn begin_verify(&self) {
         self.run.set_stage(stage_hint::VERIFYING);
-        self.seals.lock().remove(repo);
+    }
+
+    fn end_seal(&self, repo: &str) {
+        // The stage hint stays SEALING here: the protocol's seal loop
+        // continues over the remaining repos, and VERIFYING is published
+        // only later by `begin_verify` at the real F start. The hold is
+        // extracted under the lock and dropped OUTSIDE it: its `Drop` reopens the
+        // commit gate (a measured, potentially slow synchronous reopen)
+        // and must not hold the seal-map mutex while doing so.
+        let hold = self.seals.lock().remove(repo);
+        drop(hold);
     }
 
     fn release_pins(&self) {
@@ -331,6 +410,14 @@ impl OnlineBackupPort for EngineBackupPort {
 }
 
 impl EngineBackupPort {
+    /// Test-only narrow access: number of step-A pins currently held on
+    /// this adapter (the production surface stays closed; regression
+    /// evidence that a failed `acquire_pins` released everything).
+    #[cfg(test)]
+    pub(crate) fn test_held_pins(&self) -> usize {
+        self.pins.lock().len()
+    }
+
     /// The captured repo's store dir path relative to the data dir, from
     /// the step-A snapshot (the instance exposes no path accessor).
     fn store_dir_for(&self, repo: &str) -> String {
