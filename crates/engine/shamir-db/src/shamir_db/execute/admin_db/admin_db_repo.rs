@@ -109,7 +109,8 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // if_exists early-exit: missing db → no-op.
+        // if_exists early-exit: missing db → no-op (a missing database cannot
+        // carry a marker, so no in-doubt check is skipped here).
         if op.if_exists && !self.shamir.has_db(&op.drop_db) {
             return Ok(admin_result(mpack!({
                 "dropped": @(QueryValue::Str(op.drop_db.clone())),
@@ -122,6 +123,20 @@ impl ShamirAdminExecutor {
         // concurrent CREATE SUBSCRIPTION can never bind the destination
         // mid-cascade.
         let _control = self.shamir.lock_replication_control().await;
+
+        // R1c-4 follow-up defect 2: refuse DROP of a target database with an
+        // in-doubt marker — the batch-entry fence only inspects the SESSION
+        // database, so this target-side check (inside the control lock,
+        // before the binding guard and any CASCADE teardown) is the barrier.
+        if self.shamir.schema_migration_in_doubt(&op.drop_db) {
+            return Err(err_code(
+                super::admin_db_schema_migration::schema_migration_lifecycle_code(),
+                super::admin_db_schema_migration::schema_migration_lifecycle_refusal_message(
+                    "drop",
+                    &op.drop_db,
+                ),
+            ));
+        }
 
         // Round 2 (A6): hoist the binding guard BEFORE any cascade mutation —
         // a `DROP DATABASE … CASCADE` over a bound destination is refused
@@ -635,6 +650,21 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // R1c-4 follow-up defect 2: refuse RENAME of a target database with
+        // an in-doubt marker (the batch-entry fence only inspects the SESSION
+        // database); the marker is name-keyed while the journal is keyed by
+        // the database's stable identity, and the re-key would strand the
+        // unresolved migration under the old name.
+        if self.shamir.schema_migration_in_doubt(&op.rename_db) {
+            return Err(err_code(
+                super::admin_db_schema_migration::schema_migration_lifecycle_code(),
+                super::admin_db_schema_migration::schema_migration_lifecycle_refusal_message(
+                    "rename",
+                    &op.rename_db,
+                ),
+            ));
+        }
 
         self.shamir
             .rename_db_as(&op.rename_db, &op.to, self.actor.clone())

@@ -141,6 +141,20 @@ impl ShamirDb {
             return Ok(false);
         }
 
+        // R1c-4 follow-up defect 2: refuse removal of a database with an
+        // in-doubt marker BEFORE any mutation (the CASCADE child teardown
+        // below would destroy the database the unresolved migration was
+        // applied to). Name-keyed marker; the journal itself is keyed by the
+        // database's stable identity. The marker is seeded at boot and is
+        // static until a resumed runner's `hold` converts it to a live gate
+        // (gate-ownership mechanics unchanged).
+        if self.schema_migration_in_doubt(name) {
+            return Err(DbError::Validation(
+                crate::shamir_db::execute::admin_db_schema_migration
+                    ::schema_migration_lifecycle_refusal_message("drop", name),
+            ));
+        }
+
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
         self.ensure_destinations_unbound(name, None, "DROP").await?;
@@ -193,10 +207,25 @@ impl ShamirDb {
     /// - `from` must not be `SYSTEM_DB_NAME`.
     /// - The source database must exist (in-memory OR persisted).
     /// - The destination must NOT exist (in-memory AND persisted).
+    /// - The source must not carry an application-schema in-doubt marker
+    ///   (R1c-4 follow-up defect 2 — the re-key would strand the marker,
+    ///   which is name-keyed, away from the journal, which follows the
+    ///   database's stable identity).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // Hold database-create admission through namespace publication.
         let _create_guard = self.db_create_lock().lock().await;
         let _control = self.lock_replication_control().await;
+        // R1c-4 follow-up defect 2: refuse RENAME of a database with an
+        // in-doubt marker BEFORE any mutation. Name-keyed marker; the
+        // journal follows the stable identity, the marker does not travel
+        // with the re-key. Static boot seed; gate-ownership mechanics
+        // unchanged.
+        if self.schema_migration_in_doubt(from) {
+            return Err(DbError::Validation(
+                crate::shamir_db::execute::admin_db_schema_migration
+                    ::schema_migration_lifecycle_refusal_message("rename", from),
+            ));
+        }
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
         // (repo: None — the whole database is the destination set).

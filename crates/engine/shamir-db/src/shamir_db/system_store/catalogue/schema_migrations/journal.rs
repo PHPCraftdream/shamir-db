@@ -459,26 +459,20 @@ impl SystemStore {
     }
 
     /// Open-time fence snapshot (R1c step 2b-3b): the durable generation of
-    /// the partition's fence iff the control record still OWNS it and the
-    /// journal has an unresolved entry — the state a crashed runner or a
-    /// server restart leaves behind. `None` when the fence is free or the
-    /// journal carries nothing unresolved. One-shot read for
-    /// `ShamirDb::init_inner`; never on the batch path.
+    /// the partition's fence iff the journal carries an unresolved entry,
+    /// else `None`. The full ordinary-journal validation runs first, so a
+    /// damaged journal or control record fails closed (design §4.2/§4.3)
+    /// rather than silently reporting the fence free. One-shot read for
+    /// `ShamirDb::init_inner`; never on the batch path; no second scan.
     pub async fn owned_schema_migration_fence(
         &self,
         identity: DatabaseIdentity,
     ) -> DbResult<Option<u64>> {
-        let Some(control) = self.load_control(identity).await? else {
-            return Ok(None);
-        };
-        if control.state != "owned" {
-            return Ok(None);
-        }
         let history = self.read_schema_migration_history(identity).await?;
-        if history.unresolved.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(control.generation))
+        Ok(history
+            .unresolved
+            .last()
+            .map(|event| event.fence_generation))
     }
 
     async fn flush_journal_tail(&self) -> DbResult<()> {
@@ -495,6 +489,8 @@ impl SystemStore {
             if value.get("record_type").and_then(QueryValue::as_str) == Some("control")
                 && value.get("record_key").and_then(QueryValue::as_str)
                     == Some(control_key(identity).as_str())
+                && value.get("database_identity").and_then(QueryValue::as_str)
+                    == Some(identity.to_string().as_str())
                 && found.replace((row_id.clone(), value)).is_some()
             {
                 return Err(corrupt(&row_id, "duplicate control record"));
@@ -505,9 +501,17 @@ impl SystemStore {
         };
         let refs = new_map();
         let context = table.info_store_read_view().filter_context(&refs).await?;
-        let mut query = ReadQuery::new(TABLE_SCHEMA_MIGRATION_EVENTS).filter(Filter::Eq {
-            field: vec!["record_key".into()],
-            value: FilterValue::String(control_key(identity)),
+        let mut query = ReadQuery::new(TABLE_SCHEMA_MIGRATION_EVENTS).filter(Filter::And {
+            filters: vec![
+                Filter::Eq {
+                    field: vec!["record_key".into()],
+                    value: FilterValue::String(control_key(identity)),
+                },
+                Filter::Eq {
+                    field: vec!["database_identity".into()],
+                    value: FilterValue::String(identity.to_string()),
+                },
+            ],
         });
         query.with_version = true;
         let result = table.read(&query, &context).await?;
@@ -574,6 +578,10 @@ impl SystemStore {
                     Filter::Eq {
                         field: vec!["record_key".into()],
                         value: FilterValue::String(control_key(event.database_identity)),
+                    },
+                    Filter::Eq {
+                        field: vec!["database_identity".into()],
+                        value: FilterValue::String(event.database_identity.to_string()),
                     },
                     Filter::Eq {
                         field: vec!["generation".into()],

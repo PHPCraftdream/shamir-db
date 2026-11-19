@@ -6,61 +6,27 @@
 //! Requests are built ONLY through `shamir-query-builder` and executed
 //! through the normal batch entry point (`execute` / `execute_as`).
 
+use std::time::Duration;
+
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_query_builder::{
-    application_schema_plan, application_schema_status, apply_application_schema_migration,
-};
-use shamir_query_types::admin::types::schema_migration::{
-    SchemaMigrationApplyRequest, SchemaMigrationBody, SchemaMigrationOp,
-    SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
-    SchemaMigrationSubmission, SchemaMigrationTarget,
-};
-use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+use shamir_query_types::admin::types::schema_migration::SchemaMigrationOp;
 
 use super::super::helpers::on_big_stack;
-use super::helpers::{body, checksum, context, overwrite_row, persistent_db, rows};
-use crate::engine::repo::repo_types::BoxRepoFactory;
-use crate::engine::repo::RepoConfig;
-use crate::engine::table::TableManager;
+use super::super::helpers::{
+    body, checksum, context, fence_generation_from_status, field, flush_and_reopen, journal_table,
+    overwrite_row, persistent_db, predecessor, prepare_database, rows, run_apply, run_plan,
+    run_status, str_field, submission, OWNER,
+};
 use crate::query::batch::BatchError;
-use crate::shamir_db::system_store::{DatabaseIdentity, SystemStoreConfig};
+use crate::shamir_db::system_store::JournalEvent;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
-
-/// The database owner: holds `Read` and `Manage` on the database and its
-/// store resource (the §5.2 preflight authorizes `CreateTable` on the store).
-const OWNER: Actor = Actor::User(7);
-
-/// Prepare one database for migration traffic: repository `main` plus owner
-/// grants on the database and the store resource.
-async fn prepare_database(db: &ShamirDb, name: &str) {
-    db.add_repo(name, RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
-    let meta = ResourceMeta {
-        owner: OWNER,
-        group: None,
-        mode: 0o700,
-    };
-    db.set_resource_meta(&ResourcePath::database(name), &meta)
-        .await
-        .unwrap();
-    db.set_resource_meta(&ResourcePath::store(name, "main"), &meta)
-        .await
-        .unwrap();
-}
 
 /// Corrupt ONLY the stored body of the first journal event: the reader must
 /// refuse it as an integrity failure for its own database.
 async fn corrupt_first_event_body(db: &ShamirDb) {
-    let table: TableManager = db
-        .system_store()
-        .system_repo()
-        .unwrap()
-        .get_table("schema_migration_events")
-        .await
-        .unwrap();
+    let table = journal_table(db).await;
     let (event_id, mut envelope) = rows(&table)
         .await
         .into_iter()
@@ -70,8 +36,7 @@ async fn corrupt_first_event_body(db: &ShamirDb) {
         Some(QueryValue::Bin(bytes)) => bytes.clone(),
         _ => panic!("started event payload is binary"),
     };
-    let mut event: crate::shamir_db::system_store::JournalEvent =
-        rmp_serde::from_slice(&payload).unwrap();
+    let mut event: JournalEvent = rmp_serde::from_slice(&payload).unwrap();
     let body = event
         .body
         .as_mut()
@@ -88,102 +53,6 @@ async fn corrupt_first_event_body(db: &ShamirDb) {
         );
     }
     overwrite_row(&table, event_id, envelope).await;
-}
-
-fn target(identity: &DatabaseIdentity) -> SchemaMigrationTarget {
-    SchemaMigrationTarget {
-        database_identity: identity.0,
-    }
-}
-
-fn predecessor(id: Option<&str>, ordinal: u64, digest: [u8; 32]) -> SchemaMigrationPredecessor {
-    SchemaMigrationPredecessor {
-        migration_id: id.map(str::to_string),
-        ordinal,
-        checksum: digest,
-    }
-}
-
-fn submission(migration: &SchemaMigrationBody) -> SchemaMigrationSubmission {
-    SchemaMigrationSubmission::new(migration, checksum(migration))
-}
-
-async fn run_status(
-    db: &ShamirDb,
-    database: &str,
-    identity: &DatabaseIdentity,
-) -> Result<QueryValue, BatchError> {
-    let mut b = Batch::new();
-    b.op(
-        "status",
-        application_schema_status(SchemaMigrationStatusRequest {
-            protocol_version: 1,
-            target: target(identity),
-        }),
-    );
-    let request = b.to_request_via_msgpack().unwrap();
-    let response = db.execute(database, &request).await?;
-    Ok(response.results["status"].records[0]
-        .as_value()
-        .into_owned())
-}
-
-async fn run_plan(
-    db: &ShamirDb,
-    database: &str,
-    expected: SchemaMigrationPredecessor,
-    migrations: Vec<SchemaMigrationSubmission>,
-    identity: &DatabaseIdentity,
-) -> Result<QueryValue, BatchError> {
-    let mut b = Batch::new();
-    b.op(
-        "plan",
-        application_schema_plan(SchemaMigrationPlanRequest {
-            protocol_version: 1,
-            target: target(identity),
-            expected_predecessor: expected,
-            migrations,
-        }),
-    );
-    let request = b.to_request_via_msgpack().unwrap();
-    let response = db.execute(database, &request).await?;
-    Ok(response.results["plan"].records[0].as_value().into_owned())
-}
-
-async fn run_apply(
-    db: &ShamirDb,
-    database: &str,
-    expected: SchemaMigrationPredecessor,
-    fence_generation: u64,
-    migration: SchemaMigrationSubmission,
-    identity: &DatabaseIdentity,
-) -> Result<QueryValue, BatchError> {
-    let mut b = Batch::new();
-    b.op(
-        "apply",
-        apply_application_schema_migration(SchemaMigrationApplyRequest {
-            protocol_version: 1,
-            target: target(identity),
-            expected_predecessor: expected,
-            expected_fence_generation: fence_generation,
-            migration,
-        }),
-    );
-    let request = b.to_request_via_msgpack().unwrap();
-    let response = db.execute_as(OWNER, database, &request).await?;
-    Ok(response.results["apply"].records[0].as_value().into_owned())
-}
-
-fn field<'a>(value: &'a QueryValue, key: &str) -> &'a QueryValue {
-    value
-        .get(key)
-        .unwrap_or_else(|| panic!("field {key} missing"))
-}
-
-fn str_field<'a>(value: &'a QueryValue, key: &str) -> &'a str {
-    field(value, key)
-        .as_str()
-        .unwrap_or_else(|| panic!("field {key} is not a string"))
 }
 
 fn assert_closed(error: BatchError, context: &str, detailed: bool) {
@@ -231,7 +100,7 @@ fn corrupted_event_of_one_database_fails_it_closed_and_never_blocks_another_data
     // slower).
     on_big_stack(|| async {
         tokio::time::timeout(
-            std::time::Duration::from_secs(300),
+            Duration::from_secs(300),
             Box::pin(corrupted_event_scenario(false)),
         )
         .await
@@ -246,38 +115,12 @@ fn corrupted_event_of_one_database_fails_it_closed_after_a_cold_restart() {
     // fail database A closed across a restart too, while B stays healthy.
     on_big_stack(|| async {
         tokio::time::timeout(
-            std::time::Duration::from_secs(300),
+            Duration::from_secs(300),
             Box::pin(corrupted_event_scenario(true)),
         )
         .await
         .expect("journal isolation restart scenario timed out");
     });
-}
-
-/// Reopen the persistent system store after a cold restart: a just-dropped
-/// engine can hold its fjall lock until the background handles finish
-/// (`FjallError: Locked`, seen on Windows), so retry ONLY that error under a
-/// bounded deadline; every other error fails at once. Never a bare reopen.
-async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> ShamirDb {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())),
-        )
-        .await
-        .expect("reopen attempt timed out")
-        {
-            Ok(db) => return db,
-            Err(error)
-                if error.to_string().contains("Locked")
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Err(error) => panic!("reopen the system store: {error}"),
-        }
-    }
 }
 
 async fn corrupted_event_scenario(reopen: bool) {
@@ -315,31 +158,20 @@ async fn corrupted_event_scenario(reopen: bool) {
     let db = if reopen {
         // Persist the damaged journal row durably, then drop the engine and
         // reopen: the corruption must survive a cold restart of the store.
-        let table: TableManager = db
-            .system_store()
-            .system_repo()
-            .unwrap()
-            .get_table("schema_migration_events")
-            .await
-            .unwrap();
-        db.system_store()
-            .flush_system_repo_durable(&table)
-            .await
-            .expect("the damaged journal row flushes durably before the restart");
-        drop(table);
-        drop(db);
-        init_waiting_for_locks(dir.path().join("system")).await
+        let table = journal_table(&db).await;
+        flush_and_reopen(dir.path(), db, table).await
     } else {
         db
     };
 
-    // B is untouched by A's damaged record: its apply succeeds.
+    // B is untouched by A's damaged record: its apply succeeds. The apply
+    // generation comes from B's OWN status, never a magic constant.
     let beta_first = body("beta-001", 1);
     let applied = run_apply(
         &db,
         "beta",
         predecessor(None, 0, [0; 32]),
-        0,
+        fence_generation_from_status(&db, "beta", &beta).await,
         submission(&beta_first),
         &beta,
     )

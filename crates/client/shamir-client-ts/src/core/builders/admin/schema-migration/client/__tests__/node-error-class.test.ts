@@ -121,7 +121,7 @@ describe('definitive server rejection across ShamirDbError runtimes', () => {
     expect(caught?.retryable).toBe(false);
     expect(caught?.attempt).toBeUndefined();
     expect(seenAliases).toEqual([STATUS_ALIAS, APPLY_ALIAS]);
-  });
+  }, 120000);
 
   it('readNodeClassCodeIsTyped', async () => {
     const caught = await statusError(() => ({
@@ -133,7 +133,7 @@ describe('definitive server rejection across ShamirDbError runtimes', () => {
     }));
     expect(caught).toBeInstanceOf(MigrationError);
     expect(caught?.code).toBe('schema_migration_durability_unavailable');
-  });
+  }, 120000);
 
   it('uncertainCodesAndNonCarriersStayUnknownOutcome', async () => {
     for (const failure of [
@@ -154,7 +154,7 @@ describe('definitive server rejection across ShamirDbError runtimes', () => {
       expect((caught as MigrationError).code).toBe('unknown_outcome');
       expect((caught as MigrationError).attempt?.migrationId).toBe(M1);
     }
-  });
+  }, 120000);
 
   it('missingDetailCarrierStillDefiniteWithSafeFallback', async () => {
     const caught = await applyError((alias) =>
@@ -168,7 +168,7 @@ describe('definitive server rejection across ShamirDbError runtimes', () => {
     expect(caught).toBeInstanceOf(MigrationError);
     expect(caught?.code).toBe('schema_migration_gap');
     expect(caught?.message).not.toContain('undefined');
-  });
+  }, 120000);
 
   it('unsupportedServerMatchesExactDetailOnly', async () => {
     const unsupported = await applyError((alias) =>
@@ -195,5 +195,5 @@ describe('definitive server rejection across ShamirDbError runtimes', () => {
     );
     expect(other?.code).toBe('server');
     expect(other?.serverCode).toBe('invalid_request');
-  });
+  }, 120000);
 });

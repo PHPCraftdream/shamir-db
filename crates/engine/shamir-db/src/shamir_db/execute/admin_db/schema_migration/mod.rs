@@ -21,6 +21,9 @@ mod schema_migration;
 #[cfg(test)]
 pub(in crate::shamir_db) use apply::apply_journal;
 pub(in crate::shamir_db::execute) use fence::maintenance_fence_refusal;
+pub(in crate::shamir_db) use fence::{
+    schema_migration_lifecycle_code, schema_migration_lifecycle_refusal_message,
+};
 
 #[cfg(test)]
 pub(in crate::shamir_db) use function_family::{test_capture_intent, test_verify};

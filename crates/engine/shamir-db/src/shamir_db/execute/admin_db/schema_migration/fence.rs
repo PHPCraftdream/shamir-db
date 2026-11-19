@@ -58,6 +58,28 @@ const GATE_PENDING: u64 = u64::MAX;
 /// restarted before resume) — seeded at database open from the journal.
 const IN_DOUBT: &str = "schema_migration_in_doubt";
 
+/// Stable code of the lifecycle refusal (R1c-4 follow-up defect 2): any
+/// database lifecycle op (RENAME/DROP/seed publication) targeting a database
+/// with an in-doubt marker reports `schema_migration_in_doubt`. Narrow
+/// accessor — the constant itself stays file-private.
+pub(in crate::shamir_db) const fn schema_migration_lifecycle_code() -> &'static str {
+    IN_DOUBT
+}
+
+/// Shared message shape of the lifecycle refusal (no per-callsite text
+/// drift; the direct-call guards wrap it in `DbError::Validation`, the wire
+/// handlers pair it with [`schema_migration_lifecycle_code`]).
+pub(in crate::shamir_db) fn schema_migration_lifecycle_refusal_message(
+    op: &str,
+    db: &str,
+) -> String {
+    format!(
+        "cannot {op} database '{db}': an application-schema migration journal \
+         is in doubt for it; resume or repair the migration and reopen the \
+         database first"
+    )
+}
+
 /// Stable §5.3 code for an unreadable journal/catalogue. When the open-time
 /// seed itself failed for a database, the marker stands for a BOOT FAILURE
 /// and status/plan/apply report this code, not `schema_migration_in_doubt`.
@@ -166,7 +188,9 @@ impl ShamirDb {
     /// control record still OWNS the durable fence while its journal is
     /// unresolved is marked in doubt (in-memory only, generation known).
     /// A database whose fence/journal state is UNKNOWABLE at boot (the
-    /// control-record read FAILED — ownership itself cannot be established)
+    /// full ordinary-journal validation in
+    /// `owned_schema_migration_fence` FAILED — ownership itself cannot be
+    /// established)
     /// is marked with the unknown-generation variant (`None`): admission
     /// fails closed with `schema_migration_durability_unavailable`. A single
     /// payload-free `warn!` covers all failures. Never propagates an error:
