@@ -621,3 +621,126 @@ async fn dropped_repo_after_catalogue_fails_pins_typed_and_next_run_completes() 
     let _ = std::fs::remove_dir_all(&to);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Defect 4 (R2a-4 follow-up): a panic on the detached runner thread must
+/// not leave the registry `running` or the §4.8 metrics stuck. The panic
+/// is injected through the registry's per-run opt-in step callback
+/// (`arm_runner_step_callback`), moved onto THIS run's runner thread only
+/// and fired by the engine's shared test-step dispatcher at the
+/// `after_recheck` seal-barrier step — mid-protocol, so the unwind proves
+/// the WHOLE cleanup chain — the protocol's `RunCleanup` removes the
+/// owned output directory and releases the pins, the seal barrier's own
+/// RAII releases the pause and reopens the gate, the permit drops, and
+/// then the registry's `RunGuard` publishes failed + idle and closes the
+/// metrics. A second `start` succeeds to `Done` on the SAME engine and
+/// the live source stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runner_panic_publishes_failed_idle_and_second_start_succeeds() {
+    // Failure-only diagnostics: the watchdog dumps the phase timeline
+    // after 150 s, below the 180 s nextest per-test kill.
+    let guard = FlakeGuard::with_watchdog(
+        "runner_panic_publishes_failed_idle_and_second_start_succeeds",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    // RAII tempdirs kept alive to the end of the test.
+    let root_dir = tempfile::tempdir().expect("tempdir");
+    let to_dir = tempfile::tempdir().expect("tempdir");
+    let other_dir = tempfile::tempdir().expect("tempdir");
+    let root = root_dir.path().to_path_buf();
+    let to = to_dir.path().to_path_buf();
+    let other = other_dir.path().to_path_buf();
+    let deadline = Instant::now() + OVERALL;
+    let (db, registry) = tokio::time::timeout(remaining(deadline), fixture(&root))
+        .await
+        .expect("fixture within deadline");
+    guard.note("fixture-ready", "engine + registry built");
+
+    registry.arm_runner_step_callback(Box::new(|step| {
+        if step == "after_recheck" {
+            panic!("injected runner panic at the seal recheck (registry panic-seam test)");
+        }
+    }));
+    registry.start(to.clone()).expect("start");
+    assert!(
+        wait_until(|| !registry.status().running, deadline),
+        "the panicking run must end on its own (guard published the failure)"
+    );
+    let snapshot = registry.status();
+    assert!(
+        !snapshot.running,
+        "the guard must have left the registry idle"
+    );
+    assert_eq!(
+        format!("{:?}", snapshot.stage),
+        "Failed",
+        "the guard must publish a failed stage"
+    );
+    assert_eq!(
+        snapshot.progress.failed_stage,
+        Some(BackupStage::Sealing),
+        "the panic fired inside the seal barrier: stage hint Sealing"
+    );
+    assert!(
+        snapshot
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("panic"),
+        "the guard's error must name the panic: {:?}",
+        snapshot.last_error
+    );
+    assert_eq!(snapshot.dest_dir, None, "no snapshot dir on a panic");
+    assert_eq!(
+        std::fs::read_dir(&to).expect("to dir").count(),
+        0,
+        "the unwind must remove the protocol-owned output directory"
+    );
+    guard.note("panic-published", "failed + idle, output cleaned");
+
+    // The source is usable: a bounded write through the SAME engine (the
+    // seal barrier's pause/gate RAII was released on the unwind).
+    let mut batch = Batch::new();
+    let mut row = new_map();
+    row.insert("n".to_string(), QueryValue::Int(7));
+    batch.op(
+        "ins_after_panic",
+        write::Insert::with_repo("main", "rows").row(QueryValue::Map(row)),
+    );
+    tokio::time::timeout(remaining(deadline), db.execute("app", &batch.build()))
+        .await
+        .expect("write after panic within deadline")
+        .expect("write after panic");
+    tokio::time::timeout(remaining(deadline), db.flush_all_waiting())
+        .await
+        .expect("flush after panic within deadline")
+        .expect("flush after panic");
+    guard.note("source-usable", "write + flush after panic");
+
+    // The permit and the engine's pins/seals are free: a second start
+    // succeeds and completes to `Done` on the SAME engine.
+    let (second_id, destination) = registry
+        .start(other.clone())
+        .expect("second start after panic");
+    assert!(second_id.starts_with("ob-"), "backup id shape: {second_id}");
+    assert_ne!(second_id, snapshot.backup_id, "fresh backup id");
+    assert_eq!(destination, other);
+    assert!(
+        wait_until(|| !registry.status().running, deadline),
+        "the second run must complete on its own"
+    );
+    let after = registry.status();
+    assert!(
+        after.last_error.is_none(),
+        "the second run must be clean: {:?}",
+        after.last_error
+    );
+    assert_eq!(format!("{:?}", after.stage), "Done");
+    let dest_dir = after.dest_dir.expect("second run records the snapshot dir");
+    assert!(
+        dest_dir.join("manifest.json").is_file(),
+        "the second run wrote a manifest"
+    );
+    verify_manifest(&dest_dir).expect("second snapshot must verify");
+    guard.note("second-run", "Done + verified after panic recovery");
+}

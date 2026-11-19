@@ -142,12 +142,21 @@ impl EngineBackupPort {
     }
 
     /// The engine seal barrier under cancellation and the repo's absolute
-    /// seal budget deadline. `biased`: cancellation is polled FIRST on
-    /// every wake. `timeout_at` uses the SAME absolute `Instant` the
-    /// caller computed (no drift): the barrier is INSIDE the per-repo
-    /// budget. On timeout/cancel the barrier future is dropped and the
-    /// engine's close owner reopens the gate on unwind; in-flight blocking
-    /// I/O is not preempted, so a straggler syscall can extend the window.
+    /// seal budget deadline. The barrier future runs to its NATURAL
+    /// completion — it is never dropped, `select`ed against or wrapped in
+    /// `timeout_at` from outside (R2a follow-up 3): the controlled facade
+    /// [`RepoInstance::seal_point_controlled`] consults the caller's
+    /// cancellation closure and the deadline ONLY at its own named step
+    /// boundaries, strictly between mutating awaits (gate-close RMW,
+    /// zero-lease wait, drain, pause acquisition, recheck, flush). A fired
+    /// checkpoint returns the typed
+    /// [`OnlineBackupError::Cancelled`] / [`OnlineBackupError::DeadlineExceeded`]
+    /// and the engine's RAII owners fail closed on that ordinary error
+    /// return — pause released first, gate reopened last, no snapshot.
+    /// In-flight blocking I/O is not preempted: a barrier step blocked on
+    /// a straggler syscall runs to completion before the next checkpoint
+    /// is observed, so a straggler can extend the closed window —
+    /// fail-closed either way (the protocol removes the destination).
     fn seal_bridge(
         &self,
         repo: &str,
@@ -155,48 +164,14 @@ impl EngineBackupPort {
         deadline: Option<Instant>,
         cancel: &CancelFlag,
     ) -> Result<SealHold, PortError> {
-        // Box::pin the ACTUAL barrier future before the select: the pinned
-        // future is polled/dropped in place (dispatch-depth rule; no
-        // per-poll re-creation).
-        let mut sealed = Box::pin(instance.seal_point());
-        self.runtime.block_on(Box::pin(async {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(PortError::Seal {
-                    repo: repo.to_string(),
-                    source: io::Error::other(
-                        "cancelled during the seal barrier; the engine reopens the gate when \
-                         the abandoned barrier future unwinds",
-                    ),
-                }),
-                result = async {
-                    match deadline {
-                        Some(deadline) => {
-                            match tokio::time::timeout_at(deadline.into(), sealed.as_mut())
-                                .await
-                            {
-                                Ok(result) => result.map_err(|error| {
-                                    Self::barrier_error(repo, error)
-                                }),
-                                Err(_elapsed) => Err(io::Error::other(format!(
-                                    "repo {repo}: the seal budget elapsed before the barrier \
-                                     returned; the barrier future was abandoned (fail-closed: \
-                                     no snapshot); the commit gate reopens when it unwinds — \
-                                     in-flight blocking I/O is not preempted"
-                                ))),
-                            }
-                        }
-                        None => sealed
-                            .as_mut()
-                            .await
-                            .map_err(|error| Self::barrier_error(repo, error)),
-                    }
-                } => result.map_err(|source| PortError::Seal {
-                    repo: repo.to_string(),
-                    source,
-                }),
-            }
-        }))
+        // The closure is consulted by the engine at each step boundary;
+        // the flag is a cheap atomic/token check (no locking, no await).
+        let cancel = cancel.clone();
+        self.bridge(instance.seal_point_controlled(deadline, move || cancel.is_cancelled()))
+            .map_err(|error| PortError::Seal {
+                repo: repo.to_string(),
+                source: Self::barrier_error(repo, error),
+            })
     }
 
     /// Resolve the live repo instance for a captured `"db/repo"` key.
@@ -368,14 +343,17 @@ impl OnlineBackupPort for EngineBackupPort {
     }
 
     /// Step E, deadline-aware (R2a-4): the SAME absolute monotonic
-    /// `deadline` the caller computed bounds the engine's async seal
-    /// barrier via `timeout_at`, and a `biased` `select!` polls the
-    /// cancellation branch first. On timeout/cancel the barrier future is
-    /// dropped and the gate reopens on unwind; a separately dispatched
-    /// storage syscall that finishes late is not preempted, and a
-    /// synchronous seal re-copy blocked on a straggler syscall can extend
-    /// the closed window — fail-closed either way: no snapshot, and the
-    /// protocol removes the destination. Not covering process teardown
+    /// `deadline` the caller computed and the caller's cancellation flag
+    /// are handed to the engine's controlled seal barrier
+    /// ([`RepoInstance::seal_point_controlled`]), which observes them only
+    /// at its own step boundaries — the barrier future itself is NEVER
+    /// dropped mid-await (see [`Self::seal_bridge`]). A fired checkpoint
+    /// refuses the barrier through the engine's ordinary typed error path
+    /// (fail-closed: pause released, gate reopened, no snapshot) and the
+    /// protocol removes the destination. In-flight blocking I/O is not
+    /// preempted: a step blocked on a straggler syscall completes before
+    /// the next checkpoint fires, so a straggler can extend the closed
+    /// window — the run still fails closed. Not covering process teardown
     /// mid-syscall.
     fn seal_point_before(
         &self,

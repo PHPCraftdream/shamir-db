@@ -36,7 +36,7 @@ Decisions (owner-level ones repeated in section 8):
 | # | Decision | Where |
 |---|---|---|
 | D1 | Recommended option: copy + WAL replay (option C of section 3) | 3.6 |
-| D2 | Two short write barriers (capture, seal); writers blocked only for flushes, never for the copy | 4.2 |
+| D2 | Capture barrier stays short (flush time only); at seal, admission closes THROUGH SETTLE per repository — the seal sample and the WAL/store re-copy run inside that window — bounded by the cooperative 8 s per-repo deadline; writers wait up to 15 s, then a typed retryable refusal | 4.2 |
 | D3 | Consistency point = per-repo (and system store) highest fully-captured WAL version recorded in the manifest | 4.3 |
 | D4 | WAL truncation pinned below the seal point for the whole copy via a NEW truncation pin (`RetentionGate` is a write-refusal flag, not a truncation pin — see 4.4) | 4.4 |
 | D5 | Online backup is a server-side operation; the CLI `backup --to` stays offline-only and is not given a `--online` flag in R2a | 4.7 |
@@ -110,7 +110,7 @@ Each requirement is stated so a test can decide pass/fail. "Copy" = the online b
 
 * **R1 Consistency point.** Restoring a completed copy yields the state in which all repositories and the system store were consistent at one instant: for every repo, the restored store state plus replayed WAL equals the live state exactly at that repo's recorded consistency version (manifest field, 4.5); catalogues, repos and the registry agree with each other. Weaker guarantee NOT taken: per-repo independent instants (rejected — cross-repo references via the catalogue would dangle).
 * **R2 No lost acknowledged write.** Every write whose acknowledgement reached the client before the capture barrier (step B, 4.2) survives restore. Verified with an acknowledged-writes oracle (6.1): acked writes with timestamp < capture instant ⊆ restored state; acked writes after capture are NOT required (R2b may relax further; here the seal barrier pins the upper edge too).
-* **R3 Writer-block bound.** Writers are blocked only inside the two barriers; each barrier lasts at most the per-repo flush time plus a constant, measured and asserted (`shamir_backup_writer_block_seconds`, 4.8). The file copy itself never holds the write barrier. Default bound to assert in tests: p99 barrier < 2 s on CI-sized data (6.4).
+* **R3 Writer-block bound.** The FIRST copy pass runs with writers running; writers are blocked inside the capture barrier and inside the per-repository seal window (admission closed through settle — barrier, seal sample and re-copy). The seal window is bounded by the COOPERATIVE monotonic deadline — 8 s per repository INCLUDING the barrier — checked at barrier step boundaries and during the re-copy between files, I/O chunks/read/hash, and retry waits; in-flight writes/syscalls cannot be interrupted and may overrun. There is NO byte cap by default in the server: the re-copy rewrites whole changed files, not only the delta, so the size of a mutable active WAL/journal/LSM store is not a writer latency bound. The sync protocol retains an OPTIONAL explicit byte cap (cumulative, including retries) in `SealRecopyCap`, but it is not an operator config knob unless code exposes one. Exceeding the deadline is a typed `Failed(Sealing)` plus cleanup — the gate stays closed until the failing step finishes safely and the re-copy guard releases before the gate reopens. A writer arriving during a closed seal window waits up to 15 s (`ADMISSION_REOPEN_WAIT_CAP`) and may then receive a typed retryable refusal; it is never held by the deadline mechanism itself. Measured and asserted (`shamir_backup_writer_block_seconds`, 4.8). Default bound to assert in tests: p99 barrier < 2 s on CI-sized data (6.4).
 * **R4 Failure isolation.** A failed or cancelled copy leaves the source untouched (no mutation, no truncation, truncation pin released) and removes its partial output directory; a crash leaving partial output leaves a directory that `verify_manifest` refuses and restore never adopts. Same discipline as restore's staged temp dir (`restore.rs:216-222,422`).
 * **R5 Offline verifiability.** `verify` of a copy directory (online or offline kind) runs without a server, re-hashes every manifest file, checks the manifest self-consistency (file set, versions, WAL positions) and reports the stamp observation — today's `verify_manifest` (`backup.rs:411`) extended, not replaced.
 * **R6 No source degradation.** During and after a copy, the live server meets its existing durability guarantees (WAL sync on commit, `segment_set.rs:706`; per-commit persist, `repo.rs:114-119`) and WAL retention does not lose recoverable history beyond the pre-copy retention policy.
@@ -668,13 +668,21 @@ with writers running; the seal barrier then CLOSES ADMISSION THROUGH SETTLE —
 the seal sample plus the WAL/store re-copy happen inside that pause — and the
 pause is dropped, after which the gate reopens (supersedes the earlier
 "gate already open while the hold is handed out" ordering of Step 1d). Bound
-policy, with defaults: 8 s monotonic per repository INCLUDING the barrier, and
-a 64 MiB cumulative re-copy write budget INCLUDING retries; exceeding either
-is a typed `Failed(Sealing)` plus cleanup, not an unbounded block. The clock
-is cooperative: it is checked between file/chunk/read/hash steps — in-flight
-OS syscalls can overrun the bound. A writer therefore waits (admission closed,
-no new commit), but after the EXISTING 15 s wait it may receive a typed
-retryable refusal instead of committing.
+policy, with defaults: the 8 s monotonic per-repository deadline INCLUDING
+the barrier; there is NO byte cap by default in the server (the re-copy
+rewrites whole changed files, not only the delta, so a mutable active
+WAL/journal/LSM store's size is not a writer latency bound; the protocol
+keeps an OPTIONAL explicit cumulative byte cap, including retries, in
+`SealRecopyCap` — not an operator config knob unless code exposes one).
+Exceeding the deadline is a typed `Failed(Sealing)` plus cleanup, not an
+unbounded block. The clock is cooperative: it is checked at barrier step
+boundaries and during the re-copy between files, I/O chunks/read/hash, and
+retry waits — in-flight writes/syscalls cannot be interrupted and may
+overrun the bound. On a trip the gate stays CLOSED until the failing step
+finishes safely and the re-copy guard is released, and only then reopens.
+A writer therefore waits (admission closed, no new commit), but after the
+EXISTING 15 s wait it may receive a typed retryable refusal instead of
+committing.
 Alternative (rejected default): move re-copy outside the pause with a
 convergence proof — no such proof exists (post-V* store effects are
 non-convergent, Review finding 4), so it stays an open question (Q12).
@@ -773,8 +781,8 @@ Supersedes (a)/(c) on one point and is the landed note on gate timing:
 the admission gate is NOT already open when the hold is handed out — it
 stays CLOSED through settle (seal sample and WAL/store re-copy run inside
 the pause), and the gate reopens only after the pause guard is dropped.
-The bound policy (8 s per repository, 64 MiB re-copy budget, cooperative
-clock) and the resulting typed retryable writer refusal are stated once
+The bound policy (8 s per repository cooperative deadline, NO byte cap by
+default in the server, cooperative clock) and the resulting typed retryable writer refusal are stated once
 in Step E above — see it instead of a repeat here. The reserved
 `shamir_backup_writer_block_seconds` gauge now records the latest closed
 window per phase (`capture|seal`), INCLUDING failed holds, and is absent

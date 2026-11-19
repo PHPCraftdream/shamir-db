@@ -17,7 +17,14 @@
 //! * [`RepoInstance::seal_point`] (step E): settle the drain, acquire the
 //!   drain pause, recheck pending work, flush history and sample `V*`.
 //!   The returned [`SealHold`] owns the pause and closed admission gate
-//!   through re-copy. Dropping it releases the pause before reopening admission.
+//!   through re-copy. Dropping it releases the pause before reopening
+//!   admission. [`RepoInstance::seal_point_controlled`] is the same
+//!   barrier with cooperative caller cancellation/deadline observed at
+//!   step boundaries only (R2a follow-up 3) — the server adapter must
+//!   use it instead of dropping the future under `select`/`timeout`,
+//!   because `drain_all` can be parked on the drainer's marker mutex or
+//!   dispatched `spawn_blocking` work and dropping it there abandons
+//!   that state.
 //!
 //! Position source (verified, R2a-1d): `RepoTxGate::last_committed`
 //! (`shamir-tx/src/gate/repo_tx_gate/core.rs:54`) is the max
@@ -80,6 +87,20 @@ pub enum OnlineBackupError {
     /// enter.
     #[error("a seal hold already owns the drain pause on this repository")]
     HoldActive,
+    /// The caller-supplied cancellation closure of
+    /// [`RepoInstance::seal_point_controlled`] returned `true` at a step
+    /// boundary. Checked ONLY between barrier steps — never inside a
+    /// mutating await (drain, flush, gate close) — so this refusal leaves
+    /// the same fail-closed state as any other error path: pause released,
+    /// gate reopened, no position reported.
+    #[error("the seal barrier was cancelled by the caller at a step boundary")]
+    Cancelled,
+    /// The caller-supplied deadline of
+    /// [`RepoInstance::seal_point_controlled`] expired at a step boundary
+    /// (or capped the zero-lease wait). Same fail-closed release as
+    /// [`OnlineBackupError::Cancelled`].
+    #[error("the seal barrier exceeded the caller deadline")]
+    DeadlineExceeded,
     /// Underlying engine failure (drain I/O, flush). Fails closed.
     #[error(transparent)]
     Engine(#[from] DbError),
@@ -201,6 +222,37 @@ impl MeasuredCloseOwner {
     }
 }
 
+/// One cooperative-control checkpoint: the controlled seal observes the
+/// caller's cancellation closure and deadline ONLY at named step
+/// boundaries — never by dropping a mutating await. Waiting for the
+/// drainer's marker mutex is NOT the corruption point; the hazard is
+/// dropping it ONCE the mutex is held and the dispatched marker write is
+/// in flight, which abandons that state and can allow a late writer to
+/// overwrite past the in-progress write. A fired checkpoint returns the
+/// typed refusal; the RAII owners then release exactly as on any error
+/// path.
+fn check_control(
+    deadline: Option<Instant>,
+    cancelled: &(impl Fn() -> bool + Send + Sync),
+) -> Result<(), OnlineBackupError> {
+    if cancelled() {
+        return Err(OnlineBackupError::Cancelled);
+    }
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return Err(OnlineBackupError::DeadlineExceeded);
+    }
+    Ok(())
+}
+
+/// The zero-lease wait cap for the controlled seal: the standing typed
+/// cap, clamped down to the caller deadline's remainder (never up).
+fn controlled_zero_cap(deadline: Option<Instant>) -> Duration {
+    match deadline {
+        None => BARRIER_ZERO_LEASE_CAP,
+        Some(d) => BARRIER_ZERO_LEASE_CAP.min(d.saturating_duration_since(Instant::now())),
+    }
+}
+
 impl RepoInstance {
     /// Install the barrier step hook (test-only; first installer wins).
     /// Associated with the publicly reachable `RepoInstance` so the seam
@@ -211,10 +263,18 @@ impl RepoInstance {
         let _ = ONLINE_BACKUP_STEP_HOOK.set(hook);
     }
 
-    #[cfg(any(test, feature = "test-util"))]
+    /// Fires the step hook only under test; a no-op otherwise.
+    #[inline]
     fn fire_step(step: &'static str) {
-        if let Some(hook) = ONLINE_BACKUP_STEP_HOOK.get() {
-            hook(step);
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            if let Some(hook) = ONLINE_BACKUP_STEP_HOOK.get() {
+                hook(step);
+            }
+        }
+        #[cfg(not(any(test, feature = "test-util")))]
+        {
+            let _ = step;
         }
     }
 
@@ -244,13 +304,17 @@ impl RepoInstance {
     /// acquire a truncation pin (pins are held from step A by the caller,
     /// via [`RepoInstance::acquire_truncation_pin`]).
     ///
-    /// cancel-safe: yes. The close owner (RAII) is created before the
-    /// first suspension point, so cancellation at any `await` drops it and
-    /// reopens the gate — the guarantee is RELEASE (gate open, drain
-    /// unpaused), not reversing work: a cancellation after a successful
-    /// flush leaves the flushed history in place. Caveat inherited from
-    /// the ordinary drain: `drain_to_settled` itself is as cancel-safe as
-    /// `drain_all`.
+    /// Cancel-safety: NOT cancel-safe under direct dropping. The close
+    /// owner (RAII) is created before the first suspension point, so a
+    /// drop always reopens the gate (release, not rollback) — but this
+    /// future must still be driven to completion. Waiting for the
+    /// drainer's marker mutex is NOT the corruption point; the hazard is
+    /// dropping it ONCE the mutex is held and the dispatched marker
+    /// write is in flight: that abandons the marker state and can let a
+    /// late writer overwrite past the in-progress write, breaking
+    /// marker consistency. Capture has no controlled substitute —
+    /// [`RepoInstance::seal_point_controlled`] is not one (seal is not
+    /// capture) — so callers must simply await this to its return.
     pub async fn capture_point(&self) -> Result<u64, OnlineBackupError> {
         if self.core.drainer().pause_held() {
             return Err(OnlineBackupError::HoldActive);
@@ -260,10 +324,8 @@ impl RepoInstance {
         // (or moved into a hold) after the body completes.
         let owner = self.barrier_owner(&CAPTURE_CLOSE_NANOS)?;
         let outcome: Result<u64, OnlineBackupError> = Box::pin(async {
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_close");
             owner.wait_zero(BARRIER_ZERO_LEASE_CAP).await?;
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_quiesce");
             // NO repo write permit is held here — the ordinary drain paths
             // acquire their own domain permits (hazard 1 is self-deadlock
@@ -293,9 +355,58 @@ impl RepoInstance {
     /// pause FIRST and reopens the gate LAST, recording the close→reopen
     /// writer-block window (approximated around the gate-close RMW).
     ///
-    /// cancel-safe: yes, with the same release-not-rollback guarantee as
-    /// [`RepoInstance::capture_point`].
+    /// Cancel-safety: NOT cancel-safe under direct dropping — same
+    /// release-not-rollback as [`RepoInstance::capture_point`] (gate is
+    /// always reopened, pause released, flushed history kept), but
+    /// dropping it ONCE the drain holds the marker mutex and its
+    /// dispatched write is in flight abandons that state and can allow a
+    /// late overwrite past the in-progress write.
+    /// Never wrap in `select`/`timeout`; use
+    /// [`RepoInstance::seal_point_controlled`] for cancellation. Drop
+    /// order on ANY exit past the pause: pause released FIRST, gate
+    /// reopened LAST (struct field order on success; forward drop of the
+    /// async block's locals then the outer owner otherwise) — admission
+    /// is never reopened while the drain pause is still held.
     pub async fn seal_point(&self) -> Result<SealHold, OnlineBackupError> {
+        self.seal_point_controlled(None, || false).await
+    }
+
+    /// Cooperatively controlled variant of [`RepoInstance::seal_point`]
+    /// (R2a follow-up 3): the SAME barrier, observed by the caller's
+    /// `cancelled` closure and `deadline` at named step boundaries only —
+    /// before the gate close, at each existing barrier step seam
+    /// (`after_close`, `after_quiesce`, `after_drain`, `after_pause`,
+    /// `after_recheck`) and after the flush. NEVER cancels a mutating
+    /// await: `drain_all`, the pause acquisition, `flush_all_history` and
+    /// the gate-close RMW always run to their natural completion; the
+    /// closure is consulted strictly between them. On a fired checkpoint
+    /// the typed [`OnlineBackupError::Cancelled`] /
+    /// [`OnlineBackupError::DeadlineExceeded`] is returned and the RAII
+    /// owners fail closed exactly as on any error path (pause released
+    /// first, gate reopened last, flushed history not reversed).
+    ///
+    /// The zero-lease wait keeps its standing typed cap
+    /// (`BARRIER_ZERO_LEASE_CAP`, mapped to
+    /// [`OnlineBackupError::QuiesceTimeout`]); a nearer `deadline` only
+    /// ever clamps that cap DOWN to the remaining time, so the wait can
+    /// also end in `DeadlineExceeded`.
+    ///
+    /// `deadline = None` and an always-false closure reproduce
+    /// [`RepoInstance::seal_point`] exactly.
+    ///
+    /// Cancel-safety: safe ONLY via its cooperative signals. This future
+    /// must be driven until it returns; in exchange the caller never
+    /// needs to drop it mid-await — cancellation/deadline take effect at
+    /// step boundaries only, so the marker mutex is never abandoned
+    /// while its dispatched write is in flight.
+    pub async fn seal_point_controlled(
+        &self,
+        deadline: Option<Instant>,
+        cancelled: impl Fn() -> bool + Send + Sync,
+    ) -> Result<SealHold, OnlineBackupError> {
+        // Checkpoint BEFORE the gate close: a refused call never takes the
+        // close CAS at all.
+        check_control(deadline, &cancelled)?;
         if self.core.drainer().pause_held() {
             return Err(OnlineBackupError::HoldActive);
         }
@@ -303,18 +414,23 @@ impl RepoInstance {
         // only borrows the wrapper so it can be moved into the hold.
         let owner = self.barrier_owner(&SEAL_CLOSE_NANOS)?;
         let outcome: Result<(u64, DrainPauseGuard), OnlineBackupError> = Box::pin(async {
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_close");
-            owner.wait_zero(BARRIER_ZERO_LEASE_CAP).await?;
-            #[cfg(any(test, feature = "test-util"))]
+            // Checkpoint before the zero-lease wait: a cancel that fires
+            // at this seam must never even begin the quiesce wait.
+            check_control(deadline, &cancelled)?;
+            let zero_cap = controlled_zero_cap(deadline);
+            let quiesced = owner.wait_zero(zero_cap).await;
+            check_control(deadline, &cancelled)?;
+            quiesced?;
             Self::fire_step("after_quiesce");
+            check_control(deadline, &cancelled)?;
             // The last drain_all pass held `replaying`, so any in-flight
             // background pass finished before it returned; draining BEFORE
             // pausing avoids the recursive `replaying` acquisition
             // (hazard 1).
             self.drain_to_settled().await?;
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_drain");
+            check_control(deadline, &cancelled)?;
             let guard = self
                 .core
                 .drainer()
@@ -322,17 +438,19 @@ impl RepoInstance {
                 .acquire()
                 .await
                 .map_err(|_| OnlineBackupError::HoldActive)?;
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_pause");
+            check_control(deadline, &cancelled)?;
             // Recheck under the pause: nothing may be pending. Non-empty
             // fails closed; the guard drops on the error path, releasing
             // the pause.
             if !self.settled_under_pause() {
                 return Err(OnlineBackupError::RecheckPending);
             }
-            #[cfg(any(test, feature = "test-util"))]
             Self::fire_step("after_recheck");
+            check_control(deadline, &cancelled)?;
             self.core.flush_all_history().await?;
+            Self::fire_step("after_flush");
+            check_control(deadline, &cancelled)?;
             let position = self
                 .core
                 .initialized_tx_gate()

@@ -4,6 +4,11 @@
 //! commit), and live committers racing the barrier. The regression proof
 //! is completion WITHIN the budget: a capture that kept a repo write
 //! permit would self-deadlock on its own drain and trip the harness cap.
+//!
+//! Retention: the in-memory WAL reclaims individual frames at or below the
+//! durable watermark on every drain pass, so the fixture pins at floor 1
+//! before the seeding commits; the horizon oracles below then read the
+//! retained WAL, not a truncated tail.
 
 use std::time::Duration;
 
@@ -13,6 +18,7 @@ use shamir_types::access::Actor;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::WalOpV2;
 
+use crate::repo::instance::repo_instance::TruncationPinGuard;
 use crate::repo::RepoInstance;
 use crate::table::{table_manager::table_token_for, TableConfig};
 use crate::tx::tests::drain::drainer_tests::support::{make_repo, seed_inflight_entry};
@@ -26,7 +32,7 @@ const COMMITTERS: usize = 4;
 const COMMITS_PER_COMMITTER: usize = 8;
 
 /// Per-committer per-commit outcomes.
-type CommitterOutcomes = Vec<Result<(), CommitError>>;
+type CommitterOutcomes = Vec<Result<u64, CommitError>>;
 
 /// A transaction whose ONLY effect is an interner overlay merge (no write
 /// set, no index write set): the pending `InternerOverlayMerge` WAL op
@@ -40,9 +46,12 @@ fn overlay_only_tx() -> TxContext {
     tx
 }
 
-async fn seeded_repo() -> RepoInstance {
+async fn seeded_repo() -> (RepoInstance, TruncationPinGuard) {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
+    // Retention pin before the seeding commits: the in-memory WAL reclaims
+    // frames ≤ the durable watermark on every drain pass when unpinned.
+    let pin = repo.acquire_truncation_pin(1).await.unwrap();
     let table = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
 
@@ -58,11 +67,15 @@ async fn seeded_repo() -> RepoInstance {
         .await
         .expect("overlay-only commit proceeds while the gate is open");
 
-    // The orphan index posting rides ABOVE the committed prefix (the
-    // version the commit path never assigned) and is made visible so the
+    // The orphan index posting rides ABOVE the committed prefix on a
+    // version reserved FROM the allocator (so no racing writer can take it)
+    // and is made visible so the
     // drain window covers it; capture's settled drain replays it through
     // the `begin_write_barrier` index branch.
-    let orphan_version = gate.last_committed() + 1;
+    // Reserve the orphan's version via the allocator: `publish_committed_max`
+    // does NOT advance it, so an unpreserved version could collide with a
+    // real racing writer's commit.
+    let orphan_version = gate.assign_next_version();
     seed_inflight_entry(
         &repo,
         vec![WalOpV2::IndexPut {
@@ -75,7 +88,7 @@ async fn seeded_repo() -> RepoInstance {
     )
     .await;
     gate.publish_committed_max(orphan_version);
-    repo
+    (repo, pin)
 }
 
 /// Spawn `COMMITTERS` continuous committers; each records its per-commit
@@ -104,7 +117,7 @@ async fn spawn_committers(repo: &RepoInstance) -> Vec<tokio::task::JoinHandle<Co
                     outcomes.push(Err(CommitError::Storage(e)));
                     continue;
                 }
-                outcomes.push(owned.commit_tx(tx).await.map(|_| ()));
+                outcomes.push(owned.commit_tx(tx).await.map(|o| o.commit_version));
             }
             outcomes
         }));
@@ -112,10 +125,10 @@ async fn spawn_committers(repo: &RepoInstance) -> Vec<tokio::task::JoinHandle<Co
     tasks
 }
 
-fn assert_refusals_only_ok_or_refused(outcomes: &[Result<(), CommitError>]) {
+fn assert_refusals_only_ok_or_refused(outcomes: &[Result<u64, CommitError>]) {
     for outcome in outcomes {
         match outcome {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(CommitError::CommitAdmissionRefused) => {}
             Err(other) => panic!("unexpected commit outcome under the barrier: {other:?}"),
         }
@@ -124,7 +137,7 @@ fn assert_refusals_only_ok_or_refused(outcomes: &[Result<(), CommitError>]) {
 
 #[tokio::test]
 async fn capture_completes_under_concurrent_commits_no_repo_permit() {
-    let repo = seeded_repo().await;
+    let (repo, _pin) = seeded_repo().await;
     let table = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
 
@@ -176,6 +189,11 @@ async fn capture_completes_under_concurrent_commits_no_repo_permit() {
 /// Actual WAL horizon: the highest commit version of any recovered WAL
 /// entry (0 on an empty WAL).
 async fn wal_horizon(repo: &RepoInstance) -> u64 {
+    wal_versions(repo).await.into_iter().max().unwrap_or(0)
+}
+
+/// Every retained commit version, recovered from the actual WAL.
+async fn wal_versions(repo: &RepoInstance) -> Vec<u64> {
     repo.repo_wal()
         .await
         .unwrap()
@@ -184,13 +202,12 @@ async fn wal_horizon(repo: &RepoInstance) -> u64 {
         .unwrap()
         .iter()
         .map(|e| e.commit_version)
-        .max()
-        .unwrap_or(0)
+        .collect()
 }
 
 #[tokio::test]
 async fn seal_completes_under_concurrent_commits_no_repo_permit() {
-    let repo = seeded_repo().await;
+    let (repo, _pin) = seeded_repo().await;
     let gate = repo.tx_gate().await.unwrap();
 
     let committers = spawn_committers(&repo).await;
@@ -214,14 +231,27 @@ async fn seal_completes_under_concurrent_commits_no_repo_permit() {
         0,
         "no admission leases under the hold"
     );
-    let before_horizon = wal_horizon(&repo).await;
+    let before_versions = wal_versions(&repo).await;
+    assert!(
+        before_versions.iter().all(|&v| v <= v_star),
+        "no frame above V* may exist while the hold is live, got {before_versions:?}"
+    );
     assert_eq!(
-        before_horizon, v_star,
-        "all successful before-side commits landed through V*"
+        before_versions.iter().max().copied(),
+        Some(v_star),
+        "all successful before-side commits landed through V* (highest frame == V*)"
+    );
+    let mut sorted = before_versions.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        before_versions.len(),
+        "no duplicate commit versions may exist in the retained WAL"
     );
     assert_eq!(
         wal_horizon(&repo).await,
-        before_horizon,
+        v_star,
         "the actual WAL horizon is stable while the hold is live"
     );
     drop(hold);
@@ -230,26 +260,49 @@ async fn seal_completes_under_concurrent_commits_no_repo_permit() {
         "hold drop reopens the gate before the after-side commits"
     );
 
-    let mut admitted = 0usize;
+    let mut acknowledged: Vec<u64> = Vec::new();
     for task in committers {
         let outcomes = tokio::time::timeout(BARRIER_BUDGET, task)
             .await
             .expect("committer hung")
             .expect("committer join");
         assert_refusals_only_ok_or_refused(&outcomes);
-        admitted += outcomes.iter().filter(|r| r.is_ok()).count();
+        acknowledged.extend(outcomes.iter().filter_map(|r| r.as_ref().ok().copied()));
     }
-    assert!(admitted > 0);
+    acknowledged.sort_unstable();
+    acknowledged.dedup();
+    assert!(!acknowledged.is_empty());
 
     // Everything acknowledged — before and after V* — settles once the
-    // hold is gone, and the after-side commits reached the WAL too.
+    // hold is gone, and EVERY acknowledged commit_version (not just the
+    // max) is recovered from the WAL: the strongest after-side oracle.
     repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     assert!(gate.last_committed() >= v_star);
+    let recovered = wal_versions(&repo).await;
     assert_eq!(
-        wal_horizon(&repo).await,
-        gate.last_committed(),
-        "the successful after-side commits' WAL entries are all recovered"
+        recovered.iter().max().copied(),
+        Some(gate.last_committed()),
+        "the WAL tail is exactly the settled horizon"
+    );
+    assert!(!recovered.is_empty());
+    let mut recovered_sorted = recovered.clone();
+    recovered_sorted.sort_unstable();
+    recovered_sorted.dedup();
+    assert_eq!(
+        recovered_sorted.len(),
+        recovered.len(),
+        "no duplicate commit versions in the recovered WAL, got {recovered:?}"
+    );
+    let missing: Vec<u64> = acknowledged
+        .iter()
+        .filter(|version| !recovered.contains(version))
+        .copied()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "every acknowledged commit_version must be recovered from the WAL, \
+         missing {missing:?} of {acknowledged:?}"
     );
     assert!(!repo.drainer().pause_held(), "hold drop released the pause");
 }

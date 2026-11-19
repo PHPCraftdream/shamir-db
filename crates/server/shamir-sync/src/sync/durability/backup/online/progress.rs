@@ -107,8 +107,9 @@ impl CancelFlag {
     }
 
     /// Await cancellation through the token's wakeup — no polling, no
-    /// sleep. The server's production override wraps the engine's async
-    /// seal in `timeout_at` + `select`, never the blocking copy.
+    /// sleep. Not used by the protocol itself (which checks
+    /// [`CancelFlag::is_cancelled`] at its step boundaries); kept for
+    /// callers that want to await the shutdown token.
     pub async fn cancelled(&self) {
         self.0.cancelled().await;
     }

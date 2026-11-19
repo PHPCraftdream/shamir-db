@@ -6,6 +6,11 @@
 //! is awaited after the hold drops and commits with exactly `V* + 1`,
 //! whose data is then applied to the stores. Assertions are on STORE
 //! state (durable watermark) and WAL evidence, not on drain counters.
+//!
+//! Retention: the in-memory WAL reclaims individual frames at or below the
+//! durable watermark on every drain pass, so a truncation pin at floor 1 is
+//! acquired before the first commit and kept for the whole test; the WAL
+//! reads then show no frame above V* and the highest frame exactly V*.
 
 use std::time::Duration;
 
@@ -34,6 +39,9 @@ async fn commit_insert(repo: &crate::repo::RepoInstance, value: &str) {
 async fn seal_hold_keeps_committed_after_v_star_data_out_of_stores_until_drop() {
     let repo = make_repo();
     repo.add_table_for_test(TableConfig::new("t"));
+    // Retention pin before the first commit: the in-memory WAL reclaims
+    // frames ≤ the durable watermark on every drain pass when unpinned.
+    let _pin = repo.acquire_truncation_pin(1).await.unwrap();
     let table = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
 
@@ -93,12 +101,22 @@ async fn seal_hold_keeps_committed_after_v_star_data_out_of_stores_until_drop() 
     // Store and WAL evidence: nothing above V* exists while the hold is
     // live — the actual WAL stays exactly through V*.
     let wal = repo.repo_wal().await.unwrap();
-    let entries = wal.recover().await.unwrap();
+    let versions: Vec<u64> = wal
+        .recover()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.commit_version)
+        .collect();
     assert!(
-        entries.iter().map(|e| e.commit_version).max() == Some(v_star),
-        "the WAL must stay exactly through V* (max == V*) while the hold is live"
+        versions.iter().all(|&v| v <= v_star),
+        "no frame above V* may exist while the hold is live, got {versions:?}"
     );
-    drop(entries);
+    assert_eq!(
+        versions.iter().max().copied(),
+        Some(v_star),
+        "the WAL must stay exactly through V* (highest frame == V*) while the hold is live"
+    );
     assert_eq!(
         gate.durable_watermark(),
         v_star,

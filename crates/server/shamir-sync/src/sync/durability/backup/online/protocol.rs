@@ -3,7 +3,9 @@
 //! the manifest written last with fsync, self-verification before
 //! success. Cancellation is checked at every stage boundary and between
 //! files; a failed or cancelled run removes the destination directory
-//! and releases the pins. The server publishes the real phase through
+//! and releases the pins — on the error return AND on an unwind, via the
+//! RAII run cleanup armed right after the atomic destination create.
+//! The server publishes the real phase through
 //! the port's `begin_copy` (before the first WAL pass) and
 //! `begin_verify` (at the start of F, after the cancellation check)
 //! hooks; Sealing stays the reported stage through E including the
@@ -75,11 +77,14 @@ pub enum OnlineBackupFailure {
 /// Fail-closed cap (design "Step E re-copy versus R3" / Q12) bounding each
 /// repo's seal re-copy, after which the backup FAILS CLOSED (`Failed` at
 /// `BackupStage::Sealing`, `OnlineBackupFailure::RecopyCap`) instead of
-/// blocking writers unboundedly. `None` means unlimited (bytes: the whole
-/// store; clock: unbounded), so existing callers keep working — production
-/// callers should always set both (the re-copy runs while writers'
-/// visibility is paused, so an uncapped large store stalls commits).
-/// The byte cap is enforced DURING the re-copy by the copy engine's
+/// blocking writers unboundedly. The seal re-copy runs while writers'
+/// admission to the repo is closed (visibility paused via the open seal
+/// hold), so the TIME cap is the real protection — production callers
+/// should always set `max_seconds` (8s is the default guidance). The byte
+/// cap is an optional extra safety net, not a production requirement:
+/// `None` means unlimited (bytes: the whole store; clock: unbounded), so
+/// existing callers keep working. The byte cap, when set, is enforced
+/// DURING the re-copy by the copy engine's
 /// cooperative gate: checked before each written chunk, cumulatively
 /// across that repo's WAL + store passes INCLUDING retries, around the
 /// fsyncs, with the sharing-retry sleeps clamped to the clock deadline.
@@ -327,6 +332,30 @@ impl Drop for SealGuard<'_> {
     }
 }
 
+/// RAII cleanup of one run's owned resources: the destination directory
+/// created atomically in `run_online_backup` and the run's pins. Its
+/// `Drop` — on error return AND unwind — removes ONLY the owned directory
+/// (a pre-existing destination tree is never touched) and releases the
+/// pins exactly once, so nothing leaks past a panic and there is no
+/// explicit release that could double-panic; the success path only sets
+/// `keep_dir` before dropping the guard. The per-repo `SealGuard`s live
+/// inside `run_steps` and drop before this guard, so no seal hold is
+/// still open at cleanup.
+struct RunCleanup<'a> {
+    port: &'a dyn OnlineBackupPort,
+    dir: &'a Path,
+    keep_dir: bool,
+}
+
+impl Drop for RunCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.keep_dir {
+            let _ = fs::remove_dir_all(self.dir);
+        }
+        self.port.release_pins();
+    }
+}
+
 /// Run the online backup protocol steps A-G (design 4.2).
 pub fn run_online_backup(
     port: &dyn OnlineBackupPort,
@@ -338,17 +367,38 @@ pub fn run_online_backup(
     cap: &SealRecopyCap,
 ) -> Result<BackupReport, OnlineBackupError> {
     let dir = to.join(utc_timestamp());
-    fs::create_dir(&dir).map_err(|error| failed(BackupStage::Preparing, error))?;
+    // Atomic create: on failure nothing is owned and nothing is deleted —
+    // a pre-existing destination tree stays untouched; no cleanup guard is
+    // armed, so there is nothing to drop and no pins to release (they are
+    // acquired only inside `run_steps`). The failure is still RECORDED in
+    // the progress like every other error path, so the registry never
+    // publishes a bare `Preparing` without a failed stage.
+    if let Err(error) = fs::create_dir(&dir) {
+        let error = failed(BackupStage::Preparing, error);
+        progress.record_failure(error.stage(), &error);
+        return Err(error);
+    }
+    let mut cleanup = RunCleanup {
+        port,
+        dir: &dir,
+        keep_dir: false,
+    };
     let result = run_steps(port, source_root, &dir, cancel, progress, options, cap);
     match result {
         Ok(report) => {
-            port.release_pins();
+            // Verified: preserve the directory and let the guard's Drop
+            // release the pins exactly once (the only release call on
+            // any path).
+            cleanup.keep_dir = true;
+            drop(cleanup);
             progress.set_stage(BackupStage::Done);
             Ok(report)
         }
         Err(error) => {
-            let _ = fs::remove_dir_all(&dir);
-            port.release_pins();
+            // The guard's Drop removes the owned partial directory and
+            // releases the pins (also on the unwind path); the stage and
+            // the error are preserved for the failure report.
+            drop(cleanup);
             progress.record_failure(error.stage(), &error);
             Err(error)
         }

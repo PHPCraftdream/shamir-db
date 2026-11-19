@@ -28,3 +28,5 @@ pub(crate) use entry::{
 #[cfg(any(test, feature = "test-util"))]
 pub use entry::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 pub(crate) use legacy_and_lockfree::release_pessimistic_locks;
+#[cfg(test)]
+pub(crate) use pipeline::phase::commit_phases::{OrphanMarkerSaveHook, TEST_ORPHAN_MARKER_PARK};

@@ -4,8 +4,13 @@ use std::sync::atomic::Ordering::SeqCst;
 use shamir_collections::TFxMap;
 use shamir_collections::THasher;
 use shamir_storage::error::DbError;
+#[cfg(test)]
+use shamir_storage::types::Store;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{IndexWriteOp, TxContext};
+
+#[cfg(test)]
+use std::sync::Arc;
 
 use super::materialize::{apply_vector_delta_batch, apply_vector_graph_batch};
 use crate::meta::recovery_marker::{
@@ -837,6 +842,69 @@ pub(crate) async fn apply_index_batch(
     Ok(())
 }
 
+/// R2a follow-up 3: repository-scoped, one-shot gate that detaches the
+/// marker save into a non-abortable task inside `persist_markers` (see
+/// [`orphan_marker_park_save`]). Process-global (per-test process
+/// isolation).
+#[cfg(test)]
+pub(crate) struct OrphanMarkerSaveHook {
+    pub(crate) repo_name: String,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+    /// Bounded one-shot: the save task notifies the test it reached the
+    /// park (read/compare done, save not started).
+    pub(crate) reached: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Bounded one-shot: the test releases the save task.
+    pub(crate) release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_ORPHAN_MARKER_PARK: std::sync::OnceLock<
+    std::sync::Arc<OrphanMarkerSaveHook>,
+> = std::sync::OnceLock::new();
+
+/// R2a follow-up 3: run the real marker save through the armed park gate.
+/// The save is dispatched as a spawned, non-abortable task owning a clone
+/// of `info_store` + `candidate` — the production Fjall `set` blocking
+/// task likewise outlives a dropped join handle. The task notifies
+/// `reached` (one-shot), waits for `release`, then calls the real
+/// `save_last_committed` (`save_u64` → `Store::set`). The join is awaited
+/// UNDER the `marker_write_mutex` the caller already holds, so a
+/// suspension suspends the WHOLE marker write and any concurrent writer's
+/// `try_lock` fails loudly. Replaces the direct save; returns `true` when
+/// it ran.
+#[cfg(test)]
+async fn orphan_marker_park_save(
+    repo: &RepoCore,
+    info_store: &Arc<dyn Store>,
+    candidate: u64,
+) -> Result<bool, DbError> {
+    let park = match TEST_ORPHAN_MARKER_PARK.get() {
+        Some(p) if p.repo_name == repo.name() => p,
+        _ => return Ok(false),
+    };
+    if !park.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        return Ok(false);
+    }
+    let (reached_tx, release_rx) = {
+        let mut reached = park.reached.lock().expect("reached mutex");
+        let mut release = park.release.lock().expect("release mutex");
+        (
+            reached.take().expect("reached taken twice"),
+            release.take().expect("release taken twice"),
+        )
+    };
+    let info_store = Arc::clone(info_store);
+    let save_task = tokio::spawn(async move {
+        let _ = reached_tx.send(()); // one-shot; gone receiver = not watched
+        let _ = release_rx.await; // a dropped sender counts as released
+        save_last_committed(&info_store, candidate).await
+    });
+    let saved = save_task
+        .await
+        .map_err(|e| DbError::Storage(format!("marker save panicked: {e}")))?;
+    saved.map(|()| true)
+}
+
 /// Persist `last_committed_version` + `next_tx_id` recovery markers
 /// (Phase 6.5).
 ///
@@ -848,6 +916,11 @@ pub(crate) async fn apply_index_batch(
 /// `assign_next_version()` could re-issue a version a truncated segment
 /// already used. Writing the monotonic max guarantees the marker never goes
 /// backwards regardless of commit interleaving.
+///
+/// R2a follow-up 3 (test seam): when `TEST_ORPHAN_MARKER_PARK` is armed
+/// for this repository, the marker save is dispatched as a non-abortable
+/// task outliving a dropped future (`orphan_marker_park_save`); otherwise
+/// the direct save runs.
 pub(crate) async fn persist_markers(
     repo: &RepoCore,
     gate: &shamir_tx::RepoTxGate,
@@ -878,6 +951,18 @@ pub(crate) async fn persist_markers(
             None => true,
         };
         if should_write {
+            // R2a follow-up 3: one-shot park before the store write (see
+            // `orphan_marker_park_save`); the hook path replaces the direct
+            // save — never write twice. Both paths run under the mutex
+            // guard above, keeping the on-disk marker monotonic (§1.7).
+            #[cfg(test)]
+            if orphan_marker_park_save(repo, &info_store, candidate).await? {
+                // The hook path replaced the direct save — never write
+                // twice.
+            } else {
+                save_last_committed(&info_store, candidate).await?;
+            }
+            #[cfg(not(test))]
             save_last_committed(&info_store, candidate).await?;
         }
         // Share the reservation lock with WAL-less follower allocation. Do

@@ -87,12 +87,17 @@ pub trait OnlineBackupPort {
     /// Step E, deadline-aware variant the protocol actually calls:
     /// `deadline` is the repo's seal re-copy budget boundary (the
     /// per-repo monotonic start is taken immediately before this call,
-    /// so the barrier itself is INSIDE the budget); `cancel` lets an
-    /// async server implementation abandon the seal early. The default
-    /// ignores both and delegates to [`OnlineBackupPort::seal_point`]
-    /// (existing impls keep working); the server production override
-    /// uses `timeout_at` + `select` around the engine seal, never
-    /// around the blocking copy.
+    /// so the barrier itself is INSIDE the budget); `cancel` is checked by the
+    /// engine at its safe step boundaries — it never preempts or drops
+    /// the mutating seal future. The
+    /// default ignores both and delegates to
+    /// [`OnlineBackupPort::seal_point`] (existing impls keep working).
+    /// The engine barrier is COOPERATIVELY controlled (R2a follow-up 3):
+    /// implementations hand the deadline and the flag to the engine's
+    /// controlled seal, which observes them only at its own step
+    /// boundaries — the mutating seal future is never dropped, wrapped in
+    /// `timeout_at`, or raced in a `select` from outside (in-flight
+    /// blocking I/O is not preempted; a fired checkpoint fails closed).
     fn seal_point_before(
         &self,
         repo: &str,
@@ -116,9 +121,12 @@ pub trait OnlineBackupPort {
     /// (design 1d (a): the hold returned by `seal_point` keeps the stores
     /// frozen until this drops it). Idempotent: ending an unheld or
     /// already-ended seal is a no-op. Called on every failure and
-    /// cancellation path for every repo sealed but not yet ended.
+    /// cancellation path — including unwind — so it MUST NOT panic:
+    /// `Drop`-based run cleanup invokes it while
+    /// a panic is already in flight. For every repo sealed but not yet ended.
     fn end_seal(&self, repo: &str);
 
     /// Step G and failure cleanup: release every truncation pin. Idempotent.
+    /// Called from `Drop`-based cleanup, so it MUST NOT panic.
     fn release_pins(&self);
 }

@@ -833,12 +833,14 @@ fn panic_mid_seal_recopy_ends_the_open_seal_hold_on_unwind() {
     let to = temp_dir("panic_hold_to");
     TestPort::source_with_data(&source);
     let store = source.join("repos/alpha/store.bin");
+    let big = big_store_bytes();
     let scope = SealScope::new();
-    let store_for_hook = store;
+    let store_for_hook = store.clone();
+    let big_for_hook = big.clone();
     let active_for_hook = Arc::clone(&scope.active);
     let port = TestPort::single_repo(&source)
         .with_seal_hook(move || {
-            fs::write(&store_for_hook, big_store_bytes()).expect("replace store at seal");
+            fs::write(&store_for_hook, &big_for_hook).expect("replace store at seal");
             active_for_hook.store(true, Ordering::SeqCst);
         })
         .with_end_seal_hook(scope.clear_active());
@@ -861,15 +863,24 @@ fn panic_mid_seal_recopy_ends_the_open_seal_hold_on_unwind() {
         .or_else(|| error.downcast_ref::<String>().map(String::as_str))
         .expect("panic payload must be a string");
     assert_eq!(message, "injected unwind mid-chunk");
-    // The RAII seal hold must have ended on the unwind path — the only
-    // cleanup that runs, since the panic skips the normal error arm of
-    // `run_online_backup`.
+    // The RAII seal hold must have ended on the unwind path — the
+    // per-repo guards of `run_steps` drop before the run cleanup.
     assert_eq!(
         port.seal_events(),
         vec!["seal:alpha".to_string(), "end_seal:alpha".to_string()],
         "the open hold must be ended by the guard's Drop during unwind"
     );
+    // The RAII run cleanup must ALSO have run on the unwind path: the
+    // owned partial output directory is removed and the pins released —
+    // exactly once, no double release, no double panic.
     assert_eq!(port.pins_held.load(Ordering::SeqCst), 1);
+    assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fs::read_dir(&to).expect("to dir").count(),
+        0,
+        "the owned partial destination directory must be removed on unwind"
+    );
+    assert_eq!(fs::read(&store).expect("live store"), big);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
 }
