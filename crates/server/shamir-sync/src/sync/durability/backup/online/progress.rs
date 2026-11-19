@@ -1,8 +1,6 @@
 //! Progress reporting and cancellation for the online backup engine.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -84,16 +82,34 @@ impl Default for BackupProgress {
     }
 }
 
-/// Cooperative cancellation flag shared with the copy engine.
+/// Cooperative cancellation flag shared with the copy engine. Always a
+/// shutdown token: `from_shutdown` constructs a per-run CHILD token from
+/// the server's shutdown token, so an admin cancel cancels only the run
+/// while a server shutdown cancels it too; the engine-local default is
+/// a fresh, never-cancelled token.
 #[derive(Debug, Default, Clone)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(tokio_util::sync::CancellationToken);
 
 impl CancelFlag {
+    /// A flag cancelled when the given parent token (the server's
+    /// shutdown token) is cancelled; the child is stored directly so
+    /// `cancelled` can await it.
+    pub fn from_shutdown(parent: &tokio_util::sync::CancellationToken) -> Self {
+        Self(parent.child_token())
+    }
+
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancel();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.is_cancelled()
+    }
+
+    /// Await cancellation through the token's wakeup — no polling, no
+    /// sleep. The server's production override wraps the engine's async
+    /// seal in `timeout_at` + `select`, never the blocking copy.
+    pub async fn cancelled(&self) {
+        self.0.cancelled().await;
     }
 }

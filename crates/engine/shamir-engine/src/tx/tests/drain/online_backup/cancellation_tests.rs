@@ -1,13 +1,17 @@
 //! Cancellation at every barrier await point (brief item 8, test 4): the
-//! barrier future is driven through the `set_online_backup_step_hook`
-//! seam; when the armed step fires, the task running the future is
-//! aborted, dropping the future exactly at that step. After EVERY drop:
-//! the gate is open with zero leases, the pause is released, and fresh
-//! capture AND seal barriers succeed (no leaked close owner, no leaked
-//! hold). The hook is a plain `fn(&'static str)`, so the park is a
-//! spawned task + oneshot handoff inside the test — no sleeps.
+//! barrier future is dropped EXACTLY at a named step via a deterministic
+//! unwind — the `set_online_backup_step_hook` seam (a plain
+//! `fn(&'static str)`) is armed per-test through THREAD-LOCAL state, and
+//! the armed fire panics with a sentinel payload inside the barrier task.
+//! The panic payload recovered from the `JoinHandle` proves the future
+//! was mid-flight AT that step (no vacuous abort of an already-completed
+//! task, and no cross-test arm: each test runs on its own thread under
+//! the current-thread test runtime). After EVERY drop: the gate is open
+//! with zero leases, the pause is released, and fresh capture AND seal
+//! barriers succeed (no leaked close owner, no leaked hold). No sleeps —
+//! the unwind IS the handshake; every await is bounded.
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 use std::time::Duration;
 
 use shamir_tx::IsolationLevel;
@@ -17,7 +21,8 @@ use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 use crate::tx::tests::drain::drainer_tests::support::make_repo;
 
-/// Harness cap around each handshake; the handshake is the hook fire.
+/// Harness cap around each bounded await; the synchronization itself is
+/// the hook fire / the abort join.
 const CANCEL_BUDGET: Duration = Duration::from_secs(30);
 
 /// Every step the barrier hook fires, in barrier order.
@@ -29,27 +34,46 @@ const ALL_STEPS: [&str; 5] = [
     "after_recheck",
 ];
 
-static STEP_HOOK_RECORDED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-static STEP_HOOK_ARMED: Mutex<Option<(&'static str, tokio::sync::oneshot::Sender<()>)>> =
-    Mutex::new(None);
+/// Marker inside the unwind panic payload.
+const SENTINEL: &str = "step-hook unwind sentinel";
 
-fn step_hook(step: &'static str) {
-    STEP_HOOK_RECORDED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(step);
-    let mut armed = STEP_HOOK_ARMED.lock().unwrap_or_else(|e| e.into_inner());
-    if armed.as_ref().is_some_and(|(target, _)| *target == step) {
-        if let Some((_, tx)) = armed.take() {
-            let _ = tx.send(());
-        }
-    }
+/// Per-thread hook state. Tests under `#[tokio::test]` (current-thread
+/// runtime) run the whole barrier task on their own thread, so the armed
+/// step and the recorded steps are isolated per test even though the
+/// production hook slot is a process-global `OnceLock` (first installer
+/// wins; every test here installs the same `step_hook` fn).
+#[derive(Default)]
+struct HookState {
+    /// One-shot: the step whose next fire unwinds the barrier task.
+    armed: Option<&'static str>,
+    /// Every step this thread's barriers fired.
+    recorded: Vec<&'static str>,
 }
 
-fn arm_step(step: &'static str) -> tokio::sync::oneshot::Receiver<()> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    *STEP_HOOK_ARMED.lock().unwrap_or_else(|e| e.into_inner()) = Some((step, tx));
-    rx
+thread_local! {
+    static STEP_HOOK_STATE: RefCell<HookState> = RefCell::new(HookState::default());
+}
+
+fn step_hook(step: &'static str) {
+    STEP_HOOK_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.recorded.push(step);
+        if state.armed == Some(step) {
+            state.armed = None;
+            panic!("{SENTINEL}: {step}");
+        }
+    });
+}
+
+fn arm_step(step: &'static str) {
+    STEP_HOOK_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        assert!(
+            state.armed.is_none(),
+            "a step is already armed on this thread"
+        );
+        state.armed = Some(step);
+    });
 }
 
 async fn fixture_with_committed_data() -> RepoInstance {
@@ -65,11 +89,13 @@ async fn fixture_with_committed_data() -> RepoInstance {
     repo
 }
 
-/// Abort the barrier task once the armed step fired, then assert the
-/// fail-closed invariants AND that fresh barriers succeed.
+/// Drive the barrier to the armed step (a deterministic unwind there),
+/// then assert the fail-closed invariants AND that fresh barriers
+/// succeed. The panic payload proves the future was dropped mid-flight at
+/// exactly the armed step.
 async fn cancel_barrier_at(repo: &RepoInstance, step: &'static str, seal: bool) {
     RepoInstance::set_online_backup_step_hook(step_hook);
-    let fired = arm_step(step);
+    arm_step(step);
     let owned = repo.clone();
     let task = if seal {
         tokio::spawn(Box::pin(
@@ -80,15 +106,25 @@ async fn cancel_barrier_at(repo: &RepoInstance, step: &'static str, seal: bool) 
             async move { owned.capture_point().await.map(|_| ()) },
         ))
     };
-    tokio::time::timeout(CANCEL_BUDGET, fired)
+    let outcome = tokio::time::timeout(CANCEL_BUDGET, task)
         .await
         .expect("the barrier never reached the armed step")
-        .expect("hook handoff");
-    task.abort();
-    // A completed task is also fine: its output (and any hold inside it)
-    // drops with the JoinHandle result — the assertions below hold either
-    // way, they just then prove the completed state instead.
-    let _ = task.await;
+        .expect_err("the barrier must unwind at the armed step, not complete");
+    assert!(
+        outcome.is_panic(),
+        "the barrier completed before the armed step fired"
+    );
+    let payload = outcome.into_panic();
+    let expected = format!("{SENTINEL}: {step}");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied());
+    assert_eq!(
+        message,
+        Some(expected.as_str()),
+        "the unwind must have fired exactly the armed step"
+    );
 
     let admission = repo.core().commit_admission();
     assert!(!admission.is_closed(), "gate must reopen after the drop");
@@ -142,8 +178,74 @@ async fn seal_cancelled_after_recheck_releases_the_pause() {
     cancel_barrier_at(&repo, "after_recheck", true).await;
 }
 
+/// The hold itself lives in a task: while the hold is alive BOTH gates
+/// are held (admission closed, drain paused); aborting the owner task
+/// unwinds the hold — pause released FIRST, gate reopened LAST — and a
+/// fresh writer commits and both fresh barriers succeed.
+#[tokio::test]
+async fn hold_owning_task_abort_releases_both_gates() {
+    let repo = fixture_with_committed_data().await;
+    let (got_hold_tx, got_hold_rx) = tokio::sync::oneshot::channel();
+    let owned = repo.clone();
+    let task = tokio::spawn(Box::pin(async move {
+        let hold = owned.seal_point().await.expect("seal in the owner task");
+        got_hold_tx.send(()).expect("hold handoff");
+        std::future::pending::<()>().await;
+        drop(hold);
+    }));
+    tokio::time::timeout(CANCEL_BUDGET, got_hold_rx)
+        .await
+        .expect("the owner task never obtained the hold")
+        .expect("hold handoff");
+
+    // While the hold lives inside the task, the hold keeps BOTH gates.
+    let admission = repo.core().commit_admission();
+    assert!(admission.is_closed(), "the hold keeps the gate closed");
+    assert!(
+        repo.drainer().pause_held(),
+        "the hold keeps the drain paused"
+    );
+
+    // Bounded abort: the unwind drops the hold (pause FIRST, gate LAST).
+    task.abort();
+    let outcome = tokio::time::timeout(CANCEL_BUDGET, task)
+        .await
+        .expect("the abort join hung")
+        .expect_err("abort join");
+    assert!(outcome.is_cancelled(), "the abort must cancel the task");
+    assert!(!repo.drainer().pause_held(), "unwind released the pause");
+    assert!(!admission.is_closed(), "unwind reopened the gate");
+
+    // Fresh writer succeeds once both gates are open.
+    let table = repo.get_table("t").await.unwrap();
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let id = table
+        .insert_tx(&InnerValue::Str("post-abort".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    repo.commit_tx(tx).await.unwrap();
+    let got = table.get(id).await.unwrap();
+    assert!(
+        matches!(got, InnerValue::Str(ref s) if s == "post-abort"),
+        "fresh writer data readable after the abort, got {got:?}"
+    );
+
+    // Fresh barriers succeed: no leaked close owner, no leaked hold.
+    let position = tokio::time::timeout(CANCEL_BUDGET, repo.capture_point())
+        .await
+        .expect("fresh capture completes after the abort")
+        .expect("fresh capture succeeds after the abort");
+    assert_eq!(position, repo.tx_gate().await.unwrap().last_committed());
+    let hold = tokio::time::timeout(CANCEL_BUDGET, repo.seal_point())
+        .await
+        .expect("fresh seal completes after the abort")
+        .expect("fresh seal succeeds after the abort");
+    drop(hold);
+    assert!(!repo.drainer().pause_held());
+}
+
 /// Sanity anchor: the hook really fired every named step across the
-/// cancellation tests above (the armed handoffs were not silently
+/// barriers run on this thread (the armed handoffs were not silently
 /// short-circuited by barrier completion before the armed step).
 #[tokio::test]
 async fn step_hook_fires_every_named_barrier_step() {
@@ -153,7 +255,7 @@ async fn step_hook_fires_every_named_barrier_step() {
     let hold = repo.seal_point().await.expect("seal");
     drop(hold);
 
-    let recorded = STEP_HOOK_RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = STEP_HOOK_STATE.with(|state| state.borrow().recorded.clone());
     for expected in ALL_STEPS {
         assert!(
             recorded.contains(&expected),

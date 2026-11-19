@@ -18,10 +18,16 @@
 //! `<to>/<timestamp>/` directory is then created atomically by the protocol
 //! itself, which refuses existing directories.
 //!
-//! Production seal re-copy cap (Q12): 4 GiB per repo and 1800 s wall clock —
-//! fail-closed bounds on the writer-visibility pause; unlimited (the
-//! `SealRecopyCap::default()`) would let a large store stall commits
-//! unboundedly.
+//! Production seal re-copy cap (Q12, R2a-4): 64 MiB of actual aggregate
+//! writes per repo and an 8 s monotonic budget per repo INCLUDING the seal
+//! barrier (the budget boundary is the absolute `Instant` handed to
+//! `OnlineBackupPort::seal_point_before`, so the barrier itself counts).
+//! The engine's existing 15 s leader-wait cap is unchanged and stays the
+//! larger side of the pair: 8 s of budget leaves headroom for the
+//! re-copy after the barrier, and cooperative OS syscalls may overrun the
+//! wall-clock budget (the run fails closed at the check; the budget cannot
+//! preempt an in-flight syscall). Unlimited (the `SealRecopyCap::default()`)
+//! would let a large store stall commits unboundedly.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,21 +37,26 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use shamir_db::ShamirDb;
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
 use crate::sync::durability::backup::online::copy_engine::CopyOptions;
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
-    run_online_backup, BackupPermit, BackupReport, SealRecopyCap,
+    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, SealRecopyCap,
 };
 
 use super::adapter::{EngineBackupPort, PortRunState};
 use super::metrics as backup_metrics;
 
-/// Production seal re-copy cap: 4 GiB per repo, 1800 s wall clock (Q12;
-/// documented in the step report — unlimited defaults are for tests).
-const SEAL_RECOPY_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const SEAL_RECOPY_MAX_SECONDS: u64 = 1800;
+/// Production seal re-copy cap: 64 MiB of actual aggregate writes per
+/// repo, 8 s monotonic budget per repo including the seal barrier (Q12,
+/// R2a-4; module doc). The clock budget reaches the barrier through the
+/// protocol's per-repo absolute `Instant` deadline on
+/// `seal_point_before`; wall-clock caps cannot preempt in-flight
+/// syscalls (fail-closed overrun documented in the module doc).
+const SEAL_RECOPY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const SEAL_RECOPY_MAX_SECONDS: u64 = 8;
 
 /// Failure causes of a `start`.
 #[derive(Debug, thiserror::Error)]
@@ -118,13 +129,45 @@ pub struct OnlineBackupRegistry {
     permit: Arc<BackupPermit>,
     record: Arc<Mutex<RunRecord>>,
     backup_id: Mutex<Option<String>>,
+    /// The server's root shutdown token, when running under the real
+    /// launcher: each run's `CancelFlag` is then backed by a CHILD token
+    /// (`CancelFlag::from_shutdown` derives it per run), so server shutdown
+    /// cancels the run while an admin `CancelBackup` cancels only the child
+    /// (never the server). `None` keeps the default flag: a fresh,
+    /// never-cancelled token (the constructor existing tests use).
+    shutdown: Option<CancellationToken>,
 }
 
 impl OnlineBackupRegistry {
     /// Build the registry. `runtime` must be the server's runtime handle
     /// (the runner bridges async facade calls through it from a blocking
-    /// thread). `data_dir` is the server's source data dir.
+    /// thread). `data_dir` is the server's source data dir. Runs cancel
+    /// through the default flag — a fresh, never-cancelled token (the
+    /// constructor existing tests use); the production launcher uses
+    /// [`OnlineBackupRegistry::new_with_shutdown`].
     pub fn new(db: Arc<ShamirDb>, data_dir: PathBuf, runtime: Handle) -> Self {
+        Self::new_with_shutdown_inner(db, data_dir, runtime, None)
+    }
+
+    /// Build the registry wired to the server's root shutdown token: every
+    /// run started here takes a child token, so server shutdown cancels the
+    /// in-flight run while an admin `CancelBackup` cancels only that run's
+    /// child (never the server itself).
+    pub fn new_with_shutdown(
+        db: Arc<ShamirDb>,
+        data_dir: PathBuf,
+        runtime: Handle,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self::new_with_shutdown_inner(db, data_dir, runtime, Some(shutdown))
+    }
+
+    fn new_with_shutdown_inner(
+        db: Arc<ShamirDb>,
+        data_dir: PathBuf,
+        runtime: Handle,
+        shutdown: Option<CancellationToken>,
+    ) -> Self {
         let fresh = Self::fresh_record(&data_dir);
         Self {
             db: Arc::downgrade(&db),
@@ -133,6 +176,7 @@ impl OnlineBackupRegistry {
             permit: Arc::new(BackupPermit::new()),
             record: Arc::new(Mutex::new(fresh)),
             backup_id: Mutex::new(None),
+            shutdown,
         }
     }
 
@@ -164,12 +208,20 @@ impl OnlineBackupRegistry {
         std::fs::create_dir_all(&to)?;
         let started_at_unix_ns = unix_nanos();
         let backup_id = format!("ob-{started_at_unix_ns}");
-        let cancel = {
+        // Under the real launcher the run cancels on a CHILD token
+        // `from_shutdown` derives from the server's root shutdown token:
+        // shutdown cancels the run, an admin `CancelBackup` (below,
+        // `record.cancel.cancel()`) cancels only the child. Cheap and
+        // synchronous.
+        let cancel = match &self.shutdown {
+            Some(root) => CancelFlag::from_shutdown(root),
+            None => CancelFlag::default(),
+        };
+        {
             let mut record = self.record.lock();
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
-            let cancel = CancelFlag::default();
             *record = RunRecord {
                 running: true,
                 cancel: cancel.clone(),
@@ -182,7 +234,6 @@ impl OnlineBackupRegistry {
                 last_error: None,
             };
             *self.backup_id.lock() = Some(backup_id.clone());
-            cancel
         };
         let job = RunJob {
             db,
@@ -313,7 +364,14 @@ impl RunJob {
             }
         }
         let snapshot_count = run_state.snapshot_count();
-        let repos_created_during = live_repo_count(&db, &runtime).saturating_sub(snapshot_count);
+        // Cancelled or shutdown-interrupted runs skip the post-run live
+        // catalogue read: there is nothing to attribute and `block_on` a
+        // straggler store load only extends the teardown on the way out.
+        let repos_created_during = if cancel.is_cancelled() {
+            0
+        } else {
+            live_repo_count(&db, &runtime).saturating_sub(snapshot_count)
+        };
         // Release the permit before publishing idle, or a new run can be
         // refused.
         drop(permit_guard);
@@ -322,7 +380,7 @@ impl RunJob {
         record.progress = progress.clone();
         record.repos_created_during = repos_created_during;
         record.dest_dir = outcome.as_ref().ok().map(|report| report.dest_dir.clone());
-        record.last_error = outcome.err().map(|error| error.to_string());
+        record.last_error = outcome.as_ref().err().map(full_error_chain);
         // §4.8 metrics hook: run counters, copied bytes (the protocol's
         // hashed-byte counters) and the last run duration. The failure
         // stage is where the protocol recorded the failure.
@@ -402,6 +460,22 @@ fn unix_nanos() -> u128 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default()
+}
+
+/// The error's `Display` chain, top error first. The protocol's top-level
+/// `Display` already carries the stage (`failed at stage Sealing`); the
+/// source chain contributes the typed failure detail (e.g. the
+/// `RecopyCap` bytes-vs-cap text) that `to_string()` alone would drop,
+/// so `BackupStatus`'s `last_error` keeps both stage and cap detail.
+fn full_error_chain(error: &OnlineBackupError) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(link) = source {
+        text.push_str(": ");
+        text.push_str(&link.to_string());
+        source = link.source();
+    }
+    text
 }
 
 /// Offline-backup-equivalent destination validation: absolute, and its

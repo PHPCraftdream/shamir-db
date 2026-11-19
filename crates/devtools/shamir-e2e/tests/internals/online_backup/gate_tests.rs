@@ -10,13 +10,18 @@
 //!     the contiguous prefix `1..=m`, bounded by the writer row limit.
 //! (b) Overlap + R3 writer-block bound (§6.2): at least one write per
 //!     writer is acknowledged between the `StartBackup` request and the
-//!     last observed live status; the tight Sealing window is
-//!     MANDATORY (observed or the test fails) and every consecutive ack
-//!     pair overlapping it stays within [`ACK_GAP_BOUND`]; the FIRST and
+//!     last observed live status; the tight window — the live `Copying`
+//!     stage of THIS backup (the truthful live first-pass phase emitted
+//!     by the protocol's `begin_copy` hook) — is MANDATORY (observed or
+//!     the test fails) and every consecutive ack pair overlapping it
+//!     stays within [`ACK_GAP_BOUND`] (the seal hold now intentionally
+//!     admits no new commits, so the tight proof moved off `Sealing`);
+//!     the acknowledgement gap ACROSS the seal is covered by the same
+//!     whole-run per-writer check in [`certify_acks`]. The FIRST and
 //!     LAST qualifying status observations carry strictly parsed
 //!     `CopyProgress` amounts, both certified strictly below the final
-//!     nonzero totals. `Verifying` and terminal bookkeeping are never
-//!     treated as live (followup item 4: `active_seal_copy` decides).
+//!     nonzero totals. `Sealing`, `Verifying` and terminal bookkeeping
+//!     are never treated as live (`active_copy` decides).
 //! (c) Non-vacuity: every writer ends in `WriterError::Stopped` with real
 //!     progress — the stop signal, not the row limit, ends the run.
 //! (d) Snapshot + restore (R4): the backup `dest_dir` exists and verifies
@@ -40,15 +45,13 @@ use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use tokio::task::JoinSet;
 
-use super::copy_observation::{active_seal_copy, CopyProgress};
+use super::copy_observation::{
+    active_copy, CopyObservation, CopyProgress, StatusObservation, ACK_GAP_BOUND,
+};
 use super::fixture::{self, paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
 use super::writers::{
     run_writer, value, Ack, Ledger, WriterControl, WriterError, WRITER_COUNT, WRITER_ROW_LIMIT,
 };
-
-/// Hard bound on consecutive ack-to-ack gaps per writer (R3, §6.2): 10×
-/// the design's 2 s p99 per-ack baseline plus CI scheduling slack.
-const ACK_GAP_BOUND: Duration = Duration::from_secs(30);
 
 /// Minimum pacing between BackupStatus attempts (retries included); the
 /// [`fixture::paced_execute`] send `Instant` is captured AFTER this sleep
@@ -221,33 +224,6 @@ fn verify_restored_pad(restored_data_dir: &std::path::Path) {
     }
 }
 
-/// One qualifying status observation of the live SEAL COPY: the wire
-/// record showed THIS backup live in the `Sealing` stage (see
-/// [`active_seal_copy`] — `Verifying` and terminal bookkeeping are NOT
-/// live and never produce an observation). Status-placeholder note: while
-/// the protocol runs the registry keeps `per_repo` EMPTY, which parses to
-/// the zero progress, and an active seal with a malformed list yields
-/// `None` from `active_seal_copy` — neither is treated as proof that no
-/// copy happened; the timestamps are kept regardless of the amount.
-struct SealObservation {
-    /// `Instant` of the request send — taken BEFORE the request goes out.
-    sent_at: Instant,
-    /// `Instant` of the response receipt — set only AFTER the response
-    /// arrived, never speculatively before send.
-    received_at: Instant,
-    /// Strictly parsed summed `per_repo` counters at poll time (may be
-    /// the zero placeholder while the protocol runs).
-    progress: CopyProgress,
-}
-
-/// Timeline edges of the observed copy window: the FIRST and the LAST
-/// qualifying `Sealing` observations, each carrying both its request-send
-/// and response-receipt `Instant`s and the parsed [`CopyProgress`].
-struct StatusObservation {
-    first: Option<SealObservation>,
-    last: Option<SealObservation>,
-}
-
 /// Paced, bounded `execute` of a typed batch (pacing/retry via
 /// [`fixture::paced_execute`]: ≥ [`STATUS_PACE`] before the send, exact
 /// pre-dispatch `rate_limited` retried within the shared 120 s budget);
@@ -350,23 +326,24 @@ async fn await_backup_done(
             "online backup reported last_error: {:?}",
             status.get_value_str("last_error")
         );
-        // ONLY an active `Sealing` seal of THIS backup counts as a live
-        // observation: `Verifying` / final bookkeeping / other runs are
+        // ONLY an active `Copying` pass of THIS backup counts as a live
+        // observation: the per-repo seal holds (no new commits, by
+        // design), `Verifying` / final bookkeeping / other runs are
         // never treated as live and contribute no timestamps. A `None`
-        // from `active_seal_copy` during a live seal (placeholder or
+        // from `active_copy` during a live copy (placeholder or
         // malformed `per_repo`) is not proof of no copy — no observation
         // is recorded for it, and the final-totals assertions below
         // certify from the observations that DID qualify.
-        if let Some(progress) = active_seal_copy(&status, backup_id) {
+        if let Some(progress) = active_copy(&status, backup_id) {
             if observation.first.is_none() {
-                guard.mark("seal-copy window opens (first Sealing response received)");
-                observation.first = Some(SealObservation {
+                guard.mark("copy window opens (first Copying response received)");
+                observation.first = Some(CopyObservation {
                     sent_at,
                     received_at,
                     progress,
                 });
             }
-            observation.last = Some(SealObservation {
+            observation.last = Some(CopyObservation {
                 sent_at,
                 received_at,
                 progress,
@@ -758,7 +735,7 @@ async fn gate_scenario(guard: FlakeGuard) {
     // EVERY writer (acks are receipt stamps).
     let last_live = observation
         .last
-        .expect("no live Sealing status was ever observed — overlap cannot be certified");
+        .expect("no live Copying status was ever observed — overlap cannot be certified");
     let first_live = observation
         .first
         .expect("live statuses observed without a first observation");
@@ -785,7 +762,10 @@ async fn gate_scenario(guard: FlakeGuard) {
         );
     }
     // STRICT window: lower is post-receipt, upper pre-send — boundary
-    // acks are excluded and the comparisons are strict.
+    // acks are excluded and the comparisons are strict. The tight proof
+    // lives on the first live WAL/store pass: the per-repo seal holds
+    // that follow intentionally admit no new commits, so the in-window
+    // check measures FIRST-PASS overlap only.
     let in_window: Vec<&Ack> = snapshot
         .iter()
         .filter(|ack| ack.acked_at > overlap_lower && ack.acked_at < last_live_at)
@@ -793,7 +773,7 @@ async fn gate_scenario(guard: FlakeGuard) {
     guard.note("acks in tight window", in_window.len().to_string());
     assert!(
         !in_window.is_empty(),
-        "no acks landed inside the tight live window"
+        "no acks landed inside the tight live Copying window"
     );
     // Consecutive-ack gaps PER WRITER: pairing across writers would pair
     // unrelated acks and measure nothing. In-window order is global ack
@@ -805,12 +785,18 @@ async fn gate_scenario(guard: FlakeGuard) {
                 let gap = ack.acked_at.duration_since(prev.acked_at);
                 assert!(
                     gap < ACK_GAP_BOUND,
-                    "writer {writer} stalled {gap:?} between acks inside the overlap window (bound {ACK_GAP_BOUND:?})"
+                    "writer {writer} stalled {gap:?} between acks inside the Copying window (bound {ACK_GAP_BOUND:?})"
                 );
             }
             previous = Some(ack);
         }
     }
+
+    // The whole-run per-writer gap check in [`certify_acks`] above
+    // bounds EVERY consecutive ack pair — including any pair straddling
+    // the seal hold — on the same [`ACK_GAP_BOUND`], so the
+    // acknowledgement gap across the seal is covered without a separate
+    // window construction.
 
     // (d) Graceful source shutdown BEFORE the snapshot is restored
     // (fjall file locks on Windows).

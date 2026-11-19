@@ -26,6 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use shamir_collections::TFxMap;
@@ -35,7 +36,7 @@ use shamir_db::ShamirDb;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::Handle;
 
-use crate::sync::durability::backup::online::progress::BackupStage;
+use crate::sync::durability::backup::online::progress::{BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::wal_capture::{
     CapturedPoint, OnlineBackupPort, PortError, RepoSource,
 };
@@ -138,6 +139,64 @@ impl EngineBackupPort {
     /// (dispatch-depth rule).
     fn bridge<F: std::future::Future>(&self, future: F) -> F::Output {
         self.runtime.block_on(Box::pin(future))
+    }
+
+    /// The engine seal barrier under cancellation and the repo's absolute
+    /// seal budget deadline. `biased`: cancellation is polled FIRST on
+    /// every wake. `timeout_at` uses the SAME absolute `Instant` the
+    /// caller computed (no drift): the barrier is INSIDE the per-repo
+    /// budget. On timeout/cancel the barrier future is dropped and the
+    /// engine's close owner reopens the gate on unwind; in-flight blocking
+    /// I/O is not preempted, so a straggler syscall can extend the window.
+    fn seal_bridge(
+        &self,
+        repo: &str,
+        instance: RepoInstance,
+        deadline: Option<Instant>,
+        cancel: &CancelFlag,
+    ) -> Result<SealHold, PortError> {
+        // Box::pin the ACTUAL barrier future before the select: the pinned
+        // future is polled/dropped in place (dispatch-depth rule; no
+        // per-poll re-creation).
+        let mut sealed = Box::pin(instance.seal_point());
+        self.runtime.block_on(Box::pin(async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Err(PortError::Seal {
+                    repo: repo.to_string(),
+                    source: io::Error::other(
+                        "cancelled during the seal barrier; the engine reopens the gate when \
+                         the abandoned barrier future unwinds",
+                    ),
+                }),
+                result = async {
+                    match deadline {
+                        Some(deadline) => {
+                            match tokio::time::timeout_at(deadline.into(), sealed.as_mut())
+                                .await
+                            {
+                                Ok(result) => result.map_err(|error| {
+                                    Self::barrier_error(repo, error)
+                                }),
+                                Err(_elapsed) => Err(io::Error::other(format!(
+                                    "repo {repo}: the seal budget elapsed before the barrier \
+                                     returned; the barrier future was abandoned (fail-closed: \
+                                     no snapshot); the commit gate reopens when it unwinds — \
+                                     in-flight blocking I/O is not preempted"
+                                ))),
+                            }
+                        }
+                        None => sealed
+                            .as_mut()
+                            .await
+                            .map_err(|error| Self::barrier_error(repo, error)),
+                    }
+                } => result.map_err(|source| PortError::Seal {
+                    repo: repo.to_string(),
+                    source,
+                }),
+            }
+        }))
     }
 
     /// Resolve the live repo instance for a captured `"db/repo"` key.
@@ -302,6 +361,28 @@ impl OnlineBackupPort for EngineBackupPort {
     }
 
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
+        // Direct variant without deadline/cancel: kept for existing tests
+        // (the protocol's step E calls
+        // [`OnlineBackupPort::seal_point_before`]).
+        self.seal_point_before(repo, None, &CancelFlag::default())
+    }
+
+    /// Step E, deadline-aware (R2a-4): the SAME absolute monotonic
+    /// `deadline` the caller computed bounds the engine's async seal
+    /// barrier via `timeout_at`, and a `biased` `select!` polls the
+    /// cancellation branch first. On timeout/cancel the barrier future is
+    /// dropped and the gate reopens on unwind; a separately dispatched
+    /// storage syscall that finishes late is not preempted, and a
+    /// synchronous seal re-copy blocked on a straggler syscall can extend
+    /// the closed window — fail-closed either way: no snapshot, and the
+    /// protocol removes the destination. Not covering process teardown
+    /// mid-syscall.
+    fn seal_point_before(
+        &self,
+        repo: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelFlag,
+    ) -> Result<CapturedPoint, PortError> {
         let Some(instance) = self.resolve(repo) else {
             return Err(PortError::Seal {
                 repo: repo.to_string(),
@@ -309,12 +390,7 @@ impl OnlineBackupPort for EngineBackupPort {
             });
         };
         self.run.set_stage(stage_hint::SEALING);
-        let hold = self
-            .bridge(instance.seal_point())
-            .map_err(|error| PortError::Seal {
-                repo: repo.to_string(),
-                source: Self::barrier_error(repo, error),
-            })?;
+        let hold = self.seal_bridge(repo, instance, deadline, cancel)?;
         let point = CapturedPoint {
             wal_position: hold.position(),
             store_dir: self.store_dir_for(repo),
@@ -324,9 +400,30 @@ impl OnlineBackupPort for EngineBackupPort {
         Ok(point)
     }
 
-    fn end_seal(&self, repo: &str) {
+    /// Called at the C start, before the first WAL pass: writers are
+    /// visibly RUNNING again, so the live status publishes the real phase
+    /// `Copying` and e2e tests can prove the copy overlaps the
+    /// writer-running phase.
+    fn begin_copy(&self) {
+        self.run.set_stage(stage_hint::COPYING);
+    }
+
+    /// Called at the real F start: the live status moves from `Sealing`
+    /// to `Verifying` once the seal loop over the repos has finished, so
+    /// end_seal no longer publishes a misleading Verifying stage early.
+    fn begin_verify(&self) {
         self.run.set_stage(stage_hint::VERIFYING);
-        self.seals.lock().remove(repo);
+    }
+
+    fn end_seal(&self, repo: &str) {
+        // The stage hint stays SEALING here: the protocol's seal loop
+        // continues over the remaining repos, and VERIFYING is published
+        // only later by `begin_verify` at the real F start. The hold is
+        // extracted under the lock and dropped OUTSIDE it: its `Drop` reopens the
+        // commit gate (a measured, potentially slow synchronous reopen)
+        // and must not hold the seal-map mutex while doing so.
+        let hold = self.seals.lock().remove(repo);
+        drop(hold);
     }
 
     fn release_pins(&self) {

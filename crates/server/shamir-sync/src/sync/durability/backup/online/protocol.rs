@@ -2,8 +2,12 @@
 //! the port, WAL copied before stores, a second pass at the seal barrier,
 //! the manifest written last with fsync, self-verification before
 //! success. Cancellation is checked at every stage boundary and between
-//! files; a failed or cancelled run removes the destination directory and
-//! releases the pins.
+//! files; a failed or cancelled run removes the destination directory
+//! and releases the pins. The server publishes the real phase through
+//! the port's `begin_copy` (before the first WAL pass) and
+//! `begin_verify` (at the start of F, after the cancellation check)
+//! hooks; Sealing stays the reported stage through E including the
+//! residual pass.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,7 +17,7 @@ use std::time::Instant;
 
 #[cfg(test)]
 use super::copy_engine::test_seams;
-use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult};
+use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult, SealGate};
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
 use super::progress::{BackupProgress, BackupStage, CancelFlag};
 use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
@@ -75,8 +79,16 @@ pub enum OnlineBackupFailure {
 /// store; clock: unbounded), so existing callers keep working — production
 /// callers should always set both (the re-copy runs while writers'
 /// visibility is paused, so an uncapped large store stalls commits).
-/// The clock cap is enforced at the per-repo re-copy completion and stage
-/// boundaries only: the copy engine has no per-file deadline support. It is
+/// The byte cap is enforced DURING the re-copy by the copy engine's
+/// cooperative gate: checked before each written chunk, cumulatively
+/// across that repo's WAL + store passes INCLUDING retries, around the
+/// fsyncs, with the sharing-retry sleeps clamped to the clock deadline.
+/// The clock cap bounds the same gate (read/hash and writes alike);
+/// the per-repo monotonic start is taken immediately before the seal
+/// barrier, so the barrier counts as elapsed budget. A blocking syscall
+/// can overrun the clock: enforcement is cooperative, never a detached
+/// kill. The gate itself is checked once more before each repo's hold
+/// is ended; no stage-wide completion cap remains. It is
 /// a wall-clock bound with sub-second resolution (a cap of 0 seconds still
 /// fails closed on a fast run).
 #[derive(Debug, Clone, Default)]
@@ -84,8 +96,10 @@ pub struct SealRecopyCap {
     /// Maximum bytes a single repo's seal re-copy (WAL dir + store dir)
     /// may copy.
     pub max_bytes: Option<u64>,
-    /// Maximum wall-clock seconds (sub-second resolution) from step E entry
-    /// past a repo's seal re-copy completion.
+    /// Maximum wall-clock seconds (sub-second resolution) from a repo's
+    /// seal-re-copy start — taken immediately before `seal_point_before`,
+    /// so the barrier is inside the budget — past that repo's re-copy
+    /// completion.
     pub max_seconds: Option<u64>,
 }
 
@@ -150,43 +164,69 @@ fn rel_slash(path: &Path) -> String {
 }
 
 /// A copy error as a stage-tagged protocol error; a cancellation observed
-/// between files is `Cancelled`, not a failure.
+/// between files is `Cancelled`, a tripped seal gate is the typed
+/// `RecopyCap` failure (always at `Sealing`), everything else fails the
+/// stage.
 fn copy_failed(stage: BackupStage, error: CopyError) -> OnlineBackupError {
     match error {
         CopyError::Cancelled => OnlineBackupError::Cancelled { stage },
+        CopyError::RecopyCap(message) => failed(
+            BackupStage::Sealing,
+            OnlineBackupFailure::RecopyCap(message),
+        ),
         other => failed(stage, other),
     }
 }
 
-/// One copy pass mapped onto a stage-tagged protocol error.
-fn run_pass(
-    source: &Path,
-    dest: &Path,
-    skip: &'static [&'static str],
-    cancel: &CancelFlag,
-    options: &CopyOptions,
+/// One copy pass's shared context (keeps argument lists short): the
+/// stage tag, cancellation, retry options and — for the seal re-copy
+/// passes — the cooperative gate plus the destination digests
+/// authenticated outside the hold.
+struct PassCtx<'a> {
+    cancel: &'a CancelFlag,
+    options: &'a CopyOptions,
     stage: BackupStage,
-) -> Result<CopyPassResult, OnlineBackupError> {
-    copy_engine::run_copy_pass(source, dest, skip, &[], cancel, options)
-        .map_err(|error| copy_failed(stage, error))
+    gate: Option<&'a SealGate>,
+    preauth: &'a BTreeMap<String, (String, u64)>,
+}
+
+impl PassCtx<'_> {
+    /// One copy pass mapped onto a stage-tagged protocol error.
+    fn run(
+        &self,
+        source: &Path,
+        dest: &Path,
+        skip: &'static [&'static str],
+    ) -> Result<CopyPassResult, OnlineBackupError> {
+        let result = match self.gate {
+            Some(gate) => copy_engine::run_copy_pass_gated(
+                source,
+                dest,
+                self.cancel,
+                self.options,
+                gate,
+                self.preauth,
+            ),
+            None => copy_engine::run_copy_pass(source, dest, skip, &[], self.cancel, self.options),
+        };
+        result.map_err(|error| copy_failed(self.stage, error))
+    }
 }
 
 /// WAL copy passes for every file-backed repo, WAL before stores
 /// (design 4.2 step C). Returns (repo name, snapshot-relative dir,
 /// files relative to the WAL dir).
 fn copy_wal_dirs(
+    ctx: &PassCtx<'_>,
     repos: &[RepoSource],
     source_root: &Path,
     dest_dir: &Path,
-    cancel: &CancelFlag,
-    options: &CopyOptions,
-    stage: BackupStage,
 ) -> Result<Vec<(String, String, Vec<CopiedFile>)>, OnlineBackupError> {
     let mut copied = Vec::new();
     for repo in repos {
         if let Some(wal) = &repo.wal_dir {
             let dest_wal = wal_dest_dir(source_root, dest_dir, repo);
-            let result = run_pass(wal, &dest_wal, &[], cancel, options, stage)?;
+            let result = ctx.run(wal, &dest_wal, &[])?;
             let dir_rel = dest_wal
                 .strip_prefix(dest_dir)
                 .map(rel_slash)
@@ -268,25 +308,23 @@ struct SealRecopy {
     residual: CopyPassResult,
 }
 
-fn recopy_bytes(files: &[CopiedFile]) -> u64 {
-    files.iter().map(|file| file.size_bytes).sum()
+/// RAII per-repo seal hold: spans the seal attempt through BOTH re-copy
+/// passes and is ended on EVERY exit path (failure, cap trip,
+/// cancellation, unwind) before the next repo and before any output
+/// cleanup. `end_seal` is idempotent, so an end at drop for a hold that
+/// never opened is a no-op (fail-closed). There is NO explicit-release
+/// path: `drop` invokes `end_seal` exactly once per repo on every path,
+/// success included (the protocol's seal-event ordering shows exactly
+/// one `end_seal` per repo).
+struct SealGuard<'a> {
+    port: &'a dyn OnlineBackupPort,
+    repo: &'a str,
 }
 
-fn clock_cap_exceeded(cap: &SealRecopyCap, started: &Instant) -> bool {
-    // Sub-second resolution: a cap of 0 seconds fails closed even on a fast
-    // run. Checked at each repo's re-copy completion and stage boundaries.
-    cap.max_seconds
-        .is_some_and(|max| started.elapsed().as_secs_f64() > max as f64)
-}
-
-/// Store-destination directory relative to the snapshot root: the store
-/// dir's path relative to the data dir, or the captured point's reported
-/// relative store dir as a fallback.
-fn store_dest_rel(source_root: &Path, repo: &RepoSource, point: &CapturedPoint) -> String {
-    repo.store_dir
-        .strip_prefix(source_root)
-        .map(rel_slash)
-        .unwrap_or_else(|_| point.store_dir.clone())
+impl Drop for SealGuard<'_> {
+    fn drop(&mut self) {
+        self.port.end_seal(self.repo);
+    }
 }
 
 /// Run the online backup protocol steps A-G (design 4.2).
@@ -366,13 +404,20 @@ fn run_steps(
             stage: BackupStage::Copying,
         });
     }
+    // Publish the real `Copying` phase to the server before the first
+    // WAL pass (capture barrier done, cancellation checked).
+    port.begin_copy();
     copy_wal_dirs(
+        &PassCtx {
+            cancel,
+            options,
+            stage: BackupStage::Copying,
+            gate: None,
+            preauth: &BTreeMap::new(),
+        },
         &repos,
         source_root,
         dest_dir,
-        cancel,
-        options,
-        BackupStage::Copying,
     )?;
     // Test-only seam: raise cancellation exactly at the C→D boundary
     // (after the WAL passes, before the first store pass — a point no
@@ -393,12 +438,19 @@ fn run_steps(
     // E. Seal (design "Step 1d decisions" (a)/(b), Q12): per repo —
     // seal_point, THAT repo's seal re-copy (WAL dir then store dir) whose
     // final hashes define the snapshot, then end_seal; the seal hold lives
-    // exactly through its re-copy. The re-copy runs while writers'
-    // visibility is paused (drain pause survives seal_point), bounded by
-    // `cap`: exceeding the byte cap fails closed; the clock cap is checked
-    // at each repo's re-copy completion and at the stage boundary. Any
-    // failure or cancellation ends every seal still open (`end_seal` is
-    // idempotent) before propagating.
+    // exactly through its re-copy, spanned by an RAII guard so EVERY exit
+    // (failure, cap trip, cancellation, unwind) ends the hold before the
+    // next repo and before any output cleanup (`end_seal` is idempotent).
+    // The re-copy runs while writers' visibility is paused (drain pause
+    // survives seal_point), bounded by `cap` cooperatively DURING the
+    // work: the per-repo monotonic start is taken immediately before
+    // `seal_point_before` so the barrier is inside the budget; the gate
+    // travels through listing, per-chunk writes, sharing-retry sleeps
+    // (clamped to the deadline) and the fsync surroundings of BOTH the
+    // repo's WAL and store passes, and bytes are checked cumulatively
+    // (retries included) BEFORE each chunk is written. A blocking syscall
+    // can still overrun the deadline — the cap is cooperative, never a
+    // detached kill. The residual pass holds NO gate.
     // Test-only seam: raise cancellation exactly at the D→E boundary
     // (a point no copy-pass hook can reach); must stay before the
     // existing cancellation check below.
@@ -409,12 +461,7 @@ fn run_steps(
             stage: BackupStage::Sealing,
         });
     }
-    let mut sealed_open: Vec<String> = Vec::new();
-    let started = Instant::now();
-    let cap_failed = |what: String| -> OnlineBackupError {
-        failed(BackupStage::Sealing, OnlineBackupFailure::RecopyCap(what))
-    };
-    let recopy = (|| -> Result<SealRecopy, OnlineBackupError> {
+    let recopy: SealRecopy = {
         let mut recopy = SealRecopy::default();
         // Repo store/WAL dirs are re-copied per repo below; the residual
         // store pass at the end must not copy them again.
@@ -423,40 +470,83 @@ fn run_steps(
             exclude.push(repo.store_dir.clone());
         }
         for repo in &repos {
-            // The repo counts as seal-open from the attempt on:
-            // `end_seal` is documented idempotent, so ending a repo whose
-            // seal never opened is a no-op; ending one whose hold IS open
-            // on an error path is mandatory (fail-closed).
-            sealed_open.push(repo.name.clone());
-            let point = port
-                .seal_point(&repo.name)
-                .map_err(|error| failed(BackupStage::Sealing, error))?;
-            let mut bytes = 0u64;
-            if repo.wal_dir.is_some() {
-                let wal = copy_wal_dirs(
-                    std::slice::from_ref(repo),
-                    source_root,
-                    dest_dir,
-                    cancel,
-                    options,
-                    BackupStage::Sealing,
-                )?;
-                bytes += wal
-                    .iter()
-                    .map(|(_, _, files)| recopy_bytes(files))
-                    .sum::<u64>();
-                recopy.wal_final.extend(wal);
-            }
-            let store_rel = store_dest_rel(source_root, repo, &point);
-            let store = run_pass(
-                &repo.store_dir,
-                &dest_dir.join(&store_rel),
-                &[],
+            // Destination digests are authenticated ONCE, outside the
+            // seal hold (before the barrier) and CANCELLATION-ONLY —
+            // this read-only pass does NOT consume the repo's writer-
+            // block budget; the deadline is created only after it, so
+            // the budget starts right before the actual seal. Each
+            // destination tree authenticates into its OWN map (keys
+            // are rel paths within that tree); a missing destination
+            // root yields an empty map. Only when the destination dir
+            // is not derivable pre-seal (out-of-tree store dir) is the
+            // comparison left to hash-under-hold.
+            let wal_preauth = if repo.wal_dir.is_some() {
+                let dest_wal = wal_dest_dir(source_root, dest_dir, repo);
+                copy_engine::authenticate_dest(&dest_wal, cancel, None)
+                    .map_err(|error| copy_failed(BackupStage::Sealing, error))?
+            } else {
+                BTreeMap::new()
+            };
+            let store_dest_known = repo.store_dir.strip_prefix(source_root).ok().map(rel_slash);
+            let store_preauth = match &store_dest_known {
+                Some(store_rel) => {
+                    copy_engine::authenticate_dest(&dest_dir.join(store_rel), cancel, None)
+                        .map_err(|error| copy_failed(BackupStage::Sealing, error))?
+                }
+                None => BTreeMap::new(),
+            };
+            // RAII seal hold: declared immediately before the ACTUAL
+            // seal attempt (after the read-only preauth), ended on
+            // EVERY exit path — `drop` invokes the idempotent
+            // `end_seal`, exactly once, on the success path too —
+            // before the next repo and before any output cleanup.
+            let guard = SealGuard {
+                port,
+                repo: &repo.name,
+            };
+            // Budget (clock) starts immediately before the actual seal
+            // barrier call, so the barrier is inside the budget.
+            let gate = SealGate::new(cap, Instant::now())
+                .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+            let wal_ctx = PassCtx {
                 cancel,
                 options,
-                BackupStage::Sealing,
-            )?;
-            bytes += recopy_bytes(&store.files);
+                stage: BackupStage::Sealing,
+                gate: Some(&gate),
+                preauth: &wal_preauth,
+            };
+            let store_ctx = PassCtx {
+                cancel,
+                options,
+                stage: BackupStage::Sealing,
+                gate: Some(&gate),
+                preauth: &store_preauth,
+            };
+            let point = match port.seal_point_before(&repo.name, gate.deadline(), cancel) {
+                Ok(point) => point,
+                Err(error) => {
+                    // A typed cap/cancel outcome wins over the port's
+                    // own error before it is forwarded.
+                    if let Err(cap) = gate.check_clock() {
+                        return Err(copy_failed(BackupStage::Sealing, cap));
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(OnlineBackupError::Cancelled {
+                            stage: BackupStage::Sealing,
+                        });
+                    }
+                    return Err(failed(BackupStage::Sealing, error));
+                }
+            };
+            if repo.wal_dir.is_some() {
+                let wal =
+                    copy_wal_dirs(&wal_ctx, std::slice::from_ref(repo), source_root, dest_dir)?;
+                recopy.wal_final.extend(wal);
+            }
+            let store_rel = store_dest_known
+                .clone()
+                .unwrap_or_else(|| point.store_dir.clone());
+            let store = store_ctx.run(&repo.store_dir, &dest_dir.join(&store_rel), &[])?;
             for file in store.files {
                 recopy.store_files.push(CopiedFile {
                     rel_path: format!("{store_rel}/{}", file.rel_path),
@@ -464,25 +554,16 @@ fn run_steps(
                     size_bytes: file.size_bytes,
                 });
             }
-            if let Some(max) = cap.max_bytes {
-                if bytes > max {
-                    return Err(cap_failed(format!(
-                        "repo {} copied {bytes} bytes, cap {max}",
-                        repo.name
-                    )));
-                }
-            }
-            if clock_cap_exceeded(cap, &started) {
-                return Err(cap_failed(format!(
-                    "repo {} seal re-copy exceeded {}s",
-                    repo.name,
-                    cap.max_seconds.unwrap_or_default()
-                )));
-            }
-            port.end_seal(&repo.name);
-            sealed_open.retain(|open| open != &repo.name);
+            // Final cooperative check before leaving the iteration for
+            // the manifest mapping; the gate already fails closed
+            // mid-pass, this covers the last loop of it.
+            gate.check(cancel)
+                .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+            drop(guard);
             recopy.points.push((repo.name.clone(), point));
         }
+        // Residual pass: NO gate (it holds no repo's seal) and NO cap
+        // check — it is outside every hold; stage-boundary bounded.
         recopy.residual = copy_engine::run_copy_pass(
             source_root,
             dest_dir,
@@ -492,19 +573,8 @@ fn run_steps(
             options,
         )
         .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
-        if clock_cap_exceeded(cap, &started) {
-            return Err(cap_failed(format!(
-                "seal re-copy exceeded {}s",
-                cap.max_seconds.unwrap_or_default()
-            )));
-        }
-        Ok(recopy)
-    })();
-    // Failure/cancellation inside the seal loop: end every hold still open.
-    for repo in &sealed_open {
-        port.end_seal(repo);
-    }
-    let recopy = recopy?;
+        recopy
+    };
 
     // F. Verify + manifest: manifest from the final pass, written last
     // with fsync, then self-verification.
@@ -518,6 +588,7 @@ fn run_steps(
             stage: BackupStage::Verifying,
         });
     }
+    port.begin_verify();
     let per_repo: BTreeMap<String, _> = recopy
         .points
         .iter()

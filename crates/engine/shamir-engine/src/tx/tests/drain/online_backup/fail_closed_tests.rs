@@ -106,9 +106,10 @@ async fn hold_active_refuses_second_barrier_until_the_hold_drops() {
             .expect("seal must refuse immediately, not block"),
         Err(OnlineBackupError::HoldActive)
     ));
-    // The refused barriers must not have closed the gate: the hold has it
-    // reopened the whole time.
-    assert!(!admission.is_closed());
+    // The refused barriers must not have disturbed the hold's ownership:
+    // the hold keeps the gate CLOSED (it owns the close owner) the whole
+    // time, with zero admission leases.
+    assert!(admission.is_closed());
     assert_eq!(admission.active_count(), 0);
 
     drop(hold);

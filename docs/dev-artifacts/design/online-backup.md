@@ -248,7 +248,7 @@ R2c extension point: `manifest.json` gains a preserved-unknown `encryption` obje
 ## 5. Restore and verification for online copies
 
 * **Replay or none (D10).** `kind = "offline"`: today's path, unchanged, no replay (`restore.rs:158-329`). `kind = "online"`: after the swap's step-3 copy into the staged dir (`restore.rs:186-222`), run the replay entry of 4.1 against the staged copy: replay goes through the BOOT-RECOVERY path (`add_repo_with_durability`), which replays the ENTIRE retained WAL unconditionally — `recover` = `SegmentSet::replay` over all segments (`repo_wal_manager.rs:182-184`), `recover_inflight_v2` sorts by commit_version and applies all (`v2.rs:339-383,440-447`) — NOT "from the recorded `wal_position`": the watermark only seeds the version floor (`v2.rs:357-372`). Replay MUST use cold recovery semantics — `CounterDelta` is NOT applied on the cold path (`v2.rs:155-186`), never the warm drainer counter path (`drain_step.rs:786-812` increments). Replay fails closed on unresolved table tokens (restore-mode flag; live code warns+Ok, `v2.rs:97-110,170-181,220-232`). Replay failure aborts before the swap (`restore.rs:230-243` discipline) with `data_dir` untouched.
-* **Consistency check.** After replay, the staged copy is opened once through `ShamirDb::init` (the same init the next boot would do, `launch.rs:415`) with a read-only consistency pass: catalogue rows ↔ repo directories ↔ the captured repo-set (Q9, not the live one); a mismatch refuses the restore. The check must TOLERATE a post-V* store state — store files may legitimately contain drain effects above V* (4.2 E). Replay must be run with cold-recovery semantics (above). (Same fail-closed bias as the stamp gate, `restore.rs:180`.)
+* **Consistency check.** After replay, the staged copy is opened once through `ShamirDb::init` (the same init the next boot would do, `launch.rs:415`) with a read-only consistency pass: catalogue rows ↔ repo directories ↔ the captured repo-set (Q9, not the live one); a mismatch refuses the restore. Strict restore refuses store contents or WAL **above** the recorded point `V*` — an above-point WAL segment or a store version above `V*` is a typed refusal with NO trim (corrective delta, 2026-11-19: supersedes the earlier "must TOLERATE a post-V* store" wording; the guide's claim that such a state is impossible by construction is likewise corrected). A store state at or below the point is NOT treated as corruption when the WAL covers it up to the point. Replay must be run with cold-recovery semantics (above). (Same fail-closed bias as the stamp gate, `restore.rs:180`.)
 * **Stamp refusal.** Unchanged: `restore_snapshot_gate` (`restore.rs:180`) on the snapshot's copied stamp; newer epoch refused, older allowed for rollback (`format-stamp.md` 5.2). The manifest `format_epoch` is cross-checked against the copied stamp — a mismatched manifest/stamp pair is refused as corrupt.
 * **Clean-machine restore.** `data_dir` absent: steps 3-7 of `restore.rs` already handle the fresh target (`restore.rs:303-310`). For an online copy the replay step runs on the staged dir before the single rename; the machine needs no prior state.
 * **Offline verify (R5).** `verify` extends `verify_manifest` (`backup.rs:411`) to: parse v2; check `kind`; re-hash every `files` entry and every WAL segment; check WAL seq contiguity per repo against the `wal` listing; report `format_epoch`, `binary_version`, `consistency` positions; refuse unmanifested files as today (`backup.rs:104-108`). No engine open — pure file inspection, runs on any machine with the binary.
@@ -655,15 +655,26 @@ remain PROPOSED work, unchanged in substance from the previous revision.
 
 Section 4.2 E required re-copying every mutable repo-database file inside
 the seal barrier, contradicting R3's "flush time plus a constant". The
-landed protocol runs the seal re-copy with writers running
-(`protocol.rs:338-368`), which is only safe if copied stores provably
-contain nothing above `V*` — exactly what §2 (iii)'s drain-pause provides.
-**Default (settled): keep the re-copy INSIDE the pause window** (pause is
-writer-blocking, so the bound is real data size, not flush time), with an
-explicit bound policy: a per-repo re-copy cap (bytes + wall clock,
-`shamir_backup_writer_block_seconds` extension) after which capture FAILS
-CLOSED instead of blocking unboundedly — R3's wording becomes "each barrier
-lasts at most flush + capped re-copy, with the cap enforced by refusal".
+EARLIER landed behavior ran the seal re-copy with writers running
+(`protocol.rs:338-368`), which was only defensible if copied stores
+provably contained nothing above `V*`; the commit store, however, applies
+its effects INLINE during commit (overlay merge, WAL append), so a
+drain-pause alone freezes the DRAINER, not the commit path — pause-only
+is therefore insufficient, and closing admission through the pause is
+exactly why a valid new snapshot contains no post-point commits through
+seal.
+**Default (settled; corrective delta 2026-11-19).** The FIRST copy pass runs
+with writers running; the seal barrier then CLOSES ADMISSION THROUGH SETTLE —
+the seal sample plus the WAL/store re-copy happen inside that pause — and the
+pause is dropped, after which the gate reopens (supersedes the earlier
+"gate already open while the hold is handed out" ordering of Step 1d). Bound
+policy, with defaults: 8 s monotonic per repository INCLUDING the barrier, and
+a 64 MiB cumulative re-copy write budget INCLUDING retries; exceeding either
+is a typed `Failed(Sealing)` plus cleanup, not an unbounded block. The clock
+is cooperative: it is checked between file/chunk/read/hash steps — in-flight
+OS syscalls can overrun the bound. A writer therefore waits (admission closed,
+no new commit), but after the EXISTING 15 s wait it may receive a typed
+retryable refusal instead of committing.
 Alternative (rejected default): move re-copy outside the pause with a
 convergence proof — no such proof exists (post-V* store effects are
 non-convergent, Review finding 4), so it stays an open question (Q12).
@@ -715,7 +726,7 @@ the two hazards above are unaddressed.
 
 #### Step 1d decisions (2026-11-17)
 
-**(a) Seal hold.** The drain pause survives `seal_point`: the barrier
+**(a) Seal hold (historical; superseded on gate timing by (d)).** The drain pause survives `seal_point`: the barrier
 returns a `SealHold` that owns the `DrainPauseGuard` (`Send + 'static`)
 and drops it exactly once, with itself — so on hold drop the gate is
 already open (the close owner was dropped before the hold was handed out,
@@ -730,7 +741,8 @@ the guard there — fail-closed is preserved.
 hold-returning `seal_point` signature; shamir-sync is NOT changed in this
 step — that port change belongs to R2a-3.
 
-**(c) Observed commit-side backpressure under the hold.** Commit execution
+**(c) Observed commit-side backpressure under the hold (historical; the
+gate-reopened premise is superseded by (d)).** Commit execution
 itself does NOT wait on the drainer: with the gate reopened, a commit
 passes admission, performs the Phase-1 interner overlay merge outside
 `commit_lock` (`preparation/pre_commit/prelock.rs:46,85-108`), and the
@@ -755,3 +767,16 @@ its timeout, and the soft undrained-gap brake
 committed and visible in overlay; only the durability promise relaxes).
 So: overlay-only and `Bounded` commits proceed with degraded
 acknowledgement; `Strict` commits block for the duration of the hold.
+
+**(d) Corrective delta (2026-11-19): admission closed through settle.**
+Supersedes (a)/(c) on one point and is the landed note on gate timing:
+the admission gate is NOT already open when the hold is handed out — it
+stays CLOSED through settle (seal sample and WAL/store re-copy run inside
+the pause), and the gate reopens only after the pause guard is dropped.
+The bound policy (8 s per repository, 64 MiB re-copy budget, cooperative
+clock) and the resulting typed retryable writer refusal are stated once
+in Step E above — see it instead of a repeat here. The reserved
+`shamir_backup_writer_block_seconds` gauge now records the latest closed
+window per phase (`capture|seal`), INCLUDING failed holds, and is absent
+until the first window; `shamir_backup_pin_seconds` and
+`shamir_backup_wal_segments_copied_total` remain not exported.

@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::path::Path;
+use std::time::Instant;
 
 /// Fired inside `copy_once` after every completed `write_all`:
 /// returning `Err` injects a genuine mid-file I/O failure AFTER at
@@ -24,6 +25,13 @@ pub type HashHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<(String, u64)
 /// successful self-verification, before Done); used to raise
 /// cancellation exactly at boundaries no copy-pass hook can reach.
 pub type BoundaryHook = Box<dyn Fn(BackupStage) + 'static>;
+/// Overrides the gate's monotonic clock for the in-flight deadline
+/// check: called with the REAL `Instant::now()` at every gate clock
+/// read, returning the instant the gate must treat as now. Default
+/// (unregistered) is the identity — the real clock. Lets a test trip
+/// the clock cap mid-copy deterministically (no sleeps): shift the
+/// reported instant past the deadline after the first chunk lands.
+pub type NowHook = Box<dyn FnMut(Instant) -> Instant + 'static>;
 
 use crate::sync::durability::backup::online::progress::BackupStage;
 
@@ -32,6 +40,7 @@ thread_local! {
     static AFTER_COPY: RefCell<Option<CopyHook>> = RefCell::new(None);
     static HASH_FILE: RefCell<Option<HashHook>> = RefCell::new(None);
     static BEFORE_BOUNDARY: RefCell<Option<BoundaryHook>> = RefCell::new(None);
+    static MONOTONIC_NOW: RefCell<Option<NowHook>> = RefCell::new(None);
 }
 
 /// Scoped registration: every hook is cleared when the guard drops.
@@ -43,6 +52,7 @@ impl Drop for SeamGuard {
         AFTER_COPY.with(|slot| *slot.borrow_mut() = None);
         HASH_FILE.with(|slot| *slot.borrow_mut() = None);
         BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = None);
+        MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
@@ -64,6 +74,20 @@ pub fn set_hash_file(hook: HashHook) -> SeamGuard {
 pub fn set_before_boundary(hook: BoundaryHook) -> SeamGuard {
     BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = Some(hook));
     SeamGuard
+}
+
+pub fn set_monotonic_now(hook: NowHook) -> SeamGuard {
+    MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard
+}
+
+/// The gate's clock read: the registered hook's verdict, else the real
+/// instant. Called only from `SealGate`'s clock checks under `cfg(test)`.
+pub fn fire_monotonic_now(real: Instant) -> Instant {
+    MONOTONIC_NOW.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(hook) => hook(real),
+        None => real,
+    })
 }
 
 pub fn fire_after_first_write(source: &Path) -> std::io::Result<()> {

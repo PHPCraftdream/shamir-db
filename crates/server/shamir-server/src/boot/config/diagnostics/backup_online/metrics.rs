@@ -5,16 +5,22 @@
 //! are process-lifetime cumulative so the recorder's `absolute` rendering
 //! never regresses them across overlapping scrapes.
 //!
-//! Unmeasured values (writer-block barrier durations per phase, pin hold
-//! duration, WAL segment count) stay `None` in the snapshot — the renderer
-//! emits nothing for them rather than a fabricated zero. The current port
-//! adapter does not time the capture/seal barriers or the truncation pins,
-//! and `BackupProgress` carries only hashed bytes/files.
+//! Writer-block windows come from the engine's per-phase last-window cells
+//! (`RepoInstance::online_backup_writer_block_seconds`, process-local): each
+//! completed capture or seal barrier — success, error, timeout, cancellation
+//! or unwind — overwrites its phase cell exactly once after the gate has
+//! reopened, so the exported gauge is the LAST completed window per phase
+//! (`phase=capture|seal`), not an aggregate. Truncation-pin hold duration
+//! and the WAL segment count are still unmeasured: no observable source
+//! exists, so they stay `None` in the snapshot — the renderer emits nothing
+//! for them rather than a fabricated zero. `BackupProgress` carries only
+//! hashed bytes/files.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
+use shamir_db::engine::repo::RepoInstance;
 use shamir_server_security::observability::{install_backup_metrics_source, BackupMetricsSnapshot};
 
 use crate::sync::durability::backup::online::progress::BackupStage;
@@ -87,6 +93,7 @@ pub fn backup_metrics_snapshot() -> BackupMetricsSnapshot {
         .map(|(label, count)| ((*label).to_owned(), count.load(Ordering::Relaxed)))
         .filter(|(_, count)| *count > 0)
         .collect();
+    let (capture_window, seal_window) = RepoInstance::online_backup_writer_block_seconds();
     BackupMetricsSnapshot {
         started_total: state.started.load(Ordering::Relaxed),
         completed_total: state.completed.load(Ordering::Relaxed),
@@ -97,8 +104,8 @@ pub fn backup_metrics_snapshot() -> BackupMetricsSnapshot {
             .has_duration
             .load(Ordering::Relaxed)
             .then(|| state.last_duration_ms.load(Ordering::Relaxed) as f64 / 1_000.0),
-        writer_block_capture_seconds: None,
-        writer_block_seal_seconds: None,
+        writer_block_capture_seconds: capture_window,
+        writer_block_seal_seconds: seal_window,
         pin_seconds: None,
         wal_segments_copied_total: None,
     }

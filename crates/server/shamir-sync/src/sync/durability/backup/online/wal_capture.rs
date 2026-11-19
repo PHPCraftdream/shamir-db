@@ -4,8 +4,10 @@
 //! at steps A, B, E and G.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::manifest::RepoConsistency;
+use super::progress::CancelFlag;
 
 /// One file-backed repository in the captured set. `wal_dir` is `None` for
 /// an in-memory repo, which is reported in the manifest but not copied
@@ -81,6 +83,34 @@ pub trait OnlineBackupPort {
     /// Step E (seal barrier): re-flush `repo` and report the consistency
     /// point `V*`.
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError>;
+
+    /// Step E, deadline-aware variant the protocol actually calls:
+    /// `deadline` is the repo's seal re-copy budget boundary (the
+    /// per-repo monotonic start is taken immediately before this call,
+    /// so the barrier itself is INSIDE the budget); `cancel` lets an
+    /// async server implementation abandon the seal early. The default
+    /// ignores both and delegates to [`OnlineBackupPort::seal_point`]
+    /// (existing impls keep working); the server production override
+    /// uses `timeout_at` + `select` around the engine seal, never
+    /// around the blocking copy.
+    fn seal_point_before(
+        &self,
+        repo: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelFlag,
+    ) -> Result<CapturedPoint, PortError> {
+        let _ = (deadline, cancel);
+        self.seal_point(repo)
+    }
+
+    /// Called by the protocol right before the first WAL pass of step
+    /// C/D (after the capture barrier and its cancellation check) so the
+    /// server can publish the real phase `Copying`. Default: no-op.
+    fn begin_copy(&self) {}
+
+    /// Called by the protocol at the start of step F (verify + manifest)
+    /// so the server can publish the real phase `Verifying`. Default: no-op.
+    fn begin_verify(&self) {}
 
     /// Ends the seal hold for `repo` after that repo's seal re-copy
     /// (design 1d (a): the hold returned by `seal_point` keeps the stores

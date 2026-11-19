@@ -173,6 +173,21 @@ async fn capture_completes_under_concurrent_commits_no_repo_permit() {
     );
 }
 
+/// Actual WAL horizon: the highest commit version of any recovered WAL
+/// entry (0 on an empty WAL).
+async fn wal_horizon(repo: &RepoInstance) -> u64 {
+    repo.repo_wal()
+        .await
+        .unwrap()
+        .recover()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.commit_version)
+        .max()
+        .unwrap_or(0)
+}
+
 #[tokio::test]
 async fn seal_completes_under_concurrent_commits_no_repo_permit() {
     let repo = seeded_repo().await;
@@ -183,15 +198,37 @@ async fn seal_completes_under_concurrent_commits_no_repo_permit() {
         .await
         .expect("seal deadlocked under concurrent commits (hazard-1 regression)")
         .expect("seal succeeded under concurrent commits");
-    // The gate is ALREADY reopened when the hold is handed out: writers
-    // run again while the pause is live.
+    let v_star = hold.position();
+    // The hold now owns the close owner as well: the gate stays CLOSED
+    // while the hold is alive, with zero admission leases, and the actual
+    // WAL horizon is stable at V* — every successful committer commit is
+    // a "before" side entry through V*, and the "after" side can only
+    // append once the hold drops and reopens the gate.
     let admission = repo.core().commit_admission();
     assert!(
-        !admission.is_closed(),
-        "gate reopened before the hold returned"
+        admission.is_closed(),
+        "the hold keeps the admission gate closed"
     );
-    let v_star = hold.position();
+    assert_eq!(
+        admission.active_count(),
+        0,
+        "no admission leases under the hold"
+    );
+    let before_horizon = wal_horizon(&repo).await;
+    assert_eq!(
+        before_horizon, v_star,
+        "all successful before-side commits landed through V*"
+    );
+    assert_eq!(
+        wal_horizon(&repo).await,
+        before_horizon,
+        "the actual WAL horizon is stable while the hold is live"
+    );
     drop(hold);
+    assert!(
+        !admission.is_closed(),
+        "hold drop reopens the gate before the after-side commits"
+    );
 
     let mut admitted = 0usize;
     for task in committers {
@@ -205,9 +242,14 @@ async fn seal_completes_under_concurrent_commits_no_repo_permit() {
     assert!(admitted > 0);
 
     // Everything acknowledged — before and after V* — settles once the
-    // hold is gone.
+    // hold is gone, and the after-side commits reached the WAL too.
     repo.drainer().drain_all(&repo.core).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
     assert!(gate.last_committed() >= v_star);
+    assert_eq!(
+        wal_horizon(&repo).await,
+        gate.last_committed(),
+        "the successful after-side commits' WAL entries are all recovered"
+    );
     assert!(!repo.drainer().pause_held(), "hold drop released the pause");
 }
