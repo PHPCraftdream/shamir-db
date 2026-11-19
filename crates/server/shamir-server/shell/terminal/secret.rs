@@ -248,8 +248,8 @@ fn read_stdin_byte() -> Result<Option<u8>, ShellError> {
     }
 }
 
-/// POSIX `dup` for the `--secret-fd` duplicate; declared locally because the
-/// workspace deliberately carries no `libc` crate dependency.
+// POSIX `dup` for the `--secret-fd` duplicate; declared locally because the
+// workspace deliberately carries no `libc` crate dependency.
 #[cfg(unix)]
 extern "C" {
     fn dup(fd: core::ffi::c_int) -> core::ffi::c_int;

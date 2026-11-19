@@ -437,7 +437,7 @@ fn verified_dir_names(root: &Path) -> Result<Vec<String>, ShellError> {
         let name = entry
             .file_name()
             .to_str()
-            .ok_or(ShellError::InsecureProfile)?;
+            .map_err(|_| ShellError::InsecureProfile)?;
         if name != "." && name != ".." {
             names.push(name.to_string());
         }
