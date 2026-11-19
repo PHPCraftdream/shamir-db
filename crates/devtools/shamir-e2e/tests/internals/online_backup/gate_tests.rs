@@ -49,6 +49,7 @@ use super::copy_observation::{
     active_copy, CopyObservation, CopyProgress, StatusObservation, ACK_GAP_BOUND,
 };
 use super::fixture::{self, paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
+use super::shutdown_budgets::{budget_failure, scan_quiet_shutdown};
 use super::writers::{
     run_writer, value, Ack, Ledger, WriterControl, WriterError, WRITER_COUNT, WRITER_ROW_LIMIT,
 };
@@ -88,13 +89,14 @@ const CI_FIXTURE_PAD_BYTES: usize = 16 * 1024 * 1024;
 const CI_FIXTURE_CHUNK_BYTES: usize = 1024 * 1024;
 const CI_FIXTURE_PAD_FILE: &str = "zz-backup-test-fixture.bin";
 
-/// Budget: total actual bytes under the data dir at quiet shutdown
-/// (filesystem scan of every regular file, fixture padding included —
-/// nothing is removed) must stay under 200 MB.
-const DATA_DIR_TOTAL_BUDGET: u64 = 200 * 1024 * 1024;
-/// Budget: bytes under retained WAL directories (every `*.shamirwal`
-/// directory file) at quiet shutdown must stay under 32 MB.
-const WAL_RETAINED_BUDGET: u64 = 32 * 1024 * 1024;
+/// The canonical fixture pad path RELATIVE to the data dir — the single
+/// source of the pad path; the absolute helper joins it onto a base, so
+/// the directory literal exists exactly once. This is the ONLY path the
+/// budget scan may classify as the pad; a same-named stray file
+/// elsewhere classifies as store/other instead.
+fn ci_fixture_pad_relative() -> std::path::PathBuf {
+    std::path::Path::new("shamir_db_default_main.redb").join(CI_FIXTURE_PAD_FILE)
+}
 
 /// Deterministic NONZERO byte pattern for chunk `idx` of the fixture:
 /// `(idx * 31 + 0x5A) as u8` — never zero, fully reproducible. Proof: the
@@ -109,8 +111,7 @@ fn fixture_pad_byte(chunk_idx: usize) -> u8 {
 /// deterministic nonzero bytes, 1 MiB per chunk — an ordinary side file
 /// in the `default/main` repo directory, no locks, no protocol.
 fn ci_fixture_pad_path(base: &std::path::Path) -> std::path::PathBuf {
-    base.join("shamir_db_default_main.redb")
-        .join(CI_FIXTURE_PAD_FILE)
+    base.join(ci_fixture_pad_relative())
 }
 
 pub(super) fn write_ci_fixture_pad(data_dir: &std::path::Path) {
@@ -129,73 +130,15 @@ pub(super) fn write_ci_fixture_pad(data_dir: &std::path::Path) {
     file.sync_all().expect("sync CI fixture pad file");
 }
 
-/// One recursive-scan outcome: total bytes of every regular file and the
-/// subset under retained WAL directories (`*.shamirwal`).
-#[derive(Debug, Default)]
-struct DirScan {
-    total_bytes: u64,
-    wal_bytes: u64,
-    fixture_bytes: u64,
-}
-
-/// Recursively sum regular-file sizes under `dir`. A file is WAL bytes
-/// when ANY path component ends in `.shamirwal` (the per-repo WAL
-/// directory shape: `<name>.shamirwal/` next to the repo dir) — this
-/// counts ALL files inside those directories, not only `*.wal` segments.
-/// Files are NEVER removed; symlinks are not followed (metadata only).
-fn scan_dir(dir: &std::path::Path, under_wal: bool, scan: &mut DirScan, depth: u32) {
-    assert!(
-        depth < 32,
-        "directory scan depth runaway at {}",
-        dir.display()
-    );
-    for entry in dir
-        .read_dir()
-        .unwrap_or_else(|e| panic!("scan {}: {e}", dir.display()))
-    {
-        let entry = entry.unwrap_or_else(|e| panic!("scan entry in {}: {e}", dir.display()));
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            panic!("scan metadata {}: vanished during scan", path.display())
-        };
-        if meta.is_dir() {
-            let child_wal = under_wal
-                || path
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().ends_with(".shamirwal"));
-            scan_dir(&path, child_wal, scan, depth + 1);
-        } else if meta.is_file() {
-            let size = meta.len();
-            scan.total_bytes += size;
-            if under_wal {
-                scan.wal_bytes += size;
-            }
-            if path.file_name().is_some_and(|n| n == CI_FIXTURE_PAD_FILE) {
-                scan.fixture_bytes += size;
-            }
-        }
-    }
-}
-
-/// Assert the quiet-shutdown budgets over a full data-dir scan and verify
-/// the fixture padding survived the round trip at its exact constant size.
-fn assert_shutdown_budgets(data_dir: &std::path::Path, what: &str) {
-    let mut scan = DirScan::default();
-    scan_dir(data_dir, false, &mut scan, 0);
+/// Assert the fixture padding survived the round trip at its exact
+/// constant size, on a completed quiet-shutdown scan (unchanged text and
+/// expression; the aggregate/WAL budgets themselves are reported by
+/// [`budget_failure`]).
+fn assert_exact_fixture_pad(scan: &super::shutdown_budgets::DirScan, what: &str) {
     assert_eq!(
         scan.fixture_bytes, CI_FIXTURE_PAD_BYTES as u64,
         "{what}: fixture padding must survive at exactly {CI_FIXTURE_PAD_BYTES} bytes (scan saw {})",
         scan.fixture_bytes
-    );
-    assert!(
-        scan.total_bytes <= DATA_DIR_TOTAL_BUDGET,
-        "{what}: data dir totals {} bytes, over the {DATA_DIR_TOTAL_BUDGET} budget",
-        scan.total_bytes
-    );
-    assert!(
-        scan.wal_bytes <= WAL_RETAINED_BUDGET,
-        "{what}: retained WAL totals {} bytes, over the {WAL_RETAINED_BUDGET} budget",
-        scan.wal_bytes
     );
 }
 
@@ -929,9 +872,24 @@ async fn gate_scenario(guard: FlakeGuard) {
 
     // ── quiet-shutdown budget scan (nothing removed, fixture included) ──
     // Both data dirs are quiescent (each server shut down cleanly); the
-    // scan counts every regular file and removes nothing.
-    assert_shutdown_budgets(data_dir.path(), "source data dir");
-    assert_shutdown_budgets(&restored_data_dir, "restored data dir");
+    // scan counts every regular file and removes nothing. BOTH scans run
+    // before the single budget assertion, and each side formats its
+    // report only when it actually failed, so shortages on both roots
+    // print together in one CI run. The exact-padding assertions keep
+    // their original text and expression, on the returned scans.
+    let pad_relative = ci_fixture_pad_relative();
+    let source_scan = scan_quiet_shutdown(data_dir.path(), &pad_relative);
+    let restored_scan = scan_quiet_shutdown(&restored_data_dir, &pad_relative);
+    let source_failure = budget_failure(&source_scan, "source data dir");
+    let restored_failure = budget_failure(&restored_scan, "restored data dir");
+    assert!(
+        source_failure.is_none() && restored_failure.is_none(),
+        "quiet-shutdown budgets exceeded:\n{}\n{}",
+        source_failure.unwrap_or_else(|| "source data dir: within budget".to_string()),
+        restored_failure.unwrap_or_else(|| "restored data dir: within budget".to_string()),
+    );
+    assert_exact_fixture_pad(&source_scan, "source data dir");
+    assert_exact_fixture_pad(&restored_scan, "restored data dir");
     guard.mark("shutdown budget scan passed");
     assert!(
         Instant::now() < overall_deadline,

@@ -5,4 +5,5 @@ mod churn_tests;
 mod copy_observation;
 mod fixture;
 mod gate_tests;
+mod shutdown_budgets;
 mod writers;
