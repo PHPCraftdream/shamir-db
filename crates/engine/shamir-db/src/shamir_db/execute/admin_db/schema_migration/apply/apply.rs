@@ -344,11 +344,7 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // acquire also re-validates id/ordinal/checksum against the journal and
     // persists+syncs the `started` event WITH the complete checksum-verified
     // body before any effect (§4.1 runner sequence).
-    if executor
-        .shamir
-        .schema_migration_gate_generation(&db)
-        .is_some()
-    {
+    let Some(gate) = executor.shamir.reserve_schema_migration_gate(&db) else {
         return Err(coded(
             "schema_migration_in_progress",
             format!(
@@ -356,7 +352,7 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
                  for database '{db}'"
             ),
         ));
-    }
+    };
     let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
     // Recovery CASes the fence at the CURRENT durable generation, i.e. the
     // generation of the latest journal event (the control-record validation
@@ -383,17 +379,20 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
 
     // Fence owned durably: the runner holds the in-process gate under an
     // RAII guard so EVERY exit path releases it.
-    Box::pin(run_operations(FencedRun {
-        executor,
-        serving,
-        db: &db,
-        submission,
-        body: &body,
-        protocol_version: request.protocol_version,
-        generation,
-        resume,
-        context: &context,
-    }))
+    Box::pin(run_operations(
+        FencedRun {
+            executor,
+            serving,
+            db: &db,
+            submission,
+            body: &body,
+            protocol_version: request.protocol_version,
+            generation,
+            resume,
+            context: &context,
+        },
+        gate,
+    ))
     .await
 }
 

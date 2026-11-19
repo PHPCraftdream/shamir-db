@@ -17,12 +17,12 @@ use crate::query::read::QueryResult;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
 };
-use crate::shamir_db::ShamirDb;
 use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationBody, SchemaMigrationMetadata, SchemaMigrationOp, SchemaMigrationSubmission,
 };
 
 use super::super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::fence::SchemaMigrationGateGuard;
 use super::super::function_family::{admission, execution, reconcile};
 use super::super::plan::{coded, map_store_error};
 use super::apply_journal::{
@@ -34,25 +34,6 @@ use super::apply_journal::{
 mod ddl_postconditions;
 
 use self::ddl_postconditions::{index_exists, stored_rules, table_exists};
-
-struct LiveGate<'a> {
-    shamir: &'a ShamirDb,
-    db: &'a str,
-    generation: u64,
-    succeeded: bool,
-}
-
-impl Drop for LiveGate<'_> {
-    fn drop(&mut self) {
-        if self.succeeded {
-            self.shamir
-                .release_schema_migration_gate(self.db, self.generation);
-        } else {
-            self.shamir
-                .mark_schema_migration_gate_in_doubt(self.db, self.generation);
-        }
-    }
-}
 
 /// Parameter bundle for one fenced run: the runner takes this single struct
 /// instead of a long argument list (rust-guard: no new `#[allow]`).
@@ -70,22 +51,18 @@ pub(super) struct FencedRun<'a> {
     pub(super) context: &'a SchemaMigrationContext,
 }
 
-/// The fenced run: holds the IN-PROCESS gate for the whole run and converts
-/// it to an in-doubt marker on error or cancellation. Only a successful
-/// durable fence release clears the live gate.
-pub(super) async fn run_operations(run: FencedRun<'_>) -> Result<QueryResult, BatchError> {
-    let shamir = &run.executor.shamir;
-    let db = run.db;
-    let generation = run.generation;
-    shamir.hold_schema_migration_gate(db, generation);
-    let mut gate = LiveGate {
-        shamir,
-        db,
-        generation,
-        succeeded: false,
-    };
+/// The fenced run: converts the reserved in-process gate into the live gate
+/// for the whole run and into an in-doubt marker on error or cancellation.
+/// Only a successful durable fence release clears the live gate.
+pub(super) async fn run_operations(
+    run: FencedRun<'_>,
+    mut gate: SchemaMigrationGateGuard<'_>,
+) -> Result<QueryResult, BatchError> {
+    gate.hold(run.generation);
     let result = Box::pin(run_operations_fenced(run)).await;
-    gate.succeeded = result.is_ok();
+    if result.is_ok() {
+        gate.mark_succeeded();
+    }
     result
 }
 
