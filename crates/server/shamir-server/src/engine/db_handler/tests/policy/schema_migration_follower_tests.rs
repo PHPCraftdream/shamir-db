@@ -208,19 +208,28 @@ fn apply_batch() -> shamir_query_builder::BatchRequest {
 
 #[tokio::test]
 async fn follower_refuses_application_schema_apply_as_stale() {
-    let handler = build_handler(NodeMode::ReadOnly).await;
-    let session = alice_session();
-    let conn = ConnectionServices::without_push(0);
+    let fut = async {
+        let handler = build_handler(NodeMode::ReadOnly).await;
+        let session = alice_session();
+        let conn = ConnectionServices::without_push(0);
 
-    let resp = handler
-        .execute(
-            &session,
-            CURRENT_QUERY_LANG_VERSION,
-            "app",
-            apply_batch(),
-            &conn,
-        )
-        .await;
+        handler
+            .execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                apply_batch(),
+                &conn,
+            )
+            .await
+    };
+
+    // Bounded wait: if the follower gate regresses to blocking (e.g. by
+    // attempting a real apply on a read-replica), this test must fail fast
+    // instead of hanging the CI suite.
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(180), Box::pin(fut))
+        .await
+        .expect("apply refusal must complete within 180s");
 
     match resp {
         DbResponse::Error { code, message } => {

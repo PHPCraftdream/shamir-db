@@ -3,18 +3,120 @@ use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEventKind, SchemaMigrationStep, SystemStoreConfig,
 };
 use crate::shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_types::admin::types::schema_migration::{
+    SchemaMigrationStatusRequest, SchemaMigrationTarget,
+};
 use shamir_types::types::value::QueryValue;
 use std::str::FromStr;
+use std::time::Duration;
 use tokio::runtime::Builder;
 
 use super::helpers::{body, checksum, context};
+
+/// Every phase of the touched scenario is bounded well above the 120 s
+/// floor (the Windows CI runner can be up to 10x slower) and `Box::pin`s
+/// the engine futures so their frames never live in the test thread's
+/// stack (debug-test stacks are small).
+async fn bounded<T>(step: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(180), Box::pin(step))
+        .await
+        .expect("identity-restart scenario phase timed out")
+}
+
+/// Reopen the persistent system store. A just-dropped engine can keep its
+/// fjall lock until its background handles finish (`FjallError: Locked`,
+/// seen on Windows), so retry that one error for a bounded time; any other
+/// error fails at once. Never a bare reopen.
+async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> ShamirDb {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        match bounded(ShamirDb::init(SystemStoreConfig::Fjall(
+            system_path.clone(),
+        )))
+        .await
+        {
+            Ok(db) => return db,
+            Err(error)
+                if error.to_string().contains("Locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("reopen the system store: {error}"),
+        }
+    }
+}
+
+/// A typed Batch status request built ONLY through `shamir-query-builder`,
+/// executed through the normal batch entry point (`execute`) against the
+/// database under `database_name`.
+async fn run_status_batch(
+    db: &ShamirDb,
+    database_name: &str,
+    identity: DatabaseIdentity,
+) -> QueryValue {
+    let mut b = Batch::new();
+    b.op(
+        "status",
+        shamir_query_builder::application_schema_status(SchemaMigrationStatusRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: identity.0,
+            },
+        }),
+    );
+    let request = b.to_request_via_msgpack().unwrap();
+    let response = bounded(db.execute(database_name, &request)).await.unwrap();
+    response.results["status"].records[0]
+        .as_value()
+        .into_owned()
+}
+
+fn field<'a>(value: &'a QueryValue, key: &str) -> &'a QueryValue {
+    value
+        .get(key)
+        .unwrap_or_else(|| panic!("field {key} missing"))
+}
+
+fn str_field<'a>(value: &'a QueryValue, key: &str) -> &'a str {
+    field(value, key)
+        .as_str()
+        .unwrap_or_else(|| panic!("field {key} is not a string"))
+}
+
+/// The typed status handler reports the SAME stored identity's applied
+/// prefix (`alpha-001`, ordinal 1, the staged checksum) with the checksum
+/// validated, no in-flight fence and no error — both post-rename and
+/// post-restart.
+fn assert_applied_prefix_via_status(value: &QueryValue, digest: [u8; 32]) {
+    assert_eq!(str_field(value, "last_applied_id"), "alpha-001");
+    assert_eq!(field(value, "last_applied_ordinal").as_i64(), Some(1));
+    assert_eq!(
+        field(value, "last_applied_checksum"),
+        &QueryValue::Bin(digest.to_vec())
+    );
+    assert_eq!(str_field(value, "checksum_validation"), "valid");
+    assert!(value.get("in_flight").is_none());
+    assert!(value.get("error").is_none());
+    let QueryValue::List(entries) = field(value, "applied") else {
+        panic!("applied is not a list");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(str_field(&entries[0], "id"), "alpha-001");
+    assert_eq!(field(&entries[0], "ordinal").as_i64(), Some(1));
+    assert_eq!(
+        field(&entries[0], "checksum"),
+        &QueryValue::Bin(digest.to_vec())
+    );
+}
 
 #[test]
 fn database_identity_survives_cold_restart_and_rename() {
     let dir = tempfile::tempdir().unwrap();
     let system_path = dir.path().join("system");
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    let identity = runtime.block_on(async {
+    let (identity, digest) = runtime.block_on(bounded(async {
         let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone()))
             .await
             .unwrap();
@@ -92,15 +194,18 @@ fn database_identity_survives_cold_restart_and_rename() {
             .unwrap();
         assert_eq!(renamed_history.applied.len(), 1);
         assert_eq!(renamed_history.applied[0].checksum, digest);
-        identity
-    });
+        // NEW (4b): the typed Batch status operation, executed through the
+        // handler under the NEW database name, reports the SAME stored
+        // identity's applied prefix with checksum validity.
+        let status = run_status_batch(&db, "after_rename", identity).await;
+        assert_applied_prefix_via_status(&status, digest);
+        (identity, digest)
+    }));
     drop(runtime);
 
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
-    runtime.block_on(async {
-        let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path))
-            .await
-            .unwrap();
+    runtime.block_on(bounded(async {
+        let db = init_waiting_for_locks(system_path).await;
         assert_eq!(
             db.system_store()
                 .schema_migration_identity("after_rename")
@@ -121,7 +226,12 @@ fn database_identity_survives_cold_restart_and_rename() {
             history.applied[0].migration.id, "alpha-001",
             "the applied prefix survives the rename and the restart"
         );
-    });
+        // NEW (4b): the same typed status, again through the handler under
+        // the NEW name after the cold restart: same stored identity, same
+        // applied prefix, checksum still validated.
+        let status = run_status_batch(&db, "after_rename", identity).await;
+        assert_applied_prefix_via_status(&status, digest);
+    }));
     drop(runtime);
 }
 

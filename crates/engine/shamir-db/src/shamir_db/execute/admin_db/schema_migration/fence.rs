@@ -43,7 +43,6 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use crate::query::batch::{BatchError, BatchOp, BatchRequest};
 use crate::shamir_db::shamir_db::ShamirDb;
 use crate::shamir_db::system_store::DatabaseIdentity;
-use crate::DbResult;
 
 /// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
@@ -58,6 +57,11 @@ const GATE_PENDING: u64 = u64::MAX;
 /// runner in this process (R1c step 2b-3b: the runner crashed or the server
 /// restarted before resume) — seeded at database open from the journal.
 const IN_DOUBT: &str = "schema_migration_in_doubt";
+
+/// Stable §5.3 code for an unreadable journal/catalogue. When the open-time
+/// seed itself failed for a database, the marker stands for a BOOT FAILURE
+/// and status/plan/apply report this code, not `schema_migration_in_doubt`.
+const DURABILITY_UNAVAILABLE: &str = "schema_migration_durability_unavailable";
 
 impl ShamirDb {
     /// §4.5: lower the server's node mode into the engine. Called once at
@@ -118,14 +122,27 @@ impl ShamirDb {
 
     /// The generation of the fence the open-time rebuild recorded as durably
     /// OWNED with an unresolved journal entry — i.e. in doubt, no runner.
-    /// Absent once a resumed runner has held the gate.
+    /// Absent once a resumed runner has held the gate; `None` while the
+    /// marker stands for an UNKNOWABLE state (boot failure) — such databases
+    /// report `schema_migration_durability_unavailable`, never a guessed
+    /// generation. Test-only reader.
+    #[cfg(test)]
     pub(in crate::shamir_db) fn schema_migration_gate_in_doubt_generation(
         &self,
         db: &str,
     ) -> Option<u64> {
         self.schema_migration_gate_in_doubt
             .get(db)
-            .map(|entry| *entry)
+            .and_then(|entry| *entry)
+    }
+
+    /// Whether ANY in-doubt marker is present for `db`, including the
+    /// boot-failure variant whose generation is unknown (`None`). The
+    /// presence-only reader of the batch fence; unlike the test-only
+    /// generation getter it does not collapse the unknown-generation marker
+    /// into "free".
+    pub(in crate::shamir_db) fn schema_migration_in_doubt(&self, db: &str) -> bool {
+        self.schema_migration_gate_in_doubt.contains_key(db)
     }
 
     /// Convert a LIVE gate into an IN-DOUBT marker: the run exited while the
@@ -142,29 +159,53 @@ impl ShamirDb {
     ) {
         self.release_schema_migration_gate(db, generation);
         self.schema_migration_gate_in_doubt
-            .insert(db.to_string(), generation);
+            .insert(db.to_string(), Some(generation));
     }
 
     /// One-time open-time seed of the in-doubt marker: every database whose
     /// control record still OWNS the durable fence while its journal is
-    /// unresolved is marked in doubt (in-memory only). A no-op without a
-    /// durable journal. Called by `init_inner` only; never on the batch path.
+    /// unresolved is marked in doubt (in-memory only, generation known).
+    /// A database whose fence/journal state is UNKNOWABLE at boot (the
+    /// control-record read FAILED — ownership itself cannot be established)
+    /// is marked with the unknown-generation variant (`None`): admission
+    /// fails closed with `schema_migration_durability_unavailable`. A single
+    /// payload-free `warn!` covers all failures. Never propagates an error:
+    /// the seed must not block database open. The marker is in-memory only
+    /// and is NOT cleared by repairing the journal on disk alone — the
+    /// affected databases must be reopened for a fresh seed. A no-op without
+    /// a durable journal. Called by `init_inner` only; never on the batch path.
     pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(
         &self,
         identities: &[(String, DatabaseIdentity)],
-    ) -> DbResult<()> {
+    ) {
         let store = self.system_store();
         if !store.schema_migration_journal_durable() {
-            return Ok(());
+            return;
         }
+        let mut unreadable = false;
         for (name, identity) in identities {
-            let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await?;
-            if let Some(generation) = owned {
-                self.schema_migration_gate_in_doubt
-                    .insert(name.clone(), generation);
+            let owned = Box::pin(store.owned_schema_migration_fence(*identity)).await;
+            match owned {
+                Ok(Some(generation)) => {
+                    self.schema_migration_gate_in_doubt
+                        .insert(name.clone(), Some(generation));
+                }
+                // The control record read failed: mark unknown, never guess.
+                Err(_) => {
+                    unreadable = true;
+                    self.schema_migration_gate_in_doubt
+                        .insert(name.clone(), None);
+                }
+                Ok(None) => {}
             }
         }
-        Ok(())
+        if unreadable {
+            log::warn!(
+                "application-schema maintenance fence: the durable migration state could not \
+                 be read for at least one database at boot; affected databases fail closed \
+                 until repaired and REOPENED"
+            );
+        }
     }
 
     /// Release the in-process gate, but only if the recorded generation still
@@ -242,8 +283,8 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
     // Nothing is held for this database: neither a live runner's gate nor an
     // open-time in-doubt marker → nothing to refuse.
     let live = shamir.schema_migration_gate_generation(db_name);
-    let in_doubt = shamir.schema_migration_gate_in_doubt_generation(db_name);
-    if live.is_none() && in_doubt.is_none() {
+    let in_doubt = shamir.schema_migration_in_doubt(db_name);
+    if live.is_none() && !in_doubt {
         return None;
     }
     // A live runner of this process is authoritative over the open-time
@@ -276,4 +317,35 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
         }
     }
     None
+}
+
+/// Fail-closed admission for the application-schema handlers (status/plan/
+/// apply), called from the common dispatcher AFTER authorization and BEFORE
+/// any journal byte is read: when the open-time in-doubt marker stands for a
+/// BOOT FAILURE (state unknowable at open — the control-record read failed),
+/// refuse with `schema_migration_durability_unavailable`
+/// instead of guessing. A marker with a
+/// KNOWN generation keeps the existing behavior (handlers read the journal
+/// themselves and report `schema_migration_in_doubt` with the reason and
+/// operation index). Repairing the journal on disk alone does not clear the
+/// in-memory marker: the database must be reopened.
+#[inline(never)]
+pub(in crate::shamir_db) fn schema_migration_gate_boot_unavailable_refusal(
+    shamir: &ShamirDb,
+    db_name: &str,
+) -> Option<BatchError> {
+    shamir
+        .schema_migration_gate_in_doubt
+        .get(db_name)
+        .filter(|entry| entry.value().is_none())
+        .map(|_| BatchError::QueryError {
+            alias: String::new(),
+            message: format!(
+                "the application-schema migration state for database \
+                     '{db_name}' could not be read at boot; status, plan and \
+                     apply fail closed until the journal or catalogue is \
+                     repaired and the database is reopened"
+            ),
+            code: Some(DURABILITY_UNAVAILABLE.to_string()),
+        })
 }

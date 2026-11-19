@@ -556,7 +556,7 @@ fn dml_operations_cannot_enter_a_schema_migration_body() {
 
 #[tokio::test]
 async fn plan_lists_function_and_validator_warnings_and_registrations() {
-    let limit = Duration::from_secs(30);
+    let limit = Duration::from_secs(120);
     let (_dir, db) = tokio::time::timeout(limit, Box::pin(persistent_db()))
         .await
         .expect("persistent database setup timed out");

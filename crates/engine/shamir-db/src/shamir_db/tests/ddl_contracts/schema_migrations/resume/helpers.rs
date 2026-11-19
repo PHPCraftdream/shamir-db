@@ -97,10 +97,10 @@ async fn persistent_owner_db_dir(
 /// fixtures).
 pub(super) async fn reopen_owner_db(dir: &tempfile::TempDir) -> ShamirDb {
     let system_path = dir.path().join("system");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let attempt = tokio::time::timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(120),
             ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())),
         )
         .await;

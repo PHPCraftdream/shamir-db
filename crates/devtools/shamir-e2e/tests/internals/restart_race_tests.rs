@@ -28,22 +28,40 @@
 //!    refuses and the drifted refusals leave the journal at exactly the
 //!    two applied entries with the released generation 4.
 //!
-//! **Race** (`migration_real_server_concurrent_appliers_one_gate_...`):
-//! TWO independent client connections apply the SAME next ordinal,
-//! released from ONE gate (`tokio::sync::Barrier`). The SET of outcomes is
-//! asserted loosely: AT LEAST ONE applier returns `Ok` (both refusals are
-//! impossible — the raced event IS durably applied exactly once, so the
-//! winner's `apply` already-applied fast path returns a successful
-//! response); if BOTH return `Ok`, the two stored responses must be
-//! EQUAL (`SchemaMigrationApplyResult` derives `PartialEq` — the
-//! fast-path loser gets the identical stored response). The loser may
-//! instead be refused typed (`NothingToApply` when its preflight saw the
-//! winner's applied head, `InProgress` / `PredecessorMismatch` when the
-//! server fenced the stale expected generation) — the count of successes
-//! is NOT pinned. The DURABLE effect is pinned exactly: afterwards `status`
-//! reports the persisted journal prefix with EXACTLY ONE applied event for
-//! the raced ordinal (the exact id and canonical checksum, fence released
-//! generation 2), and a repeat refuses without a second event.
+//! **Race** (`migration_real_server_concurrent_appliers_one_gate_...`), run
+//! in TWO modes over ONE SHARED scenario body (`run_race_scenario`):
+//!
+//! * **Preflight**
+//!   (`..._status_preflight_exactly_one_applied_event`): both connections
+//!   use the high-level `Client::apply_next` (status preflight + typed
+//!   send).
+//! * **Raw** (`..._raw_typed_request_exactly_one_applied_event`): each
+//!   connection independently derives the SAME typed
+//!   `SchemaMigrationApplyRequest` from ITS OWN `status` read (the fresh
+//!   path's status-derived predecessor and fence generation, plus the
+//!   identical body and canonical checksum), builds the typed
+//!   `apply_application_schema_migration` operation, and sends it through
+//!   the plain `Client::execute` transport from its OWN connection — no
+//!   `apply_next` preflight anywhere. Both requests are asserted EQUAL
+//!   before the gate.
+//!
+//! Both modes release the two appliers from ONE gate (`tokio::sync::Barrier`)
+//! and assert on the SET of outcomes: AT LEAST ONE applier returns an
+//! applied result (both refusals are impossible — the raced event IS durably
+//! applied exactly once, so the winner's apply already-applied fast path
+//! returns a successful response); if BOTH return applied, the two stored
+//! responses must be EQUAL (the fast-path loser gets the identical stored
+//! response). A loser may instead be refused typed: in preflight mode
+//! `NothingToApply` / `InProgress` / `PredecessorMismatch`; in raw mode ONLY
+//! the result-record error codes `schema_migration_in_progress` /
+//! `schema_migration_predecessor_mismatch` (a raw send can never produce a
+//! client-side `NothingToApply` — the ordinal is submitted explicitly — so
+//! that code is impossible here and any other record error fails the test).
+//! The DURABLE effect is pinned identically in both modes: afterwards
+//! `status` reports EXACTLY ONE applied event for the raced ordinal (exact
+//! id and canonical checksum, fence released generation 2, no unresolved
+//! tail), the physical `events` table answers a typed builder query, and a
+//! repeat refuses without a second event.
 //!
 //! Direct-journal seam note: the persisted journal is asserted through the
 //! `status` projection (`MigrationStatus::applied` — the full applied
@@ -53,6 +71,17 @@
 //! (`read_schema_migration_history`), and `ServerHandle` exposes no engine
 //! handle (only `first_tls_exporter_addr` / `format_stamp` / IPC path), so
 //! a real-server test in `shamir-e2e` cannot read the journal directly.
+//!
+//! Raw decode note: an applied raw send answers with the applied result
+//! record, asserted field by field on its `QueryValue` payload map
+//! (`migration_id`, `ordinal`, `status`, `fence_generation` — the wire
+//! shape the typed `SchemaMigrationApplyResult` deserializes from); a
+//! refusal is an ENVELOPE-level error answered as
+//! `ClientError::Db { code }` / `ClientError::Server { code }` and is
+//! matched on the stable §5.3 code strings. The typed client decode
+//! helpers are `pub(super)` inside `shamir-client`, and `rmp_serde` is not
+//! a dependency of this test crate (no new dependencies allowed), so the
+//! payload-map assertion IS the typed-record assertion here.
 //!
 //! Fence-generation vocabulary (as in `rust_migration_tests.rs`): EXPECTED
 //! = what the client sends (status-derived), ACQUIRED = the generation the
@@ -81,7 +110,15 @@ use shamir_client::schema_migration::{
     ApplicationMigrationSet, MigrationError, PrefixCoverage, SchemaMigrationAppliedEntry,
     SchemaMigrationApplyResult, SchemaMigrationErrorCode, SchemaMigrationTarget,
 };
-use shamir_client::{Client, ConnectOptions};
+use shamir_client::{Client, ClientError, ConnectOptions};
+
+use shamir_query_builder::apply_application_schema_migration;
+use shamir_query_builder::batch::Batch as RawBatch;
+use shamir_query_types::admin::types::schema_migration::{
+    SchemaMigrationApplyRequest, SchemaMigrationPredecessor,
+};
+use shamir_query_types::batch::BatchResponse;
+use shamir_query_types::read::QueryRecord;
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -89,6 +126,7 @@ use shamir_server::config::{
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::QueryValue;
 
 use tokio::sync::Barrier;
 
@@ -98,9 +136,20 @@ const R2_ID: &str = "restart-create-audit";
 const R3_ID: &str = "restart-create-metrics";
 const RACE_ID: &str = "race-create-events";
 const DRIFT_TABLE: &str = "items_tampered";
+const APPLY_ALIAS: &str = "apply_application_schema_migration";
 const ADMIN_PASSWORD: &[u8] = b"correct horse battery staple";
 const TEST_TIMEOUT: Duration = Duration::from_secs(360);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Which send path the race scenario uses for BOTH appliers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RaceMode {
+    /// High-level `Client::apply_next` (status preflight + typed send).
+    Preflight,
+    /// Raw typed `SchemaMigrationApplyRequest` via plain `Client::execute`
+    /// from each independent connection; no preflight.
+    Raw,
+}
 
 fn migration_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
@@ -450,10 +499,23 @@ async fn run_restart_scenario(guard: &FlakeGuard) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2: two concurrent appliers of the same ordinal, one gate
+// Scenario 2: two concurrent appliers of the same ordinal, one gate —
+// shared by the preflight and the raw send path
 // ---------------------------------------------------------------------------
 
-async fn run_race_scenario(guard: &FlakeGuard) {
+/// The race fixture: a launched server and TWO independent client
+/// connections over one persistent directory, plus the raced set and the
+/// discovered target identity.
+struct RaceFixture {
+    temp: TempDir,
+    handle: ServerHandle,
+    client_a: Client,
+    client_b: Client,
+    set: ApplicationMigrationSet,
+    target: SchemaMigrationTarget,
+}
+
+async fn race_fixture(guard: &FlakeGuard) -> RaceFixture {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let temp = TempDir::new().expect("tempdir");
     let handle = launch_on_same_directory(guard, migration_config(&temp), "race boot").await;
@@ -467,71 +529,201 @@ async fn run_race_scenario(guard: &FlakeGuard) {
     let body = migration_body(RACE_ID, 1, "create events table", "events");
     let set = ApplicationMigrationSet::new(vec![body]).expect("the one-migration set");
     let target = discover_identity(&client_a, &set).await;
-
-    // The SET of outcomes, WITHOUT pinning the number of successes: each
-    // applier either applied or refused typed. TWO `applied` results are a
-    // LEGAL outcome (the already-applied fast path returns an identical
-    // successful response to the loser). The durable journal (asserted
-    // below) is what pins the single application exactly once.
-    let gate = Arc::new(Barrier::new(2));
-    let (gate_a, gate_b) = (Arc::clone(&gate), Arc::clone(&gate));
-    guard.mark("releasing the two-applier race gate");
-    let (out_a, out_b) = tokio::join!(
-        async {
-            gate_a.wait().await;
-            client_a.apply_next(DB, target, &set).await
-        },
-        async {
-            gate_b.wait().await;
-            client_b.apply_next(DB, target, &set).await
-        },
-    );
-    // AT LEAST ONE success: the raced event is durably applied, so both
-    // refusals are impossible (the winner's apply must return `Ok`).
-    let mut oks: Vec<&SchemaMigrationApplyResult> = Vec::new();
-    for outcome in [&out_a, &out_b] {
-        match outcome {
-            Ok(applied) => {
-                assert_eq!(applied.migration_id, RACE_ID);
-                assert_eq!(applied.ordinal, 1);
-                assert_eq!(applied.status, "applied");
-                assert_eq!(
-                    applied.fence_generation,
-                    Some(1),
-                    "ACQUIRED: expected 0, acquired 1"
-                );
-                oks.push(applied);
-            }
-            Err(MigrationError::NothingToApply)
-            | Err(MigrationError::InProgress { .. })
-            | Err(MigrationError::PredecessorMismatch { .. }) => {
-                // Allowed refusal outcomes: its preflight saw the winner's
-                // applied head, or the server fenced the stale expected
-                // generation / predecessor.
-                guard.note("race loser", format!("{outcome:?}"));
-            }
-            Err(other) => panic!(
-                "the loser must refuse typed (NothingToApply / InProgress / \
-                 PredecessorMismatch); got {other:?}"
-            ),
-        }
+    RaceFixture {
+        temp,
+        handle,
+        client_a,
+        client_b,
+        set,
+        target,
     }
+}
+
+/// Build the typed RAW apply request from THIS connection's own status
+/// read: the fresh path's status-derived predecessor (zero on an empty
+/// journal) and expected fence generation, plus the identical body and
+/// canonical checksum. Mirrors the fresh arm of the client's `apply_next`
+/// preflight (no in-flight entry may exist on a fresh journal).
+async fn status_derived_raw_request(
+    client: &Client,
+    target: SchemaMigrationTarget,
+    set: &ApplicationMigrationSet,
+) -> SchemaMigrationApplyRequest {
+    let st = client.status(DB, target, set).await.expect("status");
     assert!(
-        !oks.is_empty(),
-        "at least one applier must succeed (the event is applied exactly \
-         once; both refusals are impossible), got {out_a:?} / {out_b:?}"
+        st.in_flight.is_none(),
+        "the fresh race journal must hold no unresolved entry: {st:?}"
     );
-    if let [left, right] = oks[..] {
-        // Both `Ok` responses come from the SAME stored event (the fast
-        // path replays the stored response), so they must be equal.
-        assert_eq!(left, right, "both successful responses must be identical");
-    }
+    assert_eq!(
+        st.last_applied_ordinal, 0,
+        "the raced ordinal is the FIRST migration of the journal"
+    );
+    let predecessor = if st.last_applied_ordinal == 0 {
+        SchemaMigrationPredecessor {
+            migration_id: None,
+            ordinal: 0,
+            checksum: [0; 32],
+        }
+    } else {
+        SchemaMigrationPredecessor {
+            migration_id: st.last_applied_id.clone(),
+            ordinal: st.last_applied_ordinal,
+            checksum: st
+                .last_applied_checksum
+                .expect("a nonempty head reports its checksum"),
+        }
+    };
+    SchemaMigrationApplyRequest::from_body(
+        target,
+        predecessor,
+        st.fence_generation,
+        &set.bodies()[0],
+        set.checksums()[0],
+    )
+}
 
+/// Send the typed raw request through the plain `execute` transport of
+/// this connection (ONE typed admin op in ONE batch — no preflight).
+async fn send_raw_apply(
+    client: &Client,
+    request: SchemaMigrationApplyRequest,
+) -> Result<BatchResponse, ClientError> {
+    let mut batch = RawBatch::new();
+    batch.id("raw-race-apply");
+    batch.op(APPLY_ALIAS, apply_application_schema_migration(request));
+    let built = batch.try_build().expect("the raw apply batch builds");
+    tokio::time::timeout(REQUEST_TIMEOUT, client.execute(DB, built))
+        .await
+        .expect("raw apply deadline")
+}
+
+/// The direct record payload of the raw apply result (the typed
+/// `SchemaMigrationApplyResult` wire shape, asserted as a map).
+fn raw_apply_payload(response: &BatchResponse) -> &QueryValue {
+    let result = response
+        .results
+        .get(APPLY_ALIAS)
+        .expect("the apply result is present under the operation alias");
+    let record = result
+        .records
+        .first()
+        .expect("the apply result carries a payload record");
+    match record {
+        QueryRecord::Direct(payload) => payload,
+        other => panic!("the apply payload is a direct record, got {other:?}"),
+    }
+}
+
+/// A successful race response, kept for the identical-response assertion:
+/// the typed result (preflight) or the raw payload map (raw).
+#[derive(Debug, PartialEq)]
+enum AppliedResponse {
+    Typed(SchemaMigrationApplyResult),
+    Map(QueryValue),
+}
+
+/// One applier's outcome, normalized across the two send paths.
+#[derive(Debug)]
+enum RaceOutcome {
+    /// The stored applied response (typed, or the raw payload map).
+    Applied(AppliedResponse),
+    /// A typed refusal (allowed refusal kinds are enumerated per mode in
+    /// the `classify_*` functions; only the variant is distinguished here).
+    Refused,
+}
+
+fn classify_preflight(outcome: &Result<SchemaMigrationApplyResult, MigrationError>) -> RaceOutcome {
+    match outcome {
+        Ok(applied) => {
+            assert_eq!(applied.migration_id, RACE_ID);
+            assert_eq!(applied.ordinal, 1);
+            assert_eq!(applied.status, "applied");
+            assert_eq!(
+                applied.fence_generation,
+                Some(1),
+                "ACQUIRED: expected 0, acquired 1"
+            );
+            RaceOutcome::Applied(AppliedResponse::Typed(applied.clone()))
+        }
+        Err(MigrationError::NothingToApply)
+        | Err(MigrationError::InProgress { .. })
+        | Err(MigrationError::PredecessorMismatch { .. }) => {
+            // Allowed refusal outcomes: its preflight saw the winner's
+            // applied head, or the server fenced the stale expected
+            // generation / predecessor.
+            RaceOutcome::Refused
+        }
+        Err(other) => panic!(
+            "the loser must refuse typed (NothingToApply / InProgress / \
+             PredecessorMismatch); got {other:?}"
+        ),
+    }
+}
+
+fn classify_raw(outcome: &Result<BatchResponse, ClientError>) -> RaceOutcome {
+    match outcome {
+        Ok(response) => {
+            // Applied: the typed `SchemaMigrationApplyResult` fields, on the
+            // wire shape the typed struct deserializes from. A successful
+            // envelope carries the applied result record (a refusal is an
+            // ENVELOPE-level error, never an error field inside the
+            // record).
+            let payload = raw_apply_payload(response).clone();
+            match payload.get("migration_id") {
+                Some(QueryValue::Str(id)) => assert_eq!(id, RACE_ID),
+                other => panic!("the applied result reports migration_id, got {other:?}"),
+            }
+            match payload.get("ordinal") {
+                Some(QueryValue::Int(1)) => {}
+                other => panic!("the applied result reports ordinal 1, got {other:?}"),
+            }
+            match payload.get("status") {
+                Some(QueryValue::Str(status)) => assert_eq!(status, "applied"),
+                other => panic!("the applied result status is a string, got {other:?}"),
+            }
+            match payload.get("fence_generation") {
+                Some(QueryValue::Int(1)) => {}
+                other => panic!("ACQUIRED: expected 0, acquired 1, got {other:?}"),
+            }
+            RaceOutcome::Applied(AppliedResponse::Map(payload))
+        }
+        Err(ClientError::Db { code, .. }) | Err(ClientError::Server { code }) => {
+            // Typed refusal codes at the envelope level: ONLY the
+            // in-progress / stale-predecessor refusals are allowed. A raw
+            // send can never produce a `nothing_to_apply` (the ordinal is
+            // submitted explicitly), and any other code is a failure.
+            match code.as_str() {
+                "schema_migration_in_progress" | "schema_migration_predecessor_mismatch" => {
+                    RaceOutcome::Refused
+                }
+                other => panic!(
+                    "the raw loser must refuse with in_progress or \
+                     predecessor_mismatch only; got the error code {other:?}"
+                ),
+            }
+        }
+        Err(other) => panic!(
+            "the raw apply must answer with a result record (an applied result or a \
+             typed refusal code), not a transport/shape failure; got {other:?}"
+        ),
+    }
+}
+
+/// The DURABLE effect of the race, pinned identically in both modes:
+/// exactly ONE applied event for the raced ordinal, the fence advanced
+/// exactly once, no unresolved tail, the physical table present, and a
+/// repeat refused without a second event.
+async fn assert_race_durable_state(
+    guard: &FlakeGuard,
+    client: &Client,
+    target: SchemaMigrationTarget,
+    set: &ApplicationMigrationSet,
+) {
     // The persisted journal prefix carries EXACTLY ONE applied event for
     // the raced ordinal, with the exact id and canonical checksum, and the
     // fence advanced exactly once (acquired 1, released 2). Asserted via
     // the status projection (no direct journal seam in this crate).
-    let settled = client_a.status(DB, target, &set).await.expect("status");
+    let settled = client.status(DB, target, set).await.expect("status");
     assert_eq!(
         settled.coverage,
         PrefixCoverage::Verified { ordinal: 1 },
@@ -559,7 +751,7 @@ async fn run_race_scenario(guard: &FlakeGuard) {
     let mut read_events = Batch::new();
     read_events.id("read-raced-table");
     read_events.query("sel-events", Query::from("events"));
-    let events = tokio::time::timeout(REQUEST_TIMEOUT, client_a.execute(DB, read_events.build()))
+    let events = tokio::time::timeout(REQUEST_TIMEOUT, client.execute(DB, read_events.build()))
         .await
         .expect("table read deadline")
         .expect("the migrated table must be queryable");
@@ -569,11 +761,11 @@ async fn run_race_scenario(guard: &FlakeGuard) {
     );
 
     // A repeat refuses without a second event.
-    match client_b.apply_next(DB, target, &set).await {
+    match client.apply_next(DB, target, set).await {
         Err(MigrationError::NothingToApply) => {}
         other => panic!("expected NothingToApply for the post-race repeat, got {other:?}"),
     }
-    let unchanged = client_a.status(DB, target, &set).await.expect("status");
+    let unchanged = client.status(DB, target, set).await.expect("status");
     assert_eq!(
         unchanged.applied.len(),
         1,
@@ -583,6 +775,99 @@ async fn run_race_scenario(guard: &FlakeGuard) {
         unchanged.fence_generation, 2,
         "the fence did not move again"
     );
+    guard.mark("race durable state verified");
+}
+
+async fn run_race_scenario(guard: &FlakeGuard, mode: RaceMode) {
+    let fixture = race_fixture(guard).await;
+    let RaceFixture {
+        temp,
+        handle,
+        client_a,
+        client_b,
+        set,
+        target,
+    } = fixture;
+    let _temp = temp; // the persistent directory lives for the whole test
+
+    // Each connection derives ITS OWN request; both MUST arrive at the
+    // identical typed request (same status-derived predecessor/generation
+    // and body/checksum). In preflight mode the equivalent derivation
+    // happens inside `apply_next`'s status preflight.
+    let request_a = match mode {
+        RaceMode::Raw => Some(status_derived_raw_request(&client_a, target, &set).await),
+        RaceMode::Preflight => None,
+    };
+    let request_b = match mode {
+        RaceMode::Raw => Some(status_derived_raw_request(&client_b, target, &set).await),
+        RaceMode::Preflight => None,
+    };
+    if let (Some(a), Some(b)) = (&request_a, &request_b) {
+        assert_eq!(
+            a, b,
+            "both independent connections must derive the SAME typed apply request"
+        );
+    }
+
+    // The SET of outcomes, WITHOUT pinning the number of successes: each
+    // applier either applied or refused typed. TWO `applied` results are a
+    // LEGAL outcome (the already-applied fast path returns an identical
+    // successful response to the loser). The durable journal (asserted
+    // below) is what pins the single application exactly once.
+    let gate = Arc::new(Barrier::new(2));
+    let (gate_a, gate_b) = (Arc::clone(&gate), Arc::clone(&gate));
+    guard.mark("releasing the two-applier race gate");
+    let (out_a, out_b) = tokio::join!(
+        async {
+            gate_a.wait().await;
+            match mode {
+                RaceMode::Preflight => {
+                    let applied = client_a.apply_next(DB, target, &set).await;
+                    classify_preflight(&applied)
+                }
+                RaceMode::Raw => {
+                    let response =
+                        send_raw_apply(&client_a, request_a.expect("raw request a")).await;
+                    classify_raw(&response)
+                }
+            }
+        },
+        async {
+            gate_b.wait().await;
+            match mode {
+                RaceMode::Preflight => {
+                    let applied = client_b.apply_next(DB, target, &set).await;
+                    classify_preflight(&applied)
+                }
+                RaceMode::Raw => {
+                    let response =
+                        send_raw_apply(&client_b, request_b.expect("raw request b")).await;
+                    classify_raw(&response)
+                }
+            }
+        },
+    );
+    // AT LEAST ONE success: the raced event is durably applied, so both
+    // refusals are impossible (the winner's apply must return `Ok`).
+    let mut applied: Vec<&AppliedResponse> = Vec::new();
+    for outcome in [&out_a, &out_b] {
+        if let RaceOutcome::Applied(response) = outcome {
+            applied.push(response);
+        }
+    }
+    assert!(
+        !applied.is_empty(),
+        "at least one applier must succeed (the event is applied exactly \
+         once; both refusals are impossible), got {out_a:?} / {out_b:?}"
+    );
+    if let [left, right] = applied[..] {
+        // Both applied responses come from the SAME stored event (the fast
+        // path replays the stored response), so they must be identical.
+        assert_eq!(left, right, "both successful responses must be identical");
+    }
+    guard.note("race outcomes", format!("{out_a:?} / {out_b:?}"));
+
+    assert_race_durable_state(guard, &client_a, target, &set).await;
 
     client_a.close().await;
     client_b.close().await;
@@ -596,7 +881,10 @@ async fn run_race_scenario(guard: &FlakeGuard) {
 /// across a thread boundary if it is `Send`, and instantiating it on the
 /// test thread itself keeps the harness unconditionally sound.
 macro_rules! big_stack_test {
-    ($name:ident, $scenario:ident) => {
+    // `$mode` is an enum variant expression (`RaceMode::...`); the scenario
+    // is invoked INSIDE the spawned thread so the `&guard` borrow never
+    // escapes into a moved closure/future.
+    ($name:ident, $scenario:ident $(, $mode:expr)?) => {
         #[test]
         fn $name() {
             std::thread::Builder::new()
@@ -610,12 +898,15 @@ macro_rules! big_stack_test {
                         .build()
                         .expect("test runtime")
                         .block_on(Box::pin(async {
-                            tokio::time::timeout(TEST_TIMEOUT, Box::pin($scenario(&guard)))
-                                .await
-                                .expect(
-                                    "the whole scenario must finish inside the hang-guard \
-                                     deadline",
-                                );
+                            tokio::time::timeout(
+                                TEST_TIMEOUT,
+                                Box::pin($scenario(&guard $(, $mode)?)),
+                            )
+                            .await
+                            .expect(
+                                "the whole scenario must finish inside the hang-guard \
+                                 deadline",
+                            );
                         }));
                 })
                 .expect("spawn big-stack test thread")
@@ -630,6 +921,12 @@ big_stack_test!(
     run_restart_scenario
 );
 big_stack_test!(
-    migration_real_server_concurrent_appliers_one_gate_exactly_one_applied_event,
-    run_race_scenario
+    migration_real_server_concurrent_appliers_one_gate_status_preflight_exactly_one_applied_event,
+    run_race_scenario,
+    RaceMode::Preflight
+);
+big_stack_test!(
+    migration_real_server_concurrent_appliers_one_gate_raw_typed_request_exactly_one_applied_event,
+    run_race_scenario,
+    RaceMode::Raw
 );

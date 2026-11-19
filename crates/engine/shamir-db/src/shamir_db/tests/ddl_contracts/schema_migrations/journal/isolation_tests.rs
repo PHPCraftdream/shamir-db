@@ -24,7 +24,7 @@ use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableManager;
 use crate::query::batch::BatchError;
-use crate::shamir_db::system_store::DatabaseIdentity;
+use crate::shamir_db::system_store::{DatabaseIdentity, SystemStoreConfig};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
@@ -186,18 +186,42 @@ fn str_field<'a>(value: &'a QueryValue, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("field {key} is not a string"))
 }
 
-fn assert_closed(error: BatchError, context: &str) {
+fn assert_closed(error: BatchError, context: &str, detailed: bool) {
     assert_eq!(
         error.code(),
         Some("schema_migration_durability_unavailable"),
         "{context}: wrong refusal code; message: {error}"
     );
-    assert!(
-        error
-            .to_string()
-            .contains("body metadata/checksum mismatch"),
-        "{context}: expected the journal corruption cause, got: {error}"
+    if detailed {
+        // Same-process: the corruption cause carries through. After a restart
+        // the open-time in-doubt marker reports the generic refusal, so the
+        // detailed message is asserted only for the no-reopen variant.
+        assert!(
+            error
+                .to_string()
+                .contains("body metadata/checksum mismatch"),
+            "{context}: expected the journal corruption cause, got: {error}"
+        );
+    }
+}
+
+/// A plain DDL writer batch against the damaged database, pinned to the
+/// database's `main` repository: after a restart the open-time in-doubt
+/// marker must refuse it with the TYPED in-doubt code, never a silent
+/// success (and never an actually executed create-table).
+fn writer_batch() -> Batch {
+    let mut b = Batch::new();
+    b.op(
+        "ct",
+        ddl::create_table("blocked_items").repo("main").build(),
     );
+    b
+}
+
+async fn run_writer(db: &ShamirDb, database: &str) -> Result<(), BatchError> {
+    let request = writer_batch().to_request_via_msgpack().unwrap();
+    db.execute_as(OWNER, database, &request).await?;
+    Ok(())
 }
 
 #[test]
@@ -208,15 +232,56 @@ fn corrupted_event_of_one_database_fails_it_closed_and_never_blocks_another_data
     on_big_stack(|| async {
         tokio::time::timeout(
             std::time::Duration::from_secs(300),
-            Box::pin(corrupted_event_scenario()),
+            Box::pin(corrupted_event_scenario(false)),
         )
         .await
         .expect("journal isolation scenario timed out");
     });
 }
 
-async fn corrupted_event_scenario() {
-    let (_dir, db) = persistent_db().await;
+#[test]
+fn corrupted_event_of_one_database_fails_it_closed_after_a_cold_restart() {
+    // Same scenario, but the damaged journal is flushed durably and the
+    // system store is REOPENED before the assertions: the corruption must
+    // fail database A closed across a restart too, while B stays healthy.
+    on_big_stack(|| async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            Box::pin(corrupted_event_scenario(true)),
+        )
+        .await
+        .expect("journal isolation restart scenario timed out");
+    });
+}
+
+/// Reopen the persistent system store after a cold restart: a just-dropped
+/// engine can hold its fjall lock until the background handles finish
+/// (`FjallError: Locked`, seen on Windows), so retry ONLY that error under a
+/// bounded deadline; every other error fails at once. Never a bare reopen.
+async fn init_waiting_for_locks(system_path: std::path::PathBuf) -> ShamirDb {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone())),
+        )
+        .await
+        .expect("reopen attempt timed out")
+        {
+            Ok(db) => return db,
+            Err(error)
+                if error.to_string().contains("Locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("reopen the system store: {error}"),
+        }
+    }
+}
+
+async fn corrupted_event_scenario(reopen: bool) {
+    let (dir, db) = persistent_db().await;
     db.create_db("alpha").await.unwrap();
     db.create_db("beta").await.unwrap();
     prepare_database(&db, "alpha").await;
@@ -247,6 +312,26 @@ async fn corrupted_event_scenario() {
         .await
         .unwrap();
     corrupt_first_event_body(&db).await;
+    let db = if reopen {
+        // Persist the damaged journal row durably, then drop the engine and
+        // reopen: the corruption must survive a cold restart of the store.
+        let table: TableManager = db
+            .system_store()
+            .system_repo()
+            .unwrap()
+            .get_table("schema_migration_events")
+            .await
+            .unwrap();
+        db.system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .expect("the damaged journal row flushes durably before the restart");
+        drop(table);
+        drop(db);
+        init_waiting_for_locks(dir.path().join("system")).await
+    } else {
+        db
+    };
 
     // B is untouched by A's damaged record: its apply succeeds.
     let beta_first = body("beta-001", 1);
@@ -288,7 +373,7 @@ async fn corrupted_event_scenario() {
     let status_error = run_status(&db, "alpha", &alpha)
         .await
         .expect_err("database A status must fail closed on its corrupted journal");
-    assert_closed(status_error, "status");
+    assert_closed(status_error, "status", !reopen);
     let plan_error = run_plan(
         &db,
         "alpha",
@@ -298,7 +383,7 @@ async fn corrupted_event_scenario() {
     )
     .await
     .expect_err("database A plan must fail closed on its corrupted journal");
-    assert_closed(plan_error, "plan");
+    assert_closed(plan_error, "plan", !reopen);
     let apply_error = run_apply(
         &db,
         "alpha",
@@ -309,7 +394,31 @@ async fn corrupted_event_scenario() {
     )
     .await
     .expect_err("database A apply must fail closed on its corrupted journal");
-    assert_closed(apply_error, "apply");
+    assert_closed(apply_error, "apply", !reopen);
+
+    if reopen {
+        // After the restart the open-time in-doubt marker refuses a plain
+        // DDL writer against A with the EXACT in-doubt code, and the
+        // refused create-table was never executed.
+        let writer_error = run_writer(&db, "alpha")
+            .await
+            .expect_err("restart: database A must refuse a DDL writer");
+        assert_eq!(
+            writer_error.code(),
+            Some("schema_migration_in_doubt"),
+            "restart: wrong writer refusal code; message: {writer_error}"
+        );
+        let instance = db.get_db("alpha").unwrap();
+        assert!(
+            !instance.has_table("main", "blocked_items"),
+            "the refused writer must not have executed its create-table"
+        );
+
+        // Positive control for the healthy database is already asserted
+        // above: B's apply through the normal batch succeeded after the
+        // restart and its status still reports the unchanged control row
+        // (beta-001, ordinal 1).
+    }
 
     // B still reads healthy after A's failures: nothing in A's journal
     // poisoned B's view.

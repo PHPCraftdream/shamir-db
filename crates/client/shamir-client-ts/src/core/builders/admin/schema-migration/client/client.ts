@@ -241,14 +241,40 @@ function inFlightError(
 }
 
 /**
+ * The stable structural shape a definitive server rejection carrier must
+ * present: `name === 'ShamirDbError'` and a string `code`. The `detail`
+ * is OPTIONAL — the Node binding (`shamir-client` `js/wrapper.js`)
+ * throws its own `ShamirDbError` class (same stable `name`, string
+ * `code` / `detail`, same `db error [code]: detail` message) with a
+ * DIFFERENT prototype, so no `instanceof` — not even of `Error` across
+ * realms — may gate recognition.
+ */
+type ShamirDbErrorShape = Pick<ShamirDbError, 'code'> & {
+  detail?: ShamirDbError['detail'];
+};
+
+/** Recognize a definitive server rejection across runtimes. */
+function isShamirDbError(error: unknown): error is ShamirDbErrorShape {
+  if (error instanceof ShamirDbError) return true;
+  if (typeof error !== 'object' || error === null) return false;
+  const shaped = error as ShamirDbErrorShape & { name?: unknown };
+  return shaped.name === 'ShamirDbError' && typeof shaped.code === 'string';
+}
+
+/** The carrier's detail, safe when the field is absent (empty string). */
+function dbErrorDetail(error: ShamirDbErrorShape): string {
+  return typeof error.detail === 'string' ? error.detail : '';
+}
+
+/**
  * Map a DEFINITIVE server rejection from the apply send (a `ShamirDbError`
- * with its stable code) into the typed migration error — EXCEPT for the
- * non-definitive codes (`timeout`, `limits`, `result_too_large`) and any
- * non-`ShamirDbError` failure, which stay unmapped so the caller types
- * them as unknown-outcome.
+ * from either runtime — see {@link isShamirDbError}) into the typed
+ * migration error — EXCEPT for the non-definitive codes (`timeout`,
+ * `limits`, `result_too_large`) and any non-`ShamirDbError` failure, which
+ * stay unmapped so the caller types them as unknown-outcome.
  */
 function mapDefiniteServerError(error: unknown): MigrationError | undefined {
-  if (!(error instanceof ShamirDbError)) return undefined;
+  if (!isShamirDbError(error)) return undefined;
   if (
     error.code === 'timeout' ||
     error.code === 'limits' ||
@@ -256,7 +282,7 @@ function mapDefiniteServerError(error: unknown): MigrationError | undefined {
   ) {
     return undefined;
   }
-  return mapMigrationServerError(error.code, error.detail);
+  return mapMigrationServerError(error.code, dbErrorDetail(error));
 }
 
 /**
@@ -299,8 +325,8 @@ async function sendSingleRead(
   try {
     return await sendSingle(client, db, alias, op);
   } catch (error) {
-    if (error instanceof ShamirDbError) {
-      throw mapMigrationServerError(error.code, error.detail);
+    if (isShamirDbError(error)) {
+      throw mapMigrationServerError(error.code, dbErrorDetail(error));
     }
     throw error;
   }
@@ -612,12 +638,14 @@ export class ApplicationMigrationClient {
         ),
       );
     } catch (error) {
-      // A DEFINITIVE server rejection (ShamirDbError with its stable
-      // code) is mapped as-is with the verbatim detail — it is a known
-      // outcome, never uncertainty. Anything else (timeout, limit,
-      // close, transport failure) leaves the outcome UNKNOWN after the
-      // send: typed unknown_outcome with the frozen attempt token, no
-      // `cause` nesting, no retryable flag honoured, never a resend.
+      // A DEFINITIVE server rejection (a `ShamirDbError` of EITHER
+      // runtime — the TS nominal class or the Node binding's own class,
+      // see `isShamirDbError`) is mapped as-is with the verbatim detail
+      // — it is a known outcome, never uncertainty. Anything else
+      // (timeout, limit, close, transport failure) leaves the outcome
+      // UNKNOWN after the send: typed unknown_outcome with the frozen
+      // attempt token, no `cause` nesting, no retryable flag honoured,
+      // never a resend.
       throw (
         mapDefiniteServerError(error) ??
         new MigrationError(

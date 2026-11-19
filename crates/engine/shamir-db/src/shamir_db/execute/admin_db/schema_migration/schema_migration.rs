@@ -40,10 +40,12 @@ impl ShamirAdminExecutor {
         match op {
             SchemaMigrationAdminOp::ApplicationSchemaStatus(request) => {
                 self.authorize_database_read().await?;
+                self.ensure_boot_durability()?;
                 self.status_result(request).await
             }
             SchemaMigrationAdminOp::ApplicationSchemaPlan(request) => {
                 super::plan::authorize_database_manage(self).await?;
+                self.ensure_boot_durability()?;
                 // Box::pin keeps the plan future out of this dispatcher's
                 // own stack frame (Windows debug-build overflow, 2026-11-17).
                 Box::pin(super::plan::plan_application_schema(self, request)).await
@@ -57,8 +59,26 @@ impl ShamirAdminExecutor {
                 // dispatcher's own stack frame (same Windows debug-build
                 // overflow mechanism as the plan arm).
                 super::plan::authorize_database_manage(self).await?;
+                // The apply entry itself orders its fail-closed checks:
+                // follower refusal first, then the boot-durability marker
+                // (see `apply::apply_application_schema`).
                 Box::pin(super::apply::apply_application_schema(self, request)).await
             }
+        }
+    }
+
+    /// Fail-closed guard shared by status/plan/apply (design §5.2: after
+    /// authorization, before any journal byte is read): when the open-time
+    /// in-doubt marker stands for a BOOT FAILURE — the durable journal could
+    /// not be read at database open, so its generation is unknown — refuse
+    /// with `schema_migration_durability_unavailable` instead of guessing.
+    fn ensure_boot_durability(&self) -> Result<(), BatchError> {
+        match super::fence::schema_migration_gate_boot_unavailable_refusal(
+            &self.shamir,
+            &self.db_name,
+        ) {
+            Some(refusal) => Err(refusal),
+            None => Ok(()),
         }
     }
 

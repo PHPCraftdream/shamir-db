@@ -8,14 +8,18 @@
 //! `arm_durability_tail_faults_after(2, 1)` fails the first operation-intent
 //! append (append 2, tick 3) and leaves the journal with `started` only.
 
+use std::time::Duration;
+
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::write::{doc, insert};
 use shamir_query_builder::Query;
 use shamir_query_builder::SchemaMigration;
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
+use shamir_test_diag::FlakeGuard;
+use tokio::time::timeout;
 
-use super::super::helpers::{body, checksum, context};
+use super::super::helpers::{body, checksum, context, on_big_stack};
 use super::helpers::{
     apply_request, assert_code, empty_predecessor, field, identity, journal_rows,
     persistent_owner_db, predecessor, reopen_owner_db, run_apply, run_status, str_field,
@@ -177,115 +181,132 @@ async fn the_fence_distinguishes_in_doubt_marker_live_gate_and_free() {
     .expect("the write is admitted once nothing is held");
 }
 
-#[tokio::test]
-async fn takeover_fences_the_stale_runner_generation() {
-    let (_dir, db, migration) = crash_started_only_and_reopen().await;
-    let target = identity(&db).await;
+#[test]
+fn takeover_fences_the_stale_runner_generation() {
+    on_big_stack(|| async {
+        // Whole-scenario bound (>=120 s: the Windows runner is up to 10x
+        // slower) with the failure-only diagnostic watchdog of the
+        // boot-oracle pattern: the watchdog fires BELOW the runner's
+        // slow-timeout kill so the timeline dumps first; the timeout itself
+        // fails the test.
+        let guard = FlakeGuard::with_watchdog(
+            "takeover_fences_the_stale_runner_generation",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            let (_dir, db, migration) = crash_started_only_and_reopen().await;
+            let target = identity(&db).await;
 
-    // Take over via resume: a FRESH fence generation.
-    let value = run_apply(
-        &db,
-        apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-    )
-    .await
-    .expect("the resume takes over the owned fence");
-    assert_eq!(str_field(&value, "status"), "applied");
+            // Take over via resume: a FRESH fence generation.
+            let value = run_apply(
+                &db,
+                apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+            )
+            .await
+            .expect("the resume takes over the owned fence");
+            assert_eq!(str_field(&value, "status"), "applied");
 
-    // The stale runner (old generation 1) cannot append through the system
-    // store: the durable fence CAS refuses it.
-    let error = db
-        .system_store()
-        .append_schema_migration_event(
-            target,
-            1,
-            migration.metadata.clone(),
-            checksum(&migration),
-            SchemaMigrationStep {
-                kind: JournalEventKind::OperationIntent,
-                operation_index: Some(0),
-                evidence: None,
-            },
-            &context(),
-        )
-        .await
-        .expect_err("a stale generation must not append");
-    assert!(
-        error.to_string().contains("fence CAS conflict"),
-        "the step-2a fence CAS refuses the stale runner: {error}"
-    );
+            // The stale runner (old generation 1) cannot append through the system
+            // store: the durable fence CAS refuses it.
+            let error = db
+                .system_store()
+                .append_schema_migration_event(
+                    target,
+                    1,
+                    migration.metadata.clone(),
+                    checksum(&migration),
+                    SchemaMigrationStep {
+                        kind: JournalEventKind::OperationIntent,
+                        operation_index: Some(0),
+                        evidence: None,
+                    },
+                    &context(),
+                )
+                .await
+                .expect_err("a stale generation must not append");
+            assert!(
+                error.to_string().contains("fence CAS conflict"),
+                "the step-2a fence CAS refuses the stale runner: {error}"
+            );
 
-    // And a stale runner cannot execute through the in-process path either:
-    // while a live gate is held (as the resumed runner holds it), the NEXT
-    // migration is refused in progress. (The identical migration is already
-    // applied and answers as the durable no-op before the gate.)
-    db.hold_schema_migration_gate("testdb", 2);
-    let next = body("alpha-002", 2);
-    let head_request = apply_request(
-        &target,
-        predecessor(Some("alpha-001"), 1, checksum(&migration)),
-        2,
-        submission(&next),
-    );
-    let error = run_apply(&db, head_request)
-        .await
-        .expect_err("an apply while the gate is held must be refused");
-    assert_code(error, "schema_migration_in_progress");
-    db.release_schema_migration_gate("testdb", 2);
+            // And a stale runner cannot execute through the in-process path either:
+            // while a live gate is held (as the resumed runner holds it), the NEXT
+            // migration is refused in progress. (The identical migration is already
+            // applied and answers as the durable no-op before the gate.)
+            db.hold_schema_migration_gate("testdb", 2);
+            let next = body("alpha-002", 2);
+            let head_request = apply_request(
+                &target,
+                predecessor(Some("alpha-001"), 1, checksum(&migration)),
+                2,
+                submission(&next),
+            );
+            let error = run_apply(&db, head_request)
+                .await
+                .expect_err("an apply while the gate is held must be refused");
+            assert_code(error, "schema_migration_in_progress");
+            db.release_schema_migration_gate("testdb", 2);
 
-    // The stale generation cannot EXECUTE either, even with nothing held:
-    // the fence is free (the takeover released it after acquiring at
-    // generation 2), so the
-    // refusal of the stale runner's `expected_fence_generation = 1` comes
-    // from the durable fence CAS, mapped to the stable in-progress code —
-    // with no journal write and no executed effect.
-    let pristine = journal_rows(&db).await;
-    assert!(db.schema_migration_gate_generation("testdb").is_none());
-    assert!(db
-        .schema_migration_gate_in_doubt_generation("testdb")
-        .is_none());
-    let stale_request = apply_request(
-        &target,
-        predecessor(Some("alpha-001"), 1, checksum(&migration)),
-        1,
-        submission(&next),
-    );
-    let error = run_apply(&db, stale_request)
-        .await
-        .expect_err("a stale fence generation must not execute the next migration");
-    assert_code(error, "schema_migration_in_progress");
-    assert_eq!(
-        journal_rows(&db).await,
-        pristine,
-        "the stale-generation refusal writes nothing"
-    );
-    let instance = db.get_db("testdb").unwrap();
-    assert!(
-        !instance.has_table("main", "items_2"),
-        "the fenced-out runner must not have executed the next migration"
-    );
+            // The stale generation cannot EXECUTE either, even with nothing held:
+            // the fence is free (the takeover released it after acquiring at
+            // generation 2), so the
+            // refusal of the stale runner's `expected_fence_generation = 1` comes
+            // from the durable fence CAS, mapped to the stable in-progress code —
+            // with no journal write and no executed effect.
+            let pristine = journal_rows(&db).await;
+            assert!(db.schema_migration_gate_generation("testdb").is_none());
+            assert!(db
+                .schema_migration_gate_in_doubt_generation("testdb")
+                .is_none());
+            let stale_request = apply_request(
+                &target,
+                predecessor(Some("alpha-001"), 1, checksum(&migration)),
+                1,
+                submission(&next),
+            );
+            let error = run_apply(&db, stale_request)
+                .await
+                .expect_err("a stale fence generation must not execute the next migration");
+            assert_code(error, "schema_migration_in_progress");
+            assert_eq!(
+                journal_rows(&db).await,
+                pristine,
+                "the stale-generation refusal writes nothing"
+            );
+            let instance = db.get_db("testdb").unwrap();
+            assert!(
+                !instance.has_table("main", "items_2"),
+                "the fenced-out runner must not have executed the next migration"
+            );
 
-    // Positive control: the CURRENT runner — generation derived from the
-    // status (the durable fence head, released after the takeover) — applies the
-    // same next migration and its effect exists.
-    let status = run_status(&db, &target).await;
-    let current = u64::try_from(
-        field(&status, "fence_generation")
-            .as_i64()
-            .expect("the status reports a durable fence generation"),
-    )
-    .expect("the durable fence generation fits in u64");
-    let fresh_request = apply_request(
-        &target,
-        predecessor(Some("alpha-001"), 1, checksum(&migration)),
-        current,
-        submission(&next),
-    );
-    let value = run_apply(&db, fresh_request)
-        .await
-        .expect("the status-derived current generation applies the next migration");
-    assert_eq!(str_field(&value, "status"), "applied");
-    let instance = db.get_db("testdb").unwrap();
-    assert!(instance.has_table("main", "items_2"));
+            // Positive control: the CURRENT runner — generation derived from the
+            // status (the durable fence head, released after the takeover) — applies the
+            // same next migration and its effect exists.
+            let status = run_status(&db, &target).await;
+            let current = u64::try_from(
+                field(&status, "fence_generation")
+                    .as_i64()
+                    .expect("the status reports a durable fence generation"),
+            )
+            .expect("the durable fence generation fits in u64");
+            let fresh_request = apply_request(
+                &target,
+                predecessor(Some("alpha-001"), 1, checksum(&migration)),
+                current,
+                submission(&next),
+            );
+            let value = run_apply(&db, fresh_request)
+                .await
+                .expect("the status-derived current generation applies the next migration");
+            assert_eq!(str_field(&value, "status"), "applied");
+            let instance = db.get_db("testdb").unwrap();
+            assert!(instance.has_table("main", "items_2"));
+        });
+        timeout(Duration::from_secs(180), scenario)
+            .await
+            .expect("restart scenario exceeded its 180 s whole-scenario bound");
+        guard.mark("scenario done");
+    });
 }
 
 #[tokio::test]

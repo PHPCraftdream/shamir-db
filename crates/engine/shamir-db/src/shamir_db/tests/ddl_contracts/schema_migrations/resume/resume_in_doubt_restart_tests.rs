@@ -9,9 +9,13 @@
 //! store seam (`journal_prefix`), not by timing a real crash, and the
 //! reopen uses the bounded lock-only retry (`reopen_owner_db`).
 
+use std::time::Duration;
+
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
+use shamir_test_diag::FlakeGuard;
+use tokio::time::timeout;
 
 use super::super::helpers::on_big_stack;
 use super::helpers::{
@@ -50,94 +54,109 @@ fn rename_body() -> SchemaMigrationBody {
 
 #[test]
 fn restart_with_a_durable_in_doubt_tail_reports_reason_and_index_and_refuses_replay() {
+    // Whole-scenario bound (>=120 s: the Windows runner is up to 10x
+    // slower) with the failure-only diagnostic watchdog of the
+    // boot-oracle pattern: the watchdog fires BELOW the runner's
+    // slow-timeout kill so the timeline dumps first; the timeout itself
+    // fails the test.
     on_big_stack(|| async {
-        // The FILE-BACKED repo fixture: the test asserts the physical
-        // tables' identities across the restart, so the repo must survive
-        // the reopen (an in-memory repo would be re-created empty).
-        let (dir, db) = persistent_owner_db_fjall_repo().await;
-        // The REAL ambiguous state up front: source AND destination both
-        // exist, so the intent's outcome is genuinely unprovable — the
-        // synthetic marker matches the physical facts instead of
-        // contradicting them, and no effect is executed after it.
-        create_table(&db, "items_1").await;
-        create_table(&db, "renamed_items").await;
-        let migration = rename_body();
-
-        // Sow the durable tail exactly as an interrupted apply leaves it:
-        // the fence (generation 1), the operation-0 intent, and the
-        // best-effort InDoubt marker naming the blocked operation — then
-        // the process "dies" BEFORE any DDL runs.
-        journal_prefix(
-            &db,
-            &migration,
-            &[
-                (JournalEventKind::OperationIntent, 0, None),
-                (
-                    JournalEventKind::InDoubt,
-                    0,
-                    Some(RENAME_BOTH_PRESENT_EVIDENCE),
-                ),
-            ],
-        )
-        .await;
-        drop(db);
-
-        // FIRST boot after the crash (bounded lock-only retry inside
-        // `reopen_owner_db`): STATUS alone carries the evidence — no
-        // diagnostic resume/apply runs before this assertion.
-        let db = reopen_owner_db(&dir).await;
-        let target = identity(&db).await;
-        let value = run_status(&db, &target).await;
-        let in_flight = field(&value, "in_flight");
-        assert_eq!(str_field(in_flight, "migration_id"), "alpha-001");
-        assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
-        assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(1));
-        assert_eq!(str_field(in_flight, "status"), "in_doubt");
-        assert_eq!(
-            str_field(in_flight, "in_doubt_reason"),
-            RENAME_BOTH_PRESENT_EVIDENCE,
-            "status surfaces the recorded in-doubt reason verbatim"
+        let guard = FlakeGuard::with_watchdog(
+            "restart_with_a_durable_in_doubt_tail_reports_reason_and_index_and_refuses_replay",
+            Duration::from_secs(150),
         );
-        assert_eq!(
-            field(in_flight, "operation_index").as_i64(),
-            Some(0),
-            "status names the blocked operation index"
-        );
-        assert_eq!(str_field(&value, "error"), "schema_migration_in_doubt");
+        let scenario = Box::pin(async {
+            // The FILE-BACKED repo fixture: the test asserts the physical
+            // tables' identities across the restart, so the repo must survive
+            // the reopen (an in-memory repo would be re-created empty).
+            let (dir, db) = persistent_owner_db_fjall_repo().await;
+            // The REAL ambiguous state up front: source AND destination both
+            // exist, so the intent's outcome is genuinely unprovable — the
+            // synthetic marker matches the physical facts instead of
+            // contradicting them, and no effect is executed after it.
+            create_table(&db, "items_1").await;
+            create_table(&db, "renamed_items").await;
+            let migration = rename_body();
 
-        // The identical apply resubmission — with the fence generation
-        // STATUS itself reported — is refused typed in-doubt and replays
-        // NOTHING: no completion, no later effect, ever.
-        let error = run_apply(
-            &db,
-            apply_request(&target, empty_predecessor(), 1, submission(&migration)),
-        )
-        .await
-        .expect_err("an in-doubt tail must refuse apply, never replay");
-        assert_code(error, "schema_migration_in_doubt");
+            // Sow the durable tail exactly as an interrupted apply leaves it:
+            // the fence (generation 1), the operation-0 intent, and the
+            // best-effort InDoubt marker naming the blocked operation — then
+            // the process "dies" BEFORE any DDL runs.
+            journal_prefix(
+                &db,
+                &migration,
+                &[
+                    (JournalEventKind::OperationIntent, 0, None),
+                    (
+                        JournalEventKind::InDoubt,
+                        0,
+                        Some(RENAME_BOTH_PRESENT_EVIDENCE),
+                    ),
+                ],
+            )
+            .await;
+            drop(db);
 
-        let history = db
-            .system_store()
-            .read_schema_migration_history(target)
+            // FIRST boot after the crash (bounded lock-only retry inside
+            // `reopen_owner_db`): STATUS alone carries the evidence — no
+            // diagnostic resume/apply runs before this assertion.
+            let db = reopen_owner_db(&dir).await;
+            let target = identity(&db).await;
+            let value = run_status(&db, &target).await;
+            let in_flight = field(&value, "in_flight");
+            assert_eq!(str_field(in_flight, "migration_id"), "alpha-001");
+            assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
+            assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(1));
+            assert_eq!(str_field(in_flight, "status"), "in_doubt");
+            assert_eq!(
+                str_field(in_flight, "in_doubt_reason"),
+                RENAME_BOTH_PRESENT_EVIDENCE,
+                "status surfaces the recorded in-doubt reason verbatim"
+            );
+            assert_eq!(
+                field(in_flight, "operation_index").as_i64(),
+                Some(0),
+                "status names the blocked operation index"
+            );
+            assert_eq!(str_field(&value, "error"), "schema_migration_in_doubt");
+
+            // The identical apply resubmission — with the fence generation
+            // STATUS itself reported — is refused typed in-doubt and replays
+            // NOTHING: no completion, no later effect, ever.
+            let error = run_apply(
+                &db,
+                apply_request(&target, empty_predecessor(), 1, submission(&migration)),
+            )
             .await
-            .unwrap();
-        assert!(history.applied.is_empty(), "nothing was replayed");
-        assert_eq!(
-            completions_for(&history, 0),
-            0,
-            "the uncertain rename was never re-run"
-        );
-        let kinds = journal_kinds(&db).await;
-        assert!(
-            !kinds.contains(&JournalEventKind::OperationComplete)
-                && !kinds.contains(&JournalEventKind::Applied),
-            "no completion or applied event may exist after the refusal: {kinds:?}"
-        );
+            .expect_err("an in-doubt tail must refuse apply, never replay");
+            assert_code(error, "schema_migration_in_doubt");
 
-        // The physical state is untouched by the refusal: both table
-        // identities are still exactly as the crash left them.
-        let instance = db.get_db("testdb").unwrap();
-        assert!(instance.has_table("main", "items_1"));
-        assert!(instance.has_table("main", "renamed_items"));
+            let history = db
+                .system_store()
+                .read_schema_migration_history(target)
+                .await
+                .unwrap();
+            assert!(history.applied.is_empty(), "nothing was replayed");
+            assert_eq!(
+                completions_for(&history, 0),
+                0,
+                "the uncertain rename was never re-run"
+            );
+            let kinds = journal_kinds(&db).await;
+            assert!(
+                !kinds.contains(&JournalEventKind::OperationComplete)
+                    && !kinds.contains(&JournalEventKind::Applied),
+                "no completion or applied event may exist after the refusal: {kinds:?}"
+            );
+
+            // The physical state is untouched by the refusal: both table
+            // identities are still exactly as the crash left them.
+            let instance = db.get_db("testdb").unwrap();
+            assert!(instance.has_table("main", "items_1"));
+            assert!(instance.has_table("main", "renamed_items"));
+        });
+        timeout(Duration::from_secs(180), scenario)
+            .await
+            .expect("restart scenario exceeded its 180 s whole-scenario bound");
+        guard.mark("scenario done");
     });
 }
