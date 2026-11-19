@@ -161,3 +161,128 @@ async fn a_held_fence_refuses_other_sessions_writes_ddl_and_calls_but_admits_rea
     .await
     .expect("DDL is admitted after the fence is released");
 }
+
+/// The in-process gate is RESERVED before the durable fence CAS: exactly one
+/// reservation exists at a time, it is visible to every other applier (and to
+/// the batch entries) from that moment, and an early drop (CAS failure or a
+/// dropped apply future) cancels it.
+#[tokio::test]
+async fn the_gate_reservation_is_exclusive_and_an_early_drop_cancels_it() {
+    let (_dir, db) = persistent_owner_db().await;
+
+    let first = db
+        .reserve_schema_migration_gate("testdb")
+        .expect("the first reservation wins");
+    assert!(
+        db.reserve_schema_migration_gate("testdb").is_none(),
+        "a second applier must be refused while the gate is reserved"
+    );
+    assert!(
+        db.schema_migration_gate_generation("testdb").is_some(),
+        "a reserved gate is visible to every other applier"
+    );
+
+    drop(first);
+    assert!(
+        db.schema_migration_gate_generation("testdb").is_none(),
+        "dropping the reservation before the hold cancels it"
+    );
+    assert!(
+        db.reserve_schema_migration_gate("testdb").is_some(),
+        "the gate is free again after the cancellation"
+    );
+}
+
+/// After the hold the guard owns the live gate: a successful run releases it,
+/// any other exit leaves the in-doubt marker (writes stay refused until a
+/// resume), and neither exit evicts a newer owner's gate.
+#[tokio::test]
+async fn the_gate_guard_releases_on_success_and_leaves_an_in_doubt_marker_otherwise() {
+    let (_dir, db) = persistent_owner_db().await;
+
+    let mut succeeded = db.reserve_schema_migration_gate("testdb").unwrap();
+    succeeded.hold(3);
+    assert_eq!(db.schema_migration_gate_generation("testdb"), Some(3));
+    succeeded.mark_succeeded();
+    drop(succeeded);
+    assert!(db.schema_migration_gate_generation("testdb").is_none());
+    assert!(db
+        .schema_migration_gate_in_doubt_generation("testdb")
+        .is_none());
+
+    let mut failed = db.reserve_schema_migration_gate("testdb").unwrap();
+    failed.hold(4);
+    drop(failed);
+    assert!(db.schema_migration_gate_generation("testdb").is_none());
+    assert_eq!(
+        db.schema_migration_gate_in_doubt_generation("testdb"),
+        Some(4),
+        "an unsuccessful exit leaves the fence in doubt"
+    );
+}
+
+/// Many appliers released together for the same ordinal: whatever their
+/// interleaving, exactly one run executes (one `Started`, no takeover of a
+/// live runner), the others are refused as in progress or see the applied
+/// no-op, and no in-process gate or in-doubt marker is left behind.
+#[tokio::test]
+async fn eight_concurrent_appliers_run_the_migration_exactly_once() {
+    let (_dir, db) = persistent_owner_db().await;
+    let target = identity(&db).await;
+    let migration = body("alpha-001", 1);
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let db = db.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            let request = apply_request(&target, empty_predecessor(), 0, submission(&migration));
+            tokio::spawn(async move {
+                barrier.wait().await;
+                run_apply(&db, request).await
+            })
+        })
+        .collect();
+
+    let mut applied_results = 0;
+    for task in tasks {
+        match task.await.expect("applier task must not panic") {
+            Ok(value) => {
+                assert_eq!(str_field(&value, "status"), "applied");
+                applied_results += 1;
+            }
+            Err(error) => assert_code(error, "schema_migration_in_progress"),
+        }
+    }
+    assert!(applied_results >= 1, "one applier must apply the migration");
+
+    let history = db
+        .system_store()
+        .read_schema_migration_history(target)
+        .await
+        .unwrap();
+    let kinds: Vec<_> = history.events.iter().map(|event| event.kind).collect();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == JournalEventKind::Started)
+            .count(),
+        1,
+        "exactly one runner started: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&JournalEventKind::RecoveryAcquired),
+        "a live runner must never be taken over: {kinds:?}"
+    );
+    assert_eq!(
+        history.events.len(),
+        5,
+        "one run of a single-operation body: {kinds:?}"
+    );
+    assert_eq!(history.applied.len(), 1);
+    assert!(history.unresolved.is_empty());
+    assert!(db.schema_migration_gate_generation("testdb").is_none());
+    assert!(db
+        .schema_migration_gate_in_doubt_generation("testdb")
+        .is_none());
+}

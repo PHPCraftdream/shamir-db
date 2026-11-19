@@ -122,32 +122,30 @@ fn migration_body_msgpack_round_trips_nested_admitted_values_and_checksum() {
     let mut body = empty_body();
     let mut nested_map = new_map();
     nested_map.insert("label".to_owned(), QueryValue::Str("é".to_owned()));
+    let nested_values = vec![QueryValue::List(vec![
+        QueryValue::Null,
+        QueryValue::Bool(true),
+        QueryValue::Int(17),
+        QueryValue::F64(1.5),
+        QueryValue::Bin(vec![0, 255, 1]),
+        QueryValue::Map(nested_map),
+    ])];
+    // Nested admitted values survive the wire through the schema constraint `one_of`;
+    // `functional_args` are refused by admission and must not carry round-trip coverage.
     body.operations
-        .push(SchemaMigrationOp::CreateIndex(Box::new(
-            crate::admin::types::CreateIndexOp {
-                create_index: "items_by_label".to_owned(),
-                table: "items".to_owned(),
-                fields: vec![vec!["label".to_owned()]],
-                unique: false,
-                sorted: false,
+        .push(SchemaMigrationOp::AddSchemaRule(Box::new(
+            crate::admin::types::AddSchemaRuleOp {
+                add_schema_rule: "items".to_owned(),
                 repo: "main".to_owned(),
-                index_type: None,
-                fts_tokenizer: None,
-                fts_language: None,
-                functional_op: None,
-                functional_args: Some(vec![QueryValue::List(vec![
-                    QueryValue::Null,
-                    QueryValue::Bool(true),
-                    QueryValue::Int(17),
-                    QueryValue::F64(1.5),
-                    QueryValue::Bin(vec![0, 255, 1]),
-                    QueryValue::Map(nested_map),
-                ])]),
-                vector_dim: None,
-                vector_metric: None,
-                vector_quantization: None,
-                include: Vec::new(),
-                if_not_exists: false,
+                rule: crate::admin::types::FieldRuleDto {
+                    path: vec!["label".to_owned()],
+                    r#type: "any".to_owned(),
+                    constraints: crate::admin::types::ConstraintsDto {
+                        one_of: Some(nested_values),
+                        ..Default::default()
+                    },
+                    keyset_safe: false,
+                },
             },
         )));
     let checksum = canonical_body_checksum(&body).unwrap();

@@ -3,10 +3,11 @@
  * the provenance/`__proto__` follow-up round:
  *   - The `createIndex` WRAPPER ITSELF throws typed
  *     `MigrationError('invalid_set')` when `functional_op`/`functional_args`
- *     are given for a non-functional `index_type`, and the built-ins enforce
- *     their explicit-extra arity (`substring` two, `mod` one, unary
- *     built-ins zero, `concat`/`coalesce` variadic with no maximum — the
- *     indexed field is the first operand).
+ *     are given for a non-functional (or omitted) `index_type`; the admitted
+ *     functional-op allowlist is exactly `lower | upper | trim | length`
+ *     (what the server's index backend builds directly); and ANY supplied
+ *     `functional_args` — including `[]` — is refused because the server's
+ *     functional-index backend never reads them.
  *   - Builder provenance is asserted BEFORE any semantic read at BOTH
  *     authoring boundaries (`schemaMigration` and the direct
  *     `ApplicationMigrationSet` constructor): hand-built / spread ops fail
@@ -115,14 +116,14 @@ describe('finding 1 — wrapper throws on btree + functional_op/functional_args'
   it('btree + functional_args is a typed invalid_set thrown by the wrapper call', () => {
     expectInvalidSet(
       () => migrationDdl.createIndex('idx', 't', [['col']], { index_type: 'btree', functional_args: [] }),
-      /create_index: createIndex: functional_op\/functional_args are only valid/,
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
     );
   });
 
   it('btree + functional_op is the same typed refusal at the wrapper call', () => {
     expectInvalidSet(
       () => migrationDdl.createIndex('idx', 't', [['col']], { index_type: 'btree', functional_op: 'lower' }),
-      /create_index: createIndex: functional_op\/functional_args are only valid/,
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
     );
   });
 });
@@ -154,16 +155,17 @@ describe('finding 1 — raw and spread inputs at the authoring boundaries (prove
 
   it('a GENUINE btree op mutated in place still fails with the ORIGINAL semantic diagnostic', () => {
     // Minted valid, then mutated AFTER minting: provenance holds, semantics
-    // must still be checked and reject the mutation.
+    // must still be checked and reject the mutation (with the migration
+    // diagnostic, not the plain builder's).
     const genuine = migrationDdl.createIndex('idx', 't', [['col']], { index_type: 'functional', functional_op: 'lower' });
     createIndexPayload(genuine).index_type = 'btree';
     expectInvalidSet(
       () => schemaMigration('m1', 1n, 'mutated btree', [genuine]),
-      /migration create_index: createIndex: functional_op\/functional_args are only valid/,
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
     );
     expectInvalidSet(
       () => new ApplicationMigrationSet([rawBody([genuine])]),
-      /migration create_index: createIndex: functional_op\/functional_args are only valid/,
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
     );
   });
 
@@ -181,58 +183,111 @@ describe('finding 1 — raw and spread inputs at the authoring boundaries (prove
   });
 });
 
-// ── finding 1: explicit extra-argument arity per builtin ────────────
+// ── finding 1: functional-index admission matrix ────────────────────
 
-describe('finding 1 — functional-index builtin argument arity', () => {
-  it('substring requires TWO explicit extra arguments', () => {
-    expectInvalidSet(functionalBody('substring'));
-    expectInvalidSet(functionalBody('substring', []));
-    expectInvalidSet(functionalBody('substring', ['1']));
-  });
-
-  it('substring with two valid args carries them on the payload', () => {
-    const payload = createIndexPayload(functionalBody('substring', [1, 2])().operations[0]);
-    expect(payload.functional_op).toBe('substring');
-    expect(payload.functional_args).toEqual([1, 2]);
-  });
-
-  it('mod requires ONE explicit extra argument', () => {
-    expectInvalidSet(functionalBody('mod'));
-    expectInvalidSet(functionalBody('mod', []));
-    expect(() => functionalBody('mod', [3])()).not.toThrow();
-  });
-
-  it('concat and coalesce accept ZERO extras (the field is the one total operand)', () => {
-    for (const op of ['concat', 'coalesce'] as const) {
-      expect(() => functionalBody(op)()).not.toThrow();
-      expect(() => functionalBody(op, [])()).not.toThrow();
+describe('finding 1 — functional-index admission matrix (wrapper-level)', () => {
+  it('each ADMITTED builtin (lower/upper/trim/length) succeeds with no args', () => {
+    for (const op of ['lower', 'upper', 'trim', 'length'] as const) {
+      const payload = createIndexPayload(functionalBody(op)().operations[0]);
+      expect(payload.functional_op).toBe(op);
+      expect(payload.functional_args).toBeUndefined();
     }
   });
 
-  it('unary builtins reject ANY extras with the real message', () => {
+  it('substring/mod/coalesce/concat are OUTSIDE the migration allowlist', () => {
+    for (const op of ['substring', 'mod', 'coalesce', 'concat'] as const) {
+      expectInvalidSet(
+        functionalBody(op),
+        /index function is outside the built-in functional-index allowlist/,
+      );
+      // Even with args supplied, the allowlist diagnostic wins (Rust order).
+      expectInvalidSet(
+        functionalBody(op, [1]),
+        /index function is outside the built-in functional-index allowlist/,
+      );
+    }
+  });
+
+  it('ANY supplied functional_args — including [] — is refused, on every admitted op', () => {
+    for (const op of ['lower', 'upper', 'trim', 'length'] as const) {
+      expectInvalidSet(
+        functionalBody(op, []),
+        /functional_args are not admitted because functional indexes do not use them/,
+      );
+      expectInvalidSet(
+        functionalBody(op, ['x']),
+        /functional_args are not admitted because functional indexes do not use them/,
+      );
+    }
+  });
+
+  it('functional options on ANY non-functional family are refused with the builder-meaning diagnostic', () => {
+    for (const index_type of ['btree', 'fts', 'vector'] as const) {
+      expectInvalidSet(
+        () => migrationDdl.createIndex('idx', 't', [['col']], { index_type, functional_op: 'lower' }),
+        /functional_op\/functional_args are only valid for 'functional' indexes/,
+      );
+      expectInvalidSet(
+        () => migrationDdl.createIndex('idx', 't', [['col']], { index_type, functional_args: [] }),
+        /functional_op\/functional_args are only valid for 'functional' indexes/,
+      );
+    }
+  });
+
+  it('the functional guard precedes the plain builder: a vector + functional_op case WITH a valid vector_dim still gets the migration diagnostic', () => {
+    // The plain builder checks the vector family (dim) FIRST when it runs;
+    // the wrapper runs the functional-option guards before it, so the
+    // functional-family diagnostic wins even though the vector options are
+    // internally consistent.
     expectInvalidSet(
-      functionalBody('lower', ['x']),
-      /functional 'lower' is unary and takes no explicit arguments beyond the indexed field \(the field is the first operand\), got 1/,
+      () => migrationDdl.createIndex('idx', 't', [['col']], {
+        index_type: 'vector',
+        vector_dim: 4,
+        vector_metric: 'l2',
+        functional_op: 'lower',
+      }),
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
     );
   });
 
-  it('concat and coalesce accept variadic extras (no maximum beyond the field)', () => {
-    for (const op of ['concat', 'coalesce'] as const) {
-      expect(() => functionalBody(op, ['a'])()).not.toThrow();
-      expect(() => functionalBody(op, ['a', 'b'])()).not.toThrow();
-    }
+  it('functional options with the index_type OMITTED are refused identically', () => {
+    expectInvalidSet(
+      () => migrationDdl.createIndex('idx', 't', [['col']], { functional_op: 'lower' }),
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
+    );
+    expectInvalidSet(
+      () => migrationDdl.createIndex('idx', 't', [['col']], { functional_args: [] }),
+      /functional_op\/functional_args are only valid for 'functional' indexes/,
+    );
   });
 
-  it('lower with no extras succeeds and keeps functional_args off the payload', () => {
+  it('functional index without an explicit op is refused with the explicit-op diagnostic', () => {
+    expectInvalidSet(
+      () => migrationDdl.createIndex('idx', 't', [['col']], { index_type: 'functional' }),
+      /functional index requires an explicit built-in operation/,
+    );
+  });
+
+  it('a GENUINE admitted op MUTATED to add functional_args still fails with the real diagnostic', () => {
+    // Both authoring boundaries validate the mutation BEFORE any canonical
+    // encoding: the failure is the typed `invalid_set`, never a canonical
+    // encode error, so the encoder is never reached with refused args.
+    const genuine = migrationDdl.createIndex('idx', 't', [['col']], { index_type: 'functional', functional_op: 'lower' });
+    createIndexPayload(genuine).functional_args = [];
+    expectInvalidSet(
+      () => schemaMigration('m1', 1n, 'mutated args', [genuine]),
+      /functional_args are not admitted because functional indexes do not use them/,
+    );
+    expectInvalidSet(
+      () => new ApplicationMigrationSet([rawBody([genuine])]),
+      /functional_args are not admitted because functional indexes do not use them/,
+    );
+  });
+
+  it('lower with no extras succeeds and keeps functional_args off the payload (control)', () => {
     const payload = createIndexPayload(lowerBody('lower-ok', 1).operations[0]);
     expect(payload.functional_op).toBe('lower');
     expect(payload.functional_args).toBeUndefined();
-  });
-
-  it('upper/trim/length need no required extras', () => {
-    for (const op of ['upper', 'trim', 'length']) {
-      expect(() => functionalBody(op)()).not.toThrow();
-    }
   });
 });
 

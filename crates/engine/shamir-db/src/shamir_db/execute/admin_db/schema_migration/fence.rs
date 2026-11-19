@@ -37,6 +37,7 @@
 
 use std::sync::atomic::Ordering;
 
+use dashmap::mapref::entry::Entry;
 use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 
 use crate::query::batch::{BatchError, BatchOp, BatchRequest};
@@ -46,6 +47,12 @@ use crate::DbResult;
 
 /// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
+
+/// Generation placeholder of a gate that is RESERVED (admission passed, the
+/// durable fence CAS is still in flight): the gate is visible to every other
+/// applier and to the batch entries from the reservation on, so no applier can
+/// observe a durably started migration with no in-process gate.
+const GATE_PENDING: u64 = u64::MAX;
 
 /// Stable §5.3 code for a fence that is still durably OWNED but has NO live
 /// runner in this process (R1c step 2b-3b: the runner crashed or the server
@@ -70,6 +77,32 @@ impl ShamirDb {
     /// The generation of the fence currently held in-process for `db`, if any.
     pub(in crate::shamir_db) fn schema_migration_gate_generation(&self, db: &str) -> Option<u64> {
         self.schema_migration_gate.get(db).map(|entry| *entry)
+    }
+
+    /// Reserve the in-process gate for `db` BEFORE the durable fence CAS:
+    /// atomic insert-if-absent, so exactly one applier of this process gets
+    /// the reservation and every other one is refused with
+    /// `schema_migration_in_progress` (a durable `started` row is therefore
+    /// never visible without its in-process gate, and a concurrent applier
+    /// can never take over a live runner as if it had crashed). The returned
+    /// guard cancels the reservation if dropped before
+    /// [`SchemaMigrationGateGuard::hold`].
+    pub(in crate::shamir_db) fn reserve_schema_migration_gate(
+        &self,
+        db: &str,
+    ) -> Option<SchemaMigrationGateGuard<'_>> {
+        match self.schema_migration_gate.entry(db.to_string()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => {
+                slot.insert(GATE_PENDING);
+                Some(SchemaMigrationGateGuard {
+                    shamir: self,
+                    db: db.to_string(),
+                    generation: None,
+                    succeeded: false,
+                })
+            }
+        }
     }
 
     /// Mark `db` as fenced in-process under `generation`. Only the winner of
@@ -139,6 +172,54 @@ impl ShamirDb {
     pub(in crate::shamir_db) fn release_schema_migration_gate(&self, db: &str, generation: u64) {
         self.schema_migration_gate
             .remove_if(db, |_, held| *held == generation);
+    }
+}
+
+/// RAII owner of the in-process gate of one apply run, from the reservation
+/// before the durable fence CAS to the end of the run. Dropped before
+/// [`Self::hold`] it cancels the reservation (the CAS failed or the apply
+/// future was dropped); after `hold` it releases the live gate on success and
+/// converts it to the in-doubt marker otherwise. Every transition is
+/// synchronous, so no await can separate the reservation from its owner.
+pub(in crate::shamir_db) struct SchemaMigrationGateGuard<'a> {
+    shamir: &'a ShamirDb,
+    db: String,
+    generation: Option<u64>,
+    succeeded: bool,
+}
+
+impl SchemaMigrationGateGuard<'_> {
+    /// The durable fence is owned under `generation`: replace the reservation
+    /// with the live gate (also clearing an open-time in-doubt marker).
+    pub(in crate::shamir_db) fn hold(&mut self, generation: u64) {
+        self.shamir.hold_schema_migration_gate(&self.db, generation);
+        self.generation = Some(generation);
+    }
+
+    /// The run ended with `applied` durable: the drop releases the gate
+    /// instead of leaving an in-doubt marker.
+    pub(in crate::shamir_db) fn mark_succeeded(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for SchemaMigrationGateGuard<'_> {
+    fn drop(&mut self) {
+        match self.generation {
+            None => {
+                self.shamir
+                    .schema_migration_gate
+                    .remove_if(&self.db, |_, held| *held == GATE_PENDING);
+            }
+            Some(generation) if self.succeeded => {
+                self.shamir
+                    .release_schema_migration_gate(&self.db, generation);
+            }
+            Some(generation) => {
+                self.shamir
+                    .mark_schema_migration_gate_in_doubt(&self.db, generation);
+            }
+        }
     }
 }
 

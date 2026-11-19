@@ -155,3 +155,90 @@ fn query_value_literals_are_bounded() {
     let value = QueryValue::List(vec![QueryValue::Str("x".to_owned())]);
     assert!(validate_query_value(&value, 0).is_ok());
 }
+
+fn create_index(
+    index_type: Option<&str>,
+    functional_op: Option<&str>,
+    functional_args: Option<Vec<QueryValue>>,
+) -> SchemaMigrationOp {
+    SchemaMigrationOp::CreateIndex(Box::new(crate::admin::types::CreateIndexOp {
+        create_index: "items_by_label".to_owned(),
+        table: "items".to_owned(),
+        fields: vec![vec!["label".to_owned()]],
+        unique: false,
+        sorted: false,
+        repo: "main".to_owned(),
+        index_type: index_type.map(str::to_owned),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: functional_op.map(str::to_owned),
+        functional_args,
+        vector_dim: None,
+        vector_metric: None,
+        vector_quantization: None,
+        include: Vec::new(),
+        if_not_exists: false,
+    }))
+}
+
+#[test]
+fn functional_index_admits_only_explicit_builtin_lowercase_string_ops() {
+    for functional_op in ["lower", "upper", "trim", "length"] {
+        let operation = create_index(Some("functional"), Some(functional_op), None);
+        assert!(operation.validate().is_ok(), "op {functional_op} refused");
+    }
+    for functional_op in ["substring", "mod", "coalesce", "concat", "reverse"] {
+        let operation = create_index(Some("functional"), Some(functional_op), None);
+        assert_eq!(
+            operation.validate(),
+            Err(SchemaMigrationError::UnsafeOperation(
+                "index function is outside the built-in functional-index allowlist"
+            )),
+            "op {functional_op} admitted"
+        );
+    }
+}
+
+#[test]
+fn functional_index_requires_an_explicit_builtin_operation() {
+    let operation = create_index(Some("functional"), None, None);
+    assert_eq!(
+        operation.validate(),
+        Err(SchemaMigrationError::UnsafeOperation(
+            "functional index requires an explicit built-in operation"
+        ))
+    );
+}
+
+#[test]
+fn functional_args_are_refused_even_when_empty() {
+    for functional_args in [
+        Some(Vec::new()),
+        Some(vec![QueryValue::List(vec![QueryValue::Int(1)])]),
+    ] {
+        let operation = create_index(Some("functional"), Some("lower"), functional_args);
+        assert_eq!(
+            operation.validate(),
+            Err(SchemaMigrationError::UnsafeOperation(
+                "functional_args are not admitted because functional indexes do not use them"
+            )),
+            "args admitted"
+        );
+    }
+}
+
+#[test]
+fn functional_options_on_nonfunctional_or_omitted_families_are_refused_first() {
+    for index_type in [None, Some("btree"), Some("fts"), Some("vector")] {
+        for (functional_op, functional_args) in [(Some("lower"), None), (None, Some(Vec::new()))] {
+            let operation = create_index(index_type, functional_op, functional_args);
+            assert_eq!(
+                operation.validate(),
+                Err(SchemaMigrationError::UnsafeOperation(
+                    "functional_op/functional_args are only valid for 'functional' indexes"
+                )),
+                "index_type {index_type:?} admitted functional options"
+            );
+        }
+    }
+}

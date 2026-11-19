@@ -1548,6 +1548,23 @@ is immutable once applied: changing it changes its checksum — drift, refused
 before any apply. Correct a released migration with a new forward migration,
 never by editing the old body.
 
+#### Functional indexes in migrations
+
+`create_index` migrations admit functional indexes only with
+`index_type = "functional"` and a `functional_op` of exactly
+`lower | upper | trim | length` — the built-ins the server's index backend
+constructs directly (`write_domain_index_admitted.rs`). Functional options on
+any other (or omitted) index type, a functional index without an explicit op,
+a name outside the allowlist, and ANY supplied `functional_args` — including
+`[]` — are refused locally, before the journal intent is written. The typed
+refusal is `SchemaMigrationError::UnsafeOperation` from the operation builder;
+when the op goes through a migration-set builder, that error surfaces wrapped
+as `MigrationError::InvalidSet(SchemaMigrationError::UnsafeOperation(…))`. `functional_args`
+are refused because the server builds the index expression from the indexed
+field and the op alone and never reads them. Note the index semantics:
+`length` counts UTF-8 bytes of a string (element count of a list), not
+Unicode characters.
+
 ### Target identity and permissions
 
 `SchemaMigrationTarget { database_identity }` carries the **known stable

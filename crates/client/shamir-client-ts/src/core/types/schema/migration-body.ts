@@ -124,10 +124,14 @@ export type MigrationAddSchemaRulePayload = Omit<AddSchemaRuleOp, 'rule'> & {
 };
 
 /**
- * Migration payload for `create_index` — `functional_args` accept the
- * canonical-admitted {@link MigrationLiteral} forms (`bigint`,
- * {@link MigrationFloat}, `Uint8Array` in addition to the plain JSON
- * `WireValue`), mirroring the Rust `Value` grammar of canonical format v1.
+ * Migration payload for `create_index` — the OPTIONAL `functional_args`
+ * field accepts the canonical-admitted {@link MigrationLiteral} forms
+ * (`bigint`, {@link MigrationFloat}, `Uint8Array` in addition to the plain
+ * JSON `WireValue`), mirroring the Rust `Value` grammar of canonical format
+ * v1. The field is accepted by the TYPE so the typed refusal is observable,
+ * but the migration model REFUSES any supplied `functional_args` (including
+ * `[]`): the server's functional-index backend never reads them, so they
+ * must not enter the canonical checksum.
  */
 export type MigrationCreateIndexPayload = Omit<CreateIndexOp, 'functional_args'> & {
   functional_args?: MigrationLiteral[];

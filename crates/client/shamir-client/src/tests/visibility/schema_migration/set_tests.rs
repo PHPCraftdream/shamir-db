@@ -5,7 +5,12 @@
 //! or connection exists (so an invalid local gap emits ZERO outbound
 //! bytes by construction: there is nothing to send on).
 
-use shamir_query_types::admin::types::schema_migration::SchemaMigrationError;
+use shamir_query_builder::ddl;
+use shamir_query_builder::wire::schema_migration::SchemaMigration;
+use shamir_query_types::admin::types::schema_migration::{
+    SchemaMigrationBody, SchemaMigrationError, SchemaMigrationOp,
+};
+use shamir_types::types::value::QueryValue;
 
 use crate::schema_migration::{ApplicationMigrationSet, MigrationError};
 
@@ -83,4 +88,87 @@ fn rust_migration_set_rejects_gap_order_and_duplicate_before_any_send() {
 
     // The valid set still constructs after the refusals.
     assert_eq!(migration_set(&["a", "b"]).len(), 2);
+}
+
+/// The admitted functional-index subset (`lower`, `upper`, `trim`,
+/// `length`, NO arguments — the only forms the server demonstrably builds
+/// and serves lookups with) passes the LOCAL typed set construction:
+/// the emitted operation keeps its name and indexed field, and the set
+/// holds the body before any client or connection exists.
+#[test]
+fn rust_migration_set_accepts_built_in_functional_index_without_args() {
+    for functional_op in ["lower", "upper", "trim", "length"] {
+        let body = SchemaMigration::new("mig_func", 1, "functional index")
+            .op(ddl::create_index("ix_email", "users")
+                .functional(vec![String::from("email")], functional_op)
+                .expect("typed functional constructor builds"))
+            .expect("create_index is an admitted migration operation")
+            .build()
+            .unwrap_or_else(|error| panic!("{functional_op} must be admitted, got {error:?}"));
+        assert_eq!(body.operations.len(), 1);
+        let SchemaMigrationOp::CreateIndex(create_index) = &body.operations[0] else {
+            panic!("expected a typed create_index operation")
+        };
+        assert_eq!(create_index.functional_op.as_deref(), Some(functional_op));
+        assert_eq!(create_index.fields, vec![vec![String::from("email")]]);
+        let set = ApplicationMigrationSet::new(vec![body])
+            .unwrap_or_else(|error| panic!("{functional_op} set must construct, got {error:?}"));
+        assert_eq!(set.len(), 1);
+    }
+}
+
+/// A valid builder-produced body whose typed `create_index` DTO is then
+/// narrowly mutated to the operation/arguments under test (the typed
+/// constructor cannot carry the refused forms, and normalizes an empty
+/// argument list to absent, which would hide the `[]` case).
+fn mutated_body(functional_op: &str, args: Option<Vec<QueryValue>>) -> SchemaMigrationBody {
+    let mut body = SchemaMigration::new("mig_func", 1, "functional index")
+        .op(ddl::create_index("ix_email", "users")
+            .functional(vec![String::from("email")], "lower")
+            .expect("typed functional constructor builds"))
+        .expect("create_index is an admitted migration operation")
+        .build()
+        .expect("the unmutated body validates");
+    let SchemaMigrationOp::CreateIndex(create_index) = &mut body.operations[0] else {
+        panic!("expected a typed create_index operation")
+    };
+    create_index.functional_op = Some(functional_op.to_string());
+    create_index.functional_args = args;
+    body
+}
+
+/// Unbuildable functional forms refuse inside
+/// `ApplicationMigrationSet::new` with the model's exact typed reasons:
+/// the four allowlist-era names (with and without arguments) fail the
+/// allowlist check, and any `functional_args` (even empty) on an admitted
+/// name fails the arguments check.
+#[test]
+fn rust_migration_set_refuses_unbuildable_functional_forms_at_construction() {
+    const ALLOWLIST_REASON: &str =
+        "index function is outside the built-in functional-index allowlist";
+    const ARGS_REASON: &str =
+        "functional_args are not admitted because functional indexes do not use them";
+
+    for functional_op in ["substring", "mod", "coalesce", "concat"] {
+        for args in [None, Some(vec![QueryValue::from("arg")])] {
+            let error = ApplicationMigrationSet::new(vec![mutated_body(functional_op, args)])
+                .expect_err("an unbuildable functional name must be refused");
+            let MigrationError::InvalidSet(SchemaMigrationError::UnsafeOperation(reason)) = &error
+            else {
+                panic!("typed set refusal, got {error:?}")
+            };
+            assert_eq!(*reason, ALLOWLIST_REASON, "for {functional_op}");
+        }
+    }
+    for functional_op in ["lower", "upper", "trim", "length"] {
+        for args in [Some(vec![QueryValue::from("arg")]), Some(Vec::new())] {
+            let error = ApplicationMigrationSet::new(vec![mutated_body(functional_op, args)])
+                .expect_err("functional_args on an admitted op must be refused");
+            let MigrationError::InvalidSet(SchemaMigrationError::UnsafeOperation(reason)) = &error
+            else {
+                panic!("typed set refusal, got {error:?}")
+            };
+            assert_eq!(*reason, ARGS_REASON, "for {functional_op}");
+        }
+    }
 }
