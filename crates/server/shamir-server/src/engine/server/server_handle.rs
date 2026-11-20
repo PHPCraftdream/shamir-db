@@ -8,7 +8,7 @@ use std::time::Duration;
 use shamir_db::{ShamirDb, ShutdownReport};
 use shamir_tunables::runtime::RuntimeTunables;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::audit_appender::FjallAuditAppender;
 use crate::http_rest::RestGate;
@@ -109,6 +109,8 @@ pub struct ServerHandle {
     /// future `.cancelled().await` resolves immediately if cancel was
     /// already set, so the race is closed by construction.
     pub(super) shutdown_token: CancellationToken,
+    /// Dropping the handle also signals this task; only graceful shutdown joins it.
+    pub(super) backup_schedule_task: Option<(DropGuard, JoinHandle<()>)>,
     /// Optional observability HTTP server.
     pub(super) observability: Option<crate::observability::ObservabilityHandle>,
     /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
@@ -199,6 +201,18 @@ pub(crate) async fn drain_connections(
     joined
 }
 
+async fn join_backup_schedule(
+    schedule_task: Option<(DropGuard, JoinHandle<()>)>,
+    report: &mut ShutdownReport,
+) {
+    let Some((_guard, task)) = schedule_task else {
+        return;
+    };
+    if let Err(error) = task.await {
+        report.add_error(format!("backup schedule task failed: {error}"));
+    }
+}
+
 impl ServerHandle {
     /// What the boot-time format-stamp check did to `data_dir`.
     pub fn format_stamp(&self) -> shamir_sync::format_stamp::StampOutcome {
@@ -275,6 +289,8 @@ impl ServerHandle {
         // 3. Drain the audit chain + scheduler.
         self.audit_appender.shutdown().await;
         self.scheduler.shutdown().await;
+        // Do not abort: an in-flight copy or retention operation must finish cleanup.
+        join_backup_schedule(self.backup_schedule_task, report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new

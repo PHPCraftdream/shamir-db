@@ -1,0 +1,37 @@
+# JSON-form YAML so CI can read the rule document without a YAML dependency.
+# BACKUP_STALE_THRESHOLD_SECONDS: operator render/substitution knob, not a
+# Prometheus variable. Replace the literal 129600 (1.5 x 24h) before loading
+# for other schedules; allow for windows and planned gaps.
+# The same deadline applies from the last success or, before the first success,
+# from schedule start. The condition must remain true for 5m.
+{
+  "groups": [
+    {
+      "name": "shamir-backup",
+      "rules": [
+        {
+          "alert": "BackupStale",
+          "expr": "(time() - ((shamir_backup_last_success_timestamp_seconds > 0) or ((shamir_backup_schedule_started_timestamp_seconds > 0) and (shamir_backup_last_success_timestamp_seconds == 0))) > 129600) and shamir_backup_schedule_enabled == 1",
+          "for": "5m",
+          "annotations": {
+            "summary": "ShamirDB backup is stale or has not yet succeeded since boot"
+          }
+        },
+        {
+          "alert": "BackupFailing",
+          "expr": "shamir_backup_scheduled_failure_streak >= 3 and ignoring(result) shamir_backup_scheduled_runs_total{result=\"failed\"} >= 3 and shamir_backup_schedule_enabled == 1",
+          "annotations": {
+            "summary": "At least three consecutive scheduled ShamirDB backups failed"
+          }
+        },
+        {
+          "alert": "BackupRetentionFailing",
+          "expr": "increase(shamir_backup_retention_failed_total[1h]) > 0",
+          "annotations": {
+            "summary": "ShamirDB backup retention reported a failure in the last hour"
+          }
+        }
+      ]
+    }
+  ]
+}

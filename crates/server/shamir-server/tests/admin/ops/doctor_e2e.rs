@@ -52,6 +52,7 @@ fn make_test_config(data_dir: &Path) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 
