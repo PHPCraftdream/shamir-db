@@ -125,6 +125,7 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         // R4b-1: a token endpoint must not enumerate other sessions'
         // activity (Own) or global operator activity (All).
         | BatchOp::ListActivity(_)
+        | BatchOp::CancelRequest(_)
         | BatchOp::CancelBackup(_)
         | BatchOp::ReplicationStatus(_) => "admin-denied",
     }

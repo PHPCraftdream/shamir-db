@@ -27,6 +27,31 @@ fn execute(op: impl IntoBatchOp, db: &str) -> DbRequest {
 }
 
 #[test]
+fn scoped_tokens_cannot_cancel_requests() {
+    let cancel =
+        shamir_query_builder::cancel_request(shamir_query_types::admin::activity::RequestExecId(1));
+    let direct = execute(cancel.clone(), "db");
+    let nested = execute(
+        BatchOp::Batch(shamir_query_types::batch::SubBatchOp {
+            batch: batch_with(cancel),
+            bind: new_map(),
+        }),
+        "db",
+    );
+    let allow = [String::from("db")];
+    for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+        for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+            for request in [&direct, &nested] {
+                assert_eq!(
+                    classify_request(request, mode, Some(&allow), endpoint),
+                    Decision::Denied("token_request_denied")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
     for request in [
         DbRequest::Ping,

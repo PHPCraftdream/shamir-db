@@ -242,3 +242,14 @@ fn functional_options_on_nonfunctional_or_omitted_families_are_refused_first() {
         }
     }
 }
+
+#[test]
+fn batch_admission_rejects_request_cancellation() {
+    let op = crate::batch::BatchOp::CancelRequest(crate::admin::RequestExecId(42));
+    assert!(matches!(
+        SchemaMigrationOp::try_from(op),
+        Err(SchemaMigrationError::UnsupportedOperation(
+            "request cancellation"
+        ))
+    ));
+}

@@ -32,6 +32,8 @@
 #[cfg(test)]
 mod tests;
 
+#[path = "tx/support/core/cancel_handle.rs"]
+mod cancel_handle;
 mod gate;
 mod tx;
 mod version;
@@ -58,6 +60,7 @@ pub use version::version_guard;
 pub use version::version_provider;
 pub use version::versioned_overlay;
 
+pub use cancel_handle::{CancelHandle, CancelState, RequestCancelled, WaitGuard, WaitState};
 pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
     nontx_event, project_event, version_key, ChangeOp, ChangelogError, ChangelogEvent,
@@ -72,6 +75,7 @@ pub use layered_interner::{
     commit_interner_overlay, LayeredInterner, OverlayCommitResult, OVERLAY_ID_BASE,
 };
 pub use metrics::{TxMetrics, TxMetricsSnapshot};
+pub use mvcc_store::mvcc_locks::LockError;
 pub use mvcc_store::{KeyLock, LockMode, MvccStore, Retention, VersionEntry};
 pub use pending_commit::PendingCommit;
 pub use predicate_set::{

@@ -1,6 +1,7 @@
 //! Shared per-execution budget for the recursive executor chain.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::query::batch::result_size::ResultSize;
@@ -10,6 +11,7 @@ use crate::query::read::{QueryRecord, QueryResult};
 use shamir_engine_query::query::read::value_bytes::ValueBytes;
 use shamir_query_types::batch::RequestMetadata;
 use shamir_storage::error::DbError;
+use shamir_tx::CancelHandle;
 
 /// Per-read credit, never a delta of the shared root counter.
 /// Intermediate charges are retained; only surviving, charged output rows
@@ -119,6 +121,7 @@ pub struct ExecScope {
     bytes: AtomicU64,
     enforce_result_size: bool,
     root_metadata: Option<RequestMetadata>,
+    cancel: Option<Arc<CancelHandle>>,
 }
 
 impl ExecScope {
@@ -138,6 +141,7 @@ impl ExecScope {
             bytes: AtomicU64::new(0),
             enforce_result_size,
             root_metadata: None,
+            cancel: None,
         }
     }
 
@@ -148,6 +152,28 @@ impl ExecScope {
 
     pub(in crate::query::batch) fn root_metadata(&self) -> Option<&RequestMetadata> {
         self.root_metadata.as_ref()
+    }
+
+    pub(in crate::query::batch) fn with_cancel_handle(
+        mut self,
+        cancel: Option<Arc<CancelHandle>>,
+    ) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    pub(in crate::query::batch) fn cancel_handle(&self) -> Option<&Arc<CancelHandle>> {
+        self.cancel.as_ref()
+    }
+
+    pub(in crate::query::batch) fn check_cancelled(&self) -> Result<(), BatchError> {
+        if self
+            .cancel_handle()
+            .is_some_and(|handle| handle.is_cancelled())
+        {
+            return Err(BatchError::Cancelled);
+        }
+        Ok(())
     }
 
     /// Tighten the cooperative deadline without changing whole-second wire limits.
@@ -188,6 +214,7 @@ impl ExecScope {
             bytes: AtomicU64::new(0),
             enforce_result_size: false,
             root_metadata: None,
+            cancel: None,
         }
     }
 
@@ -297,7 +324,7 @@ impl ExecScope {
         self.bytes.load(Ordering::Relaxed)
     }
 
-    /// Check the legacy deadline and any exact caller-owned cap cooperatively.
+    /// Check both deadlines before checking request cancellation.
     pub fn check(&self) -> Result<(), BatchError> {
         self.deadline.check()?;
         if let Some((deadline, budget)) = self.deadline_cap {
@@ -307,13 +334,17 @@ impl ExecScope {
                 });
             }
         }
-        Ok(())
+        self.check_cancelled()
     }
 }
 
 impl ReadVisibilityScope for ExecScope {
     fn read_visibility_budget(&self) -> Duration {
         Self::read_visibility_budget(self)
+    }
+
+    fn cancel_handle(&self) -> Option<&CancelHandle> {
+        self.cancel.as_deref()
     }
 }
 
@@ -340,5 +371,15 @@ impl ReadByteMeter for ScopeRowMeter<'_> {
 
     fn finish_rows(&self, returned: u64) {
         Self::finish_rows(self, returned);
+    }
+}
+
+/// Detect the typed wake error without relying on an I/O kind or message.
+pub(in crate::query::batch) fn is_request_cancelled(error: &DbError) -> bool {
+    match error {
+        DbError::Io(io) => io
+            .get_ref()
+            .is_some_and(|source| source.is::<shamir_tx::RequestCancelled>()),
+        _ => false,
     }
 }

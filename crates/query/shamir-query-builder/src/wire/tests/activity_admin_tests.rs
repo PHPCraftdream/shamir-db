@@ -8,7 +8,7 @@
 //! map ordering `serde_json` chooses.
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::wire::admin::list_activity;
+use shamir_query_builder::wire::admin::{cancel_request, list_activity};
 use shamir_query_types::admin::activity::{
     ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ListActivityReq,
     RequestExecId,
@@ -138,4 +138,19 @@ fn activity_page_request_row_absent_session_handle_is_omitted() {
         rows[0].get("session_handle").is_none(),
         "absent handle must be omitted, not null: {rows:?}"
     );
+}
+
+#[test]
+fn cancel_request_builds_one_typed_nontransactional_operation() {
+    let id = RequestExecId(42);
+    let mut builder = Batch::new();
+    builder.op("cancel_request", cancel_request(id));
+
+    let built = builder.build();
+    let decoded = builder.to_request_via_msgpack().expect("batch round trip");
+    assert_eq!(built, decoded);
+    assert!(!decoded.transactional);
+    assert_eq!(decoded.queries.len(), 1);
+    let entry = decoded.queries.values().next().expect("sole operation");
+    assert_eq!(entry.op, BatchOp::CancelRequest(id));
 }

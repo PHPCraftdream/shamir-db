@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
 use crate::version_provider::VersionProvider;
-use crate::IndexWriteOp;
+use crate::{CancelHandle, IndexWriteOp};
 
 /// Opt-in commit visibility / ack policy.
 ///
@@ -398,6 +398,8 @@ pub struct TxContext {
     /// parked on key X). Stays unused for Snapshot / Serializable.
     pub wound_notify: Arc<tokio::sync::Notify>,
 
+    cancel_handle: Option<Arc<CancelHandle>>,
+
     /// True when this tx was opened by the engine's IMPLICIT batch-tx path
     /// (a non-tx write routed through the tx commit pipeline — F4b-1
     /// "everything is a transaction"). The INTERNAL `tx_id` stays real
@@ -490,6 +492,7 @@ impl TxContext {
             actor: Actor::System,
             wounded: Arc::new(AtomicBool::new(false)),
             wound_notify: Arc::new(tokio::sync::Notify::new()),
+            cancel_handle: None,
             implicit: false,
             locked_keys: scc::HashMap::with_hasher(THasher::default()),
             released_unique_cache: TFxMap::default(),
@@ -536,6 +539,16 @@ impl TxContext {
     /// wounder can wake this tx when it is parked waiting on a different key.
     pub fn wound_notify(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.wound_notify)
+    }
+
+    /// Attach or clear the request cancellation handle for record-lock waits.
+    pub fn set_cancel_handle(&mut self, cancel_handle: Option<Arc<CancelHandle>>) {
+        self.cancel_handle = cancel_handle;
+    }
+
+    /// Borrow the request cancellation handle, if one was attached.
+    pub fn cancel_handle(&self) -> Option<&CancelHandle> {
+        self.cancel_handle.as_deref()
     }
 
     /// True if this tx was wounded by an older tx (Level-3 wound-wait).

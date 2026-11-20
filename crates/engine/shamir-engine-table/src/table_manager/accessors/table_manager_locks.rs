@@ -1,5 +1,6 @@
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
+use shamir_tx::LockError;
 
 use crate::table_manager::TableManager;
 
@@ -23,14 +24,19 @@ impl TableManager {
                 self.name
             ))
         })?;
-        mvcc.lock_key(
+        mvcc.lock_key_with_cancel(
             key.clone(),
             tx.tx_id.0,
             tx.wounded_flag(),
             tx.wound_notify(),
             shamir_tx::LockMode::Shared,
+            tx.cancel_handle(),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            LockError::Db(error) => error,
+            LockError::Cancelled => DbError::Io(std::io::Error::other(shamir_tx::RequestCancelled)),
+        })?;
         tx.record_locked_key(self.table_token(), key);
         Ok(())
     }
@@ -51,14 +57,19 @@ impl TableManager {
                 self.name
             ))
         })?;
-        mvcc.lock_key(
+        mvcc.lock_key_with_cancel(
             key.clone(),
             tx.tx_id.0,
             tx.wounded_flag(),
             tx.wound_notify(),
             shamir_tx::LockMode::Exclusive,
+            tx.cancel_handle(),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            LockError::Db(error) => error,
+            LockError::Cancelled => DbError::Io(std::io::Error::other(shamir_tx::RequestCancelled)),
+        })?;
         tx.record_locked_key(self.table_token(), key);
         Ok(())
     }

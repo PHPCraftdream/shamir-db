@@ -28,3 +28,4 @@ pub(crate) use crate::security::user_directory::derive_scram_record;
 pub use config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 pub use handler::{DbRequest, DbResponse, ShamirDbHandler};
 pub use handlers::admin::AdminGlue;
+pub(crate) use repo_audit::CancelRefusalAudit;

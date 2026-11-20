@@ -81,10 +81,10 @@ use shamir_query_types::admin::activity::{
     ListActivityReq, RequestExecId,
 };
 use shamir_query_types::wire::DbResponse;
+use shamir_tx::{CancelState, WaitState};
 use shamir_types::access::{Action, ResourcePath};
 
 use super::continuation::{fresh_sequence, section_order, ActivityContinuation};
-use super::requests::REQUEST_STATE_RUNNING;
 use crate::cursor_registry::CursorActivitySnapshot;
 use crate::engine::db_handler::handler::{session_actor, ShamirDbHandler};
 use crate::tx_registry::TxActivityState;
@@ -524,10 +524,17 @@ impl ShamirDbHandler {
                     continue;
                 }
             }
-            let state = if entry.state.load(Ordering::Acquire) == REQUEST_STATE_RUNNING {
-                ActivityRequestState::Running
-            } else {
-                ActivityRequestState::Done
+            let waiting = entry.cancel.waiting();
+            let state = match entry.cancel.state() {
+                CancelState::Running => match waiting {
+                    WaitState::None => ActivityRequestState::Running,
+                    WaitState::Lock => ActivityRequestState::WaitingLock,
+                    WaitState::Visibility => ActivityRequestState::WaitingVisibility,
+                    WaitState::Budget => ActivityRequestState::WaitingBudget,
+                },
+                CancelState::Committing => ActivityRequestState::Committing,
+                CancelState::Done => ActivityRequestState::Done,
+                CancelState::Cancelled => ActivityRequestState::Cancelled,
             };
             render.rows.push(ActivityRow::Request {
                 request_exec_id: entry.id,

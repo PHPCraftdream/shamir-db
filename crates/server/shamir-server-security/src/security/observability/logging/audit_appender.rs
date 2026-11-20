@@ -839,8 +839,16 @@ impl AuditAppender for FjallAuditAppender {
                 })
             })
             .map_err(|e| std::io::Error::other(e.to_string())),
-            Durab::Batched { buffer, .. } => {
-                buffer.lock().push(entry.clone());
+            Durab::Batched {
+                buffer, shutdown, ..
+            } => {
+                let mut buffer = buffer.lock();
+                // The final flush takes this same lock after setting shutdown.
+                // A push already holding the lock is included in that flush.
+                if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(std::io::Error::other("audit appender is shut down"));
+                }
+                buffer.push(entry.clone());
                 Ok(())
             }
         };
