@@ -218,6 +218,7 @@ impl ByteBudget {
             return (!handle.is_cancelled()).then_some(guard);
         }
 
+        let _waiter = WaiterGuard::new(&self.inner.waiters);
         loop {
             if handle.is_cancelled() {
                 return None;
