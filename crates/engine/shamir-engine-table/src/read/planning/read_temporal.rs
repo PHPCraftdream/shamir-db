@@ -17,6 +17,7 @@ use shamir_engine_repo::gate_visibility::observe_gate_with_budget;
 use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_tx::{RequestCancelled, WaitState};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -91,10 +92,22 @@ impl TableManager {
                     allocated,
                 });
             }
-            // cancel-safe: observation owns only a temporary gate waiter.
-            match observe_gate_with_budget(gate, version, ctx.remaining_read_visibility_budget())
-                .await?
-            {
+            // Cancel-safe: observation owns only a temporary gate waiter.
+            let observe =
+                observe_gate_with_budget(gate, version, ctx.remaining_read_visibility_budget());
+            let visibility = if let Some(cancel) = ctx.cancel_handle() {
+                let _wait = cancel.park(WaitState::Visibility);
+                tokio::select! {
+                    biased;
+                    _ = cancel.wait_cancelled() => {
+                        return Err(DbError::Io(std::io::Error::other(RequestCancelled)));
+                    }
+                    result = observe => result,
+                }
+            } else {
+                observe.await
+            }?;
+            match visibility {
                 VisibilityState::Visible => {}
                 VisibilityState::Pending {
                     reason: VisibilityPendingReason::ReopenRequired,

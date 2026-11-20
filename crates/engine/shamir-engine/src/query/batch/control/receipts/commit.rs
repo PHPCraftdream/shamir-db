@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::query::batch::BatchError;
 use crate::tx::ack::commit_tx_with_kind;
@@ -7,6 +8,16 @@ use crate::tx::CommitError;
 use crate::tx::RepoCore;
 use shamir_query_types::batch::{TransactionInfo, VisibilityWait};
 use shamir_tx::visibility_metrics::PendingKind;
+use shamir_tx::CancelHandle;
+
+pub(crate) fn commit_implicit<'a>(
+    repo: &'a RepoCore,
+    tx: shamir_tx::TxContext,
+    alias: &'a str,
+    wait: VisibilityWait,
+) -> Pin<Box<dyn Future<Output = Result<TransactionInfo, BatchError>> + Send + 'a>> {
+    commit_implicit_with_cancel(repo, tx, alias, wait, None)
+}
 
 /// Preserve known publication, including durability warnings, as metadata.
 /// The commit itself is never raced against an execution deadline.
@@ -14,13 +25,14 @@ use shamir_tx::visibility_metrics::PendingKind;
 /// Boxed on purpose: the commit pipeline future is large and this is awaited
 /// from four write arms of the per-op runner, which recurses through nested
 /// batches; inlining it would multiply the runner's stack footprint.
-pub(crate) fn commit_implicit<'a>(
+pub(crate) fn commit_implicit_with_cancel<'a>(
     repo: &'a RepoCore,
     tx: shamir_tx::TxContext,
     alias: &'a str,
     wait: VisibilityWait,
+    cancel: Option<Arc<CancelHandle>>,
 ) -> Pin<Box<dyn Future<Output = Result<TransactionInfo, BatchError>> + Send + 'a>> {
-    Box::pin(commit_implicit_inner(repo, tx, alias, wait))
+    Box::pin(commit_implicit_inner(repo, tx, alias, wait, cancel))
 }
 
 /// Wire `code` for a failed implicit-batch commit, surfaced through
@@ -49,7 +61,7 @@ pub(crate) fn receipt_error_code(error: &CommitError) -> Option<&'static str> {
         // capture barrier reopens the gate.
         CommitError::CommitAdmissionRefused => Some("commit_admission_refused"),
         CommitError::Storage(error) => error.code(),
-        CommitError::Expired { .. } => None,
+        CommitError::Expired { .. } | CommitError::Cancelled => None,
         CommitError::WalDurability { .. } => Some("wal_durability"),
     }
 }
@@ -59,10 +71,11 @@ async fn commit_implicit_inner(
     tx: shamir_tx::TxContext,
     alias: &str,
     wait: VisibilityWait,
+    cancel: Option<Arc<CancelHandle>>,
 ) -> Result<TransactionInfo, BatchError> {
     let tx_id = tx.tx_id.0;
     let snapshot = tx.snapshot_version;
-    match commit_tx_with_kind(tx, repo, wait, PendingKind::ImplicitBatch).await {
+    match commit_tx_with_kind(tx, repo, wait, PendingKind::ImplicitBatch, cancel).await {
         Ok(outcome) => Ok(TransactionInfo::committed(
             outcome.tx_id,
             outcome.snapshot_version,
@@ -79,6 +92,7 @@ async fn commit_implicit_inner(
                 commit_version,
             })
         }
+        Err(CommitError::Cancelled) => Err(BatchError::Cancelled),
         Err(error) => {
             let code = receipt_error_code(&error);
             Err(BatchError::QueryError {

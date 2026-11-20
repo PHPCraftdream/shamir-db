@@ -40,6 +40,9 @@ pub enum BatchError {
     /// Total execution time exceeded `BatchLimits::max_execution_time_secs`.
     Timeout { elapsed_secs: u64 },
 
+    /// The request was cancelled cooperatively.
+    Cancelled,
+
     /// Query execution error.
     ///
     /// `code` carries a machine-readable error category when available
@@ -329,6 +332,7 @@ impl std::fmt::Display for BatchError {
             BatchError::Timeout { elapsed_secs } => {
                 write!(f, "Execution timeout after {}s", elapsed_secs)
             }
+            BatchError::Cancelled => f.write_str("request cancelled"),
             BatchError::QueryError {
                 alias,
                 message,
@@ -475,6 +479,7 @@ impl BatchError {
     /// Return the machine-readable code, if set.
     pub fn code(&self) -> Option<&str> {
         match self {
+            BatchError::Cancelled => Some("cancelled"),
             BatchError::QueryError { code, .. } => code.as_deref(),
             BatchError::AsOfVisibilityTimeout { .. } => Some("as_of_visibility_timeout"),
             BatchError::WalOutcomeUnknown { .. } => Some("wal_requires_reopen"),

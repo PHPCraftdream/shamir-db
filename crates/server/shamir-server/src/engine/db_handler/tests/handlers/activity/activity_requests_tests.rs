@@ -14,10 +14,9 @@ use std::sync::Arc;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::session::{Session, SessionPermissions};
 
-use crate::engine::db_handler::activity::{
-    ActivityRequests, RequestEntry, REQUEST_STATE_DONE, REQUEST_STATE_RUNNING,
-};
+use crate::engine::db_handler::activity::{ActivityRequests, RequestEntry};
 use shamir_query_types::admin::activity::RequestExecId;
+use shamir_tx::CancelState;
 
 /// Mint ids for tests — the real minter is the handler's `AtomicU64`; the
 /// table itself only requires uniqueness.
@@ -76,8 +75,8 @@ fn register_makes_entry_observable_and_drop_removes_it() {
         assert!(e.elapsed_ns() < u64::MAX);
         assert_eq!(e.client_rid, Some(9));
         assert_eq!(
-            e.state.load(std::sync::atomic::Ordering::Acquire),
-            REQUEST_STATE_RUNNING,
+            e.cancel.state(),
+            CancelState::Running,
             "a freshly registered batch is Running"
         );
         seen.push(e.id);
@@ -129,23 +128,11 @@ fn state_word_is_running_then_done_and_done_is_terminal() {
     let table = Arc::new(ActivityRequests::new());
     let guard = register(&table, 3);
 
-    guard.mark_done();
-    table.for_each(|e| {
-        assert_eq!(
-            e.state.load(std::sync::atomic::Ordering::Acquire),
-            REQUEST_STATE_DONE,
-            "mark_done stores the terminal encoding"
-        );
-    });
-    // Plain store, no CAS: setting again must be a no-op, never a
-    // transition back to Running.
-    guard.mark_done();
-    table.for_each(|e| {
-        assert_eq!(
-            e.state.load(std::sync::atomic::Ordering::Acquire),
-            REQUEST_STATE_DONE
-        );
-    });
+    assert!(guard.finish());
+    let handle = Arc::clone(guard.cancel_handle());
+    assert_eq!(handle.state(), CancelState::Done);
+    assert_eq!(handle.try_cancel(), Err(CancelState::Done));
+    assert!(!handle.try_commit());
 
     drop(guard);
     table.for_each(|_| panic!("done entries are removed, never retained"));

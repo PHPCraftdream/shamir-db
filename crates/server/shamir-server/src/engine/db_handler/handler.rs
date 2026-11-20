@@ -675,6 +675,7 @@ pub(super) fn error_code(e: &BatchError) -> &str {
             shamir_query_types::batch::LimitKind::Depth => "nesting_too_deep",
             shamir_query_types::batch::LimitKind::Iterations => "too_many_iterations",
         },
+        BatchError::Cancelled => shamir_query_types::wire::error_code::CANCELLED,
         BatchError::TooManyIterations { .. } => "too_many_iterations",
         BatchError::TooManyQueries { .. }
         | BatchError::TooDeep { .. }

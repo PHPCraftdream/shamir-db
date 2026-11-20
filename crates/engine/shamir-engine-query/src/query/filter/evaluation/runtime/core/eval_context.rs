@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::{BatchLimits, VisibilityWait};
-use shamir_tx::OVERLAY_ID_BASE;
+use shamir_tx::{CancelHandle, OVERLAY_ID_BASE};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
@@ -249,6 +249,12 @@ impl<'a> FilterContext<'a> {
     pub fn with_read_visibility_scope(mut self, scope: &'a dyn ReadVisibilityScope) -> Self {
         self.read_visibility_scope = Some(scope);
         self
+    }
+
+    /// Borrow cancellation for the read visibility wait, if supplied.
+    pub fn cancel_handle(&self) -> Option<&CancelHandle> {
+        self.read_visibility_scope
+            .and_then(|scope| scope.cancel_handle())
     }
 
     pub fn remaining_read_visibility_budget(&self) -> Option<Duration> {

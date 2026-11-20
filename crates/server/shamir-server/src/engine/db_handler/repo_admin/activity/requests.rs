@@ -35,14 +35,11 @@
 //! (`max_in_flight`, shamir-sync `request_loop.rs`), and the token-WS /
 //! REST gates mirror it.
 //!
-//! # State word (D8 groundwork)
+//! # Cancellation state (D8)
 //!
-//! [`RequestEntry::state`] is a single `AtomicU8`:
-//! `0` = `Running`, `1` = `Done`. `Done` is TERMINAL in this step — the
-//! entry is removed immediately after the word is set, no historical rows
-//! are kept, and no transition out of `Done` (no CAS, no
-//! `Committing`/`Cancelled`) exists yet; step 2 adds those transitions on
-//! top of this documented encoding.
+//! The executor and CancelRequest share one [`CancelHandle`]. Cancel can
+//! only claim Running. Drop finishes if possible, then removes the entry
+//! even if cancel won.
 //!
 //! # Privacy
 //!
@@ -60,7 +57,7 @@
 //! stateless token-REST fallback; token-WS sessions are separately stored
 //! and minted — coordinated with the connect worker). `Some(h)` otherwise.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use scc::HashIndex;
@@ -68,6 +65,7 @@ use shamir_collections::THasher;
 use shamir_connect::server::session::Session;
 use shamir_connect::server::SessionRequestSlot;
 use shamir_query_types::admin::activity::RequestExecId;
+use shamir_tx::CancelHandle;
 
 /// Fixed wire text of the overload rejection: the `server_busy` code
 /// (and message) already produced by the HTTP REST executor and the
@@ -85,12 +83,6 @@ pub(in crate::engine::db_handler) fn server_busy_response() -> shamir_query_type
         message: SERVER_BUSY.to_owned(),
     }
 }
-
-/// State word encoding: the request is executing (initial state).
-pub(in crate::engine::db_handler) const REQUEST_STATE_RUNNING: u8 = 0;
-/// State word encoding: the request finished. TERMINAL in this step — the
-/// RAII guard sets it, removes the entry and never transitions away.
-pub(in crate::engine::db_handler) const REQUEST_STATE_DONE: u8 = 1;
 
 /// One in-flight batch row. Static discriminant names only
 /// (`BatchOp::activity_name()`), never argument-derived.
@@ -116,8 +108,10 @@ pub(in crate::engine::db_handler) struct RequestEntry {
     /// immune to clock steps). Atomic so the paging worker reads it
     /// lock-free; `elapsed_ns()` derives the age from it.
     pub started_at_ns: AtomicU64,
-    /// State word — see the module docs for the encoding and terminality.
-    pub state: AtomicU8,
+    /// State and wake primitive shared with the executor.
+    pub cancel: Arc<CancelHandle>,
+    /// Admission-time policy, immutable after publication.
+    pub cancellable: bool,
     /// The client's OPTIONAL wire `rid`, carried alongside the minted id.
     pub client_rid: Option<u32>,
 }
@@ -144,7 +138,8 @@ impl RequestEntry {
             db,
             op_kind,
             started_at_ns: AtomicU64::new(monotonic_now_ns()),
-            state: AtomicU8::new(REQUEST_STATE_RUNNING),
+            cancel: Arc::new(CancelHandle::default()),
+            cancellable: true,
             client_rid,
         }
     }
@@ -252,8 +247,8 @@ impl ActivityRequests {
     }
 }
 
-/// RAII registration for one admitted batch. Drop marks the entry `Done`
-/// (terminal), removes it, and decrements the mirror EXACTLY ONCE — on
+/// RAII registration for one admitted batch. Drop attempts to finish
+/// without overwriting `Cancelled`, removes the row, and decrements the mirror on
 /// every exit path, including panics and early returns, so a request can
 /// never leak an entry.
 pub(in crate::engine::db_handler) struct InFlightRequest {
@@ -280,21 +275,22 @@ impl InFlightRequest {
         self.entry.client_rid
     }
 
-    /// Mark the entry `Done` (terminal) while it is still observable —
-    /// exposed so tests (and step 2's transitions) can observe the state
-    /// word before removal. `Drop` sets it too; setting twice is a no-op
-    /// (a plain store, deliberately NOT a CAS — no later transition).
-    pub(in crate::engine::db_handler) fn mark_done(&self) {
-        self.entry
-            .state
-            .store(REQUEST_STATE_DONE, Ordering::Release);
+    /// Shared state and wake handle for propagation into the executor.
+    pub(in crate::engine::db_handler) fn cancel_handle(&self) -> &Arc<CancelHandle> {
+        &self.entry.cancel
+    }
+
+    /// Claim completion once before publishing a reply. If cancellation
+    /// won, the caller must not return a normal result.
+    pub(in crate::engine::db_handler) fn finish(&self) -> bool {
+        self.cancel_handle().finish()
     }
 }
 
 impl Drop for InFlightRequest {
     fn drop(&mut self) {
-        // 1. Terminal state word (documented encoding; plain store).
-        self.mark_done();
+        // Preserve the winner of the cancel/completion race.
+        self.finish();
         // 2. Remove exactly once — the guard uniquely owns the key.
         let removed = self.table.index.remove_sync(&self.entry.id.0);
         // 3. Decrement the mirror once, only for a real removal — keeps
@@ -332,6 +328,19 @@ impl crate::db_handler::ShamirDbHandler {
         op_kind: &'static str,
         client_rid: Option<u32>,
     ) -> Result<InFlightRequest, ()> {
+        self.try_track_activity_request_with_cancellability(session, db, op_kind, client_rid, true)
+    }
+
+    /// Register with an explicit policy before publishing the row (e.g.
+    /// for interactive request work that has no cancellation checkpoints).
+    pub(in crate::engine::db_handler) fn try_track_activity_request_with_cancellability(
+        &self,
+        session: &Session,
+        db: &str,
+        op_kind: &'static str,
+        client_rid: Option<u32>,
+        cancellable: bool,
+    ) -> Result<InFlightRequest, ()> {
         let slot = if session.activity_handle() == 0 {
             // Stateless token-REST fallback: no minted handle, no slot.
             None
@@ -343,7 +352,8 @@ impl crate::db_handler::ShamirDbHandler {
             )
         };
         let exec_id = RequestExecId(self.next_request_exec_id());
-        let entry = RequestEntry::new(exec_id, session, db.to_string(), op_kind, client_rid);
+        let mut entry = RequestEntry::new(exec_id, session, db.to_string(), op_kind, client_rid);
+        entry.cancellable = cancellable;
         Ok(Arc::clone(&self.activity_requests).register_with_slot(entry, slot))
     }
 }

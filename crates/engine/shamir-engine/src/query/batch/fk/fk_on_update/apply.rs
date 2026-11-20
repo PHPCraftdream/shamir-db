@@ -59,10 +59,15 @@ async fn update_child_field(
     let old_bytes = table
         .read_one_tx_bytes(id, Some(&*tx))
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_on_update: read failed: {e}"),
-            code: Some("fk_on_update".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_on_update: read failed: {e}"),
+                code: Some("fk_on_update".to_string()),
+            }
         })?
         .ok_or_else(|| BatchError::QueryError {
             alias: alias.to_string(),
@@ -97,10 +102,15 @@ async fn update_child_field(
     table
         .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_on_update: update_tx_bytes failed: {e}"),
-            code: Some("fk_on_update".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_on_update: update_tx_bytes failed: {e}"),
+                code: Some("fk_on_update".to_string()),
+            }
         })?;
 
     Ok(())
@@ -121,10 +131,15 @@ async fn set_child_field_null(
     let old_bytes = table
         .read_one_tx_bytes(id, Some(&*tx))
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_on_update: set_null read failed: {e}"),
-            code: Some("fk_on_update".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_on_update: set_null read failed: {e}"),
+                code: Some("fk_on_update".to_string()),
+            }
         })?
         .ok_or_else(|| BatchError::QueryError {
             alias: alias.to_string(),
@@ -163,10 +178,15 @@ async fn set_child_field_null(
     table
         .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_on_update: set_null update_tx_bytes failed: {e}"),
-            code: Some("fk_on_update".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_on_update: set_null update_tx_bytes failed: {e}"),
+                code: Some("fk_on_update".to_string()),
+            }
         })?;
 
     Ok(())

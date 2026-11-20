@@ -38,6 +38,7 @@
 //! the code (e.g. bench/test harnesses do exactly this), not a silent
 //! omission.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::query::batch::ExecScope;
@@ -45,6 +46,7 @@ use async_trait::async_trait;
 use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchRequest, ExecPolicy, RequestMetadata,
 };
+use shamir_tx::CancelHandle;
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 
 /// Capability to check whether `actor` may perform `action` on `path`.
@@ -78,6 +80,7 @@ pub struct Authorized<'a> {
     policy: ExecPolicy,
     deadline_cap: Option<(Instant, Duration)>,
     metadata: RequestMetadata,
+    cancel: Option<Arc<CancelHandle>>,
 }
 
 impl<'a> Authorized<'a> {
@@ -119,6 +122,7 @@ impl<'a> Authorized<'a> {
             db_name,
             policy: ExecPolicy::EMBEDDED,
             deadline_cap: None,
+            cancel: None,
             metadata,
         })
     }
@@ -139,6 +143,7 @@ impl<'a> Authorized<'a> {
             db_name,
             policy: ExecPolicy::EMBEDDED,
             deadline_cap: None,
+            cancel: None,
             metadata: RequestMetadata::collect(&request.queries, db_name),
         }
     }
@@ -146,6 +151,12 @@ impl<'a> Authorized<'a> {
     /// Attach a server-owned policy independently of the request DTO.
     pub fn with_policy(mut self, policy: ExecPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Attach optional cooperative cancellation independently of wire limits.
+    pub fn with_cancel_handle(mut self, cancel: Option<Arc<CancelHandle>>) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -194,7 +205,8 @@ impl<'a> Authorized<'a> {
             self.policy.enforce_result_size,
         )
         .with_read_visibility_timeout(self.policy.read_visibility_timeout_ms)
-        .with_root_metadata(self.metadata.clone());
+        .with_root_metadata(self.metadata.clone())
+        .with_cancel_handle(self.cancel.clone());
         match self.deadline_cap {
             Some((deadline, cap)) => scope.with_deadline_cap(deadline, cap),
             None => scope,
