@@ -1,7 +1,7 @@
 use shamir_collections::{TFxMap, TFxSet};
 use shamir_index::model::identity::identity_bytes::unique_posting_owner;
 use shamir_storage::error::DbError;
-use shamir_tx::{IndexFamily, IndexWriteOp, TxContext};
+use shamir_tx::{CancelHandle, IndexFamily, IndexWriteOp, TxContext, WaitState};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -46,6 +46,7 @@ use crate::tx::commit::TxError;
 pub(in crate::tx) async fn pre_commit_prelock(
     tx: &mut TxContext,
     repo: &RepoCore,
+    cancel: Option<&CancelHandle>,
 ) -> Result<PreLockResult, TxError> {
     // F-68 (#895) cluster D diagnostic instrumentation, task #124 — entry
     // timestamp. F-70 (#897, P0) confirmed and fixed a genuine lock-order
@@ -321,7 +322,17 @@ pub(in crate::tx) async fn pre_commit_prelock(
                 "pre_commit_prelock: tx_id={tx_id_for_log} acquiring unique_write_lock \
                  table_token={token}"
             );
-            let guard = tbl.unique_write_lock().lock_owned().await;
+            let lock = tbl.unique_write_lock();
+            let guard = if let Some(cancel) = cancel.or_else(|| tx.cancel_handle()) {
+                let _park = cancel.park(WaitState::Lock);
+                tokio::select! {
+                    biased;
+                    _ = cancel.wait_cancelled() => return Err(TxError::Cancelled),
+                    guard = lock.lock_owned() => guard,
+                }
+            } else {
+                lock.lock_owned().await
+            };
             if tbl
                 .index_manager_ref()
                 .write_barrier_flags()

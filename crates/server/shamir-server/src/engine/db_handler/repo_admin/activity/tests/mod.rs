@@ -8,5 +8,6 @@
 //! continuation boundaries. No server harness — these exercise the same
 //! code the paging worker calls.
 
+mod cancellation_tests;
 mod continuation_token_tests;
 mod paging_tests;

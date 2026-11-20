@@ -35,14 +35,19 @@
 use std::future::{poll_fn, Future};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 
+use shamir_client::{Client, ClientError, ConnectOptions};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
+};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
@@ -52,20 +57,29 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::{self, RepoEngine};
 use shamir_query_builder::doc;
 use shamir_query_builder::query::Query;
-use shamir_query_builder::write::insert;
-use shamir_query_types::batch::BatchLimits;
+use shamir_query_builder::write::{insert, Insert};
+use shamir_query_types::admin::activity::{
+    ActivityKind, ActivityRequestState, ActivityRow, ActivityScope, CancelOutcome, ListActivityReq,
+};
+use shamir_query_types::batch::{BatchLimits, BatchRequest, BatchResponse};
 use shamir_query_types::wire::{CursorId, DbRequest};
 use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 
+use crate::audit_appender::FjallAuditAppender;
 use crate::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig, TlsConfig,
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig,
+    ProfileKind, TlsConfig,
 };
 use crate::db_handler::{DbResponse, NodeMode, ShamirDbHandler};
 use crate::server::{BootstrapMode, ServerLauncher};
+use crate::server_meta::ServerMetaStore;
 use crate::tx_registry::InteractiveTx;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
+
+use super::super::super::server_handle::ActivityGaugeTestSeam;
 
 /// Hard per-call bound: every await is bounded, never an unbounded
 /// engine await.
@@ -513,4 +527,428 @@ async fn run() {
     guard.mark("shutdown complete");
     assert!(report.is_clean(), "shutdown must be clean: {report:?}");
     drop(temp);
+}
+
+#[test]
+fn launched_tls_scram_cancel_wakes_budget_parked_write() {
+    on_big_stack(|| Box::pin(run_live_cancel()));
+}
+
+const CANCEL_DB: &str = "cancel_app";
+const CANCEL_ADMIN: &str = "admin";
+const CANCEL_PASSWORD: &[u8] = b"correct horse battery staple";
+
+async fn connect_cancel_client(addr: SocketAddr, trusted_pin: Option<[u8; 32]>) -> Client {
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        Box::pin(Client::connect(ConnectOptions {
+            addr,
+            server_name: "localhost".into(),
+            username: CANCEL_ADMIN.into(),
+            password: zeroize::Zeroizing::new(CANCEL_PASSWORD.to_vec()),
+            // Match the online-backup fixture's loopback TOFU policy on
+            // first connect; require the same server key on the second.
+            accept_new_host: trusted_pin.is_none(),
+            trusted_pin,
+            connect_timeout: Some(CALL_TIMEOUT),
+            handshake_timeout: Some(CALL_TIMEOUT),
+            request_timeout: Some(CALL_TIMEOUT),
+        })),
+    )
+    .await
+    .expect("TLS + SCRAM connect deadline")
+    .expect("TLS + SCRAM connect")
+}
+
+async fn setup_cancel_table(client: &Client) {
+    // Same typed persistent DDL as the online-backup fixture.
+    let mut db = Batch::new();
+    db.create_db(CANCEL_DB, ddl::create_db(CANCEL_DB));
+    let mut repo = Batch::new();
+    repo.create_repo("main", ddl::create_repo("main").engine(RepoEngine::Fjall));
+    let mut table = Batch::new();
+    table.create_table("items", ddl::create_table("items").repo("main"));
+    for (db, batch) in [("default", db), (CANCEL_DB, repo), (CANCEL_DB, table)] {
+        tokio::time::timeout(CALL_TIMEOUT, client.execute(db, batch.build()))
+            .await
+            .expect("persistent fixture DDL deadline")
+            .expect("persistent fixture DDL");
+    }
+}
+
+async fn run_live_cancel() {
+    let guard = FlakeGuard::with_watchdog(
+        "launched_tls_scram_cancel_wakes_budget_parked_write",
+        Duration::from_secs(600),
+    );
+    try_install_global_tracing_ring();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let temp = tempfile::tempdir().expect("persistent data directory");
+    let mut config = boot_config(temp.path().to_path_buf());
+    config.argon2_concurrent_max = 64;
+    config.security.auth_init_rate_per_second = 64;
+    let listener = &mut config.listeners[0];
+    listener.kind = ListenerKind::Tcp;
+    listener.profile = Some(ProfileKind::TlsExporter);
+    listener.http = Default::default();
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Password {
+            username: CANCEL_ADMIN.into(),
+            password: zeroize::Zeroizing::new(CANCEL_PASSWORD.to_vec()),
+        },
+        node_mode: NodeMode::ReadWrite,
+    };
+    let mut handle = tokio::time::timeout(CALL_TIMEOUT, Box::pin(launcher.launch()))
+        .await
+        .expect("launch deadline")
+        .expect("production boot");
+    let addr = handle
+        .first_tls_exporter_addr()
+        .expect("bound TLS listener");
+    let writer = connect_cancel_client(addr, None).await;
+    let control = connect_cancel_client(addr, Some(writer.server_pub_key_pin())).await;
+    assert!(
+        writer.session_id() != control.session_id(),
+        "distinct SCRAM sessions"
+    );
+    setup_cancel_table(&writer).await;
+    guard.mark("TLS sessions and persistent table ready");
+
+    let seam = handle
+        .activity_test_seam
+        .as_ref()
+        .expect("boot activity seam");
+    let mut write = Batch::new();
+    write.limits(BatchLimits {
+        max_result_size: 4096,
+        ..BatchLimits::default()
+    });
+    write.insert(
+        "blocked_insert",
+        Insert::with_repo("main", "items").row(doc! { "id" => "must-not-publish" }),
+    );
+    let reply = cancel_budget_parked(seam, &writer, &control, write.build(), "write", &guard).await;
+
+    let mut scan = Batch::new();
+    scan.query("scan", Query::with_repo("main", "items").build());
+    let response = tokio::time::timeout(CALL_TIMEOUT, writer.execute(CANCEL_DB, scan.build()))
+        .await
+        .expect("post-cancel scan deadline")
+        .expect("target connection still usable after cancellation");
+    let result = response.results.get("scan").expect("scan result");
+    assert!(!result.skipped);
+    assert!(
+        result.records.is_empty(),
+        "cancelled insert must not publish a row"
+    );
+
+    // DDL must still be cancellable here: it has not reached the runner
+    // that protects independent effects. Admission used to refuse it.
+    let mut ddl = Batch::new();
+    ddl.create_table(
+        "cancelled_ddl",
+        ddl::create_table("cancelled_ddl").repo("main"),
+    );
+    let ddl_reply = cancel_budget_parked(
+        seam,
+        &writer,
+        &control,
+        ddl.build(),
+        "admin:create_table",
+        &guard,
+    )
+    .await;
+    {
+        let db = seam.handler.db().get_db(CANCEL_DB).expect("fixture db");
+        let repo = db.get_repo("main").expect("persistent fixture repo");
+        assert!(repo.has_table("items"), "seed table must still exist");
+        assert!(
+            !repo.has_table("cancelled_ddl"),
+            "cancelled CreateTable must not create a table"
+        );
+    }
+
+    tokio::time::timeout(CALL_TIMEOUT, writer.close())
+        .await
+        .expect("writer close deadline");
+    tokio::time::timeout(CALL_TIMEOUT, control.close())
+        .await
+        .expect("control close deadline");
+    // No handler or DB clones are kept by the test. Drop the handle's seam
+    // too, before the persistent-store shutdown barrier.
+    drop(handle.activity_test_seam.take());
+    let report = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown()))
+        .await
+        .expect("shutdown deadline");
+    assert!(report.is_clean(), "shutdown must be clean: {report:?}");
+    guard.mark("shutdown complete");
+    drop(temp);
+
+    // Keep the requested client error contract strict. Assert after cleanup
+    // so a wire error variant mismatch still allows clean server shutdown.
+    assert!(
+        matches!(&reply, Err(ClientError::Db { code, .. }) if code == "cancelled"),
+        "expected ordinary Db error with code cancelled, got {reply:?}"
+    );
+    assert!(
+        matches!(&ddl_reply, Err(ClientError::Db { code, .. }) if code == "cancelled"),
+        "expected CreateTable error with code cancelled, got {ddl_reply:?}"
+    );
+}
+
+async fn cancel_budget_parked(
+    seam: &ActivityGaugeTestSeam,
+    writer: &Client,
+    control: &Client,
+    batch: BatchRequest,
+    expected_op: &str,
+    guard: &FlakeGuard,
+) -> Result<BatchResponse, ClientError> {
+    let cap = seam.byte_budget.cap().expect("finite byte budget");
+    let hog = tokio::time::timeout(CALL_TIMEOUT, seam.byte_budget.acquire(cap))
+        .await
+        .expect("saturate boot budget deadline");
+    assert_eq!(seam.byte_budget.used(), cap);
+
+    let reply = {
+        let mut target = Box::pin(writer.execute(CANCEL_DB, batch));
+        let parked = tokio::time::timeout(CALL_TIMEOUT, async {
+            loop {
+                // Pace polls, but synchronize on the server's waiting state.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let page = control
+                    .list_activity(
+                        CANCEL_DB,
+                        ListActivityReq {
+                            scope: ActivityScope::Own,
+                            kind: ActivityKind::Requests,
+                            limit: None,
+                            continuation: None,
+                        },
+                    )
+                    .await
+                    .expect("list own requests over control connection");
+                assert!(page.continuation.is_none());
+                if let [ActivityRow::Request {
+                    request_exec_id,
+                    db,
+                    op_kind,
+                    state: ActivityRequestState::WaitingBudget,
+                    ..
+                }] = page.rows.as_slice()
+                {
+                    assert_eq!(db, CANCEL_DB);
+                    assert_eq!(op_kind, expected_op);
+                    break *request_exec_id;
+                }
+            }
+        });
+        let id = tokio::select! {
+            result = &mut target => panic!("target replied before cancellation: {result:?}"),
+            id = parked => id.expect("observe WaitingBudget deadline"),
+        };
+        assert_eq!(seam.handler.activity_counts().requests, 1);
+        guard.mark("live target observed waiting for boot budget");
+        let outcome = tokio::time::timeout(CALL_TIMEOUT, control.cancel_request(CANCEL_DB, id))
+            .await
+            .expect("cancel deadline")
+            .expect("typed cancel reply");
+        assert_eq!(outcome, CancelOutcome::Cancelled, "{expected_op}");
+        tokio::time::timeout(CALL_TIMEOUT, target)
+            .await
+            .expect("target must wake without releasing the byte budget")
+    };
+    assert_eq!(
+        seam.byte_budget.used(),
+        cap,
+        "budget still held at target reply"
+    );
+    assert_eq!(
+        seam.handler.activity_counts().requests,
+        0,
+        "no activity slot leak"
+    );
+    drop(hog);
+    reply
+}
+
+struct ShutdownAuditGate {
+    appender: Arc<FjallAuditAppender>,
+    handshake: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+impl AuditAppender for ShutdownAuditGate {
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
+        let handshake = self.handshake.lock().unwrap().take();
+        if let Some((entered, release)) = handshake {
+            // The test writer owns the real chain's durable gate in this callback.
+            entered
+                .send(())
+                .expect("test still waiting for durable gate");
+            release
+                .recv_timeout(CALL_TIMEOUT)
+                .map_err(std::io::Error::other)?;
+        }
+        self.appender.append_entry(entry)
+    }
+
+    fn checkpoint(&self, seq: u64, hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        self.appender.checkpoint(seq, hmac)
+    }
+}
+
+#[test]
+fn graceful_shutdown_drains_accepted_cancel_refusal_before_final_audit_flush() {
+    on_big_stack(|| Box::pin(run_refusal_shutdown()));
+}
+
+async fn run_refusal_shutdown() {
+    let guard = FlakeGuard::with_watchdog(
+        "graceful_shutdown_drains_accepted_cancel_refusal_before_final_audit_flush",
+        Duration::from_secs(600),
+    );
+    try_install_global_tracing_ring();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let temp = tempfile::tempdir().expect("persistent data directory");
+    let mut config = boot_config(temp.path().to_path_buf());
+    config.argon2_concurrent_max = 64;
+    config.security.auth_init_rate_per_second = 64;
+    let listener = &mut config.listeners[0];
+    listener.kind = ListenerKind::Tcp;
+    listener.profile = Some(ProfileKind::TlsExporter);
+    listener.http = Default::default();
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Password {
+            username: CANCEL_ADMIN.into(),
+            password: zeroize::Zeroizing::new(CANCEL_PASSWORD.to_vec()),
+        },
+        node_mode: NodeMode::ReadWrite,
+    };
+    let mut handle = tokio::time::timeout(CALL_TIMEOUT, Box::pin(launcher.launch()))
+        .await
+        .expect("launch deadline")
+        .expect("production boot");
+    let addr = handle
+        .first_tls_exporter_addr()
+        .expect("bound TLS listener");
+    let owner = connect_cancel_client(addr, None).await;
+    let control = connect_cancel_client(addr, Some(owner.server_pub_key_pin())).await;
+    assert_ne!(
+        owner.session_id(),
+        control.session_id(),
+        "distinct sessions"
+    );
+    let control_prefix: [u8; 8] = control.session_id()[..8].try_into().unwrap();
+    let seam = handle
+        .activity_test_seam
+        .take()
+        .expect("boot activity seam");
+    let session = seam
+        .session_store
+        .lookup(&owner.session_id())
+        .expect("owner session in launched store");
+    let (target, finish) = seam
+        .handler
+        .track_committing_request_for_test(&session, "default");
+    let (entered, at_gate) = oneshot::channel();
+    let (release_gate, release) = mpsc::sync_channel(1);
+    let blocking_writer = AuditChainWriter::new_with_shared(
+        Arc::clone(&seam.audit_chain),
+        Arc::new(ShutdownAuditGate {
+            appender: Arc::clone(&handle.audit_appender),
+            handshake: Mutex::new(Some((entered, release))),
+        }),
+    );
+    let blocker = tokio::task::spawn_blocking(move || {
+        blocking_writer.append(
+            "test_shutdown_gate",
+            "tcp",
+            "",
+            "",
+            [0; 8],
+            "ok",
+            Vec::new(),
+            UnixNanos::try_now().expect("audit timestamp").as_u64(),
+        )
+    });
+    tokio::time::timeout(CALL_TIMEOUT, at_gate)
+        .await
+        .expect("test append did not reach durable gate")
+        .expect("gate handshake dropped");
+    guard.mark("real audit-chain gate held");
+
+    let outcome = tokio::time::timeout(CALL_TIMEOUT, control.cancel_request("default", target))
+        .await
+        .expect("cancel reply waited for the gate")
+        .expect("typed cancel reply");
+    assert_eq!(outcome, CancelOutcome::AlreadyCommitting);
+    guard.mark("typed refusal received with gate still held");
+    finish();
+    drop(session);
+    drop(seam);
+    drop(owner);
+    drop(control);
+
+    let (pending, mut at_drain) = oneshot::channel();
+    handle.refusal_drain_pending = Some(pending);
+    let mut shutdown = Box::pin(handle.shutdown());
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        poll_fn(|cx| {
+            if let Poll::Ready(report) = shutdown.as_mut().poll(cx) {
+                panic!("shutdown finished without waiting at refusal drain: {report:?}");
+            }
+            // Only the shutdown future can send, so inspect the signal in
+            // the very same poll and release before driving shutdown again.
+            match at_drain.try_recv() {
+                Ok(()) => {
+                    release_gate.try_send(()).expect("durable gate still held");
+                    Poll::Ready(())
+                }
+                Err(oneshot::error::TryRecvError::Empty) => Poll::Pending,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    panic!("refusal drain never polled Pending")
+                }
+            }
+        }),
+    )
+    .await
+    .expect("shutdown did not reach pending refusal drain");
+    guard.mark("released gate after refusal drain polled Pending");
+    let report = tokio::time::timeout(CALL_TIMEOUT, shutdown)
+        .await
+        .expect("graceful shutdown deadline");
+    assert!(report.is_clean(), "shutdown must be clean: {report:?}");
+    let first = tokio::time::timeout(CALL_TIMEOUT, blocker)
+        .await
+        .expect("blocking append deadline")
+        .expect("blocking append task")
+        .expect("blocking append succeeded");
+    guard.mark("graceful shutdown complete");
+
+    let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+        .expect("reopen server metadata after shutdown");
+    let key = meta.audit_chain_key().expect("launched chain key");
+    let entries = FjallAuditAppender::read_log_for_verify(temp.path()).expect("read on-disk audit");
+    AuditChain::verify_chain(&key, &entries).expect("verify persisted audit chain");
+    let mut refusals = entries
+        .iter()
+        .filter(|entry| entry.event == "cancel_request");
+    let refusal = refusals
+        .next()
+        .expect("accepted refusal persisted on shutdown");
+    assert!(refusals.next().is_none(), "one accepted refusal");
+    assert!(entries
+        .iter()
+        .any(|entry| entry.seq == first.seq && entry.event == first.event));
+    assert!(first.seq < refusal.seq, "refusal followed the gate holder");
+    assert_eq!(refusal.session_id_prefix, control_prefix);
+    assert_eq!(refusal.result, "already_committing");
+    let details: serde_json::Value =
+        rmp_serde::from_slice(&refusal.details_canonical_msgpack).expect("decode refusal details");
+    assert_eq!(details.as_object().expect("refusal details map").len(), 2);
+    assert_eq!(details["target"].as_u64(), Some(target.0));
+    assert_eq!(details["outcome"].as_str(), Some("already_committing"));
 }

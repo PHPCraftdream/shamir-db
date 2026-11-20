@@ -89,10 +89,15 @@ impl<'a> QueryRunner<'a> {
                         &self.actor,
                     )
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: None,
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
                     })?
             }
             // Non-tx INSERT publishes one implicit commit and retains its receipt.
@@ -136,16 +141,22 @@ impl<'a> QueryRunner<'a> {
                         &self.actor,
                     )
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: None,
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
                     })?;
-                let receipt = crate::query::batch::receipts::commit_implicit(
+                let receipt = crate::query::batch::receipts::commit_implicit_with_cancel(
                     &repo,
                     tx,
                     alias,
                     wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                    self.scope.cancel_handle().cloned(),
                 )
                 .await?;
                 return Ok(crate::query::batch::receipts::attach(
@@ -253,10 +264,15 @@ impl<'a> QueryRunner<'a> {
                 table
                     .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver), &self.actor)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: e.code().map(str::to_owned),
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: e.code().map(str::to_owned),
+                        }
                     })?
             }
             // F4b-2: "everything is a transaction" — a non-tx update
@@ -342,16 +358,22 @@ impl<'a> QueryRunner<'a> {
                     let wr = table
                         .execute_update_tx(op_ref, &ctx, &mut tx, Some(self.resolver), &self.actor)
                         .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: e.code().map(str::to_owned),
+                        .map_err(|e| {
+                            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                                return BatchError::Cancelled;
+                            }
+                            BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: e.code().map(str::to_owned),
+                            }
                         })?;
-                    let receipt = crate::query::batch::receipts::commit_implicit(
+                    let receipt = crate::query::batch::receipts::commit_implicit_with_cancel(
                         &repo,
                         tx,
                         alias,
                         wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                        self.scope.cancel_handle().cloned(),
                     )
                     .await?;
                     Ok(crate::query::batch::receipts::attach(
@@ -446,10 +468,15 @@ impl<'a> QueryRunner<'a> {
                 table
                     .execute_delete_tx(op, &ctx, tx, Some(self.resolver), &self.actor)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: e.code().map(str::to_owned),
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: e.code().map(str::to_owned),
+                        }
                     })?
             }
             // F4b-3: "everything is a transaction" — a non-tx delete
@@ -532,16 +559,22 @@ impl<'a> QueryRunner<'a> {
                     let wr = table
                         .execute_delete_tx(op, &ctx, &mut tx, Some(self.resolver), &self.actor)
                         .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: e.code().map(str::to_owned),
+                        .map_err(|e| {
+                            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                                return BatchError::Cancelled;
+                            }
+                            BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: e.code().map(str::to_owned),
+                            }
                         })?;
-                    let receipt = crate::query::batch::receipts::commit_implicit(
+                    let receipt = crate::query::batch::receipts::commit_implicit_with_cancel(
                         &repo,
                         tx,
                         alias,
                         wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                        self.scope.cancel_handle().cloned(),
                     )
                     .await?;
                     Ok(crate::query::batch::receipts::attach(
@@ -617,10 +650,15 @@ impl<'a> QueryRunner<'a> {
                 table
                     .execute_set_tx(op_ref, tx, Some(self.resolver), &self.actor)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: None,
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
                     })?
             }
             // W3d-2: non-tx SET routes through the implicit single-op
@@ -655,16 +693,22 @@ impl<'a> QueryRunner<'a> {
                 let wr = table
                     .execute_set_tx(op_ref, &mut tx, Some(self.resolver), &self.actor)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                        code: None,
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
                     })?;
-                let receipt = crate::query::batch::receipts::commit_implicit(
+                let receipt = crate::query::batch::receipts::commit_implicit_with_cancel(
                     &repo,
                     tx,
                     alias,
                     wait.unwrap_or_else(|| repo.commit_visibility_wait()),
+                    self.scope.cancel_handle().cloned(),
                 )
                 .await?;
                 return Ok(crate::query::batch::receipts::attach(

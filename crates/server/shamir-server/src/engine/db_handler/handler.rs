@@ -98,6 +98,7 @@ use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, 
 use super::cursor_handlers::error_response;
 use super::cursor_support::authorize_cursor_read;
 use super::handlers::token_admin;
+use super::repo_audit::CancelRefusalAudit;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
 /// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
@@ -153,6 +154,7 @@ pub struct ShamirDbHandler {
     pub(super) db: Arc<ShamirDb>,
     /// Per-connection audit writer, attached by the request boundary.
     pub(super) audit: Option<Arc<AuditChainWriter>>,
+    pub(super) cancel_refusal_audit: Arc<CancelRefusalAudit>,
     pub(super) transactions: crate::config::TransactionsConfig,
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
@@ -231,6 +233,10 @@ pub struct ShamirDbHandler {
 }
 
 impl ShamirDbHandler {
+    pub(crate) fn cancel_refusal_audit(&self) -> Arc<CancelRefusalAudit> {
+        Arc::clone(&self.cancel_refusal_audit)
+    }
+
     pub fn with_audit_writer(mut self, audit: Arc<AuditChainWriter>) -> Self {
         self.audit = Some(audit);
         self
@@ -242,6 +248,7 @@ impl ShamirDbHandler {
         Self {
             db,
             audit: None,
+            cancel_refusal_audit: Arc::default(),
             transactions: crate::config::TransactionsConfig::default(),
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
@@ -267,6 +274,7 @@ impl ShamirDbHandler {
         Self {
             db,
             audit: None,
+            cancel_refusal_audit: Arc::default(),
             transactions: crate::config::TransactionsConfig::default(),
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
@@ -675,6 +683,7 @@ pub(super) fn error_code(e: &BatchError) -> &str {
             shamir_query_types::batch::LimitKind::Depth => "nesting_too_deep",
             shamir_query_types::batch::LimitKind::Iterations => "too_many_iterations",
         },
+        BatchError::Cancelled => shamir_query_types::wire::error_code::CANCELLED,
         BatchError::TooManyIterations { .. } => "too_many_iterations",
         BatchError::TooManyQueries { .. }
         | BatchError::TooDeep { .. }

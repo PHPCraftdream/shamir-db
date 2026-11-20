@@ -55,6 +55,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use shamir_tx::{CancelHandle, WaitState};
 use tokio::sync::Notify;
 
 #[cfg(test)]
@@ -190,6 +191,51 @@ impl ByteBudget {
             // the whole loop: state may have changed again by the time we
             // wake, so we re-check rather than assume we now have room.
             notified.await;
+        }
+    }
+
+    /// Reserve bytes as in [`Self::acquire`], or return `None` if cancelled.
+    /// Cancellation observed before returning a reservation takes precedence:
+    /// any guard obtained in the race is dropped and its bytes released.
+    ///
+    /// cancel-safe: yes — the only suspension holds a waiter and a park
+    /// marker, but no reservation; dropping the future clears both.
+    pub async fn acquire_cancellable(
+        &self,
+        bytes: usize,
+        handle: &CancelHandle,
+    ) -> Option<ByteBudgetGuard> {
+        if handle.is_cancelled() {
+            return None;
+        }
+        let Some(cap) = self.inner.cap else {
+            return Some(ByteBudgetGuard {
+                inner: None,
+                bytes: 0,
+            });
+        };
+        if let Some(guard) = self.try_cas(bytes, cap) {
+            return (!handle.is_cancelled()).then_some(guard);
+        }
+
+        loop {
+            if handle.is_cancelled() {
+                return None;
+            }
+            // Register before retrying so a racing release cannot be lost.
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(guard) = self.try_cas(bytes, cap) {
+                return (!handle.is_cancelled()).then_some(guard);
+            }
+
+            let _park = handle.park(WaitState::Budget);
+            tokio::select! {
+                biased;
+                _ = handle.wait_cancelled() => return None,
+                _ = notified => {}
+            }
         }
     }
 

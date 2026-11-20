@@ -386,6 +386,7 @@ pub(super) async fn spawn_listeners(
     .await;
 
     if let Err(error) = result {
+        env.handler_concrete.cancel_refusal_audit().close();
         shutdown_token.cancel();
         let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         for mut task in listener_tasks.drain(..) {

@@ -49,7 +49,11 @@ impl Drainer {
     /// succeeded: `mark_durable(v)` -> A5 gate -> `wal.commit` -> crash seams.
     /// Stop at the first entry with a failed table (contiguity).
     pub async fn drain_step(&self, repo: &RepoCore) -> DbResult<usize> {
-        let _replay_guard = self.replaying.lock().await;
+        self.drain_step_with_cancel(repo, None).await
+    }
+
+    /// cancel-safe: NO — replay, durability and WAL finalization span awaits.
+    pub(super) async fn replay_locked(&self, repo: &RepoCore) -> DbResult<usize> {
         let gate = repo.tx_gate().await?;
         let mut unresolved_ceiling = u64::MAX;
         let mut blocked_by_unresolved = false;

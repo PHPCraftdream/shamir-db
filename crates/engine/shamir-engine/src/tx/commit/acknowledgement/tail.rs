@@ -1,11 +1,12 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState, VisibilityWait};
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::visibility_metrics::{AckMode, AckResult, PendingKind};
-use shamir_tx::TxContext;
+use shamir_tx::{CancelHandle, TxContext};
 
 use crate::repo::gate_visibility::{
     observe_gate_with_budget, query_ack_result, record_pending_kind,
@@ -24,7 +25,16 @@ pub(crate) fn commit_tx_with_options(
     repo: &RepoCore,
     wait: VisibilityWait,
 ) -> impl Future<Output = Result<TxOutcome, TxError>> + '_ {
-    commit_tx_with_kind(tx, repo, wait, PendingKind::ExplicitTx)
+    commit_tx_with_cancel(tx, repo, wait, None)
+}
+
+pub(crate) fn commit_tx_with_cancel(
+    tx: TxContext,
+    repo: &RepoCore,
+    wait: VisibilityWait,
+    cancel: Option<Arc<CancelHandle>>,
+) -> impl Future<Output = Result<TxOutcome, TxError>> + '_ {
+    commit_tx_with_kind(tx, repo, wait, PendingKind::ExplicitTx, cancel)
 }
 
 /// Same pipeline as [`commit_tx_with_options`]; a Pending outcome is counted
@@ -35,6 +45,7 @@ pub(crate) async fn commit_tx_with_kind(
     repo: &RepoCore,
     wait: VisibilityWait,
     kind: PendingKind,
+    cancel: Option<Arc<CancelHandle>>,
 ) -> Result<TxOutcome, TxError> {
     // Validate before entering the pipeline, never erase a known commit.
     if let VisibilityWait::Bounded { timeout_ms } = wait {
@@ -63,7 +74,7 @@ pub(crate) async fn commit_tx_with_kind(
     let gate = repo
         .initialized_tx_gate()
         .expect("gate initialized before commit");
-    let result = commit_tx_inner(tx, repo).await;
+    let result = commit_tx_inner(tx, repo, cancel).await;
     let acknowledged =
         acknowledge_known_outcome(result, repo, gate, wait, MAX_UNDRAINED_VERSIONS).await;
     let visibility = match &acknowledged {

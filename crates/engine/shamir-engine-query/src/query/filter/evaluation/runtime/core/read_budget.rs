@@ -3,12 +3,17 @@
 use std::time::Duration;
 
 use shamir_storage::error::DbError;
+use shamir_tx::CancelHandle;
 
 use crate::query::read::QueryRecord;
 
 /// Shared read-visibility budget of an enclosing execution.
 pub trait ReadVisibilityScope: Send + Sync {
     fn read_visibility_budget(&self) -> Duration;
+
+    fn cancel_handle(&self) -> Option<&CancelHandle> {
+        None
+    }
 }
 
 /// Policy-enabled per-read byte meter (result-size accounting).

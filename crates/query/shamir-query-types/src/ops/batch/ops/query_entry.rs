@@ -8,6 +8,7 @@ use shamir_types::access::{Action, ResourcePath};
 
 use crate::filter::Filter;
 use crate::read::ReadQuery;
+use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use crate::batch::batch_op::BatchOp;
 use crate::batch::tree_visitor::BatchTreeVisitor;
@@ -80,6 +81,36 @@ impl From<ReadQuery> for QueryEntry {
             when: None,
             abort_on_skip: false,
         }
+    }
+}
+
+impl From<ReadQuery> for BatchOp {
+    fn from(q: ReadQuery) -> Self {
+        BatchOp::Read(q)
+    }
+}
+
+impl From<InsertOp> for BatchOp {
+    fn from(i: InsertOp) -> Self {
+        BatchOp::Insert(i)
+    }
+}
+
+impl From<UpdateOp> for BatchOp {
+    fn from(u: UpdateOp) -> Self {
+        BatchOp::Update(u)
+    }
+}
+
+impl From<SetOp> for BatchOp {
+    fn from(s: SetOp) -> Self {
+        BatchOp::Set(s)
+    }
+}
+
+impl From<DeleteOp> for BatchOp {
+    fn from(d: DeleteOp) -> Self {
+        BatchOp::Delete(d)
     }
 }
 

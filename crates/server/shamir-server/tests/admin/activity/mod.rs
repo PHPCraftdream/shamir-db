@@ -6,5 +6,8 @@
 //! `src/engine/db_handler/tests/handlers/activity/`. Manifest only.
 
 mod activity_view_under_load;
+mod cancel_commit_test;
+mod cancel_fixture;
+mod cancel_lock_tests;
 mod common;
 mod permission_denial_activity;
