@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -24,6 +24,7 @@ use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
+use crate::backup_online::metrics::backup_metrics_snapshot;
 use crate::backup_online::{
     EngineBackupPort, OnlineBackupRegistry, PortRunState, StartBackupError,
 };
@@ -351,6 +352,12 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         .expect("flush after failure within deadline")
         .expect("flush after failure");
     guard.note("flush-returned", "row c durable");
+    // Nextest isolates process-wide metrics. The first (failed) run must not
+    // have published a success, so this admin run is the only possible source.
+    let before = backup_metrics_snapshot();
+    assert_eq!(before.last_success_timestamp_seconds, 0);
+    assert_eq!(before.last_bytes, 0);
+    let started_at = SystemTime::now();
     let (second_id, destination) = registry
         .start(other.clone())
         .expect("restart after failure");
@@ -386,7 +393,31 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         dest_dir.join("manifest.json").exists(),
         "the second run wrote a manifest"
     );
-    verify_manifest(&dest_dir).expect("second snapshot must verify");
+    let verified = verify_manifest(&dest_dir).expect("second snapshot must verify");
+    // The existing idle wait is a publication handoff: the runner writes
+    // success metrics before publishing running=false under the record lock.
+    let metrics = backup_metrics_snapshot();
+    let unix_seconds = |time: SystemTime| {
+        time.duration_since(UNIX_EPOCH)
+            .expect("Unix time")
+            .as_secs()
+    };
+    assert!(
+        (unix_seconds(started_at)..=unix_seconds(SystemTime::now()))
+            .contains(&metrics.last_success_timestamp_seconds),
+        "latest success must be stamped during the admin run"
+    );
+    let repo_bytes: u64 = after
+        .progress
+        .per_repo
+        .iter()
+        .map(|repo| repo.bytes_hashed)
+        .sum();
+    assert!(
+        verified.total_bytes > repo_bytes,
+        "fixture includes system-store bytes"
+    );
+    assert_eq!(metrics.last_bytes, verified.total_bytes);
     guard.note("second-run", "Done + verified");
 }
 
