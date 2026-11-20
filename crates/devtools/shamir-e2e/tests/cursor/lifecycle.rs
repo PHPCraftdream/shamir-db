@@ -92,6 +92,7 @@ fn make_config(temp: &TempDir, cursors: CursorLimitsConfig) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

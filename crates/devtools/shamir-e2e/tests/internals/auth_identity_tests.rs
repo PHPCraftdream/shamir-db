@@ -51,6 +51,7 @@ fn auth_test_config(temp: &TempDir) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 
@@ -133,6 +134,7 @@ fn config(temp: &TempDir) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

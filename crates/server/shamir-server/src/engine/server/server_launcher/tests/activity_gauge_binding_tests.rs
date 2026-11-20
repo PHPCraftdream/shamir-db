@@ -154,6 +154,7 @@ fn boot_config(data_dir: std::path::PathBuf) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

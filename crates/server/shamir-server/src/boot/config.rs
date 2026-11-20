@@ -82,6 +82,11 @@ pub use crate::durability::DurabilityConfig;
 pub use crate::transactions_config::TransactionsConfig;
 pub use shamir_server_security::config::{LoggingConfig, TokensConfig};
 
+#[path = "config/diagnostics/backup_online/schedule/config.rs"]
+mod backup_schedule;
+#[cfg(test)]
+#[path = "config/tests/backup_schedule_tests.rs"]
+mod backup_schedule_tests;
 pub mod diagnostics;
 mod http_listener;
 mod http_mapping;
@@ -90,6 +95,10 @@ mod limits;
 mod login_listener;
 #[cfg(test)]
 mod tests;
+
+pub use backup_schedule::{
+    BackupRetentionConfig, BackupScheduleConfig, DailyWindow, ResolvedSchedule,
+};
 
 pub use http_listener::HttpListenerSettings;
 pub use http_mapping::to_http_server_config;
@@ -145,6 +154,8 @@ pub struct Config {
     /// break existing configs (that is why the field is optional).
     #[serde(default)]
     pub replication: Option<ReplicationConfig>,
+    #[serde(default)]
+    pub backup: Option<BackupScheduleConfig>,
 }
 
 pub use crate::replication::{ReplicationConfig, UpstreamPins};
@@ -443,6 +454,9 @@ impl Config {
     /// [`ConfigError::Validation`] with a human-readable message at the
     /// first violation; callers can surface that as a startup error.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(backup) = &self.backup {
+            backup.validate(&self.data_dir)?;
+        }
         self.durability.resolve_policy()?;
         self.transactions.validate()?;
         self.tokens
