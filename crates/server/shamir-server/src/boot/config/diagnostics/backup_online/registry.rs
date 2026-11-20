@@ -432,8 +432,9 @@ impl RunJob {
     /// The blocking-thread body: permit, protocol, record update. Never
     /// holds the record lock across the protocol call. `guard` is a
     /// parameter on purpose: parameters drop after the body's locals, so
-    /// on an unwind the permit (and the protocol's own pins/seals RAII,
-    /// deeper still) is released BEFORE the guard publishes the failure.
+    /// on an unwind the permit and maintenance admission (and the protocol's
+    /// own pins/seals RAII, deeper still) are released BEFORE the guard
+    /// publishes the failure.
     fn run(self, mut guard: RunGuard) {
         guard.armed = true;
         let Self {
@@ -447,8 +448,6 @@ impl RunJob {
             record,
             #[cfg(test)]
             step_callback,
-            // Held to the end of the body: the gate stays occupied through
-            // the protocol call, the record update (cleanup) and metrics.
             maintenance,
         } = self;
         // Test-only: arm this runner thread with the run's one-shot step
@@ -460,10 +459,10 @@ impl RunJob {
             TEST_STEP_CALLBACK.with(|slot| *slot.borrow_mut() = Some(callback));
         }
         let started_at = Instant::now();
-        let _maintenance = maintenance;
         let Some(permit_guard) = permit.try_acquire() else {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol.
+            drop(maintenance);
             let mut record = record.lock();
             record.running = false;
             record.last_error = Some("another online backup holds the permit".to_string());
@@ -513,9 +512,9 @@ impl RunJob {
         } else {
             live_repo_count(&db, &runtime).saturating_sub(snapshot_count)
         };
-        // Release the permit before publishing idle, or a new run can be
-        // refused.
+        // Release both guards before taking the record lock to publish idle.
         drop(permit_guard);
+        drop(maintenance);
         // §4.8 metrics hook values, prepared BEFORE the record lock: run
         // counters, copied bytes (the protocol's hashed-byte counters)
         // and the last run duration; the failure stage is where the
@@ -538,8 +537,7 @@ impl RunJob {
         backup_metrics::note_finished(failed, stage, bytes, started_at.elapsed());
         record.running = false;
         // Normal completion: disarm the panic guard after the final
-        // status/metrics publish, so its drop is a no-op (the guard still
-        // drops last, after `permit_guard`).
+        // status/metrics publish, so its drop is a no-op.
         guard.armed = false;
     }
 }

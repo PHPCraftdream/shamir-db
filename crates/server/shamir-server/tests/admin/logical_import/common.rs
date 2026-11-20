@@ -26,7 +26,8 @@ use shamir_server_security::user_directory::FjallUserDirectory;
 use shamir_sync::replication_seed::{
     from_query_value, DatabaseItem, DumpReader, DumpScope, DumpWriter, Durability, EncryptionMode,
     IdentityItem, IdentityKind, LogicalDumpHeader, LogicalValue, PortableItem, RecordItem,
-    RepositoryEngine, RepositoryItem, RepositoryVersion, SectionInventory, SectionKind, TableItem,
+    RepositoryEngine, RepositoryItem, RepositoryVersion, SectionInventory, SectionKind, SeedError,
+    TableItem,
 };
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::{Builder, Runtime};
@@ -75,26 +76,32 @@ pub fn stage_timeout<T>(rt: &Runtime, label: &'static str, fut: impl Future<Outp
 /// other error fails at once. The pause runs on the caller's runtime, which
 /// also lets the dropped engine's tasks finish.
 ///
-/// The refusal can only be recognized as text, not by downcast: the Fjall
-/// backend erases the typed `fjall::Error::Locked` into
-/// `DbError::Storage(e.to_string())` (`storage_fjall/store.rs`), which then
-/// travels as `SeedError::Database` under `export`'s `anyhow::Error` with no
-/// preserved source chain, so no `fjall::Error` is ever reachable here.
+/// The export error can be downcast to `SeedError::Database`, but the Fjall
+/// backend stores only `DbError::Storage(e.to_string())`. Match the exact
+/// `fjall::Error::Locked` display text from Fjall 3.1.13, not the error chain's
+/// formatted text.
 pub async fn export_waiting_for_locks(
     root: &Path,
     args: &LogicalExportArgs,
 ) -> shamir_sync::replication_seed::DumpReport {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + STAGE_TIMEOUT;
     loop {
         match logical_dump::export(root, args, CancellationToken::new()).await {
             Ok(report) => return report,
-            Err(error)
-                if format!("{error:#}").contains("Locked")
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            Err(error) => {
+                let locked = matches!(
+                    error.downcast_ref::<SeedError>(),
+                    Some(SeedError::Database(DbError::Storage(message))) if message == "Locked"
+                );
+                let retry_at = tokio::time::Instant::now() + Duration::from_millis(50);
+                if !locked || retry_at >= deadline {
+                    panic!("logical export failed: {error:#}");
+                }
+                tokio::time::sleep_until(retry_at).await;
+                if tokio::time::Instant::now() >= deadline {
+                    panic!("logical export failed: {error:#}");
+                }
             }
-            Err(error) => panic!("logical export failed: {error:#}"),
         }
     }
 }

@@ -24,6 +24,7 @@ impl RepoInstance {
     }
 
     /// Resolve a token while the caller already holds this repository's permit.
+    /// Cold setup runs inline; do not cancel while recovery may still be running.
     pub async fn table_by_token_admitted(
         &self,
         token: u64,
@@ -34,10 +35,9 @@ impl RepoInstance {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
-    /// inside the init closure, the cell remains empty so subsequent
-    /// calls retry; no partial table is exposed. The clone of the cell
-    /// value is in-memory.
+    /// Cancellation stops waiting but does not interrupt a cold open once
+    /// handed off. The task holds the repository permit through recovery and
+    /// publication.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         let table = self.core.get_table(table_name).await?;
         // Metrics wiring: the observer slot lives in an Arc shared across
@@ -56,16 +56,17 @@ impl RepoInstance {
     /// (`get_table`/`get_table_admitted`) stay for anything that mutates or
     /// resolves a name for a user request. `pub` (not `pub(crate)`) because
     /// the seed-catalogue walker lives in the downstream `shamir-db` crate.
+    ///
+    /// As with [`RepoInstance::get_table`], cancellation stops waiting, not
+    /// a cold open already handed off under the repository permit.
     pub async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         self.core.get_table_unfenced(table_name).await
     }
 
     /// Admitted twin of [`RepoInstance::get_table`]: requires the caller to
     /// hold THIS repository's write-admission permit; the permit is checked
-    /// (`debug_check_permit`) and threaded into table construction so the
-    /// produced [`TableManager`] is born already holding an admitted
-    /// capability. Otherwise identical semantics to `get_table` (single-init
-    /// `OnceCell`, existence checks inside the init closure).
+    /// (`debug_check_permit`) and threaded into table construction. Cold setup
+    /// runs inline; do not cancel while recovery may still be running.
     pub async fn get_table_admitted(
         &self,
         table_name: &str,

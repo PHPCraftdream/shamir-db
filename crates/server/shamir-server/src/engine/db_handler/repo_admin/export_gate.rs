@@ -80,7 +80,7 @@ pub(crate) fn export_dispatch<'a>(
     session: &Session,
     batch: &'a BatchRequest,
     db_name: &str,
-) -> Result<Option<ExportDispatch<'a>>, DbResponse> {
+) -> Result<Option<ExportDispatch<'a>>, Box<DbResponse>> {
     let has_export_op = BatchTreeVisitor::new(&batch.queries).any(|visit| {
         matches!(
             visit.entry.op,
@@ -91,7 +91,7 @@ pub(crate) fn export_dispatch<'a>(
         return Ok(None);
     }
     if let Some(refusal) = scram_superuser_refusal(session) {
-        return Err(refusal);
+        return Err(Box::new(refusal));
     }
     let dispatch = export_dispatch_form(batch, db_name)?;
     Ok(Some(dispatch))
@@ -132,7 +132,7 @@ pub(crate) fn scram_superuser_refusal(session: &Session) -> Option<DbResponse> {
 fn export_dispatch_form<'a>(
     batch: &'a BatchRequest,
     db_name: &str,
-) -> Result<ExportDispatch<'a>, DbResponse> {
+) -> Result<ExportDispatch<'a>, Box<DbResponse>> {
     if batch.transactional {
         return Err(form_refusal());
     }
@@ -171,13 +171,13 @@ fn export_dispatch_form<'a>(
 
 /// The single atomic form refusal. Fixed code and message; no alias, no
 /// database name, no path, no peer text.
-fn form_refusal() -> DbResponse {
-    DbResponse::Error {
+fn form_refusal() -> Box<DbResponse> {
+    Box::new(DbResponse::Error {
         code: "online_export_invalid_form".into(),
         message: "online export operations require a standalone, \
                   nontransactional, top-level single-operation batch"
             .into(),
-    }
+    })
 }
 
 /// Typed "export root not configured" refusal — the stable
@@ -198,16 +198,18 @@ pub(crate) fn not_configured_refusal() -> DbResponse {
 /// Errors are internal encoding failures only (the DTOs are plain maps of
 /// scalars); they surface as the fixed `internal_error` code with a
 /// static message. See the module docs for the checked null behavior.
-pub(crate) fn receipt_value(receipt: &impl serde::Serialize) -> Result<QueryValue, DbResponse> {
+pub(crate) fn receipt_value(
+    receipt: &impl serde::Serialize,
+) -> Result<QueryValue, Box<DbResponse>> {
     let bytes = rmp_serde::to_vec_named(receipt).map_err(|_| internal_refusal())?;
     rmp_serde::from_slice::<QueryValue>(&bytes).map_err(|_| internal_refusal())
 }
 
 /// The fixed internal-error response used only for impossible codec
 /// failures; it carries no detail.
-fn internal_refusal() -> DbResponse {
-    DbResponse::Error {
+fn internal_refusal() -> Box<DbResponse> {
+    Box::new(DbResponse::Error {
         code: "internal_error".into(),
         message: "failed to encode the online export response".into(),
-    }
+    })
 }

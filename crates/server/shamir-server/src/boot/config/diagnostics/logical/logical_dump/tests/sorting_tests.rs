@@ -10,6 +10,8 @@ use shamir_types::types::value::QueryValue;
 
 use super::super::projection::record_value;
 use super::super::sorting::{next_item, Sorter};
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+use super::super::staging::publish_live_stage;
 use super::super::staging::Stage;
 
 fn row(key: Vec<u8>) -> PortableItem {
@@ -80,6 +82,53 @@ fn publish_conflict_never_replaces_racing_destination() {
     fs::write(&output, b"racing owner").unwrap();
     assert!(stage.publish(&output).is_err());
     assert_eq!(fs::read(output).unwrap(), b"racing owner");
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn live_publication_renames_without_replacing() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("dump");
+    let stage = Stage::for_live(&output).unwrap();
+    let source = stage.path().join("dump");
+    fs::write(&source, b"verified").unwrap();
+
+    // Simulate a destination appearing after stage creation.
+    fs::write(&output, b"racing owner").unwrap();
+    let error = publish_live_stage(stage.path(), &output, || Ok(())).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(Stage::for_live(&output).is_err());
+    assert_eq!(fs::read(&output).unwrap(), b"racing owner");
+    assert_eq!(fs::read(&source).unwrap(), b"verified");
+
+    let fresh_output = root.path().join("fresh");
+    publish_live_stage(stage.path(), &fresh_output, || Ok(())).unwrap();
+    assert!(!source.try_exists().unwrap());
+    let stage_path = stage.path().to_owned();
+    drop(stage);
+    assert!(!stage_path.try_exists().unwrap());
+    assert_eq!(fs::read(fresh_output).unwrap(), b"verified");
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn live_publication_callback_can_abort_before_rename() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("dump");
+    let stage = Stage::for_live(&output).unwrap();
+    let source = stage.path().join("dump");
+    fs::write(&source, b"verified").unwrap();
+
+    let error = publish_live_stage(stage.path(), &output, || {
+        anyhow::bail!("publication vetoed")
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "publication vetoed");
+    assert_eq!(fs::read(&source).unwrap(), b"verified");
+    assert!(!output.try_exists().unwrap());
 }
 
 #[test]

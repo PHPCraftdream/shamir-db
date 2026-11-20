@@ -840,14 +840,7 @@ impl SessionStore {
         }
     }
 
-    /// Look up a session by id, touching `last_activity_ns` if found.
-    ///
-    /// Calls `UnixNanos::now()` internally LAZILY (only on hit). On miss
-    /// returns immediately without consulting the clock. Hot-path callers
-    /// should still prefer [`SessionStore::lookup_at`] to share one
-    /// timestamp across multiple session touches.
-    ///
-    /// Legacy wrapper; prefer [`SessionStore::lookup_at`].
+    /// Look up and touch a session on hit; use [`Self::lookup_at`] to share a timestamp.
     ///
     /// # Panics
     /// Panics when the system clock is invalid (on hit only).
@@ -871,6 +864,13 @@ impl SessionStore {
             r.touch_at(now_ns);
             r.clone()
         })
+    }
+
+    /// Check the stored generation's handle without touching its TTL.
+    #[doc(hidden)]
+    pub fn matches_activity_handle(&self, sid: &Sid, handle: u64) -> bool {
+        let stored = self.by_sid.get(sid);
+        handle != 0 && stored.is_some_and(|s| s.activity_handle() == handle)
     }
 
     /// Remove a session by id. Returns the previous session if any.

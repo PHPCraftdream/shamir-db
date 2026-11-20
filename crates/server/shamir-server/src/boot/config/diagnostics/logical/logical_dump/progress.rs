@@ -52,10 +52,6 @@ impl<T> CheckedIo<T> {
         (self.inner, self.bytes.load(Ordering::Relaxed))
     }
 
-    pub(super) fn into_inner(self) -> T {
-        self.into_parts().0
-    }
-
     fn check(&self) -> io::Result<()> {
         if self.cancel.is_cancelled() {
             return Err(io::Error::other("logical-export cancelled"));

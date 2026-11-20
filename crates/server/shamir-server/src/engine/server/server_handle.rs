@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::boot::config::diagnostics::logical::export_online::OnlineExport;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
 use crate::server::store_release_barrier::wait_stores_released;
@@ -131,8 +132,7 @@ pub struct ServerHandle {
     /// must outlive every job, and `shutdown_with_report` waits (bounded)
     /// for a draining worker BEFORE the store flush (a freeze holds the
     /// gate). `None` without a configured root.
-    pub(super) online_export:
-        Option<Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>>,
+    pub(super) online_export: Option<Arc<OnlineExport>>,
     /// Follower-replication supervisor (386-c). Held here so its follower
     /// loops survive past boot (dropping it would kill every loop). On
     /// shutdown `stop_all()` cancels every running loop before the tasks are

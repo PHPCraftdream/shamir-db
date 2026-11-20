@@ -18,9 +18,8 @@ impl RepoCore {
     /// pipeline (Phases 1, 2.6, 5b–5d) while holding the per-repo
     /// `commit_lock`.
     ///
-    /// cancel-safe: yes — one `scc::HashMap` read plus a single
-    /// `get_table_unfenced` call. Cancellation leaves no state mutated
-    /// (apart from the cancel-safe `get_table_unfenced` OnceCell init).
+    /// Cancelling the lookup stops waiting; an admitted cold open continues
+    /// under the repository permit (see `get_table_unfenced`).
     ///
     /// O(1) (III.1): resolves through the `token_names` reverse index that
     /// `add_table` maintains, instead of scanning every config and
@@ -60,6 +59,7 @@ impl RepoCore {
     }
 
     /// Resolve a token while the caller already holds this repository's permit.
+    /// Cold setup runs inline; do not cancel while recovery may still be running.
     pub(crate) async fn table_by_token_admitted(
         &self,
         token: u64,
@@ -85,10 +85,9 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
-    /// inside the init closure, the cell remains empty so subsequent
-    /// calls retry; no partial table is exposed. The clone of the cell
-    /// value is in-memory.
+    /// Cancellation stops waiting but does not interrupt a cold open once
+    /// handed off. The task holds the repository permit through recovery and
+    /// publication.
     pub(crate) async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         self.rename_fence.check_table_rename_fence(table_name)?;
         if let Some(table) = self.catalog.initialized_table(table_name) {
@@ -101,20 +100,16 @@ impl RepoCore {
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
         self.rename_fence.check_table_rename_fence(table_name)?;
-        // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
-        // cold-init chain inline (`create_table_context` →
-        // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
-        // Pinning it — exactly like the admitted twin below — keeps that
-        // await state on the heap instead of widening this fn's future,
-        // which is embedded inline in every catalogue read/write along the
-        // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
+        self.open_cold_table(table_name, permit).await
     }
 
     /// Admitted twin of `get_table`: requires the caller to hold THIS
     /// repository's write-admission permit; the permit is checked
-    /// (`debug_check_permit`) and threaded into table construction. Otherwise
-    /// identical semantics to `get_table`.
+    /// (`debug_check_permit`) and threaded into table construction. Cold setup
+    /// runs inline; do not cancel while recovery may still be running.
     pub(crate) async fn get_table_admitted(
         &self,
         table_name: &str,
@@ -129,10 +124,9 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
-    /// inside the init closure, the cell remains empty so subsequent
-    /// calls retry; no partial table is exposed. The clone of the cell
-    /// value is in-memory.
+    /// Cancellation stops waiting but does not interrupt a cold open once
+    /// handed off. The task holds the repository permit through recovery and
+    /// publication.
     pub(crate) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         if let Some(table) = self.catalog.initialized_table(table_name) {
             return Ok(table);
@@ -143,15 +137,36 @@ impl RepoCore {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
+        self.open_cold_table(table_name, permit).await
+    }
+
+    async fn open_cold_table(
+        &self,
+        table_name: &str,
+        permit: RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        let core = self.clone();
+        let table_name = table_name.to_owned();
+        // Detach by design if the waiter is dropped: blocking recovery can
+        // outlive its awaiter, so the task must own the original permit through
+        // recovery and publication. The mutex bounds cold opens to one per repo.
+        // Keep the deep cold-init future boxed as in the inline admitted paths.
+        let task =
+            tokio::spawn(async move { Box::pin(core.get_table_ctx(&table_name, &permit)).await });
+        match task.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(DbError::Internal(error.to_string())),
+        }
     }
 
     /// Admitted twin of `get_table`: requires the caller to
     /// hold THIS repository's write-admission permit; the permit is checked
-    /// (`debug_check_permit`) and threaded into table construction so the
-    /// produced `TableManager` is born already holding an admitted
-    /// capability. Otherwise identical semantics to `get_table` (single-init
-    /// `OnceCell`, existence checks inside the init closure).
+    /// (`debug_check_permit`) and threaded into table construction. Cold setup
+    /// runs inline; do not cancel while recovery may still be running.
     pub(crate) async fn get_table_admitted_unfenced(
         &self,
         table_name: &str,
@@ -217,8 +232,8 @@ impl RepoCore {
             })
     }
 
-    /// cancel-safe: yes — all awaits precede MVCC publication. After insert,
-    /// only synchronous ownership checks and builders remain.
+    /// All awaits precede MVCC publication, but open-time recovery can already
+    /// mutate storage. Keep the admission permit until recovery has returned.
     async fn create_table_context(
         &self,
         table_name: &str,

@@ -10,11 +10,11 @@ use crate::admin::types::schema_migration::SchemaMigrationAdminOp;
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp,
     AlterRepoOp, AlterSubscriptionOp, BackupStatusOp, BindValidatorOp, CancelBackupOp,
-    CancelExportOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp, ChmodOp, ChownOp,
-    CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp,
-    CreateIndexOp, CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp,
-    CreateSubscriptionOp, CreateTableOp, CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp,
-    DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
+    CancelExportOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp,
+    CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp,
+    CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp,
+    CreateTableOp, CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp, DescribeTableOp,
+    DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
     DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
     ExportFunctionOp, ExportStatusOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
     InternerTouchOp, ListActivityReq, ListOp, ListPublicationsOp, ListSubscriptionsOp,
@@ -211,9 +211,9 @@ pub enum BatchOp {
     /// Operator activity-view listing (read-only, R4b step 1).
     ListActivity(ListActivityReq),
 
-    /// Online logical-export admin ops (R3 step 2b). Superuser-only,
-    /// node-local; authorization is enforced inside `shamir-server`'s admin
-    /// handler (superuser plus included-scope read/manage checks), so
+    /// Online logical-export admin ops (R3 step 2b), bound to the database in
+    /// the request envelope. The wire handler requires a SCRAM superuser;
+    /// the export runner checks included-scope read/manage ACLs.
     /// `required_access` returns `None`. `ExportStatus` is read-only;
     /// `StartExport` / `CancelExport` are writes.
     StartExport(StartExportOp),

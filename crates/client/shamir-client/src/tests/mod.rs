@@ -1,12 +1,12 @@
 pub mod auth;
 pub mod client;
 pub mod interner;
+#[path = "visibility/logical_export/mod.rs"]
+pub mod logical_export;
 pub mod receipts;
 #[path = "visibility/repo_admin/mod.rs"]
 pub mod repo_admin;
 #[path = "visibility/schema_migration/mod.rs"]
 pub mod schema_migration;
-#[path = "visibility/logical_export/mod.rs"]
-pub mod logical_export;
 pub mod visibility;
 pub mod wire;

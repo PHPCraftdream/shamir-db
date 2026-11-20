@@ -37,10 +37,13 @@ fn start_admits_and_status_binds_owner_and_db() {
 #[test]
 fn unstamped_session_is_refused() {
     let registry = ExportRegistry::default();
-    let error = registry
-        .start(0, DB, "ex-0".to_string(), CancellationToken::new())
-        .expect_err("unstamped refused");
-    assert_eq!(error, AlreadyRunning);
+    assert!(
+        matches!(
+            registry.start(0, DB, "ex-0".to_string(), CancellationToken::new()),
+            Err(AlreadyRunning)
+        ),
+        "unstamped refused"
+    );
     assert!(registry.status(0, DB).is_none());
 }
 
@@ -50,10 +53,13 @@ fn live_job_blocks_every_second_start_and_is_never_erased() {
     let (_cancel, _run) = started(&registry);
 
     for owner in [OWNER, OTHER] {
-        let error = registry
-            .start(owner, DB, "ex-2".to_string(), CancellationToken::new())
-            .expect_err("second start refused while a job is live");
-        assert_eq!(error, AlreadyRunning);
+        assert!(
+            matches!(
+                registry.start(owner, DB, "ex-2".to_string(), CancellationToken::new()),
+                Err(AlreadyRunning)
+            ),
+            "second start refused while a job is live"
+        );
     }
     // The live job's record is untouched.
     assert_eq!(

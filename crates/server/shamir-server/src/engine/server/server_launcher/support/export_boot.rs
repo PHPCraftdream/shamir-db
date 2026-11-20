@@ -1,11 +1,12 @@
 //! Boot-time construction of the online logical-export job service
 //! (R3-2b). Kept out of `launch.rs` to hold it under the layout line
 //! limit; the launcher passes the config, the shared gate (present iff a
-//! root is configured), the engine handles and the node mode.
+//! root is configured), the engine handles, the node mode, and the session store.
 
 use std::path::Path;
 use std::sync::Arc;
 
+use shamir_connect::server::SessionStore;
 use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::ShamirDb;
 use tokio_util::sync::CancellationToken;
@@ -20,10 +21,9 @@ use crate::user_directory::FjallUserDirectory;
 
 /// Build the online-export service when a root AND the shared gate are
 /// configured (`None` root → `None` service: the wire ops refuse with the
-/// stable `online_export_not_configured` code). The service is ENABLED
-/// only on a ReadWrite node without the experimental migration API; a
-/// service that exists but stayed disabled maps at dispatch time onto
-/// `online_export_unavailable`, never the not-configured code.
+/// stable `online_export_not_configured` code). Enable the runner only on
+/// ReadWrite nodes without experimental migration. Otherwise, a start
+/// against the installed service returns `online_export_unavailable`.
 ///
 /// Root open follows the validated-root rules (private directory,
 /// exclusive lock, stale-temp cleanup). The source storage epoch derives
@@ -36,12 +36,13 @@ pub(super) fn maybe_online_export(
     directory: Arc<FjallUserDirectory>,
     shutdown: CancellationToken,
     node_mode: NodeMode,
+    sessions: Arc<SessionStore>,
 ) -> Result<Option<Arc<OnlineExport>>, BootError> {
     let (Some(root_path), Some(gate)) = (config.security.export_root.as_deref(), gate) else {
         return Ok(None);
     };
     let epoch = source_epoch(&config.data_dir)?;
-    let mut service = OnlineExport::new(
+    let service = OnlineExport::new(
         Arc::new(ExportRegistry::default()),
         Arc::new(ExportRoot::open(root_path, &config.data_dir)?),
         gate.clone(),
@@ -51,11 +52,12 @@ pub(super) fn maybe_online_export(
         ExportRuntime {
             runtime: tokio::runtime::Handle::current(),
             shutdown,
+            sessions: Some(sessions),
         },
     );
-    if node_mode == NodeMode::ReadWrite && !config.security.enable_experimental_migration_api {
-        service = service.enable();
-    }
+    let enabled =
+        node_mode == NodeMode::ReadWrite && !config.security.enable_experimental_migration_api;
+    let service = if enabled { service.enable() } else { service };
     Ok(Some(Arc::new(service)))
 }
 

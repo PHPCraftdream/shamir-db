@@ -466,12 +466,13 @@ impl ServerLauncher {
 
         // R3-2b — online logical-export job (support/export_boot.rs).
         let online_export = super::export_boot::maybe_online_export(
-            config,
+            &config,
             maintenance_gate.as_ref(),
             Arc::clone(&shamir),
             Arc::clone(&user_dir),
             shutdown_token.clone(),
             node_mode,
+            Arc::clone(&session_store),
         )?;
 
         // F-15: opt into the experimental online storage-migration API when

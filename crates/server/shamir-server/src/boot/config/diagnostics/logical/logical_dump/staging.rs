@@ -1,8 +1,15 @@
 use std::fs::{self, File};
+use std::io;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+use rustix::fs::{renameat_with, RenameFlags, CWD};
 use tempfile::{Builder, TempDir};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
 /// Live export stage prefix. The export root must be a private directory the
 /// server owns; the runner's startup cleanup removes only directories whose
@@ -25,18 +32,75 @@ pub(crate) fn publish_stage(stage_dir: &Path, output: &Path) -> Result<()> {
     )
 }
 
-/// Live publication: the same atomic no-clobber commit point, but a Unix
-/// directory-sync failure AFTER the successful link is only logged with the
-/// fixed warning and the artifact is reported as published (`Ok`): the final
-/// file is complete and verified and must never be removed or retried. Only
-/// a failure of the link itself is returned as an error.
-pub(crate) fn publish_live_stage(stage_dir: &Path, output: &Path) -> Result<()> {
-    if commit_stage_link(stage_dir, output)?.is_err() {
-        eprintln!(
+/// Only pre-publication failures return `Err`. After the pre-rename directory
+/// sync (where supported), `before_rename` can still veto publication. Once the
+/// atomic no-replace rename starts, it cannot be preempted. A post-rename
+/// directory-sync failure is logged and the artifact stays published.
+pub(crate) fn publish_live_stage(
+    stage_dir: &Path,
+    output: &Path,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let source = stage_dir.join("dump");
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    let parent = {
+        let parent = File::open(
+            output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
+        parent.sync_all()?;
+        parent
+    };
+    before_rename()?;
+    rename_no_replace(&source, output).context("logical-export atomic no-replace rename")?;
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    if parent.sync_all().is_err() {
+        tracing::warn!(
             "logical-export published a verified artifact, but final directory sync failed; final file retained"
         );
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn rename_no_replace(source: &Path, output: &Path) -> io::Result<()> {
+    renameat_with(CWD, source, CWD, output, RenameFlags::NOREPLACE)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_no_replace(source: &Path, output: &Path) -> io::Result<()> {
+    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "logical-export path contains an interior NUL",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    let source = wide_path(source)?;
+    let output = wide_path(output)?;
+    // SAFETY: Both pointers refer to owned, NUL-terminated UTF-16 buffers
+    // without interior NULs, valid for the duration of this call. Zero is a
+    // valid flag mask and allows neither replacement nor cross-volume copying.
+    if unsafe { MoveFileExW(source.as_ptr(), output.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+fn rename_no_replace(_source: &Path, _output: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "logical-export atomic no-replace rename is unsupported on this target",
+    ))
 }
 
 /// The commit point is the single atomic no-clobber hard link: an absent

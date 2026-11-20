@@ -72,6 +72,8 @@ pub(crate) enum SecuritySource<'a> {
     LiveDirectory(Option<Arc<FjallUserDirectory>>),
 }
 
+pub(crate) type PublishCallback<'a> = dyn Fn(&Path) -> Result<()> + Send + Sync + 'a;
+
 /// Context for artifact production shared by the offline command and the
 /// online export job. The caller owns the maintenance gate/snapshots and has
 /// already captured `reader`; this function never takes a gate, opens the
@@ -82,11 +84,11 @@ pub(crate) enum SecuritySource<'a> {
 /// synchronous, non-async callback invoked exactly once after trailer
 /// verification with the staging directory path. The runner performs its
 /// final cancel/deadline check inside the callback and commits under its own
-/// record lock via [`super::staging::publish_stage`]; the commit point is a
-/// single no-clobber hard link. After the link succeeds publication is
-/// irrevocable: the artifact is complete and verified, and the only later
-/// failure is the explicit Unix final-directory-sync durability error that
-/// must be reported as "published, retained" — never removed or retried.
+/// record lock via [`super::staging::publish_live_stage`]; the commit point
+/// is a single atomic no-replace rename. After the rename succeeds the
+/// complete, verified artifact is irrevocably published. A subsequent Unix
+/// final-directory-sync failure is logged; the artifact is retained and
+/// publication is not retried.
 /// `None` keeps the default offline publication (`publish_stage(stage,
 /// &args.output)` right after a final checkpoint). `live` selects the live
 /// `.shamir-export-` stage prefix that export-root cleanup recognizes;
@@ -100,7 +102,7 @@ pub(crate) struct LiveExport<'a> {
     pub cancel: &'a CancellationToken,
     pub deadline: std::time::Instant,
     pub observer: &'a dyn ExportObserver,
-    pub on_publish: Option<&'a (dyn Fn(&Path) -> Result<()> + Send + Sync)>,
+    pub on_publish: Option<&'a PublishCallback<'a>>,
     /// Offline only: the open handle the caller retains so the
     /// pre-publication catalogue health check can run inside the freeze. The
     /// live job passes `None` and performs no background health probe.
@@ -317,6 +319,14 @@ pub(crate) async fn write_live_export(ctx: LiveExport<'_>) -> Result<DumpReport>
         on_publish,
         offline_home,
     } = ctx;
+    if live {
+        checkpoint(cancel).await?;
+        if reader.has_schema_migration_history().await? {
+            return Err(unsupported(
+                "logical-export cannot preserve schema migration history; a nonempty system journal blocks live export",
+            ));
+        }
+    }
     let mut security = match security {
         SecuritySource::OfflineDataDir(data_dir) => Projection::new(data_dir)?,
         SecuritySource::LiveDirectory(directory) => Projection::from_directory(directory),
@@ -362,6 +372,11 @@ pub(crate) async fn write_live_export(ctx: LiveExport<'_>) -> Result<DumpReport>
                     let key = text(&row, "key")?;
                     let kind = match key {
                         "root_meta" => SettingKey::RootMeta,
+                        "fn_namespace_meta" if live => {
+                            return Err(unsupported(
+                                "logical-export cannot restore persisted fn_namespace_meta settings",
+                            ));
+                        }
                         "fn_namespace_meta" => SettingKey::FunctionNamespaceMeta,
                         _ => return Err(unsupported("unsupported exported setting")),
                     };

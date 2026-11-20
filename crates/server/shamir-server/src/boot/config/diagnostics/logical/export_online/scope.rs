@@ -12,10 +12,9 @@
 //! gate's `Actor::Admin` bypass is never relied on and no owner-only
 //! `Root` `Manage` check is imposed (that would make exports impossible
 //! for a normal boot admin whose session reaches this point as a plain
-//! principal). `Root` and `FunctionNamespace` are authorized for `Read`
-//! as an ordinary actor so the dump's carried settings (`root_meta`,
-//! `fn_namespace_meta`) and function-namespace ACL stay consistent with
-//! the live gate; both tolerate the code's default metadata.
+//! principal). Persisted `root_meta` and `fn_namespace_meta` settings
+//! require `Read` on their respective resources. Implicit defaults are
+//! not exported, and nested ACL checks still require root traversal.
 //!
 //! Both functions are side-effect-free apart from warm table opens
 //! (`warm_scope`): they allocate nothing proportional to row counts and
@@ -63,7 +62,7 @@ const MAX_INVENTORY: usize = 65_536;
 fn check_name(name: Option<&str>) -> Result<&str, ScopeError> {
     match name {
         None => Ok(""),
-        Some(name) if name.is_empty() => Err(ScopeError::InvalidScope),
+        Some("") => Err(ScopeError::InvalidScope),
         Some(name) if name.len() > MAX_NAME_LEN => Err(ScopeError::InvalidScope),
         Some(name) => Ok(name),
     }
@@ -133,16 +132,24 @@ pub(crate) async fn authorize_scope(
     // impossible for a normal boot admin).
     let actor = Actor::User(principal64(user_id));
 
-    // Carried settings live under the root (`root_meta`,
-    // `fn_namespace_meta`) and functions under the namespace: authorize
-    // both for `Read` as an ordinary actor, tolerating the code's default
-    // metadata for both singletons.
-    home.authorize_access(&actor, &ResourcePath::Root, Action::Read)
-        .await
-        .map_err(|_| ScopeError::Denied)?;
-    home.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Read)
-        .await
-        .map_err(|_| ScopeError::Denied)?;
+    // Only persisted settings are carried by the dump. A read failure is
+    // not absence; the ordinary ACL checks below still enforce traversal.
+    for (key, path) in [
+        ("root_meta", ResourcePath::Root),
+        ("fn_namespace_meta", ResourcePath::FunctionNamespace),
+    ] {
+        if home
+            .system_store()
+            .load_setting(key)
+            .await
+            .map_err(|_| ScopeError::Unavailable)?
+            .is_some()
+        {
+            home.authorize_access(&actor, &path, Action::Read)
+                .await
+                .map_err(|_| ScopeError::Denied)?;
+        }
+    }
 
     // The database itself is an included object: `Read` for the export,
     // `Manage` for the definitions/security state carried with it. Both

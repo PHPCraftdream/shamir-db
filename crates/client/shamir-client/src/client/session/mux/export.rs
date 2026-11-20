@@ -4,25 +4,21 @@
 //! the ordinary [`Client::execute`](crate::Client::execute) path on THIS
 //! session.
 //!
-//! STATUS: future protocol shape. This server build's handler only exposes
-//! the fail-closed `permission_denied` / `online_export_not_configured`
-//! refusals (the live job is gated by storage-owned buffer maintenance that
-//! lacks its admission API), so the methods below are typed to the agreed
-//! wire contract but MUST NOT be documented as working against a live job
-//! yet; a server without the job configured answers the typed
-//! `online_export_not_configured` rejection. Node-mode / follower
-//! capability gates are a separate server slice and are NOT consulted by
-//! this surface, so no such code is documented here. The paragraphs
-//! below describe the INTENDED protocol behavior for a server build that admits the job;
-//! no deployment-specific claim is made about any build that answers the
-//! fail-closed refusals.
+//! Production servers enable the runner only in normal `ReadWrite` mode
+//! with a configured private `security.export_root` and experimental
+//! storage migrations disabled. After authorization and form checks, all
+//! three operations return `online_export_not_configured` without a root.
+//! With a root, `StartExport` returns `online_export_unavailable` on a
+//! read-only server, with experimental storage migrations enabled, or when
+//! the transport cannot tie cancellation to the connection lifetime. If
+//! the runner is disabled with a configured root, status and cancel return
+//! `online_export_not_found` because there is no visible job.
 //!
-//! The `db` parameter of every operation is the node-local envelope
-//! placeholder, exactly like the application-schema migration control
-//! calls: `StartExport` / `ExportStatus` / `CancelExport` are NOT
-//! database-scoped on the server (the export scope travels flat inside the
-//! start op), so the envelope database names a database the session can
-//! address and nothing else.
+//! Every operation uses `db` as the request database envelope. The start
+//! payload names the database to export and must match that envelope; its
+//! repository and table options narrow that database scope. Status and cancel
+//! carry no database in their operation payloads and resolve a job only on
+//! the same native SCRAM session and database envelope as its start.
 
 use serde::de::DeserializeOwned;
 
@@ -53,9 +49,10 @@ impl Client {
     ///
     /// No output path is accepted on the wire: the server writes only
     /// under its configured private export root and reports only an
-    /// opaque artifact name. Requires the superuser plus the
-    /// included-scope read/manage checks on the server; denial arrives as
-    /// [`ClientError::Db`] (`permission_denied`) and nothing was started.
+    /// opaque artifact name. Perimeter authorization denies the request
+    /// with [`ClientError::Db`] (`permission_denied`); if the runner is
+    /// enabled, its scope authorization denies it with `export_scope_denied`
+    /// (including failed read/manage checks). Neither denial starts a job.
     /// A server without the export root configured answers the typed
     /// `online_export_not_configured` rejection; a request whose form is
     /// not a standalone single-op batch answers the typed
@@ -63,24 +60,18 @@ impl Client {
     ///
     /// # Lost responses
     ///
-    /// No blind retry, ever. A DEFINITIVE server rejection
-    /// ([`ClientError::Db`] — including the typed
-    /// `online_export_not_configured` refusal when the server has no
-    /// export root configured) means no job was started and the call may
-    /// be repeated deliberately by the caller. Anything observed AFTER
-    /// the batch was sent leaves the outcome UNKNOWN — an undecodable
-    /// response ([`ClientError::Protocol`]), a request timeout
-    /// ([`ClientError::RequestTimeout`], which reclaims the request id
-    /// without closing the session) or a connection close
-    /// ([`ClientError::ConnectionClosed`]) — and MUST be resolved with
-    /// [`Client::export_status`], never by resending the start (a second
-    /// start is refused with the typed in-progress code while the first
-    /// job lives). Resolution limits by loss class: a decode failure or a
-    /// request timeout leaves THIS session alive, so `export_status` on
-    /// the SAME session resolves the outcome (the server's job registry is
-    /// the authority on whether the start took effect). A connection
-    /// close cannot resolve a session-bound job at all: no later session
-    /// can observe that job, and this client makes no claim about
+    /// No blind retry, ever. A definitive pre-registration rejection
+    /// such as `online_export_not_configured` means no job was started.
+    /// An `internal_error` can occur after job registration and does not
+    /// prove that no job started. An undecodable response
+    /// ([`ClientError::Protocol`]), a request timeout
+    /// ([`ClientError::RequestTimeout`]) or a connection close
+    /// ([`ClientError::ConnectionClosed`]) also leaves the outcome unknown.
+    /// Resolve an uncertain start with [`Client::export_status`] on the
+    /// same session, never by resending the start. The server's job
+    /// registry is authoritative. A request timeout reclaims the request
+    /// ID without closing the session. After a connection close, no later
+    /// session can observe that job, and this client makes no claim about
     /// post-close cleanup.
     ///
     /// # Cancel-safety
@@ -176,12 +167,9 @@ fn export_receipt<T: DeserializeOwned>(
     response: &BatchResponse,
     alias: &str,
 ) -> Result<T, ClientError> {
-    let result = response
-        .results
-        .get(alias)
-        .ok_or_else(|| {
-            ClientError::Protocol(format!("{alias} result missing from batch response"))
-        })?;
+    let result = response.results.get(alias).ok_or_else(|| {
+        ClientError::Protocol(format!("{alias} result missing from batch response"))
+    })?;
     if response.results.len() != 1 {
         return Err(ClientError::Protocol(format!(
             "{alias} result must be the ONLY result in the batch response"

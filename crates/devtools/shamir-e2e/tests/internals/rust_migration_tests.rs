@@ -560,10 +560,13 @@ async fn run_online_export_not_configured_scenario() {
     let mut mk = Batch::new();
     mk.id("mk-db");
     mk.create_db(DB, ddl::create_db(DB));
-    tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.execute("default", mk.build()))
-        .await
-        .expect("create db deadline")
-        .expect("create db");
+    tokio::time::timeout(
+        EXPORT_REQUEST_TIMEOUT,
+        client.execute("default", mk.build()),
+    )
+    .await
+    .expect("create db deadline")
+    .expect("create db");
     let mut repo = Batch::new();
     repo.id("mk-repo");
     repo.create_repo("mr", ddl::create_repo("main").engine(RepoEngine::Fjall));
@@ -584,10 +587,13 @@ async fn run_online_export_not_configured_scenario() {
         }
     }
     expect_export_not_configured(
-        tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.start_export(DB, ddl::start_export(DB)))
-            .await
-            .expect("start_export deadline")
-            .expect_err("start_export must be refused"),
+        tokio::time::timeout(
+            EXPORT_REQUEST_TIMEOUT,
+            client.start_export(DB, ddl::start_export(DB)),
+        )
+        .await
+        .expect("start_export deadline")
+        .expect_err("start_export must be refused"),
     );
     expect_export_not_configured(
         tokio::time::timeout(EXPORT_REQUEST_TIMEOUT, client.export_status(DB))

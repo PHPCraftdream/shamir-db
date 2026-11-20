@@ -145,12 +145,14 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
         config = load_edges(open(os.path.join(os.path.dirname(__file__), "../../matrix/edges.toml"), encoding="utf-8").read())
         packages = [
             pkg("shamir-client", directory="crates/client/shamir-client"),
-            pkg("shamir-db", directory="crates/engine/shamir-db"),
+            pkg("shamir-engine", directory="crates/engine/shamir-engine"),
+            pkg("shamir-db", directory="crates/engine/shamir-db", deps=[("shamir-engine", {})]),
+            pkg("shamir-sync", directory="crates/server/shamir-sync"),
             # The real server manifest (crates/server/shamir-server/Cargo.toml)
             # has shamir-client as a normal dependency too, so an isolated
             # client export.rs change selects server and e2e through Cargo.
             pkg("shamir-server", directory="crates/server/shamir-server",
-                deps=[("shamir-db", {}), ("shamir-client", {})]),
+                deps=[("shamir-db", {}), ("shamir-client", {}), ("shamir-sync", {})]),
             pkg("shamir-e2e", directory="crates/devtools/shamir-e2e",
                 deps=[("shamir-client", {"kind": "dev"}),
                       ("shamir-db", {"kind": "dev"}),
@@ -161,7 +163,9 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/service.rs",
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs",
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs",
+            "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/staging.rs",
             "crates/server/shamir-server/src/engine/db_handler/repo_admin/export_gate.rs",
+            "crates/server/shamir-server/src/engine/server/server_launcher/support/export_boot.rs",
         ]
         for path in export_paths:
             owner = "shamir-client" if path.startswith("crates/client/") else "shamir-server"
@@ -176,6 +180,7 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
             self.assertEqual({item["name"] for item in with_edge["crates"]},
                              before | {"shamir-db"}, path)
             db_item = crate(with_edge, "shamir-db")
+            self.assertTrue(db_item["lib"], path)
             self.assertTrue(any("declared edge" in reason for reason in db_item["reasons"]), path)
 
         # The widening is path-narrow: unrelated production sources of the same
@@ -186,6 +191,29 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
                      "crates/server/shamir-server/src/boot/config/mod.rs"):
             result = select([path], packages, config)
             self.assertNotIn("shamir-db", {item["name"] for item in result["crates"]}, path)
+
+        # Shared slot, sync and engine paths keep their ordinary graph coverage.
+        server_e2e = {"shamir-server", "shamir-e2e"}
+        for path, expected in (
+            ("crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs", server_e2e),
+            ("crates/server/shamir-server/src/engine/db_handler/repo_admin/tx_handlers.rs", server_e2e),
+            ("crates/server/shamir-sync/src/sync/replication/follower_loop/loop_body.rs",
+             server_e2e | {"shamir-sync"}),
+            ("crates/server/shamir-sync/src/sync/replication/supervisor/start.rs",
+             server_e2e | {"shamir-sync"}),
+            ("crates/server/shamir-sync/src/sync/replication/transport/seed/terminal.rs",
+             server_e2e | {"shamir-sync"}),
+            ("crates/engine/shamir-engine/src/db_instance/logical_export/reader.rs",
+             server_e2e | {"shamir-engine", "shamir-db"}),
+            ("crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs",
+             server_e2e | {"shamir-engine", "shamir-db"}),
+            ("crates/engine/shamir-engine/src/tx/commit/core/catalog_access.rs",
+             server_e2e | {"shamir-engine", "shamir-db"}),
+        ):
+            with self.subTest(path=path):
+                without = select([path], packages)
+                self.assertEqual({item["name"] for item in without["crates"]}, expected)
+                self.assertEqual(select([path], packages, config), without)
 
         # Runtime-path widening for the R3-2b online export job (brief 56):
         # a production file of export_online behaves like any server path

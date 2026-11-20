@@ -840,13 +840,13 @@ fn export_phase_and_failure_names_are_snake_case() {
     // Decode through QueryValue (like `repl_nested_enums_wire_shape`
     // above) and assert the literal snake_case name instead of comparing
     // raw bytes.
-    let phase_bytes = rmp_serde::to_vec_named(&crate::admin::ExportPhase::WaitingForGate)
-        .expect("encode phase");
+    let phase_bytes =
+        rmp_serde::to_vec_named(&crate::admin::ExportPhase::WaitingForGate).expect("encode phase");
     let phase: QueryValue = rmp_serde::from_slice(&phase_bytes).expect("decode phase");
     assert_eq!(phase.as_str(), Some("waiting_for_gate"));
 
-    let phase_bytes = rmp_serde::to_vec_named(&crate::admin::ExportPhase::Done)
-        .expect("encode phase");
+    let phase_bytes =
+        rmp_serde::to_vec_named(&crate::admin::ExportPhase::Done).expect("encode phase");
     let phase: QueryValue = rmp_serde::from_slice(&phase_bytes).expect("decode phase");
     assert_eq!(phase.as_str(), Some("done"));
 

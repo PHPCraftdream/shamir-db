@@ -78,7 +78,9 @@ use shamir_db::engine::table::writer_drain_barrier::WriterDrainGuard;
 use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_types::hmac as canon;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::boot::config::diagnostics::logical::export_online::OnlineExport;
 use crate::byte_budget::ByteBudget;
 use crate::security::tokens::TokenService;
 
@@ -236,6 +238,9 @@ pub struct ShamirDbHandler {
     /// native/REST request boundary: `Execute` writes, `TxBegin`, mutating
     /// `TxExecute`, `TxCommit` and the top-level identity/token mutations.
     pub(super) maintenance: Option<MaintenanceGate>,
+    // Bound owned mutation tasks across all connection clones, even when
+    // the response byte budget is unbounded or reserves zero bytes.
+    owned_mutation_slots: Arc<Semaphore>,
     /// R4b-1 — monotonic source of fresh [`RequestExecId`] values, minted
     /// when a BATCH is admitted (same shape as `next_cursor_id`). The
     /// client's optional `rid` is carried alongside, never replaced.
@@ -247,8 +252,7 @@ pub struct ShamirDbHandler {
     /// process-wide instance via [`Self::with_online_export`] after the
     /// admission audit has enrolled every mutation source in the shared
     /// gate. Shared across all clones of the handler (`Arc`).
-    pub(super) online_export:
-        Option<Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>>,
+    pub(super) online_export: Option<Arc<OnlineExport>>,
 }
 
 impl ShamirDbHandler {
@@ -281,6 +285,9 @@ impl ShamirDbHandler {
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             maintenance: None,
+            owned_mutation_slots: Arc::new(Semaphore::new(
+                shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
+            )),
             online_export: None,
         }
     }
@@ -308,6 +315,9 @@ impl ShamirDbHandler {
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             maintenance: None,
+            owned_mutation_slots: Arc::new(Semaphore::new(
+                shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
+            )),
             online_export: None,
         }
     }
@@ -315,10 +325,7 @@ impl ShamirDbHandler {
     /// R3-2b — install the online-export job service (launcher-only, after
     /// the admission audit). The service is shared `Arc`-backed, so every
     /// clone of the handler reaches the same registry and root.
-    pub(crate) fn with_online_export(
-        mut self,
-        service: Arc<crate::boot::config::diagnostics::logical::export_online::OnlineExport>,
-    ) -> Self {
+    pub(crate) fn with_online_export(mut self, service: Arc<OnlineExport>) -> Self {
         self.online_export = Some(service);
         self
     }
@@ -441,6 +448,13 @@ impl ShamirDbHandler {
     pub(super) async fn maintenance_admission(&self) -> Option<WriterDrainGuard> {
         let gate = self.maintenance.as_ref()?;
         Some(gate.wait_for_mutation().await)
+    }
+
+    // Reject overload before maintenance admission or spawning any work.
+    pub(super) fn try_owned_mutation_slot(&self) -> Result<OwnedSemaphorePermit, ()> {
+        Arc::clone(&self.owned_mutation_slots)
+            .try_acquire_owned()
+            .map_err(|_| ())
     }
 
     /// FG-5b — mint a fresh, process-unique cursor id.

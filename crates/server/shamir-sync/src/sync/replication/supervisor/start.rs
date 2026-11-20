@@ -374,33 +374,27 @@ impl SubscriptionSupervisor {
                 // `reopen_required` quarantine states, which alter
                 // exported-scope eligibility (`read_quarantine_reason`), so
                 // they must hold the server-wide maintenance gate's counted
-                // writer. Wait for the gate biased against the loop's own
-                // cancel token: a frozen gate must never stall a reconcile
-                // join (cancel releases the wait). If cancellation wins, do
-                // NOT early-return past cleanup — only the terminal writes
-                // are skipped; the teardown below always runs, and the next
-                // reconcile tick (unfrozen) re-evaluates the row.
-                let gate_guard = match &exit_gate {
-                    Some(gate) => {
-                        let tok_gate = tok.clone();
+                // writer when configured. Only errors need admission. Bias
+                // the wait toward cancellation so reconcile can still join.
+                let admission = match (loop_result.is_err(), &exit_gate) {
+                    (true, Some(gate)) => {
                         tokio::select! {
                             biased;
-                            _ = tok_gate.cancelled() => {
+                            _ = tok_exit.cancelled() => {
                                 debug!(
                                     subscription = %sub_name,
-                                    "follower loop cancelled while gate frozen; terminal persistence skipped"
+                                    "terminal persistence skipped: cancelled before maintenance admission"
                                 );
-                                None
+                                Err(())
                             }
-                            guard = gate.wait_for_mutation() => Some(guard),
+                            guard = gate.wait_for_mutation() => Ok(Some(guard)),
                         }
                     }
-                    None => None,
+                    (true, None) | (false, _) => Ok(None),
                 };
-                match gate_guard {
-                    Some(_maintenance) => {
                 match loop_result {
                     Ok(()) => {}
+                    Err(_) if admission.is_err() => {}
                     Err(e @ ReplError::JournalGap { gap_at, .. })
                     | Err(
                         e @ ReplError::ApplyRejected {
@@ -607,23 +601,9 @@ impl SubscriptionSupervisor {
                         warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
                 }
-                    }
-                    None => {
-                        // Frozen-gate skip or cancellation: the terminal
-                        // quarantine write was NOT persisted here; the next
-                        // unfrozen reconcile tick re-reads the row and
-                        // converges. Nothing was lost — only the marking is
-                        // deferred, never the teardown below.
-                        if loop_result.is_err() {
-                            debug!(
-                                subscription = %sub_name,
-                                "gate frozen or loop cancelled; terminal persistence deferred to reconcile"
-                            );
-                        }
-                    }
-                }
+                drop(admission);
                 // ---- exit housekeeping: shared by every loop return path.
-                // The apply guard is dropped before this point; decrement the
+                // The maintenance guard is dropped before this point; decrement the
                 // shared count, and let only the last loop invalidate/remove.
                 done.store(true, Ordering::Release);
                 if live.fetch_sub(1, Ordering::AcqRel) == 1 {

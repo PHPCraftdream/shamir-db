@@ -18,6 +18,8 @@
 //!   it gets the typed `ClientError::Db` with the stable
 //!   `online_export_not_found` code, asserted WITHOUT any raw peer-response
 //!   debug output (this fixture carries a secret sentinel).
+//! * unreadable scope: the export is denied, no job or output is visible,
+//!   and a follow-up write still commits.
 //! * restart: the same data directory and export root reopen; one stale
 //!   temp directory matching the job's own stage pattern is removed at
 //!   boot while a nonmatching operator sentinel file is left untouched.
@@ -33,15 +35,17 @@
 //! Everything runs directly on the `#[tokio::test]` runtime — never a
 //! nested `Runtime::block_on`, never a dropped `Runtime`.
 
-use std::fs;
+use std::fs::{self, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use shamir_client::{Client, ClientError, ConnectOptions};
 use shamir_db::{ShamirDb, ShutdownReport, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::migration::start_export;
+use shamir_query_builder::ddl::{self, RepoEngine};
 use shamir_query_types::admin::ExportPhase;
+use shamir_query_types::batch::BatchResponse;
+use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex, derive_session_hmac_key};
 use shamir_server::config::{
     Config, LoggingConfig, ObservabilityConfig, ProfileKind, SecurityConfig, TlsConfig,
 };
@@ -78,6 +82,10 @@ const ROW_MARKERS: &[&str] = &[
 /// Stable wire code the server answers an UNOWNED `ExportStatus` with (the
 /// session-scoped registry has no job behind the other session).
 const NOT_FOUND_CODE: &str = "online_export_not_found";
+const ROOT_LOCK: &str = ".shamir-export-root.lock";
+
+/// End-to-end hang detector, including launch, offline import and teardown.
+const FIXTURE_BUDGET: Duration = Duration::from_secs(600);
 
 /// Outer bound for the whole start → Done phase (brief: at least 120 s —
 /// the Windows CI runner is up to 10x slower).
@@ -167,15 +175,17 @@ async fn launch(temp: &TempDir, export_root: PathBuf) -> ServerHandle {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::time::timeout(
         LAUNCH_BUDGET,
-        ServerLauncher {
-            config: make_config(temp, export_root),
-            bootstrap: BootstrapMode::Password {
-                username: ADMIN_USER.into(),
-                password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
-            },
-            node_mode: Default::default(),
-        }
-        .launch(),
+        Box::pin(
+            ServerLauncher {
+                config: make_config(temp, export_root),
+                bootstrap: BootstrapMode::Password {
+                    username: ADMIN_USER.into(),
+                    password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
+                },
+                node_mode: Default::default(),
+            }
+            .launch(),
+        ),
     )
     .await
     .expect("server launch outer bound")
@@ -217,54 +227,66 @@ async fn connect_admin(addr: std::net::SocketAddr) -> Client {
     .expect("typed client connect")
 }
 
+async fn close_client(client: Client) {
+    tokio::time::timeout(REQUEST_BUDGET, client.close())
+        .await
+        .expect("typed client close outer bound");
+}
+
+async fn execute(client: &Client, db: &str, batch: Batch, aliases: &[&str]) -> BatchResponse {
+    let response = tokio::time::timeout(REQUEST_BUDGET, client.execute(db, batch.build()))
+        .await
+        .expect("fixture batch outer bound")
+        .unwrap_or_else(|_| panic!("fixture batch failed: {aliases:?}"));
+    assert_eq!(
+        response.results.len(),
+        aliases.len(),
+        "unexpected result set"
+    );
+    for &alias in aliases {
+        let result = response.results.get(alias).expect("expected result alias");
+        assert!(!result.skipped, "{alias} must execute");
+    }
+    response
+}
+
 /// Create `app`/`main`/`rows` AS the connected SCRAM superuser (never a
 /// default System-owned database: the superuser issues the DDL itself over
 /// the wire) and insert the marker rows of [`ROW_MARKERS`].
 async fn create_app_schema(client: &Client) {
     let mut mk_db = Batch::new();
     mk_db.id("mk-db");
-    mk_db.create_db("mk", shamir_query_builder::ddl::create_db(APP_DB));
-    let response = tokio::time::timeout(REQUEST_BUDGET, client.execute("default", mk_db.build()))
-        .await
-        .expect("create_db outer bound")
-        .expect("create_db");
-    assert!(response.results.contains_key("mk"), "create_db ok");
+    // CreateDb is not HMAC-gated. The existing `default` is only the envelope.
+    mk_db.create_db("mk", ddl::create_db(APP_DB));
+    execute(client, "default", mk_db, &["mk"]).await;
 
-    let mut mk_store = Batch::new();
-    mk_store.id("mk-store");
-    mk_store.create_repo("mr", shamir_query_builder::ddl::create_repo(APP_REPO));
-    mk_store.create_table("tb", shamir_query_builder::ddl::create_table(APP_TABLE));
-    let response = tokio::time::timeout(REQUEST_BUDGET, client.execute(APP_DB, mk_store.build()))
-        .await
-        .expect("create repo+table outer bound")
-        .expect("create repo+table");
-    assert!(response.results.contains_key("mr"), "create_repo ok");
-    assert!(response.results.contains_key("tb"), "create_table ok");
+    let mut mk_repo = Batch::new();
+    mk_repo.id("mk-repo");
+    mk_repo.create_repo("mr", ddl::create_repo(APP_REPO).engine(RepoEngine::Fjall));
+    execute(client, APP_DB, mk_repo, &["mr"]).await;
+
+    // Independent DDL aliases can run concurrently in a single batch.
+    let mut mk_table = Batch::new();
+    mk_table.id("mk-table");
+    mk_table.create_table("tb", ddl::create_table(APP_TABLE).repo(APP_REPO));
+    execute(client, APP_DB, mk_table, &["tb"]).await;
 
     let mut row = Batch::new();
     for (i, marker) in ROW_MARKERS.iter().enumerate() {
         let id = format!("live-{i}");
-        row.try_upsert(
+        // INSERT lets the engine mint the storage RecordId; `id` below is
+        // only an application field, not a hand-written storage key.
+        row.insert(
             format!("ins-{i}"),
-            shamir_query_builder::write::upsert(APP_TABLE)
-                .key(shamir_types::mpack!({ "id": id }))
-                .value(shamir_query_builder::doc! {
-                    "id" => id,
-                    "marker" => *marker,
-                }),
-        )
-        .unwrap();
-    }
-    let response = tokio::time::timeout(REQUEST_BUDGET, client.execute(APP_DB, row.build()))
-        .await
-        .expect("insert rows outer bound")
-        .expect("insert rows");
-    for i in 0..ROW_MARKERS.len() {
-        assert!(
-            response.results.contains_key(&format!("ins-{i}")),
-            "insert {i} ok"
+            shamir_query_builder::write::insert(APP_TABLE).row(shamir_query_builder::doc! {
+                "id" => id,
+                "marker" => *marker,
+            }),
         );
     }
+    let aliases: Vec<_> = (0..ROW_MARKERS.len()).map(|i| format!("ins-{i}")).collect();
+    let aliases: Vec<_> = aliases.iter().map(String::as_str).collect();
+    execute(client, APP_DB, row, &aliases).await;
 }
 
 /// Full-scan the fixture table and return the sorted `marker` string values
@@ -350,6 +372,12 @@ fn collect_strings(value: &LogicalValue, out: &mut Vec<String>) {
 /// expected marker list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
+    tokio::time::timeout(FIXTURE_BUDGET, Box::pin(roundtrip()))
+        .await
+        .expect("roundtrip fixture outer bound");
+}
+
+async fn roundtrip() {
     let temp = TempDir::new().expect("tempdir");
     let export_root = temp.path().join("export");
     let handle = launch(&temp, export_root.clone()).await;
@@ -362,7 +390,7 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
     // placeholder (the operations are node-local on the server).
     let start = tokio::time::timeout(
         REQUEST_BUDGET,
-        client.start_export(APP_DB, start_export(APP_DB)),
+        client.start_export(APP_DB, ddl::start_export(APP_DB)),
     )
     .await
     .expect("start_export outer bound")
@@ -373,23 +401,28 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
     // poll is individually bounded; a Failed/Cancelled phase aborts with
     // only the TYPED failure reason (never a raw peer-response debug dump —
     // this fixture carries a secret sentinel).
-    let deadline = Instant::now() + EXPORT_BUDGET;
-    let status = loop {
-        let poll = tokio::time::timeout(REQUEST_BUDGET, client.export_status(APP_DB))
-            .await
-            .expect("status poll outer bound")
-            .expect("status on the starting session");
-        match poll.phase {
-            ExportPhase::Done => break poll,
-            ExportPhase::Failed => panic!("export job failed: {:?}", poll.failure),
-            ExportPhase::Cancelled => panic!("export job was unexpectedly cancelled"),
-            _ => {}
+    let status = tokio::time::timeout(EXPORT_BUDGET, async {
+        loop {
+            let poll = tokio::time::timeout(REQUEST_BUDGET, client.export_status(APP_DB))
+                .await
+                .expect("status poll outer bound")
+                .expect("status on the starting session");
+            match poll.phase {
+                ExportPhase::Done => break poll,
+                ExportPhase::Failed => panic!("export job failed: {:?}", poll.failure),
+                ExportPhase::Cancelled => panic!("export job was unexpectedly cancelled"),
+                _ => {}
+            }
+            tokio::time::sleep(POLL_PACE).await;
         }
-        assert!(Instant::now() < deadline, "export did not finish in time");
-        tokio::time::sleep(POLL_PACE).await;
-    };
+    })
+    .await
+    .expect("export did not finish in time");
     assert!(status.sections > 0, "progress reports sections");
     assert!(status.items > 0, "progress reports items");
+    assert!(status.bytes > 0, "progress reports bytes");
+    assert_eq!(status.export_id, start.export_id);
+    assert!(status.failure.is_none(), "Done has no failure reason");
 
     // The artifact name is OPAQUE: no path components, and it resolves to a
     // real file inside the export root.
@@ -425,9 +458,12 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
     assert!(
         names
             .iter()
-            .all(|n| !n.starts_with(".shamir-export-") || *n == ".shamir-export-root.lock"),
+            .all(|n| !n.starts_with(".shamir-export-") || *n == ROOT_LOCK),
         "no stage directory survives a Done export: {names:?}"
     );
+    let mut names = names;
+    names.sort();
+    assert_eq!(names, [ROOT_LOCK.to_string(), artifact_name]);
 
     // The existing offline verifier accepts the artifact.
     verify_dump_file(&artifact).expect("artifact verifies");
@@ -469,6 +505,7 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
             _ => {}
         }
     }
+    drop(reader);
     assert!(
         !typed_strings.iter().any(|s| s.as_bytes() == ADMIN_PASSWORD),
         "the typed dump content must not carry the SCRAM password"
@@ -486,10 +523,10 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
     assert!(!target.exists(), "the import target starts absent");
     let report = tokio::time::timeout(
         DATA_BUDGET,
-        shamir_server::logical_import::import(
+        Box::pin(shamir_server::logical_import::import(
             import_args(&artifact, &target),
             CancellationToken::new(),
-        ),
+        )),
     )
     .await
     .expect("import outer bound")
@@ -498,8 +535,8 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
 
     // Bounded graceful shutdown, report checked CLEAN, before any directory
     // is reopened.
-    drop(client);
-    drop(second);
+    close_client(client).await;
+    close_client(second).await;
     shutdown_clean(handle).await;
 
     // Reopen through the PROVEN system-store catalogue path (same as the
@@ -522,6 +559,127 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
         expected_markers_sorted(),
         "the imported target reads back exactly the fixture markers"
     );
+    drop(imported);
+    wait_for_store_release(&target.join("shamir_db_meta.redb")).await;
+    wait_for_store_release(&target.join(format!("shamir_db_{APP_DB}_{APP_REPO}.redb"))).await;
+    temp.close()
+        .expect("roundtrip fixture directories released");
+}
+
+/// The offline reader has no server shutdown barrier. Probe Fjall's lock
+/// after dropping the reader; back off only on lock contention (Windows can
+/// still have detached store tasks), never on a different I/O failure.
+async fn wait_for_store_release(store: &Path) {
+    tokio::time::timeout(DATA_BUDGET, async {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.join("lock"))
+            .expect("open Fjall lock for release probe");
+        let mut delay = Duration::from_millis(1);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(POLL_PACE);
+                }
+                Err(error) => panic!("Fjall lock probe failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("offline store release outer bound");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_export_denies_unreadable_scope_without_job_or_output() {
+    tokio::time::timeout(FIXTURE_BUDGET, Box::pin(unreadable_scope()))
+        .await
+        .expect("unreadable-scope fixture outer bound");
+}
+
+async fn unreadable_scope() {
+    let temp = TempDir::new().expect("tempdir");
+    let export_root = temp.path().join("export");
+    let handle = launch(&temp, export_root.clone()).await;
+    let client = connect_admin(handle.first_tls_exporter_addr().expect("bound addr")).await;
+    create_app_schema(&client).await;
+    assert_eq!(entry_names(&export_root), [ROOT_LOCK.to_string()]);
+
+    // Leave the database and repository alone. Remove read from every class
+    // on the only included table, retaining owner write and execute. The
+    // export scope checks DAC as the principal, unlike normal admin DML.
+    let mode = 0o300;
+    let resource = ddl::res::table(APP_DB, APP_REPO, APP_TABLE);
+    // The builder requires a tag; the canonical encoder excludes that field.
+    let template = ddl::chmod(resource.clone(), mode).hmac("").build().unwrap();
+    let canonical = canonical_batch_op(APP_DB, &template).expect("canonical table chmod");
+    let key = derive_session_hmac_key(&client.session_id());
+    let signed = ddl::chmod(resource, mode)
+        .hmac(compute_tag_hex(&key, &canonical))
+        .build()
+        .expect("signed table chmod");
+    let mut chmod = Batch::new();
+    chmod.chmod("chmod", signed);
+    let response = execute(&client, APP_DB, chmod, &["chmod"]).await;
+    assert_eq!(response.results["chmod"].records.len(), 1);
+    assert_eq!(
+        response.results["chmod"].records[0].get_value_i64("mode"),
+        Some(i64::from(mode)),
+        "chmod applied the write-only mode"
+    );
+
+    let start = tokio::time::timeout(
+        REQUEST_BUDGET,
+        client.start_export(
+            APP_DB,
+            ddl::start_export(APP_DB).repo(APP_REPO).table(APP_TABLE),
+        ),
+    )
+    .await
+    .expect("denied start outer bound");
+    assert!(
+        matches!(start, Err(ClientError::Db { code, .. }) if code == "export_scope_denied"),
+        "StartExport must deny an unreadable included table"
+    );
+    let status = tokio::time::timeout(REQUEST_BUDGET, client.export_status(APP_DB))
+        .await
+        .expect("same-session status outer bound");
+    assert!(
+        matches!(status, Err(ClientError::Db { code, .. }) if code == NOT_FOUND_CODE),
+        "the denied start must leave no job visible to its own session"
+    );
+    assert_eq!(entry_names(&export_root), [ROOT_LOCK.to_string()]);
+
+    // This fixture has no acquisition observer. A committed follow-up proves
+    // writes are admitted after denial, not that there was no transient freeze.
+    const FOLLOW_UP: &str = "after-denied-export";
+    let mut write = Batch::new();
+    write.insert(
+        "write",
+        shamir_query_builder::write::insert(APP_TABLE)
+            .row(shamir_query_builder::doc! { "id" => FOLLOW_UP, "marker" => FOLLOW_UP }),
+    );
+    execute(&client, APP_DB, write, &["write"]).await;
+    let mut read = Batch::new();
+    read.query("read", shamir_query_builder::Query::from(APP_TABLE));
+    let response = execute(&client, APP_DB, read, &["read"]).await;
+    let mut markers: Vec<_> = response.results["read"]
+        .records
+        .iter()
+        .map(|record| record.get_value_str("marker").expect("stored marker"))
+        .collect();
+    markers.sort_unstable();
+    let mut expected = ROW_MARKERS.to_vec();
+    expected.push(FOLLOW_UP);
+    expected.sort_unstable();
+    assert_eq!(markers, expected);
+
+    close_client(client).await;
+    shutdown_clean(handle).await;
+    assert_eq!(entry_names(&export_root), [ROOT_LOCK.to_string()]);
+    temp.close().expect("denial fixture directories released");
 }
 
 /// (2) Restart with the same data directory and the same export root: one
@@ -531,6 +689,12 @@ async fn online_export_roundtrip_verifies_imports_and_leaks_no_secrets() {
 /// written before the restart still reads back as the exact marker list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn online_export_restart_cleans_stale_stage_and_spares_sentinel() {
+    tokio::time::timeout(FIXTURE_BUDGET, Box::pin(restart()))
+        .await
+        .expect("restart fixture outer bound");
+}
+
+async fn restart() {
     let temp = TempDir::new().expect("tempdir");
     let export_root = temp.path().join("export");
     let handle = launch(&temp, export_root.clone()).await;
@@ -538,10 +702,9 @@ async fn online_export_restart_cleans_stale_stage_and_spares_sentinel() {
 
     let client = connect_admin(addr).await;
     create_app_schema(&client).await;
-    drop(client);
-    // `shutdown` returns only once the stores released their locks, so an
-    // immediate relaunch on the SAME directories must succeed; the report
-    // is checked clean.
+    close_client(client).await;
+    // Shutdown drains accepted sessions and includes a Fjall lock-release
+    // barrier. Relaunch on the same directories checks that it succeeded.
     shutdown_clean(handle).await;
 
     // A crashed job's leftovers: a stale temp DIRECTORY matching the exact
@@ -563,7 +726,7 @@ async fn online_export_restart_cleans_stale_stage_and_spares_sentinel() {
         "the nonmatching sentinel file must be untouched; root now: {names:?}"
     );
     assert!(
-        names.iter().any(|n| n == ".shamir-export-root.lock"),
+        names.iter().any(|n| n == ROOT_LOCK),
         "the export root lock file is present"
     );
 
@@ -587,6 +750,7 @@ async fn online_export_restart_cleans_stale_stage_and_spares_sentinel() {
         expected_markers_sorted(),
         "the same data survives the restart"
     );
-    drop(client);
+    close_client(client).await;
     shutdown_clean(handle).await;
+    temp.close().expect("restart fixture directories released");
 }
