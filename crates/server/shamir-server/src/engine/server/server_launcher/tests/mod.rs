@@ -2,3 +2,4 @@
 
 mod activity_gauge_binding_tests;
 mod default_database_tests;
+mod load_metrics_binding_tests;

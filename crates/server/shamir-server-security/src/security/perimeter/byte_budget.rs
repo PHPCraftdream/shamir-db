@@ -57,16 +57,36 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
+#[cfg(test)]
+#[path = "tests/byte_budget_tests.rs"]
+mod tests;
+
 /// Shared state behind [`ByteBudget`]'s `Arc`. Split out so [`ByteBudget`]
 /// itself can be a cheap `Clone` (just bumps the `Arc` refcount).
 struct Inner {
     /// Bytes currently reserved by outstanding [`ByteBudgetGuard`]s.
     used: AtomicUsize,
+    waiters: AtomicUsize,
     /// Hard cap in bytes. `None` = unbounded (preserves pre-RI-15
     /// behavior: `acquire` always succeeds immediately).
     cap: Option<usize>,
     /// Wakes every waiter parked in `acquire` when bytes are released.
     notify: Notify,
+}
+
+struct WaiterGuard<'a>(&'a AtomicUsize);
+
+impl<'a> WaiterGuard<'a> {
+    fn new(waiters: &'a AtomicUsize) -> Self {
+        waiters.fetch_add(1, Ordering::Relaxed);
+        Self(waiters)
+    }
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Server-wide async byte accountant. Cheaply `Clone` (wraps an `Arc`).
@@ -87,6 +107,7 @@ impl ByteBudget {
         Self {
             inner: Arc::new(Inner {
                 used: AtomicUsize::new(0),
+                waiters: AtomicUsize::new(0),
                 cap,
                 notify: Notify::new(),
             }),
@@ -132,6 +153,8 @@ impl ByteBudget {
             return guard;
         }
 
+        // Count each contended acquire once, across retries and until return or drop.
+        let _waiter = WaiterGuard::new(&self.inner.waiters);
         loop {
             // Not enough room right now — register interest in the next
             // notification BEFORE re-checking the CAS one more time. This is
@@ -210,6 +233,11 @@ impl ByteBudget {
     /// Current reserved-byte count (0 if unbounded/no outstanding guards).
     pub fn used(&self) -> usize {
         self.inner.used.load(Ordering::Acquire)
+    }
+
+    /// Number of acquires on the contended path, for observability only.
+    pub(crate) fn waiters(&self) -> usize {
+        self.inner.waiters.load(Ordering::Relaxed)
     }
 
     /// Configured cap, or `None` if unbounded.
