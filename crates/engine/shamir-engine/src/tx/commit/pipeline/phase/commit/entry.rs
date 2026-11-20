@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use shamir_query_types::batch::TransactionInfo;
 use shamir_storage::error::DbError;
-use shamir_tx::TxContext;
+use shamir_tx::{CancelHandle, CancelState, TxContext};
 use shamir_wal::WalOpV2;
 
 use super::legacy_and_lockfree::{
@@ -312,6 +314,8 @@ pub(in crate::tx) async fn maybe_crash(_phase: &str, _repo: &RepoCore) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
+    #[error("request cancelled before commit")]
+    Cancelled,
     #[error("WAL outcome indeterminate; repository must be reopened")]
     WalRequiresReopen,
     /// Ticket came back Unknown/Indeterminate AFTER the frame was queued; the
@@ -416,6 +420,8 @@ impl TxError {
             }
             Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
             Self::CommitAdmissionRefused => "commit_admission_refused".to_string(),
+            // Batch callers return cancellation on the error path instead.
+            Self::Cancelled => "cancelled".to_string(),
             Self::Storage(e) => e
                 .code()
                 .map(str::to_owned)
@@ -445,7 +451,9 @@ impl From<TxError> for DbError {
             error @ TxError::CasConflict { .. } => DbError::VersionConflict(error.to_string()),
             // DbError has no expiry category; retain the diagnostic without
             // misclassifying expiry as a retryable transaction conflict.
-            error @ TxError::Expired { .. } => DbError::Internal(error.to_string()),
+            error @ (TxError::Expired { .. } | TxError::Cancelled) => {
+                DbError::Internal(error.to_string())
+            }
         }
     }
 }
@@ -611,6 +619,7 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoCore) -> Result<TxOutcome, TxEr
 pub(in crate::tx) async fn commit_tx_inner(
     mut tx: TxContext,
     repo: &RepoCore,
+    cancel: Option<Arc<CancelHandle>>,
 ) -> Result<TxOutcome, TxError> {
     // Level-3 wound-wait: a tx wounded by an older (higher-priority) tx must
     // abort even if it finished all its statements. The check runs at commit
@@ -702,7 +711,7 @@ pub(in crate::tx) async fn commit_tx_inner(
     let PreLockResult {
         uwl_guards,
         drain_guards,
-    } = match pre_commit_prelock(&mut tx, repo).await {
+    } = match pre_commit_prelock(&mut tx, repo, cancel.as_deref()).await {
         Ok(r) => r,
         Err(e) => {
             release_pessimistic_locks(&tx, repo).await;
@@ -715,6 +724,22 @@ pub(in crate::tx) async fn commit_tx_inner(
     // the happy path; backpressure remains in the caller-only wrapper.
     crate::tx::CommitDriver::new(tx, repo, move |tx, repo| async move {
         let _tail = repo.commit_tail().enter();
+        // Implicit commits run serially within a request; later writes inherit
+        // the first commit's decision. Never reset the state from a driver tail.
+        // Both interactive commit routes arrive without an explicit handle.
+        // Use the request handle already owned by the context, if any. The
+        // driver owns the context even when the caller stops waiting.
+        match cancel.as_deref().or_else(|| tx.cancel_handle()) {
+            Some(cancel) if cancel.state() != CancelState::Committing && !cancel.try_commit() => {
+                release_pessimistic_locks(&tx, &repo).await;
+                return Err(if cancel.is_cancelled() {
+                    TxError::Cancelled
+                } else {
+                    DbError::Internal("commit requires an active request".into()).into()
+                });
+            }
+            _ => {}
+        }
         // AsyncIndex txs bypass group-commit: their post-commit tail is spawned
         // as a background task, which is incompatible with the leader processing
         // another tx's materialization. They always wait for the lock.

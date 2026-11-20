@@ -835,6 +835,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
             message: format!("begin_tx: {}", e),
             code: None,
         })?;
+    tx.set_cancel_handle(scope.cancel_handle().cloned());
     // Thread the actor into the tx for commit-time provenance (R2).
     tx.set_actor(actor.clone());
     // Opt into async-index commit visibility when the wire client requests
@@ -904,6 +905,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                     | BatchError::TooManyIterations { .. }
                     | BatchError::LimitExceeded { .. }
                     | BatchError::AsOfVisibilityTimeout { .. }
+                    | BatchError::Cancelled
             ) {
                 return Err(plan_err);
             }
@@ -913,10 +915,14 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
             Ok((new_map(), Some(info)))
         }
         Ok(results) => {
-            // Commit.
             let commit_started = Instant::now();
-            let commit_result =
-                crate::tx::commit::commit_tx_with_options(tx, &repo, visibility_wait).await;
+            let commit_result = crate::tx::ack::commit_tx_with_cancel(
+                tx,
+                &repo,
+                visibility_wait,
+                scope.cancel_handle().cloned(),
+            )
+            .await;
             QueryRunner::observe_commit(
                 resolver,
                 &repo_name,
@@ -948,6 +954,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                         Some(info),
                     ))
                 }
+                Err(crate::tx::CommitError::Cancelled) => Err(BatchError::Cancelled),
                 Err(commit_err) => {
                     let info = commit_err.into_transaction_info(tx_id, snapshot_version);
                     if info.is_committed() {

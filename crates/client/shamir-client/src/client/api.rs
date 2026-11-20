@@ -13,6 +13,7 @@ use shamir_connect::common::wire::RotationInProgressPayload;
 
 use shamir_transport_tcp::framing::write_frame_prereserved;
 
+use shamir_query_types::admin::activity::{CancelOutcome, RequestExecId};
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
@@ -922,6 +923,36 @@ impl Client {
             DbResponse::ActivityPage { page } => Ok(page),
             other => Err(ClientError::Protocol(format!(
                 "expected ActivityPage, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Attempt to cancel a batch by its server-minted execution id.
+    ///
+    /// Use a separate SCRAM connection from the one running the target batch.
+    /// The outcome describes the cancellation attempt, not the target's reply.
+    pub async fn cancel_request(
+        &self,
+        db: &str,
+        id: RequestExecId,
+    ) -> Result<CancelOutcome, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op("cancel_request", shamir_query_builder::cancel_request(id));
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::CancelOutcome { outcome } => Ok(outcome),
+            other => Err(ClientError::Protocol(format!(
+                "expected CancelOutcome, got {other:?}"
             ))),
         }
     }

@@ -1,5 +1,7 @@
 //! Runtime handle for a launched server instance.
 
+#[cfg(test)]
+use std::future::{poll_fn, Future};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,9 +10,10 @@ use std::time::Duration;
 use shamir_db::{ShamirDb, ShutdownReport};
 use shamir_tunables::runtime::RuntimeTunables;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
 use crate::server::store_release_barrier::wait_stores_released;
@@ -69,6 +72,7 @@ pub(in crate::engine::server) struct ActivityGaugeTestSeam {
     /// The server-wide session store the handler was given via
     /// `with_session_store`.
     pub session_store: Arc<shamir_connect::server::session::SessionStore>,
+    pub audit_chain: Arc<shamir_connect::server::audit_chain::AuditChain>,
     /// The address the observability HTTP server ACTUALLY bound (config
     /// may say port 0; this is `ObservabilityHandle::bound_addr`).
     pub observability_bound_addr: std::net::SocketAddr,
@@ -97,6 +101,9 @@ pub struct ServerHandle {
     pub(super) scheduler: Scheduler,
     /// Audit-log appender (drained on shutdown).
     pub(super) audit_appender: Arc<FjallAuditAppender>,
+    pub(super) cancel_refusal_audit: Arc<CancelRefusalAudit>,
+    #[cfg(test)]
+    pub(super) refusal_drain_pending: Option<tokio::sync::oneshot::Sender<()>>,
     /// Cancellation token signalling shutdown to every accept loop.
     ///
     /// Why CancellationToken, not `Notify::notify_waiters`: Notify is
@@ -109,6 +116,8 @@ pub struct ServerHandle {
     /// future `.cancelled().await` resolves immediately if cancel was
     /// already set, so the race is closed by construction.
     pub(super) shutdown_token: CancellationToken,
+    /// Dropping the handle also signals this task; only graceful shutdown joins it.
+    pub(super) backup_schedule_task: Option<(DropGuard, JoinHandle<()>)>,
     /// Optional observability HTTP server.
     pub(super) observability: Option<crate::observability::ObservabilityHandle>,
     /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
@@ -199,6 +208,18 @@ pub(crate) async fn drain_connections(
     joined
 }
 
+async fn join_backup_schedule(
+    schedule_task: Option<(DropGuard, JoinHandle<()>)>,
+    report: &mut ShutdownReport,
+) {
+    let Some((_guard, task)) = schedule_task else {
+        return;
+    };
+    if let Err(error) = task.await {
+        report.add_error(format!("backup schedule task failed: {error}"));
+    }
+}
+
 impl ServerHandle {
     /// What the boot-time format-stamp check did to `data_dir`.
     pub fn format_stamp(&self) -> shamir_sync::format_stamp::StampOutcome {
@@ -226,6 +247,7 @@ impl ServerHandle {
         //    persistent: every existing `.cancelled().await` resolves on the
         //    next poll, and any new caller sees the cancelled state
         //    immediately. No subscribe-window race.
+        self.cancel_refusal_audit.close();
         self.shutdown_token.cancel();
         // 2. Wait for accept loops to finish, then wait for tracked accepted
         // tasks to quiesce before any repository flush.
@@ -273,8 +295,28 @@ impl ServerHandle {
             let _ = task.handle.await;
         }
         // 3. Drain the audit chain + scheduler.
+        let drain = self.cancel_refusal_audit.drain();
+        #[cfg(test)]
+        {
+            let mut pending = self.refusal_drain_pending;
+            let mut drain = std::pin::pin!(drain);
+            poll_fn(move |cx| {
+                let result = drain.as_mut().poll(cx);
+                if result.is_pending() {
+                    if let Some(signal) = pending.take() {
+                        let _ = signal.send(());
+                    }
+                }
+                result
+            })
+            .await;
+        }
+        #[cfg(not(test))]
+        drain.await;
         self.audit_appender.shutdown().await;
         self.scheduler.shutdown().await;
+        // Do not abort: an in-flight copy or retention operation must finish cleanup.
+        join_backup_schedule(self.backup_schedule_task, report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new

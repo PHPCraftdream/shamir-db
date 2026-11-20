@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::options::deserialize_optional_field;
 
-use crate::admin::ActivityPage;
+use crate::admin::{ActivityPage, CancelOutcome};
 
 use crate::batch::{
     BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
@@ -439,7 +439,7 @@ pub enum DbResponse {
         ///   `session_invalidated`, `invalid_username`, `not_found`, `internal`.
         /// - Batch / planner: `limits`, `validation`, `query`, `timeout`,
         ///   `lock_timeout`, `nesting_too_deep`, `unknown_db`, `not_supported`,
-        ///   `user_exists`.
+        ///   `user_exists`, `cancelled`.
         /// - Interactive transactions: `tx_conflict`, `tx_not_found`,
         ///   `tx_already_open`, `tx_in_tx`, `tx_forbidden`, `tx_write`,
         ///   `tx_wrong_db`, `tx_wrong_repo`, `tx_cross_repo_not_supported`,
@@ -545,4 +545,15 @@ pub enum DbResponse {
         /// The operation's full status, or `None` if unknown.
         status: Option<crate::read::DdlOpStatus>,
     },
+    /// Reply to [`crate::batch::BatchOp::CancelRequest`].
+    CancelOutcome {
+        /// The cancellation attempt's result, not the target batch's reply.
+        outcome: CancelOutcome,
+    },
+}
+
+/// Stable codes used by [`DbResponse::Error`].
+pub mod error_code {
+    /// The target batch stopped cooperatively after a cancellation request.
+    pub const CANCELLED: &str = "cancelled";
 }

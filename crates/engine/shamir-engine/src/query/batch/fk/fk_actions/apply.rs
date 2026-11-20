@@ -22,14 +22,16 @@ pub(crate) async fn apply_cascade_plan(
     for mutation in plan.mutations {
         match mutation {
             PendingMutation::Delete { table, id } => {
-                table
-                    .delete_tx(id, Some(tx))
-                    .await
-                    .map_err(|e| BatchError::QueryError {
+                table.delete_tx(id, Some(tx)).await.map_err(|e| {
+                    if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                        return BatchError::Cancelled;
+                    }
+                    BatchError::QueryError {
                         alias: alias.to_string(),
                         message: format!("fk_actions: cascade delete_tx failed: {e}"),
                         code: Some("fk_actions".to_string()),
-                    })?;
+                    }
+                })?;
             }
             PendingMutation::SetNull { table, id, field } => {
                 set_child_field_null(&table, id, &field, tx, alias).await?;
@@ -54,10 +56,15 @@ async fn set_child_field_null(
     let old_bytes = table
         .read_one_tx_bytes(id, Some(&*tx))
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_actions: set_null read failed: {e}"),
-            code: Some("fk_actions".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_actions: set_null read failed: {e}"),
+                code: Some("fk_actions".to_string()),
+            }
         })?
         .ok_or_else(|| BatchError::QueryError {
             alias: alias.to_string(),
@@ -94,10 +101,15 @@ async fn set_child_field_null(
     table
         .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_actions: set_null update_tx_bytes failed: {e}"),
-            code: Some("fk_actions".to_string()),
+        .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return BatchError::Cancelled;
+            }
+            BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_actions: set_null update_tx_bytes failed: {e}"),
+                code: Some("fk_actions".to_string()),
+            }
         })?;
 
     Ok(())

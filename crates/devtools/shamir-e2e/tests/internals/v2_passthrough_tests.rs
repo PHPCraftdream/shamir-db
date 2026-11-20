@@ -69,6 +69,7 @@ fn make_config(temp: &TempDir) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

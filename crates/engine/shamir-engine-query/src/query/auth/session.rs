@@ -598,6 +598,8 @@ impl SessionPermissions {
             // `authorize_access`, exactly like the `ApplicationSchema`
             // arm above.
             BatchOp::ListActivity(_) => (Action::Read, Resource::Global),
+            // Cancellation mutates request state; live authorization is server-side.
+            BatchOp::CancelRequest(_) => (Action::Alter, Resource::Global),
         }
     }
 

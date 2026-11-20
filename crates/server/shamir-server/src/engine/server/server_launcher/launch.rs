@@ -23,14 +23,16 @@ use shamir_tunables::runtime::RuntimeTunables;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
-use crate::boot::config::diagnostics::backup_online::OnlineBackupRegistry;
+use crate::boot::config::diagnostics::backup_online::{schedule, OnlineBackupRegistry};
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
 use crate::byte_budget::ByteBudget;
-use crate::config::Config;
+use crate::config::{Config, ResolvedSchedule};
 use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
@@ -47,7 +49,8 @@ use crate::tables_registry::TablesRegistry;
 use crate::user_directory::FjallUserDirectory;
 
 use super::helpers::{
-    boot_now_ns, default_node_id, kdf_from_config, log_bootstrap_outcome, REPL_RECONCILE_INTERVAL,
+    bind_backup_owner, boot_now_ns, default_node_id, kdf_from_config, log_bootstrap_outcome,
+    resolve_backup, REPL_RECONCILE_INTERVAL,
 };
 use super::http::BootGuard;
 use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
@@ -84,6 +87,31 @@ impl ServerLauncher {
     /// "spawn the accept loops". Returns when all listeners are bound but
     /// before any connection arrives.
     pub async fn launch(self) -> Result<ServerHandle, BootError> {
+        self.launch_inner(schedule::runner::spawn).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn launch_with_backup_test(
+        self,
+        spawn_backup: impl FnOnce(
+            ResolvedSchedule,
+            Arc<OnlineBackupRegistry>,
+            String,
+            CancellationToken,
+        ) -> JoinHandle<()>,
+    ) -> Result<ServerHandle, BootError> {
+        self.launch_inner(spawn_backup).await
+    }
+
+    async fn launch_inner(
+        self,
+        spawn_backup: impl FnOnce(
+            ResolvedSchedule,
+            Arc<OnlineBackupRegistry>,
+            String,
+            CancellationToken,
+        ) -> JoinHandle<()>,
+    ) -> Result<ServerHandle, BootError> {
         let ServerLauncher {
             config,
             bootstrap,
@@ -104,12 +132,13 @@ impl ServerLauncher {
         // executing its tick-branch body, not parked in `select!`, is
         // silently dropped — the cold-start hang we chased through the accept
         // loops). One concept, race-free by construction.
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let shutdown_token = CancellationToken::new();
         let mut boot_guard = BootGuard::new(shutdown_token.clone());
         let conn_tasks = ConnTasks::new(shutdown_token.clone());
 
         // 1. Durable stores.
         std::fs::create_dir_all(&config.data_dir)?;
+        let backup = resolve_backup(&config)?;
 
         // Single-instance guard: acquire an advisory OS file lock on
         // `<data_dir>/.shamir.lock` BEFORE opening any redb store. The
@@ -148,6 +177,8 @@ impl ServerLauncher {
             ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
                 .map_err(|e| BootError::ServerMeta(e.to_string()))?,
         );
+
+        let backup = bind_backup_owner(backup, &meta)?;
 
         let user_dir = Arc::new(
             FjallUserDirectory::open(config.data_dir.join("users"))
@@ -442,7 +473,7 @@ impl ServerLauncher {
             tokio::runtime::Handle::current(),
             shutdown_token.clone(),
         ));
-        shamir.set_online_backup_admin_port(online_backup_registry);
+        shamir.set_online_backup_admin_port(online_backup_registry.clone());
 
         // F-15: opt into the experimental online storage-migration API when
         // the operator explicitly set `security.enable_experimental_migration_api`
@@ -590,6 +621,7 @@ impl ServerLauncher {
             .with_node_mode(node_mode)
             .with_token_service(token_service.clone(), config.tokens.allow_self_service),
         );
+        let cancel_refusal_audit = handler_concrete.cancel_refusal_audit();
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete.clone();
@@ -726,7 +758,9 @@ impl ServerLauncher {
         {
             Ok(listeners) => listeners,
             Err(error) => {
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
+                cancel_refusal_audit.drain().await;
                 audit_appender.shutdown().await;
                 scheduler.shutdown().await;
                 if let Some(snap) = meta_snapshot_task {
@@ -820,13 +854,13 @@ impl ServerLauncher {
                 }
                 Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
             };
-            handle.state.mark_ready();
             Ok(Some(handle))
         }
         .await;
         let observability = match observability_result {
             Ok(handle) => handle,
             Err(error) => {
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
                 let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 for mut task in listener_tasks {
@@ -864,6 +898,7 @@ impl ServerLauncher {
                     gate.shutdown().await;
                 }
                 token_service.shutdown_gc().await;
+                cancel_refusal_audit.drain().await;
                 audit_appender.shutdown().await;
                 scheduler.shutdown().await;
                 if let Some(snap) = meta_snapshot_task {
@@ -909,27 +944,18 @@ impl ServerLauncher {
             crate::server::server_handle::ReplSupervisorTask { handle }
         };
 
-        // R4b-1 (test-only): capture the production-boot artifacts the
-        // activity-gauge source closes over so `server_launcher/tests` can
-        // drive the real handler and scrape the real `/metrics`. Compiled
-        // out of production builds entirely. Computed BEFORE the literal so
-        // `observability` is only borrowed here and moved exactly once,
-        // into the `ServerHandle`; the bound address is the one the server
-        // ACTUALLY bound (`None` — not a fake port-0 sentinel — when no
-        // observability server was configured).
-        #[cfg(test)]
-        let activity_test_seam =
-            observability
-                .as_ref()
-                .map(|obs| crate::server::server_handle::ActivityGaugeTestSeam {
-                    handler: Arc::clone(&handler_concrete),
-                    byte_budget: byte_budget.clone(),
-                    session_store: session_store.clone(),
-                    observability_bound_addr: obs.bound_addr,
-                });
+        if let Some(obs) = &observability {
+            obs.state.mark_ready();
+        }
+        let backup_schedule_task = backup.map(|(resolved, owner)| {
+            let shutdown = shutdown_token.clone();
+            let handle = spawn_backup(resolved, online_backup_registry, owner, shutdown.clone());
+            (shutdown.drop_guard(), handle)
+        });
 
         boot_guard.disarm();
         Ok(ServerHandle {
+            backup_schedule_task,
             token_service,
             bound_addrs,
             bound_ipc_paths,
@@ -937,6 +963,9 @@ impl ServerLauncher {
             http_gates,
             scheduler,
             audit_appender,
+            cancel_refusal_audit,
+            #[cfg(test)]
+            refusal_drain_pending: None,
             shutdown_token,
 
             meta_snapshot_task,
@@ -950,8 +979,17 @@ impl ServerLauncher {
             format_stamp,
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
+            // Tests drive the real handler and scrape the actual bound metrics address.
             #[cfg(test)]
-            activity_test_seam,
+            activity_test_seam: observability.as_ref().map(|obs| {
+                crate::server::server_handle::ActivityGaugeTestSeam {
+                    handler: Arc::clone(&handler_concrete),
+                    byte_budget: byte_budget.clone(),
+                    session_store: session_store.clone(),
+                    audit_chain: audit_chain.clone(),
+                    observability_bound_addr: obs.bound_addr,
+                }
+            }),
             observability,
         })
     }

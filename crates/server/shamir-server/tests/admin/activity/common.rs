@@ -159,7 +159,7 @@ pub(crate) async fn seed_committed_rows(handler: &ShamirDbHandler, admin: &Sessi
 // Request builders (shamir-query-builder only)
 // --------------------------------------------------------------------------
 
-fn execute(batch: shamir_query_builder::BatchRequest) -> DbRequest {
+pub(super) fn execute(batch: shamir_query_builder::BatchRequest) -> DbRequest {
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: DB.into(),

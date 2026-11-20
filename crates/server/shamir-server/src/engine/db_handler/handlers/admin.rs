@@ -634,6 +634,8 @@ pub(crate) fn is_coarse_admin_gate_exempt(op: &BatchOp) -> bool {
             // exemption only stops the coarse superuser gate from blocking
             // it — it grants nothing by itself.
             | BatchOp::ListActivity(_)
+            // The cancellation worker checks ownership or ActivityView:Manage.
+            | BatchOp::CancelRequest(_)
     )
 }
 

@@ -151,6 +151,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

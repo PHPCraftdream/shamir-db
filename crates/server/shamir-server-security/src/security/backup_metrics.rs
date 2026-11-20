@@ -10,7 +10,7 @@
 //! `None` in the snapshot and its series is described (so dashboards see the
 //! family) but never emitted with a fabricated value. This step measures
 //! started/completed/failed counters, the active gauge, copied bytes, the
-//! last run duration and the per-stage failure split; the writer-block
+//! last successful run, scheduled outcomes, and retention. The writer-block
 //! windows (`phase=capture|seal`) are the LAST completed close→reopen
 //! window per phase as recorded by the engine (a last-window gauge, not an
 //! aggregate, unset until the first barrier completes); the pin duration
@@ -29,6 +29,14 @@ pub const BACKUP_STAGES: [&str; 7] = [
     "failed",
 ];
 
+const SCHEDULED_RESULTS: [&str; 5] = [
+    "started",
+    "skipped_busy",
+    "skipped_window",
+    "failed",
+    "completed",
+];
+
 /// Immutable backup values supplied by the owning subsystem at scrape.
 /// Cumulative counters must be monotone for the process lifetime (the
 /// recorder renders them with `absolute`, so overlapping scrapes never
@@ -44,8 +52,20 @@ pub struct BackupMetricsSnapshot {
     /// Total bytes copied by finished runs (the protocol's per-repo hashed
     /// byte counters, summed).
     pub bytes_copied_total: u64,
-    /// Duration of the last finished run; `None` until a run has finished.
+    /// Legacy millisecond-resolution duration of the last successful run.
     pub last_duration_seconds: Option<f64>,
+    pub last_success_timestamp_seconds: u64,
+    pub last_success_duration_seconds: f64,
+    pub last_bytes: u64,
+    /// Ordered as started, skipped_busy, skipped_window, failed, completed.
+    pub scheduled_runs_total: [u64; SCHEDULED_RESULTS.len()],
+    pub scheduled_failure_streak: u64,
+    pub schedule_enabled: bool,
+    /// Unix seconds when scheduling started, or zero before enablement.
+    pub schedule_started_timestamp_seconds: u64,
+    pub retention_deleted_total: u64,
+    pub retention_failed_total: u64,
+    pub retention_untouched: u64,
     /// Writer-visibility barrier durations per phase (`capture` / `seal`):
     /// the LAST completed close→reopen window per phase as recorded by the
     /// engine (last-window gauge; each completed barrier overwrites its
@@ -101,8 +121,8 @@ pub(crate) fn register_backup_metrics() {
     metrics::describe_gauge!(
         "shamir_backup_duration_seconds",
         metrics::Unit::Seconds,
-        "Duration of the last finished online backup run (unset until the \
-         first run finishes)"
+        "Duration of the last successful online backup run (unset until the \
+         first success)"
     );
     metrics::describe_gauge!(
         "shamir_backup_writer_block_seconds",
@@ -122,6 +142,57 @@ pub(crate) fn register_backup_metrics() {
         "WAL segments copied; not emitted while unmeasured"
     );
 
+    metrics::describe_gauge!(
+        "shamir_backup_last_success_timestamp_seconds",
+        metrics::Unit::Seconds,
+        "Unix time of the last successful online backup, or zero before success"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_last_duration_seconds",
+        metrics::Unit::Seconds,
+        "Duration of the last successful online backup"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_last_bytes",
+        metrics::Unit::Bytes,
+        "Manifest payload bytes of the last successful online backup"
+    );
+    metrics::describe_counter!(
+        "shamir_backup_scheduled_runs_total",
+        metrics::Unit::Count,
+        "Scheduled online backup events by result"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_scheduled_failure_streak",
+        metrics::Unit::Count,
+        "Consecutive scheduled backup failures, ignoring skips"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_schedule_enabled",
+        metrics::Unit::Count,
+        "1 when the online backup schedule is enabled, 0 otherwise"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_schedule_started_timestamp_seconds",
+        metrics::Unit::Seconds,
+        "Unix time when the online backup schedule started, or zero before enablement"
+    );
+    metrics::describe_counter!(
+        "shamir_backup_retention_deleted_total",
+        metrics::Unit::Count,
+        "Backup directories successfully deleted by retention"
+    );
+    metrics::describe_counter!(
+        "shamir_backup_retention_failed_total",
+        metrics::Unit::Count,
+        "Backup retention errors"
+    );
+    metrics::describe_gauge!(
+        "shamir_backup_retention_untouched",
+        metrics::Unit::Count,
+        "Foreign or unverifiable entries in the last complete retention classification"
+    );
+
     metrics::counter!("shamir_backup_started_total", "kind" => "online").increment(0);
     metrics::counter!("shamir_backup_completed_total", "kind" => "online").increment(0);
     for stage in BACKUP_STAGES {
@@ -133,6 +204,27 @@ pub(crate) fn register_backup_metrics() {
     }
     metrics::gauge!("shamir_backup_active").set(0.0);
     metrics::gauge!("shamir_backup_bytes_copied").set(0.0);
+    record_schedule_metrics(&BackupMetricsSnapshot::default());
+}
+
+fn record_schedule_metrics(snap: &BackupMetricsSnapshot) {
+    metrics::gauge!("shamir_backup_last_success_timestamp_seconds")
+        .set(snap.last_success_timestamp_seconds as f64);
+    metrics::gauge!("shamir_backup_last_duration_seconds").set(snap.last_success_duration_seconds);
+    metrics::gauge!("shamir_backup_last_bytes").set(snap.last_bytes as f64);
+    for (result, count) in SCHEDULED_RESULTS.into_iter().zip(snap.scheduled_runs_total) {
+        metrics::counter!("shamir_backup_scheduled_runs_total", "result" => result).absolute(count);
+    }
+    metrics::gauge!("shamir_backup_scheduled_failure_streak")
+        .set(snap.scheduled_failure_streak as f64);
+    metrics::gauge!("shamir_backup_schedule_enabled")
+        .set(f64::from(u8::from(snap.schedule_enabled)));
+    metrics::gauge!("shamir_backup_schedule_started_timestamp_seconds")
+        .set(snap.schedule_started_timestamp_seconds as f64);
+    metrics::counter!("shamir_backup_retention_deleted_total")
+        .absolute(snap.retention_deleted_total);
+    metrics::counter!("shamir_backup_retention_failed_total").absolute(snap.retention_failed_total);
+    metrics::gauge!("shamir_backup_retention_untouched").set(snap.retention_untouched as f64);
 }
 
 /// Per-scrape rendering: read the owner's snapshot and raise the recorder.
@@ -141,6 +233,7 @@ pub(crate) fn record_backup_metrics() {
         return;
     };
     let snap = source();
+    record_schedule_metrics(&snap);
 
     metrics::counter!("shamir_backup_started_total", "kind" => "online")
         .absolute(snap.started_total);

@@ -518,6 +518,11 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "activity listing",
                 ))
             }
+            BatchOp::CancelRequest(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "request cancellation",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

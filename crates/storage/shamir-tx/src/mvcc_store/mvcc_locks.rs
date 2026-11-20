@@ -1,12 +1,25 @@
+use std::future::pending;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
+use thiserror::Error;
+
+use crate::{CancelHandle, WaitState};
 
 use super::key_lock::{Holder, LockLease, LockMode};
 use super::MvccStore;
 use super::RecordCell;
+
+/// A failed record-lock acquisition.
+#[derive(Debug, Error)]
+pub enum LockError {
+    #[error("request cancelled while acquiring a record lock")]
+    Cancelled,
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
 
 impl MvccStore {
     /// Acquire a Level-3 pessimistic lock on `key` for tx `tx_version` in
@@ -50,21 +63,55 @@ impl MvccStore {
         wound_notify: Arc<tokio::sync::Notify>,
         mode: LockMode,
     ) -> DbResult<()> {
+        match self
+            .lock_key_with_cancel(key, tx_version, wounded, wound_notify, mode, None)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(LockError::Db(err)) => Err(err),
+            Err(LockError::Cancelled) => unreachable!("lock acquisition has no cancel handle"),
+        }
+    }
+
+    /// Acquire a record lock, waking a parked waiter on request cancellation.
+    /// On `Ok(())` the caller owns the lock and must record it for rollback,
+    /// even if cancellation raced the grant. An error grants no new lock.
+    ///
+    /// cancel-safe: yes — a dropped pending future has not granted a lock;
+    /// the registry lease and notification registrations are dropped with it.
+    pub async fn lock_key_with_cancel(
+        &self,
+        key: RecordKey,
+        tx_version: u64,
+        wounded: Arc<AtomicBool>,
+        wound_notify: Arc<tokio::sync::Notify>,
+        mode: LockMode,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<(), LockError> {
         // The lease is acquired under the registry entry lock before any await.
         let lease = LockLease::acquire(&self.locks, key, true)
             .expect("inserting a lock always returns a lease");
         let lock = &lease.lock;
 
         loop {
+            if cancel.is_some_and(CancelHandle::is_cancelled) {
+                return Err(LockError::Cancelled);
+            }
             // (4) Abort early if this tx was already wounded by an older tx.
             if wounded.load(Ordering::Acquire) {
                 return Err(DbError::Conflict(format!(
                     "tx {} wounded (wound-wait abort) before acquiring lock",
                     tx_version
-                )));
+                ))
+                .into());
             }
 
             let mut state = lock.state.lock().await;
+            // Last checkpoint before mutating lock ownership. After a grant,
+            // always report success so the caller can record the acquired key.
+            if cancel.is_some_and(CancelHandle::is_cancelled) {
+                return Err(LockError::Cancelled);
+            }
 
             // (2) Compatibility check.
             //
@@ -161,7 +208,8 @@ impl MvccStore {
                     return Err(DbError::Conflict(format!(
                         "tx {} wounded (wound-wait abort) while waiting",
                         tx_version
-                    )));
+                    ))
+                    .into());
                 }
                 // Register the key-notify waiter BEFORE dropping the state
                 // lock. `tokio::sync::Notify::notify_waiters` only wakes
@@ -175,9 +223,16 @@ impl MvccStore {
                 let mut notified = Box::pin(lock.notify.notified());
                 notified.as_mut().enable();
                 drop(state);
+                let _park = cancel.map(|handle| handle.park(WaitState::Lock));
                 tokio::select! {
                     _ = notified.as_mut() => {}
                     _ = wound_notify.notified() => {}
+                    _ = async {
+                        match cancel {
+                            Some(handle) => handle.wait_cancelled().await,
+                            None => pending().await,
+                        }
+                    } => return Err(LockError::Cancelled),
                 }
                 continue;
             }
