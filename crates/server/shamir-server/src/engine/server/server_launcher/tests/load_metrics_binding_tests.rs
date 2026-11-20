@@ -75,6 +75,7 @@ fn boot_config(data_dir: PathBuf) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     };
     config.security.auth_init_rate_per_second = 64;
     config.security.connection.auth_init_timeout_ms = 120_000;
