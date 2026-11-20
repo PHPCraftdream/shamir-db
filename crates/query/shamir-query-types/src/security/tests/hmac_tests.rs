@@ -1,4 +1,4 @@
-use crate::admin::activity::{ActivityKind, ActivityScope, ListActivityReq};
+use crate::admin::activity::{ActivityKind, ActivityScope, ListActivityReq, RequestExecId};
 use crate::admin::{CreateFunctionOp, DropDbOp, DropTableOp, GroupRef, ResourceRef};
 use crate::auth::SecretString;
 use crate::batch::BatchOp;
@@ -959,4 +959,14 @@ fn online_backup_ops_are_not_hmac_gated() {
             Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
         ));
     }
+}
+
+#[test]
+fn cancel_request_is_not_hmac_gated() {
+    let op = BatchOp::CancelRequest(RequestExecId(42));
+    assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+    assert!(matches!(
+        canonical_batch_op("", &op),
+        Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
+    ));
 }

@@ -9,6 +9,7 @@
 //! - [`list`] — the `ListActivity` paging implementation, as inherent
 //!   methods on `ShamirDbHandler`.
 
+mod cancel;
 mod continuation;
 mod requests;
 
@@ -16,21 +17,12 @@ mod requests;
 // method on `ShamirDbHandler`; no `pub` module re-export is needed.
 pub(in crate::engine::db_handler) mod list;
 
-// Production code reaches `ActivityRequests` (handler field type) only;
-// `RequestEntry` is constructed inside `requests.rs`
-// (`try_track_activity_request`'s constructor path) and otherwise only named
-// by private tests. The RAII guard's readable accessors serve production,
-// so the test-facing imports (`InFlightRequest` type import, the raw
-// state encodings and `RequestEntry`) are test-gated.
-pub(in crate::engine::db_handler) use requests::ActivityRequests;
-// Fixed-text `server_busy` rejection for saturated per-session request
-// slots (execute, TxBegin, TxExecute — R4b-1 follow-up).
+// The guard and entry are named directly only by registry tests.
 pub(in crate::engine::db_handler) use requests::server_busy_response;
+pub(in crate::engine::db_handler) use requests::ActivityRequests;
 
 #[cfg(test)]
-pub(in crate::engine::db_handler) use requests::{
-    InFlightRequest, RequestEntry, REQUEST_STATE_DONE, REQUEST_STATE_RUNNING,
-};
+pub(in crate::engine::db_handler) use requests::{InFlightRequest, RequestEntry};
 
 #[cfg(test)]
 mod tests;

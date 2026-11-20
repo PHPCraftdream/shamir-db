@@ -7,7 +7,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use shamir_query_builder::write::doc;
+#[cfg(feature = "fjall")]
+use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
+#[cfg(feature = "fjall")]
+use shamir_tx::{CancelHandle, WaitState};
 use shamir_tx::{CommitVisibility, IsolationLevel, SnapshotGuard, TxContext};
 use shamir_types::codecs::interned::codec::query_value_to_inner;
 use shamir_types::types::value::InnerValue;
@@ -177,6 +181,79 @@ async fn cancellation_during_prelock_is_a_clean_abort() {
     within(repo.quiesce_commits(BUDGET)).await.unwrap();
     assert!(tbl.get(rid).await.is_err());
     assert_eq!(tbl.counter().get().await.unwrap(), 1);
+}
+
+#[cfg(feature = "fjall")]
+#[tokio::test]
+async fn cooperative_cancel_before_commit_driver_leaves_wal_unchanged() {
+    for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let repo = RepoInstance::from_factory(
+                "cooperative_cancel_pre_driver".into(),
+                BoxRepoFactory::fjall_raw(dir.path().join("repo")),
+                vec![TableConfig::new("t")],
+            )
+            .await
+            .unwrap();
+            repo.repo_wal().await.unwrap();
+            let gate = repo.tx_gate().await.unwrap();
+            let wal = repo.wal_group().await.unwrap();
+            let tbl = repo.get_table("t").await.unwrap();
+            tbl.create_unique_index("by_email", &["email"])
+                .await
+                .unwrap();
+            let value = record(&tbl, "cancelled").await;
+            let (mut tx, _snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+            let rid = tbl.insert_tx(&value, Some(&mut tx)).await.unwrap();
+            tx.set_visibility(visibility);
+            let frames_before = wal.replay().await.unwrap();
+            let allocated_before = gate.version_allocation_high_water_mark();
+
+            let unique_lock = tbl.unique_write_lock();
+            let held = unique_lock.try_lock().expect("unique prelock starts free");
+            let cancel = Arc::new(CancelHandle::default());
+            let explicit_cancel = if visibility == CommitVisibility::AsyncIndex {
+                tx.set_cancel_handle(Some(Arc::clone(&cancel)));
+                None
+            } else {
+                Some(Arc::clone(&cancel))
+            };
+            let mut commit = Box::pin(crate::tx::ack::commit_tx_with_cancel(
+                tx,
+                &repo.core,
+                repo.commit_visibility_wait(),
+                explicit_cancel,
+            ));
+            while cancel.waiting() != WaitState::Lock {
+                tokio::select! {
+                    result = &mut commit => panic!("commit returned before cancellation: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+            assert_eq!(cancel.try_cancel(), Ok(()), "{visibility:?}");
+            let result = commit.await;
+            assert_eq!(cancel.waiting(), WaitState::None, "{visibility:?}");
+            assert!(
+                matches!(result, Err(CommitError::Cancelled)),
+                "{visibility:?}: {result:?}"
+            );
+            drop(held);
+            assert_eq!(wal.replay().await.unwrap(), frames_before, "{visibility:?}");
+            assert_eq!(
+                gate.version_allocation_high_water_mark(),
+                allocated_before,
+                "{visibility:?}"
+            );
+            let row = tbl.get(rid).await;
+            assert!(
+                matches!(row, Err(DbError::NotFound(_))),
+                "{visibility:?}: expected absent row, got {row:?}"
+            );
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{visibility:?}: pre-driver cancellation watchdog expired"));
+    }
 }
 
 #[tokio::test]

@@ -109,7 +109,8 @@ impl<'a> QueryRunner<'a> {
             | BatchError::TooManyQueries { .. }
             | BatchError::TooManyIterations { .. }
             | BatchError::LimitExceeded { .. }
-            | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
+            | BatchError::AsOfVisibilityTimeout { .. }
+            | BatchError::Cancelled) => limit_error,
             e => BatchError::QueryError {
                 alias: alias.to_string(),
                 message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -156,7 +157,8 @@ impl<'a> QueryRunner<'a> {
                     | BatchError::TooManyQueries { .. }
                     | BatchError::TooManyIterations { .. }
                     | BatchError::LimitExceeded { .. }
-                    | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
+                    | BatchError::AsOfVisibilityTimeout { .. }
+                    | BatchError::Cancelled) => limit_error,
                     e => BatchError::QueryError {
                         alias: alias.to_string(),
                         message: format!("sub-batch '{}' failed: {}", alias, e),
@@ -307,6 +309,7 @@ impl<'a> QueryRunner<'a> {
             let body_limits = fe.batch.limits.clamped_to(self.scope.limits());
             let max_iterations = effective_max_iterations(&body_limits);
             if elements.len() > max_iterations {
+                self.scope.check_cancelled()?;
                 return Err(BatchError::TooManyIterations {
                     alias: alias.to_string(),
                     actual: elements.len(),
@@ -352,7 +355,8 @@ impl<'a> QueryRunner<'a> {
                 | BatchError::TooManyQueries { .. }
                 | BatchError::TooManyIterations { .. }
                 | BatchError::LimitExceeded { .. }
-                | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
+                | BatchError::AsOfVisibilityTimeout { .. }
+                | BatchError::Cancelled) => limit_error,
                 e => BatchError::QueryError {
                     alias: alias.to_string(),
                     message: format!(
@@ -435,7 +439,8 @@ impl<'a> QueryRunner<'a> {
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
                         | BatchError::LimitExceeded { .. }
-                        | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
+                        | BatchError::AsOfVisibilityTimeout { .. }
+                        | BatchError::Cancelled) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
@@ -460,7 +465,8 @@ impl<'a> QueryRunner<'a> {
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
                         | BatchError::LimitExceeded { .. }
-                        | BatchError::AsOfVisibilityTimeout { .. }) => limit_error,
+                        | BatchError::AsOfVisibilityTimeout { .. }
+                        | BatchError::Cancelled) => limit_error,
                         e => BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!("for_each '{}' iteration failed: {}", alias, e),
@@ -525,7 +531,17 @@ impl<'a> QueryRunner<'a> {
         // is idempotent / cheap when caught up; skipped for `Latest`.
         if !matches!(query.temporal, shamir_query_types::read::Temporal::Latest) {
             if let Ok(repo) = self.resolver.resolve_repo(&table_ref.repo).await {
-                if let Err(e) = repo.drainer().drain_all(&repo).await {
+                if let Err(e) = repo
+                    .drainer()
+                    .drain_all_with_cancel(
+                        &repo,
+                        self.scope.cancel_handle().map(std::sync::Arc::as_ref),
+                    )
+                    .await
+                {
+                    if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                        return self.scope.check().and(Err(BatchError::Cancelled));
+                    }
                     log::warn!("temporal read: drain_all {}: {e}", table_ref.repo);
                 }
             }
@@ -561,6 +577,9 @@ impl<'a> QueryRunner<'a> {
             }
         }
         .map_err(|e| {
+            if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                return self.scope.check().err().unwrap_or(BatchError::Cancelled);
+            }
             if let shamir_storage::error::DbError::Io(io) = &e {
                 if let Some(error) = io.get_ref().and_then(|e| e.downcast_ref::<BatchError>()) {
                     return error.clone();

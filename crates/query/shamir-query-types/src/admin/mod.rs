@@ -14,7 +14,7 @@ pub use access::{
 };
 pub use activity::{
     ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ActivityTxState,
-    ListActivityReq, RequestExecId,
+    CancelOutcome, ListActivityReq, RequestExecId,
 };
 pub use types::{
     AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp, AlterRepoOp, AlterSubscriptionOp,

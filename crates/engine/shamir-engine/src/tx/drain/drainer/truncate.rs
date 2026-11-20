@@ -1,7 +1,8 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_tx::{CancelHandle, RequestCancelled, WaitState};
 
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
@@ -176,15 +177,57 @@ impl Drainer {
     ///
     /// Returns the total number of versions drained across all passes.
     pub async fn drain_all(&self, repo: &RepoCore) -> DbResult<usize> {
+        self.drain_all_with_cancel(repo, None).await
+    }
+
+    /// Cooperative cancellation only while acquiring the replay lock or
+    /// between passes. Never race this entire future against cancellation.
+    pub(crate) async fn drain_all_with_cancel(
+        &self,
+        repo: &RepoCore,
+        cancel: Option<&CancelHandle>,
+    ) -> DbResult<usize> {
         let mut total = 0usize;
         loop {
-            let n = self.drain_step(repo).await?;
+            let pass = self.drain_step_with_cancel(repo, cancel).await;
+            if cancel.is_some_and(CancelHandle::is_cancelled) {
+                return Err(Self::request_cancelled());
+            }
+            let n = pass?;
             if n == 0 {
                 break;
             }
             total += n;
         }
         Ok(total)
+    }
+
+    pub(super) async fn drain_step_with_cancel(
+        &self,
+        repo: &RepoCore,
+        cancel: Option<&CancelHandle>,
+    ) -> DbResult<usize> {
+        let _replay_guard = if let Some(cancel) = cancel {
+            let _park = cancel.park(WaitState::Lock);
+            let guard = tokio::select! {
+                biased;
+                _ = cancel.wait_cancelled() => return Err(Self::request_cancelled()),
+                guard = self.replaying.lock() => guard,
+            };
+            if cancel.is_cancelled() {
+                return Err(Self::request_cancelled());
+            }
+            guard
+        } else {
+            self.replaying.lock().await
+        };
+        // After acquisition, replay may mutate durable state across awaits.
+        // Finish this pass before observing another request cancellation.
+        self.replay_locked(repo).await
+    }
+
+    fn request_cancelled() -> DbError {
+        DbError::Io(std::io::Error::other(RequestCancelled))
     }
 
     /// Spawn the background drain loop as a leak-free task (mirrors

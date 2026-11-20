@@ -9,9 +9,10 @@ use serde_json::{json, Value};
 
 use crate::admin::activity::{
     ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ActivityTxState,
-    ListActivityReq, RequestExecId,
+    CancelOutcome, ListActivityReq, RequestExecId,
 };
-use crate::wire::DbResponse;
+use crate::batch::BatchOp;
+use crate::wire::{error_code, DbResponse};
 
 fn full_request() -> ListActivityReq {
     ListActivityReq {
@@ -193,6 +194,21 @@ fn activity_request_state_vocabulary_is_pinned() {
         serde_json::to_value(ActivityRequestState::Done).unwrap(),
         json!("done")
     );
+    for (state, name) in [
+        (ActivityRequestState::Committing, "committing"),
+        (ActivityRequestState::Cancelled, "cancelled"),
+        (ActivityRequestState::WaitingLock, "waiting_lock"),
+        (
+            ActivityRequestState::WaitingVisibility,
+            "waiting_visibility",
+        ),
+        (ActivityRequestState::WaitingBudget, "waiting_budget"),
+    ] {
+        let wire = json!(name);
+        assert_eq!(serde_json::to_value(state).expect("encode state"), wire);
+        let decoded = serde_json::from_value::<ActivityRequestState>(wire).expect("decode state");
+        assert_eq!(decoded, state);
+    }
     assert_eq!(
         serde_json::to_value(ActivityTxState::Active).unwrap(),
         json!("active")
@@ -243,4 +259,90 @@ fn db_response_activity_page_round_trips() {
     }
     let value = serde_json::to_value(&decoded).expect("serialize");
     assert_eq!(value.get("kind"), Some(&json!("activity_page")));
+}
+
+#[test]
+fn cancel_request_wire_shape_and_classification() {
+    let op = BatchOp::CancelRequest(RequestExecId(u64::MAX));
+    let expected = json!({"cancel_request": u64::MAX});
+    assert_eq!(serde_json::to_value(&op).expect("encode JSON"), expected);
+    assert_eq!(
+        serde_json::from_value::<BatchOp>(expected.clone()).expect("decode JSON"),
+        op
+    );
+    let bytes = rmp_serde::to_vec_named(&op).expect("encode MessagePack");
+    assert_eq!(
+        rmp_serde::from_slice::<Value>(&bytes).expect("wire map"),
+        expected
+    );
+    assert_eq!(
+        rmp_serde::from_slice::<BatchOp>(&bytes).expect("decode MessagePack"),
+        op
+    );
+    assert!(op.is_admin());
+    assert!(!op.is_write());
+    assert_eq!(op.table_ref(), None);
+    assert_eq!(op.required_access("main"), None);
+    assert_eq!(op.activity_name(), "admin:cancel_request");
+}
+
+#[test]
+fn cancel_request_rejects_invalid_wire_shapes() {
+    for invalid in [
+        r#"{"cancel_request":true}"#,
+        r#"{"cancel_request":null}"#,
+        r#"{"cancel_request":-1}"#,
+        r#"{"cancel_request":"42"}"#,
+        r#"{"cancel_request":{"request_exec_id":42}}"#,
+        r#"{"cancel_request":42,"extra":0}"#,
+        r#"{"cancel_request":42,"from":"users"}"#,
+        r#"{"cancel_request":42,"cancel_request":43}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<BatchOp>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn cancel_outcomes_have_exact_tagged_response_shape() {
+    for (outcome, name) in [
+        (CancelOutcome::Cancelled, "cancelled"),
+        (CancelOutcome::AlreadyFinished, "already_finished"),
+        (CancelOutcome::AlreadyCommitting, "already_committing"),
+        (CancelOutcome::NotCancellable, "not_cancellable"),
+    ] {
+        let response = DbResponse::CancelOutcome { outcome };
+        let expected = json!({"kind": "cancel_outcome", "outcome": name});
+        assert_eq!(
+            serde_json::to_value(&response).expect("encode JSON"),
+            expected
+        );
+        let bytes = rmp_serde::to_vec_named(&response).expect("encode MessagePack");
+        assert_eq!(
+            rmp_serde::from_slice::<Value>(&bytes).expect("wire map"),
+            expected
+        );
+        for decoded in [
+            serde_json::from_value::<DbResponse>(expected).expect("decode JSON"),
+            rmp_serde::from_slice::<DbResponse>(&bytes).expect("decode MessagePack"),
+        ] {
+            assert!(
+                matches!(decoded, DbResponse::CancelOutcome { outcome: got } if got == outcome)
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelled_is_an_ordinary_wire_error_code() {
+    let response = DbResponse::Error {
+        code: error_code::CANCELLED.to_string(),
+        message: "request cancelled".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(response).expect("encode error"),
+        json!({"kind": "error", "code": "cancelled", "message": "request cancelled"})
+    );
 }

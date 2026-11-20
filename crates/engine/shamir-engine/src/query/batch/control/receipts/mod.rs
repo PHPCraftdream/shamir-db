@@ -11,7 +11,7 @@ pub(in crate::query::batch) use accounting::{
     receipt_size, reserve, write_result_to_query_result_with_encoding,
 };
 
-pub(crate) use commit::commit_implicit;
+pub(crate) use commit::{commit_implicit, commit_implicit_with_cancel};
 pub(in crate::query::batch) use propagation::{attach, execute_plan, filter, stamp};
 
 #[cfg(test)]

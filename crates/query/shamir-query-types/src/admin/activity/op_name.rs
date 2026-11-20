@@ -126,6 +126,7 @@ impl BatchOp {
             BatchOp::BackupStatus(_) => "admin:backup_status",
             BatchOp::CancelBackup(_) => "admin:cancel_backup",
             BatchOp::ListActivity(_) => "admin:list_activity",
+            BatchOp::CancelRequest(_) => "admin:cancel_request",
         }
     }
 }

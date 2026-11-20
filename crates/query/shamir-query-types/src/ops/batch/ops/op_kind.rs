@@ -94,6 +94,7 @@ define_op_kinds! {
     BackupStatus => "backup_status",
     CancelBackup => "cancel_backup",
     ListActivity => "list_activity",
+    CancelRequest => "cancel_request",
     Call => "call",
     ForEach => "for_each",
     Batch => "batch",

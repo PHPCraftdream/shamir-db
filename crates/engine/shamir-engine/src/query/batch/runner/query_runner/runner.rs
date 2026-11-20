@@ -4,6 +4,7 @@ use shamir_collections::TFxSet;
 use shamir_engine_query::query::filter::read_budget::{QueryMetrics, QueryOp};
 use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
+use shamir_tx::CancelState;
 use shamir_types::access::{Actor, ResourcePath};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
@@ -139,6 +140,17 @@ impl<'a> QueryRunner<'a> {
         }
     }
 
+    /// Independent effects cannot be rolled back by the outer batch. Claim
+    /// the same state as the commit driver and keep it for the whole request.
+    fn protect_independent_effects(&self) -> Result<(), BatchError> {
+        if let Some(handle) = self.scope.cancel_handle() {
+            if !handle.try_commit() && handle.state() != CancelState::Committing {
+                return Err(BatchError::Cancelled);
+            }
+        }
+        Ok(())
+    }
+
     /// Execute a single query entry.
     ///
     /// Dispatches by `BatchOp` variant. When `self.tx.is_some()`,
@@ -187,7 +199,12 @@ impl<'a> QueryRunner<'a> {
         // Admin ops — delegate to AdminExecutor (no tx).
         if entry.op.is_admin() {
             return match self.admin {
-                Some(executor) => executor.execute_admin(&entry.op).await,
+                Some(executor) => {
+                    if entry.op.is_write() {
+                        self.protect_independent_effects()?;
+                    }
+                    executor.execute_admin(&entry.op).await
+                }
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Admin operations not supported in this context".to_string(),
@@ -216,7 +233,10 @@ impl<'a> QueryRunner<'a> {
                 ));
             }
             return match self.invoker {
-                Some(inv) => inv.invoke_call(call_op, &self.actor, resolved_refs).await,
+                Some(inv) => {
+                    self.protect_independent_effects()?;
+                    inv.invoke_call(call_op, &self.actor, resolved_refs).await
+                }
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Function calls not supported in this context".to_string(),

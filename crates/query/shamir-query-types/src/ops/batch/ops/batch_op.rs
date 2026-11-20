@@ -21,8 +21,8 @@ use crate::admin::{
     ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
-    ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
-    StartBackupOp, StartMigrationOp, UnbindValidatorOp,
+    ReplicationStatusOp, RequestExecId, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
+    SetTableSchemaOp, StartBackupOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -211,6 +211,14 @@ pub enum BatchOp {
     CancelBackup(CancelBackupOp),
     /// Operator activity-view listing (read-only, R4b step 1).
     ListActivity(ListActivityReq),
+    /// Cancel an in-flight batch by its server-minted execution id (R4b step 2).
+    CancelRequest(RequestExecId),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelRequestWire {
+    cancel_request: RequestExecId,
 }
 
 impl Serialize for BatchOp {
@@ -315,6 +323,11 @@ impl Serialize for BatchOp {
             BatchOp::BackupStatus(op) => op.serialize(serializer),
             BatchOp::CancelBackup(op) => op.serialize(serializer),
             BatchOp::ListActivity(op) => op.serialize(serializer),
+            BatchOp::CancelRequest(id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_request", id)?;
+                map.end()
+            }
         }
     }
 }
@@ -331,6 +344,9 @@ impl<'de> Deserialize<'de> for BatchOp {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BatchOp, A::Error> {
                 let mut qv_map = TMap::default();
                 while let Some((key, value)) = map.next_entry::<String, QueryValue>()? {
+                    if key == "cancel_request" && qv_map.contains_key(&key) {
+                        return Err(DeError::duplicate_field("cancel_request"));
+                    }
                     qv_map.insert(key, value);
                 }
                 let qv = QueryValue::Map(qv_map);
@@ -544,6 +560,8 @@ impl<'de> Deserialize<'de> for BatchOp {
                     OpKind::ListActivity => {
                         ListActivityReq::deserialize(value).map(BatchOp::ListActivity)
                     }
+                    OpKind::CancelRequest => CancelRequestWire::deserialize(value)
+                        .map(|op| BatchOp::CancelRequest(op.cancel_request)),
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
@@ -677,7 +695,8 @@ impl BatchOp {
             | BatchOp::StartBackup(_)
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
-            | BatchOp::ListActivity(_) => return None,
+            | BatchOp::ListActivity(_)
+            | BatchOp::CancelRequest(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -792,6 +811,7 @@ impl BatchOp {
                 | BatchOp::BackupStatus(_)
                 | BatchOp::CancelBackup(_)
                 | BatchOp::ListActivity(_)
+                | BatchOp::CancelRequest(_)
         )
     }
 
@@ -839,6 +859,8 @@ impl BatchOp {
             // Online-backup admin ops: status is pure introspection; start
             // and cancel change persistent node-side backup state (R2a 3a).
             BatchOp::BackupStatus(_) | BatchOp::ListActivity(_) => false,
+            // Cooperative cancellation only changes transient execution state.
+            BatchOp::CancelRequest(_) => false,
             BatchOp::StartBackup(_) => true,
             BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan
@@ -966,35 +988,5 @@ fn strip_application_schema_marker(qv: QueryValue) -> QueryValue {
             QueryValue::Map(map)
         }
         other => other,
-    }
-}
-
-impl From<ReadQuery> for BatchOp {
-    fn from(q: ReadQuery) -> Self {
-        BatchOp::Read(q)
-    }
-}
-
-impl From<InsertOp> for BatchOp {
-    fn from(i: InsertOp) -> Self {
-        BatchOp::Insert(i)
-    }
-}
-
-impl From<UpdateOp> for BatchOp {
-    fn from(u: UpdateOp) -> Self {
-        BatchOp::Update(u)
-    }
-}
-
-impl From<SetOp> for BatchOp {
-    fn from(s: SetOp) -> Self {
-        BatchOp::Set(s)
-    }
-}
-
-impl From<DeleteOp> for BatchOp {
-    fn from(d: DeleteOp) -> Self {
-        BatchOp::Delete(d)
     }
 }

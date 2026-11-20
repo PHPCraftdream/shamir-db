@@ -1,7 +1,10 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
+use std::sync::Arc;
+
 use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use shamir_query_types::batch::{BatchOp, ExecPolicy};
+use shamir_tx::CancelHandle;
 
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, BatchError, BatchRequest, BatchResponse};
@@ -69,10 +72,32 @@ impl ShamirDb {
         policy: ExecPolicy,
         repo_admin_observer: Option<std::sync::Arc<dyn RepoAdminObserver>>,
     ) -> Result<BatchResponse, BatchError> {
+        Box::pin(self.execute_with_policy_and_repo_observer_and_cancel(
+            actor,
+            db_name,
+            request,
+            policy,
+            repo_admin_observer,
+            None,
+        ))
+        .await
+    }
+
+    /// Execute with a resource policy, optional observer and optional cancellation.
+    pub async fn execute_with_policy_and_repo_observer_and_cancel(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        policy: ExecPolicy,
+        repo_admin_observer: Option<Arc<dyn RepoAdminObserver>>,
+        cancel: Option<Arc<CancelHandle>>,
+    ) -> Result<BatchResponse, BatchError> {
         let auth = self
             .authorize_batch(request, actor, db_name)
             .await?
-            .with_policy(policy);
+            .with_policy(policy)
+            .with_cancel_handle(cancel);
         let ambient_actor = auth.actor().clone();
         let mut authorized_interner_repos = Vec::new();
         for repo_name in request.interner_epochs.keys() {

@@ -10,8 +10,10 @@
 
 #![warn(missing_docs)]
 
+mod cancel_request;
 mod list_activity;
 
 pub mod token_admin;
 
+pub use cancel_request::cancel_request;
 pub use list_activity::list_activity;

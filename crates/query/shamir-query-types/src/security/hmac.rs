@@ -323,6 +323,7 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         // R4b-1: activity listing is read-only introspection of server-owned
         // state, not destructive; it is permission-checked at the handler.
         | ListActivity(_)
+        | CancelRequest(_)
         | StartBackup(_)
         | BackupStatus(_)
         | CancelBackup(_) => HmacPolicy::NotGated,
