@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::TransportKind;
@@ -10,7 +12,7 @@ use shamir_query_types::admin::activity::{CancelOutcome, RequestExecId};
 use shamir_query_types::durability::{ReplicationServe, RetentionOverflow, WalCommitTier};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
-use tokio::sync::Semaphore;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 fn transport_name(kind: TransportKind) -> &'static str {
@@ -106,9 +108,125 @@ struct CancelRefusalDetails<'a> {
     outcome: &'a CancelOutcome,
 }
 
-// Bound queued plus running refusal appends across all server instances.
-const CANCEL_AUDIT_CAPACITY: usize = 16;
-static CANCEL_AUDIT_SLOTS: Semaphore = Semaphore::const_new(CANCEL_AUDIT_CAPACITY);
+// The low bits count queued and running jobs; the high bits close admission
+// and latch the first rejected submission of each saturation episode.
+const CANCEL_AUDIT_CAPACITY: usize = 256;
+const CLOSED: usize = 1 << (usize::BITS - 1);
+const SATURATED: usize = CLOSED >> 1;
+const COUNT_MASK: usize = !(CLOSED | SATURATED);
+const DRAIN_BUDGET: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+pub(crate) struct CancelRefusalAudit {
+    state: AtomicUsize,
+    dropped: AtomicUsize,
+    idle: Notify,
+}
+
+impl CancelRefusalAudit {
+    fn try_reserve(self: &Arc<Self>) -> Option<CancelAuditSlot> {
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            if state & CLOSED != 0 {
+                let dropped = self.record_drop();
+                tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
+                return None;
+            }
+            let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
+            if full && state & SATURATED != 0 {
+                self.record_drop();
+                return None;
+            }
+            let next = if full { state | SATURATED } else { state + 1 };
+            match self
+                .state
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) if full => {
+                    let dropped = self.record_drop();
+                    tracing::warn!(
+                        capacity = CANCEL_AUDIT_CAPACITY,
+                        dropped,
+                        "cancel refusal audit queue full; dropping events"
+                    );
+                    return None;
+                }
+                Ok(_) => {
+                    return Some(CancelAuditSlot {
+                        queue: Arc::clone(self),
+                        appended: false,
+                    });
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    fn record_drop(&self) -> usize {
+        self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    }
+
+    pub(crate) fn close(&self) {
+        self.state.fetch_or(CLOSED, Ordering::AcqRel);
+    }
+
+    pub(crate) async fn drain(&self) {
+        let drained = tokio::time::timeout(DRAIN_BUDGET, async {
+            // Cancel-safe: no jobs are consumed by waiting.
+            loop {
+                let notified = self.idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.state.load(Ordering::Acquire) & COUNT_MASK == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await;
+        if drained.is_err() {
+            let pending = self.state.load(Ordering::Acquire) & COUNT_MASK;
+            tracing::warn!(pending, "cancel refusal audit drain timed out");
+        }
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        if dropped != 0 {
+            tracing::debug!(dropped, "cancel refusal audit drops so far");
+        }
+    }
+}
+
+struct CancelAuditSlot {
+    queue: Arc<CancelRefusalAudit>,
+    appended: bool,
+}
+
+impl Drop for CancelAuditSlot {
+    fn drop(&mut self) {
+        if !self.appended {
+            self.queue.record_drop();
+        }
+        // Releasing any slot necessarily makes the queue non-full. Clear
+        // the saturation latch in the same transition as the decrement.
+        let mut state = self.queue.state.load(Ordering::Acquire);
+        loop {
+            let next = (state - 1) & !SATURATED;
+            match self.queue.state.compare_exchange_weak(
+                state,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if next == CLOSED {
+                        self.queue.idle.notify_waiters();
+                    }
+                    break;
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+}
 
 // Report a job discarded before execution (e.g. during runtime teardown).
 struct PendingCancelAudit {
@@ -116,12 +234,15 @@ struct PendingCancelAudit {
     result: &'static str,
     dispatcher: tracing::Dispatch,
     completed: bool,
+    // Field drop order: release the writer before signalling idle.
+    audit: Arc<AuditChainWriter>,
+    slot: CancelAuditSlot,
 }
 
 impl PendingCancelAudit {
-    fn complete(mut self) {
+    fn complete(mut self, appended: bool) {
         self.completed = true;
-        drop(self);
+        self.slot.appended = appended;
     }
 }
 
@@ -140,6 +261,7 @@ impl Drop for PendingCancelAudit {
 }
 
 pub(super) fn enqueue_cancel_refusal_audit(
+    queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
     session: &Session,
     target: RequestExecId,
@@ -150,15 +272,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
         CancelOutcome::NotCancellable => "not_cancellable",
         CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished => return None,
     };
-    let Ok(permit) = CANCEL_AUDIT_SLOTS.try_acquire() else {
-        tracing::error!(
-            target_id = target.0,
-            outcome = result,
-            capacity = CANCEL_AUDIT_CAPACITY,
-            "cancel refusal audit queue full; event dropped"
-        );
-        return None;
-    };
+    let slot = queue.try_reserve()?;
     let details = match rmp_serde::to_vec_named(&CancelRefusalDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
@@ -175,7 +289,6 @@ pub(super) fn enqueue_cancel_refusal_audit(
     };
     let mut session_prefix = [0u8; 8];
     session_prefix.copy_from_slice(&session.session_id[..8]);
-    let audit = Arc::clone(audit);
     let transport = transport_name(session.transport_kind);
     let username = session.username.clone();
     let pending = PendingCancelAudit {
@@ -183,14 +296,13 @@ pub(super) fn enqueue_cancel_refusal_audit(
         result,
         dispatcher: tracing::dispatcher::get_default(Clone::clone),
         completed: false,
+        audit: Arc::clone(audit),
+        slot,
     };
-    // Keep the writer alive through append. Standalone server shutdown may
-    // flush its batched appender before this detached work reaches the writer.
     Some(tokio::task::spawn_blocking(move || {
         let guard = pending;
-        let _permit = permit;
-        tracing::dispatcher::with_default(&guard.dispatcher, || {
-            if let Err(error) = audit.append(
+        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
+            if let Err(error) = guard.audit.append(
                 "cancel_request",
                 transport,
                 username,
@@ -202,9 +314,11 @@ pub(super) fn enqueue_cancel_refusal_audit(
             ) {
                 tracing::error!(%error, target_id = guard.target.0, outcome = guard.result,
                     "audit append rejected cancel refusal");
+                return false;
             }
+            true
         });
-        guard.complete();
+        guard.complete(appended);
     }))
 }
 

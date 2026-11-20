@@ -621,6 +621,7 @@ impl ServerLauncher {
             .with_node_mode(node_mode)
             .with_token_service(token_service.clone(), config.tokens.allow_self_service),
         );
+        let cancel_refusal_audit = handler_concrete.cancel_refusal_audit();
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete.clone();
@@ -757,7 +758,9 @@ impl ServerLauncher {
         {
             Ok(listeners) => listeners,
             Err(error) => {
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
+                cancel_refusal_audit.drain().await;
                 audit_appender.shutdown().await;
                 scheduler.shutdown().await;
                 if let Some(snap) = meta_snapshot_task {
@@ -857,6 +860,7 @@ impl ServerLauncher {
         let observability = match observability_result {
             Ok(handle) => handle,
             Err(error) => {
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
                 let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 for mut task in listener_tasks {
@@ -894,6 +898,7 @@ impl ServerLauncher {
                     gate.shutdown().await;
                 }
                 token_service.shutdown_gc().await;
+                cancel_refusal_audit.drain().await;
                 audit_appender.shutdown().await;
                 scheduler.shutdown().await;
                 if let Some(snap) = meta_snapshot_task {
@@ -939,25 +944,6 @@ impl ServerLauncher {
             crate::server::server_handle::ReplSupervisorTask { handle }
         };
 
-        // R4b-1 (test-only): capture the production-boot artifacts the
-        // activity-gauge source closes over so `server_launcher/tests` can
-        // drive the real handler and scrape the real `/metrics`. Compiled
-        // out of production builds entirely. Computed BEFORE the literal so
-        // `observability` is only borrowed here and moved exactly once,
-        // into the `ServerHandle`; the bound address is the one the server
-        // ACTUALLY bound (`None` — not a fake port-0 sentinel — when no
-        // observability server was configured).
-        #[cfg(test)]
-        let activity_test_seam =
-            observability
-                .as_ref()
-                .map(|obs| crate::server::server_handle::ActivityGaugeTestSeam {
-                    handler: Arc::clone(&handler_concrete),
-                    byte_budget: byte_budget.clone(),
-                    session_store: session_store.clone(),
-                    observability_bound_addr: obs.bound_addr,
-                });
-
         if let Some(obs) = &observability {
             obs.state.mark_ready();
         }
@@ -977,6 +963,9 @@ impl ServerLauncher {
             http_gates,
             scheduler,
             audit_appender,
+            cancel_refusal_audit,
+            #[cfg(test)]
+            refusal_drain_pending: None,
             shutdown_token,
 
             meta_snapshot_task,
@@ -990,8 +979,17 @@ impl ServerLauncher {
             format_stamp,
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
+            // Tests drive the real handler and scrape the actual bound metrics address.
             #[cfg(test)]
-            activity_test_seam,
+            activity_test_seam: observability.as_ref().map(|obs| {
+                crate::server::server_handle::ActivityGaugeTestSeam {
+                    handler: Arc::clone(&handler_concrete),
+                    byte_budget: byte_budget.clone(),
+                    session_store: session_store.clone(),
+                    audit_chain: audit_chain.clone(),
+                    observability_bound_addr: obs.bound_addr,
+                }
+            }),
             observability,
         })
     }

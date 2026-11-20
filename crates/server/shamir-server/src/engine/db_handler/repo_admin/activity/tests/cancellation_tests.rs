@@ -19,7 +19,7 @@ use super::super::cancel::cancel_entry;
 use super::super::requests::{ActivityRequests, RequestEntry};
 use crate::audit_appender::FjallAuditAppender;
 use crate::db_handler::handler::ShamirDbHandler;
-use crate::db_handler::repo_audit::enqueue_cancel_refusal_audit;
+use crate::db_handler::repo_audit::{enqueue_cancel_refusal_audit, CancelRefusalAudit};
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -149,13 +149,14 @@ async fn cancel_refusal_audit_has_exact_payload() {
     ));
     let caller = session(2, 3, true);
     let target = RequestExecId(u64::MAX - 1);
+    let queue = Arc::new(CancelRefusalAudit::default());
     for outcome in [
         CancelOutcome::Cancelled,
         CancelOutcome::AlreadyFinished,
         CancelOutcome::AlreadyCommitting,
         CancelOutcome::NotCancellable,
     ] {
-        let job = enqueue_cancel_refusal_audit(&writer, &caller, target, &outcome);
+        let job = enqueue_cancel_refusal_audit(&queue, &writer, &caller, target, &outcome);
         if matches!(
             outcome,
             CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished

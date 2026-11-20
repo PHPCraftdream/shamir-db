@@ -356,4 +356,17 @@ impl crate::db_handler::ShamirDbHandler {
         entry.cancellable = cancellable;
         Ok(Arc::clone(&self.activity_requests).register_with_slot(entry, slot))
     }
+
+    #[cfg(test)]
+    pub(crate) fn track_committing_request_for_test(
+        &self,
+        session: &Session,
+        db: &str,
+    ) -> (RequestExecId, impl FnOnce() + use<>) {
+        let request = self
+            .try_track_activity_request(session, db, "write", None)
+            .expect("register test write");
+        assert!(request.cancel_handle().try_commit());
+        (request.id(), move || drop(request))
+    }
 }

@@ -64,7 +64,11 @@ impl ShamirDbHandler {
         if let Some(audit) = &self.audit {
             // Detach by design: the reply must not wait for the writer.
             drop(enqueue_cancel_refusal_audit(
-                audit, session, target, &outcome,
+                &self.cancel_refusal_audit,
+                audit,
+                session,
+                target,
+                &outcome,
             ));
         }
         DbResponse::CancelOutcome { outcome }

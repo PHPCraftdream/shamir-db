@@ -35,15 +35,19 @@
 use std::future::{poll_fn, Future};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 
 use shamir_client::{Client, ClientError, ConnectOptions};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
+};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
@@ -64,12 +68,14 @@ use shamir_query_types::batch::{BatchLimits, BatchRequest, BatchResponse};
 use shamir_query_types::wire::{CursorId, DbRequest};
 use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 
+use crate::audit_appender::FjallAuditAppender;
 use crate::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig,
     ProfileKind, TlsConfig,
 };
 use crate::db_handler::{DbResponse, NodeMode, ShamirDbHandler};
 use crate::server::{BootstrapMode, ServerLauncher};
+use crate::server_meta::ServerMetaStore;
 use crate::tx_registry::InteractiveTx;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
@@ -765,4 +771,184 @@ async fn cancel_budget_parked(
     );
     drop(hog);
     reply
+}
+
+struct ShutdownAuditGate {
+    appender: Arc<FjallAuditAppender>,
+    handshake: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+impl AuditAppender for ShutdownAuditGate {
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
+        let handshake = self.handshake.lock().unwrap().take();
+        if let Some((entered, release)) = handshake {
+            // The test writer owns the real chain's durable gate in this callback.
+            entered
+                .send(())
+                .expect("test still waiting for durable gate");
+            release
+                .recv_timeout(CALL_TIMEOUT)
+                .map_err(std::io::Error::other)?;
+        }
+        self.appender.append_entry(entry)
+    }
+
+    fn checkpoint(&self, seq: u64, hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        self.appender.checkpoint(seq, hmac)
+    }
+}
+
+#[test]
+fn graceful_shutdown_drains_accepted_cancel_refusal_before_final_audit_flush() {
+    on_big_stack(|| Box::pin(run_refusal_shutdown()));
+}
+
+async fn run_refusal_shutdown() {
+    let guard = FlakeGuard::with_watchdog(
+        "graceful_shutdown_drains_accepted_cancel_refusal_before_final_audit_flush",
+        Duration::from_secs(600),
+    );
+    try_install_global_tracing_ring();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let temp = tempfile::tempdir().expect("persistent data directory");
+    let mut config = boot_config(temp.path().to_path_buf());
+    config.argon2_concurrent_max = 64;
+    config.security.auth_init_rate_per_second = 64;
+    let listener = &mut config.listeners[0];
+    listener.kind = ListenerKind::Tcp;
+    listener.profile = Some(ProfileKind::TlsExporter);
+    listener.http = Default::default();
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Password {
+            username: CANCEL_ADMIN.into(),
+            password: zeroize::Zeroizing::new(CANCEL_PASSWORD.to_vec()),
+        },
+        node_mode: NodeMode::ReadWrite,
+    };
+    let mut handle = tokio::time::timeout(CALL_TIMEOUT, Box::pin(launcher.launch()))
+        .await
+        .expect("launch deadline")
+        .expect("production boot");
+    let addr = handle
+        .first_tls_exporter_addr()
+        .expect("bound TLS listener");
+    let owner = connect_cancel_client(addr, None).await;
+    let control = connect_cancel_client(addr, Some(owner.server_pub_key_pin())).await;
+    assert_ne!(
+        owner.session_id(),
+        control.session_id(),
+        "distinct sessions"
+    );
+    let control_prefix: [u8; 8] = control.session_id()[..8].try_into().unwrap();
+    let seam = handle
+        .activity_test_seam
+        .take()
+        .expect("boot activity seam");
+    let session = seam
+        .session_store
+        .lookup(&owner.session_id())
+        .expect("owner session in launched store");
+    let (target, finish) = seam
+        .handler
+        .track_committing_request_for_test(&session, "default");
+    let (entered, at_gate) = oneshot::channel();
+    let (release_gate, release) = mpsc::sync_channel(1);
+    let blocking_writer = AuditChainWriter::new_with_shared(
+        Arc::clone(&seam.audit_chain),
+        Arc::new(ShutdownAuditGate {
+            appender: Arc::clone(&handle.audit_appender),
+            handshake: Mutex::new(Some((entered, release))),
+        }),
+    );
+    let blocker = tokio::task::spawn_blocking(move || {
+        blocking_writer.append(
+            "test_shutdown_gate",
+            "tcp",
+            "",
+            "",
+            [0; 8],
+            "ok",
+            Vec::new(),
+            UnixNanos::try_now().expect("audit timestamp").as_u64(),
+        )
+    });
+    tokio::time::timeout(CALL_TIMEOUT, at_gate)
+        .await
+        .expect("test append did not reach durable gate")
+        .expect("gate handshake dropped");
+    guard.mark("real audit-chain gate held");
+
+    let outcome = tokio::time::timeout(CALL_TIMEOUT, control.cancel_request("default", target))
+        .await
+        .expect("cancel reply waited for the gate")
+        .expect("typed cancel reply");
+    assert_eq!(outcome, CancelOutcome::AlreadyCommitting);
+    guard.mark("typed refusal received with gate still held");
+    finish();
+    drop(session);
+    drop(seam);
+    drop(owner);
+    drop(control);
+
+    let (pending, mut at_drain) = oneshot::channel();
+    handle.refusal_drain_pending = Some(pending);
+    let mut shutdown = Box::pin(handle.shutdown());
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        poll_fn(|cx| {
+            if let Poll::Ready(report) = shutdown.as_mut().poll(cx) {
+                panic!("shutdown finished without waiting at refusal drain: {report:?}");
+            }
+            // Only the shutdown future can send, so inspect the signal in
+            // the very same poll and release before driving shutdown again.
+            match at_drain.try_recv() {
+                Ok(()) => {
+                    release_gate.try_send(()).expect("durable gate still held");
+                    Poll::Ready(())
+                }
+                Err(oneshot::error::TryRecvError::Empty) => Poll::Pending,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    panic!("refusal drain never polled Pending")
+                }
+            }
+        }),
+    )
+    .await
+    .expect("shutdown did not reach pending refusal drain");
+    guard.mark("released gate after refusal drain polled Pending");
+    let report = tokio::time::timeout(CALL_TIMEOUT, shutdown)
+        .await
+        .expect("graceful shutdown deadline");
+    assert!(report.is_clean(), "shutdown must be clean: {report:?}");
+    let first = tokio::time::timeout(CALL_TIMEOUT, blocker)
+        .await
+        .expect("blocking append deadline")
+        .expect("blocking append task")
+        .expect("blocking append succeeded");
+    guard.mark("graceful shutdown complete");
+
+    let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+        .expect("reopen server metadata after shutdown");
+    let key = meta.audit_chain_key().expect("launched chain key");
+    let entries = FjallAuditAppender::read_log_for_verify(temp.path()).expect("read on-disk audit");
+    AuditChain::verify_chain(&key, &entries).expect("verify persisted audit chain");
+    let mut refusals = entries
+        .iter()
+        .filter(|entry| entry.event == "cancel_request");
+    let refusal = refusals
+        .next()
+        .expect("accepted refusal persisted on shutdown");
+    assert!(refusals.next().is_none(), "one accepted refusal");
+    assert!(entries
+        .iter()
+        .any(|entry| entry.seq == first.seq && entry.event == first.event));
+    assert!(first.seq < refusal.seq, "refusal followed the gate holder");
+    assert_eq!(refusal.session_id_prefix, control_prefix);
+    assert_eq!(refusal.result, "already_committing");
+    let details: serde_json::Value =
+        rmp_serde::from_slice(&refusal.details_canonical_msgpack).expect("decode refusal details");
+    assert_eq!(details.as_object().expect("refusal details map").len(), 2);
+    assert_eq!(details["target"].as_u64(), Some(target.0));
+    assert_eq!(details["outcome"].as_str(), Some("already_committing"));
 }
