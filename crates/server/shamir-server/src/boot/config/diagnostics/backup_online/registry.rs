@@ -61,13 +61,16 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use shamir_db::ShamirDb;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::copy_engine::CopyOptions;
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
-    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, SealRecopyCap,
+    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, OnlineBackupFailure,
+    SealRecopyCap,
 };
 
 use super::adapter::{EngineBackupPort, PortRunState};
@@ -248,14 +251,45 @@ impl OnlineBackupRegistry {
     /// backup id and destination root. The protocol's atomic
     /// `<to>/<timestamp>/` create happens on the runner thread (§4.2 A).
     pub fn start(&self, to: PathBuf) -> Result<(String, PathBuf), StartBackupError> {
-        validate_destination(&to, &self.data_dir)?;
+        self.start_inner(to, None, None)
+    }
+
+    /// Admit a scheduled run without filesystem work on the scheduler task.
+    /// The receiver reports protocol success after runner cleanup; a panic
+    /// closes it without a value.
+    pub(super) fn start_scheduled(
+        &self,
+        destination: PathBuf,
+        owner: String,
+        policy: BackupRetentionConfig,
+    ) -> Result<oneshot::Receiver<bool>, StartBackupError> {
+        let (completion, receiver) = oneshot::channel();
+        self.start_inner(
+            destination,
+            Some(ScheduledRun { owner, policy }),
+            Some(completion),
+        )?;
+        Ok(receiver)
+    }
+
+    fn start_inner(
+        &self,
+        to: PathBuf,
+        scheduled: Option<ScheduledRun>,
+        completion: Option<oneshot::Sender<bool>>,
+    ) -> Result<(String, PathBuf), StartBackupError> {
+        if scheduled.is_none() {
+            validate_destination(&to, &self.data_dir)?;
+        }
         let db = self
             .db
             .upgrade()
             .ok_or_else(|| StartBackupError::Io(io::Error::other("the engine is shutting down")))?;
         // The protocol creates only the timestamped child (atomic create,
         // refusing existing dirs); the root must exist by then.
-        std::fs::create_dir_all(&to)?;
+        if scheduled.is_none() {
+            std::fs::create_dir_all(&to)?;
+        }
         let started_at_unix_ns = unix_nanos();
         let backup_id = format!("ob-{started_at_unix_ns}");
         // Under the real launcher the run cancels on a CHILD token
@@ -269,6 +303,12 @@ impl OnlineBackupRegistry {
         };
         {
             let mut record = self.record.lock();
+            if scheduled.is_some() && cancel.is_cancelled() {
+                return Err(StartBackupError::Io(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "the server is shutting down",
+                )));
+            }
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
@@ -296,6 +336,7 @@ impl OnlineBackupRegistry {
             permit: Arc::clone(&self.permit),
             cancel,
             to: to.clone(),
+            scheduled,
             run_state: self.record.lock().run.clone(),
             record: Arc::clone(&self.record),
             #[cfg(test)]
@@ -317,6 +358,7 @@ impl OnlineBackupRegistry {
             Arc::clone(&job.run_state),
             started_at_unix_ns,
             to.clone(),
+            completion,
         );
         let spawned = std::thread::Builder::new()
             .name("online-backup".to_string())
@@ -376,12 +418,18 @@ impl OnlineBackupRegistry {
     }
 }
 
+struct ScheduledRun {
+    owner: String,
+    policy: BackupRetentionConfig,
+}
+
 /// Everything the runner thread owns for one backup.
 struct RunJob {
     db: Arc<ShamirDb>,
     data_dir: PathBuf,
     runtime: Handle,
     to: PathBuf,
+    scheduled: Option<ScheduledRun>,
     permit: Arc<BackupPermit>,
     cancel: CancelFlag,
     run_state: Arc<PortRunState>,
@@ -404,6 +452,7 @@ impl RunJob {
             data_dir,
             runtime,
             to,
+            scheduled,
             permit,
             cancel,
             run_state,
@@ -424,9 +473,11 @@ impl RunJob {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol.
             let mut record = record.lock();
-            record.running = false;
             record.last_error = Some("another online backup holds the permit".to_string());
             backup_metrics::note_finished(true, BackupStage::Preparing, 0, started_at.elapsed());
+            record.running = false;
+            drop(record);
+            guard.finish(false);
             return;
         };
         let port = EngineBackupPort::new(
@@ -438,20 +489,42 @@ impl RunJob {
         let mut progress = BackupProgress::new();
         let options = CopyOptions::default();
         let cap = production_seal_cap();
-        let outcome = run_online_backup(
-            &port,
-            &data_dir,
-            &to,
-            &cancel,
-            &mut progress,
-            &options,
-            &cap,
-        );
+        let preflight = if scheduled.is_some() {
+            scheduled_preflight(&to, &data_dir, &cancel)
+        } else {
+            Ok(())
+        };
+        let preflight_failed = preflight.is_err();
+        let outcome = preflight
+            .inspect_err(|error| progress.record_failure(error.stage(), error))
+            .and_then(|()| {
+                run_online_backup(
+                    &port,
+                    &data_dir,
+                    &to,
+                    &cancel,
+                    &mut progress,
+                    &options,
+                    &cap,
+                )
+            });
+        let copy_duration = started_at.elapsed();
         // Stamp the guard with the verified snapshot BEFORE any
         // panic-prone post-processing: from this point a runner panic
         // must leave the completed snapshot recorded, never deleted.
         if let Ok(report) = &outcome {
             guard.completed_dir = Some(report.dest_dir.clone());
+            backup_metrics::note_success(report.total_bytes, copy_duration);
+            if let Some(scheduled) = scheduled.filter(|_| !cancel.is_cancelled()) {
+                let result = super::schedule::retention::prune(
+                    &to,
+                    &report.dest_dir,
+                    &scheduled.owner,
+                    &scheduled.policy,
+                    &cancel,
+                );
+                backup_metrics::note_retention(result.deleted, result.failed, result.untouched);
+            }
         }
         // Owner-side final progress: the protocol only notes zeroed
         // per-repo entries (step B) and exposes no progress callback, so
@@ -464,14 +537,16 @@ impl RunJob {
             }
         }
         let snapshot_count = run_state.snapshot_count();
-        // Cancelled or shutdown-interrupted runs skip the post-run live
-        // catalogue read: there is nothing to attribute and `block_on` a
-        // straggler store load only extends the teardown on the way out.
-        let repos_created_during = if cancel.is_cancelled() {
+        // Skip the post-run live catalogue read after a preflight failure or
+        // cancellation. There is nothing to attribute, and `block_on` a
+        // straggler store load only extends teardown.
+        let repos_created_during = if cancel.is_cancelled() || preflight_failed {
             0
         } else {
             live_repo_count(&db, &runtime).saturating_sub(snapshot_count)
         };
+        drop(port);
+        drop(db);
         // Release the permit before publishing idle, or a new run can be
         // refused.
         drop(permit_guard);
@@ -480,26 +555,23 @@ impl RunJob {
         // and the last run duration; the failure stage is where the
         // protocol recorded the failure.
         let bytes: u64 = progress.per_repo.iter().map(|repo| repo.bytes_hashed).sum();
-        let failed = progress.stage == BackupStage::Failed;
-        let stage = if failed {
-            progress.failed_stage.unwrap_or(progress.stage)
-        } else {
-            progress.stage
-        };
+        let failed = outcome.is_err();
+        let stage = outcome
+            .as_ref()
+            .err()
+            .map_or(progress.stage, OnlineBackupError::stage);
         // Publish under the record lock, metrics first, `running = false`
         // LAST — a final record is atomic (the unwind guard relies on
         // this: it re-publishes nothing once `running` is false).
         let mut record = record.lock();
-        record.progress = progress.clone();
+        record.progress = progress;
         record.repos_created_during = repos_created_during;
         record.dest_dir = outcome.as_ref().ok().map(|report| report.dest_dir.clone());
         record.last_error = outcome.as_ref().err().map(full_error_chain);
         backup_metrics::note_finished(failed, stage, bytes, started_at.elapsed());
         record.running = false;
-        // Normal completion: disarm the panic guard after the final
-        // status/metrics publish, so its drop is a no-op (the guard still
-        // drops last, after `permit_guard`).
-        guard.armed = false;
+        drop(record);
+        guard.finish(!failed);
     }
 }
 
@@ -536,6 +608,9 @@ struct RunGuard {
     completed_dir: Option<PathBuf>,
     started_at: Instant,
     armed: bool,
+    // Field drop closes the channel on unwind only after Drop publishes
+    // the failure. Normal completion explicitly sends after publication.
+    completion: Option<oneshot::Sender<bool>>,
 }
 
 impl RunGuard {
@@ -544,6 +619,7 @@ impl RunGuard {
         run_state: Arc<PortRunState>,
         started_at_unix_ns: u128,
         destination: PathBuf,
+        completion: Option<oneshot::Sender<bool>>,
     ) -> Self {
         Self {
             record,
@@ -553,6 +629,14 @@ impl RunGuard {
             completed_dir: None,
             started_at: Instant::now(),
             armed: false,
+            completion,
+        }
+    }
+
+    fn finish(&mut self, verified: bool) {
+        self.armed = false;
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(verified);
         }
     }
 }
@@ -748,6 +832,45 @@ fn full_error_chain(error: &OnlineBackupError) -> String {
     text
 }
 
+/// Revalidate the boot-canonical root without creating or repairing it.
+/// Check cancellation before blocking preflight and again before handing
+/// off to the protocol (which mkdirs the timestamp child before its first
+/// cancellation check). Once I/O starts, cancellation is cooperative.
+/// Like retention, this assumes trusted operators do not replace the root
+/// or its parents concurrently with the run.
+fn scheduled_preflight(
+    to: &Path,
+    data_dir: &Path,
+    cancel: &CancelFlag,
+) -> Result<(), OnlineBackupError> {
+    let check_cancel = || {
+        if cancel.is_cancelled() {
+            Err(OnlineBackupError::Cancelled {
+                stage: BackupStage::Preparing,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    let invalid = |error| OnlineBackupError::Failed {
+        stage: BackupStage::Preparing,
+        source: OnlineBackupFailure::Io(error),
+    };
+    check_cancel()?;
+    let canonical = to.canonicalize().map_err(invalid)?;
+    if canonical != to {
+        return Err(invalid(io::Error::other(
+            "scheduled backup destination no longer matches its boot-canonical path",
+        )));
+    }
+    check_cancel()?;
+    validate_canonical_destination(to, &canonical, data_dir, true)
+        .map_err(|error| invalid(io::Error::other(error)))?;
+    check_cancel()?;
+    shamir_private_dir::verify_private_dir(to).map_err(invalid)?;
+    check_cancel()
+}
+
 /// Offline-backup-equivalent destination validation: absolute, and its
 /// nearest existing canonical ancestor must not be inside (or equal to) the
 /// source data dir.
@@ -759,6 +882,15 @@ fn validate_destination(to: &Path, data_dir: &Path) -> Result<(), StartBackupErr
         )));
     }
     let to_canonical = canonicalize_nearest_existing_ancestor(to)?;
+    validate_canonical_destination(to, &to_canonical, data_dir, false)
+}
+
+fn validate_canonical_destination(
+    to: &Path,
+    to_canonical: &Path,
+    data_dir: &Path,
+    reject_ancestor: bool,
+) -> Result<(), StartBackupError> {
     let source_canonical = data_dir.canonicalize().map_err(|error| {
         StartBackupError::InvalidDestination(format!(
             "canonicalize source {}: {error}",
@@ -768,6 +900,12 @@ fn validate_destination(to: &Path, data_dir: &Path) -> Result<(), StartBackupErr
     if to_canonical.starts_with(&source_canonical) {
         return Err(StartBackupError::InvalidDestination(format!(
             "destination is inside (or equal to) the source data dir: {}",
+            to.display()
+        )));
+    }
+    if reject_ancestor && source_canonical.starts_with(to_canonical) {
+        return Err(StartBackupError::InvalidDestination(format!(
+            "scheduled destination is an ancestor of the source data dir: {}",
             to.display()
         )));
     }

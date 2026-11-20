@@ -3,10 +3,18 @@
 //! Every call site that needs "now" as a plain `u64` unix timestamp used to
 //! hand-roll `SystemTime::now().duration_since(UNIX_EPOCH)` and either
 //! `.unwrap()` (panics if the system clock is set before 1970) or its own
-//! ad-hoc `.unwrap_or(0)` fallback. These two functions are the single safe
-//! form, reused everywhere instead of re-deriving it per call site.
+//! ad-hoc `.unwrap_or(0)` fallback. The Unix timestamp helpers centralize
+//! that fallback.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::{Local, Timelike};
+
+/// Current local minute of day (0–1439).
+pub fn local_minute_of_day() -> u32 {
+    let now = Local::now();
+    now.hour() * 60 + now.minute()
+}
 
 /// Wall-clock milliseconds since the UNIX epoch; `0` if the clock is set
 /// before 1970 (never panics).

@@ -67,6 +67,7 @@ const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
 const KEY_TOKEN_KEY: &str = "token_key";
 /// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
+const KEY_BACKUP_OWNER_ID: &str = "backup_owner_id_v1";
 const LOGIN_LISTENER_ID_PREFIX: &str = "http_login_listener_id:";
 
 // ---------------------------------------------------------------------------
@@ -411,6 +412,22 @@ impl ServerMetaStore {
         self.meta
             .insert(key.as_bytes(), bytes)
             .expect("set listener ID test fixture");
+    }
+
+    /// Read or durably create the nonsecret retention identity on schedule enablement.
+    pub(crate) fn backup_owner_id(&self) -> Result<[u8; 16], MetaError> {
+        let _guard = self.write_lock.lock();
+        if let Some(value) = self.meta.get(KEY_BACKUP_OWNER_ID.as_bytes())? {
+            return value[..].try_into().map_err(|_| {
+                MetaError::Encoding("backup_owner_id_v1 must contain exactly 16 bytes".into())
+            });
+        }
+        let mut id = [0u8; 16];
+        try_random_bytes(&mut id)?;
+        self.meta
+            .insert(KEY_BACKUP_OWNER_ID.as_bytes(), id.as_slice())?;
+        self.persist()?;
+        Ok(id)
     }
 
     /// Get or durably create the random identity for one configured HTTP login listener.
