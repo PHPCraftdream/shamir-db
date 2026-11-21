@@ -25,10 +25,6 @@ use super::progress::{BackupProgress, BackupStage, CancelFlag};
 use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
 use crate::sync::durability::backup::{utc_timestamp, verify_manifest, ManifestFileEntry};
 
-/// Directory skipped at the top level of the data-dir copy (offline
-/// backup precedent).
-const SKIP_TOP_LEVEL_DIRS: &[&str] = &["cache"];
-
 /// One in-process backup permit (design 4.4 / D9): a second concurrent
 /// online backup is refused.
 #[derive(Debug, Default)]
@@ -475,15 +471,8 @@ fn run_steps(
     // the existing cancellation check that observes it.
     #[cfg(test)]
     test_seams::fire_before_boundary(BackupStage::Copying);
-    copy_engine::run_copy_pass(
-        source_root,
-        dest_dir,
-        SKIP_TOP_LEVEL_DIRS,
-        &wal_dirs,
-        cancel,
-        options,
-    )
-    .map_err(|error| copy_failed(BackupStage::Copying, error))?;
+    copy_engine::run_data_dir_copy_pass(source_root, dest_dir, &wal_dirs, cancel, options)
+        .map_err(|error| copy_failed(BackupStage::Copying, error))?;
 
     // E. Seal (design "Step 1d decisions" (a)/(b), Q12): per repo —
     // seal_point, THAT repo's seal re-copy (WAL dir then store dir) whose
@@ -614,15 +603,9 @@ fn run_steps(
         }
         // Residual pass: NO gate (it holds no repo's seal) and NO cap
         // check — it is outside every hold; stage-boundary bounded.
-        recopy.residual = copy_engine::run_copy_pass(
-            source_root,
-            dest_dir,
-            SKIP_TOP_LEVEL_DIRS,
-            &exclude,
-            cancel,
-            options,
-        )
-        .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
+        recopy.residual =
+            copy_engine::run_data_dir_copy_pass(source_root, dest_dir, &exclude, cancel, options)
+                .map_err(|error| copy_failed(BackupStage::Sealing, error))?;
         recopy
     };
 
