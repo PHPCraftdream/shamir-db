@@ -1,4 +1,5 @@
 pub mod alias;
 pub mod batch_error;
+mod batch_op_classify;
 pub mod interner_delta;
 pub mod reference;

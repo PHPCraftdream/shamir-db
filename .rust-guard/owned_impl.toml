@@ -54,3 +54,42 @@ module = "crate::tx::commit::core"
 # impl must live in tx/commit/core (or a descendant module of it).
 type = "TxHorizon"
 module = "crate::tx::commit::core"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — impls span admin and ops in query types, plus
+# trait impls in query builder; the rule matches the type basename workspace-wide.
+type = "BatchOp"
+module = "crate"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — impls span api, session, interner_cache,
+# receipts, and visibility.
+type = "Client"
+module = "crate"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — private guard and its impl are colocated in request.
+type = "ScratchReturn"
+module = "crate::client::api::request"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — private guard and its impl are colocated in request.
+type = "RegistrationGuard"
+module = "crate::client::api::request"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — private guard and its impls are colocated in request.
+type = "WriteCancelGuard"
+module = "crate::client::api::request"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — logical child of state/session; this owner is
+# the planned physical location under server/infra, which the rule checks.
+type = "SessionStore"
+module = "crate::server::infra::session_store"
+
+[[owned_impl]]
+# owner: <FILE-HEADROOM-b> — impls live in tx_context and
+# support/core/tx_dependency_tracking, both under tx.
+type = "TxContext"
+module = "crate::tx"
