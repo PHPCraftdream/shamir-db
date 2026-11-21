@@ -54,6 +54,32 @@ impl TokenHttpClient {
         })
     }
 
+    /// [`Self::connect_once`] with an absolute deadline bounding ONLY the
+    /// TCP dial; `opts.connect_timeout` keeps its legacy meaning unchanged:
+    /// it caps the WHOLE establishment (TCP dial included) as an overall
+    /// relative limit, so the shorter of the two always wins and the
+    /// deadline never extends that cap. Use sequentially like
+    /// `connect_once`. cancel-safe: NO — a cancelled dial abandons the
+    /// sole connection attempt.
+    pub async fn connect_once_with_tcp_deadline(
+        opts: TokenHttpOptions,
+        tcp_deadline: tokio::time::Instant,
+    ) -> Result<Self, ClientError> {
+        let header = opts.token.authorization_header()?;
+        let transport = TokenTransport::connect_once_with_tcp_deadline(
+            &opts.endpoint,
+            header,
+            opts.connect_timeout,
+            opts.request_timeout,
+            Some(tcp_deadline),
+        )
+        .await?;
+        Ok(Self {
+            transport,
+            validate_ping_payload: true,
+        })
+    }
+
     /// cancel-safe: NO — a cancelled call may leave a request in flight.
     pub async fn ping(&self) -> Result<(), ClientError> {
         let reply = self.transport.get_ping().await?;

@@ -40,6 +40,10 @@ pub(in crate::shell_tests) struct SecureFixture {
     pub(in crate::shell_tests) shell: ShellFixture,
     pub(in crate::shell_tests) wss_addr: SocketAddr,
     pub(in crate::shell_tests) http_addr: SocketAddr,
+    /// A real native WSS listener serving a path the SDK never dials
+    /// (`/decoy/v1`): pointing a native-WSS profile at it provokes an
+    /// upgrade rejection BEFORE SCRAM (review item 3b).
+    pub(in crate::shell_tests) decoy_wss_addr: SocketAddr,
     pub(in crate::shell_tests) ca_path: PathBuf,
 }
 
@@ -76,9 +80,18 @@ fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
                     ..Default::default()
                 },
             },
+            ListenerConfig {
+                kind: ListenerKind::Ws,
+                addr: "127.0.0.1:0".into(),
+                profile: Some(ProfileKind::TlsExporter),
+                path: Some("/decoy/v1".into()),
+                kdf_override: None,
+                browser_origin_allowlist: vec![],
+                http: Default::default(),
+            },
         ]);
     });
-    let [.., Some(wss_addr), Some(http_addr)] = bound_addrs.as_slice() else {
+    let [.., Some(wss_addr), Some(http_addr), Some(decoy_wss_addr)] = bound_addrs.as_slice() else {
         panic!("secure fixture listeners did not bind");
     };
     let ca_path = profile_home_path(&shell).join("fixture-ca.pem");
@@ -87,10 +100,14 @@ fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
     std::fs::copy(cert_path, &ca_path).expect("copy fixture public certificate");
     shell.guard.note("wss_addr", wss_addr.to_string());
     shell.guard.note("http_addr", http_addr.to_string());
+    shell
+        .guard
+        .note("decoy_wss_addr", decoy_wss_addr.to_string());
     SecureFixture {
         shell,
         wss_addr: *wss_addr,
         http_addr: *http_addr,
+        decoy_wss_addr: *decoy_wss_addr,
         ca_path,
     }
 }
@@ -248,20 +265,26 @@ pub(in crate::shell_tests) fn set_acl_mode(
     }));
 }
 
-/// Run the token shell and scan both streams and the operator home for
-/// the token (including its secret suffix) and for unexpected history.
-pub(in crate::shell_tests) fn run_token_shell(
-    fixture: &ShellFixture,
-    token: &Zeroizing<String>,
-    args: &[&str],
-) -> ShellRun {
-    assert!(!token.is_empty(), "fixture token must not be empty");
-    let run = run_with_secret(fixture, token.clone(), true, args);
-    let suffix = token_secret_suffix(token);
-    assert!(
-        !run.contains_canary(token) && !run.contains_canary(suffix),
-        "token leaked in shell output"
-    );
+/// The meaningful suffix of a secret: the token's bearer tail after the
+/// final dot, else the last 8 bytes (a leaked prefix alone still shows the
+/// secret shape; the tail is the high-entropy part an echo would carry).
+pub(in crate::shell_tests) fn secret_suffix(secret: &str) -> &str {
+    if let Some((_, tail)) = secret.rsplit_once('.') {
+        if !tail.is_empty() {
+            return tail;
+        }
+    }
+    let mut cut = secret.len().saturating_sub(8);
+    while !secret.is_char_boundary(cut) {
+        cut += 1;
+    }
+    &secret[cut..]
+}
+
+/// Recursive post-run operator-home invariant (review item 6b): NO entry
+/// name may look like history, and EVERY file the shell created under the
+/// operator home is byte-scanned for every needle, whatever its name.
+pub(in crate::shell_tests) fn scan_operator_home(fixture: &ShellFixture, needles: &[&str]) {
     let mut dirs = vec![profile_home_path(fixture)];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).expect("scan operator home") {
@@ -280,21 +303,33 @@ pub(in crate::shell_tests) fn run_token_shell(
             } else {
                 assert!(kind.is_file(), "unexpected non-file in operator home");
                 let bytes = std::fs::read(entry.path()).expect("read operator file");
-                assert!(
-                    !contains(&bytes, token) && !contains(&bytes, suffix),
-                    "token leaked in operator home"
-                );
+                for needle in needles {
+                    assert!(
+                        !contains(&bytes, needle),
+                        "secret leaked in operator home file"
+                    );
+                }
             }
         }
     }
-    run
 }
 
-fn token_secret_suffix(token: &str) -> &str {
-    token.rsplit_once('.').map_or(
-        token,
-        |(_, tail)| if tail.is_empty() { token } else { tail },
-    )
+/// Run the token shell and scan both streams and the operator home for
+/// the token (including its secret suffix) and for unexpected history.
+pub(in crate::shell_tests) fn run_token_shell(
+    fixture: &ShellFixture,
+    token: &Zeroizing<String>,
+    args: &[&str],
+) -> ShellRun {
+    assert!(!token.is_empty(), "fixture token must not be empty");
+    let run = run_with_secret(fixture, token.clone(), true, args);
+    let suffix = secret_suffix(token);
+    assert!(
+        !run.contains_canary(token) && !run.contains_canary(suffix),
+        "token leaked in shell output"
+    );
+    scan_operator_home(fixture, &[token.as_str(), suffix]);
+    run
 }
 
 /// Run the real binary with a zeroizing, stdin-only secret. Arguments with
@@ -305,14 +340,26 @@ pub(in crate::shell_tests) fn run_with_secret(
     token_auth: bool,
     args: &[&str],
 ) -> ShellRun {
+    run_secret_process(fixture, Some(secret), token_auth, None, &[], args)
+}
+
+/// Generalized child shell run (review items 5 and 6c): optional stdin
+/// secret, optional child-only working directory and extra environment
+/// (never applied to this process), otherwise as [`run_with_secret`].
+pub(in crate::shell_tests) fn run_secret_process(
+    fixture: &ShellFixture,
+    secret: Option<Zeroizing<String>>,
+    token_auth: bool,
+    current_dir: Option<&Path>,
+    extra_env: &[(&'static str, String)],
+    args: &[&str],
+) -> ShellRun {
     fixture.guard.mark("shell: spawn");
     let (env_key, env_value) = profile_env(fixture);
-    let mut argv: Vec<String> = vec![
-        "shell".into(),
-        "--profile".into(),
-        PROFILE_NAME.into(),
-        "--secret-stdin".into(),
-    ];
+    let mut argv: Vec<String> = vec!["shell".into(), "--profile".into(), PROFILE_NAME.into()];
+    if secret.is_some() {
+        argv.push("--secret-stdin".into());
+    }
     if token_auth {
         argv.extend(["--auth".into(), "token".into()]);
     }
@@ -324,29 +371,29 @@ pub(in crate::shell_tests) fn run_with_secret(
         argv.push("--".into());
         argv.extend(args.iter().map(ToString::to_string));
     }
-    // An EMPTY `args` is a bare interactive probe: appending `--` there
-    // would flip the parser into command-consuming mode with nothing after it.
-    let needle = if token_auth {
-        token_secret_suffix(&secret)
-    } else {
-        secret.as_str()
-    };
+    // An EMPTY `args` with a secret is a bare interactive probe: appending
+    // `--` there would flip the parser into command-consuming mode with
+    // nothing after it.
+    // Env-source secrets must not leak into the assembled argv either.
     assert!(
         !argv.iter().any(|arg| {
-            (!needle.is_empty() && arg.contains(needle)) || arg.contains(fixture.canary.as_str())
+            secret.as_deref().is_some_and(|value| arg.contains(value))
+                || extra_env.iter().any(|(_, value)| arg.contains(value))
+                || arg.contains(fixture.canary.as_str())
         }),
         "fixture secret leaked into the assembled argv",
     );
     // The child's whole home is the isolated profile home: no state can
     // land in the real user home even under a regression.
     let home_dir = profile_home_path(fixture);
+    let current_dir = current_dir.map(Path::to_path_buf);
+    let extra_env = extra_env.to_vec();
 
     let outcome = fixture.rt.run(bound(SHELL_BOUND, async move {
         let mut command = server_command();
         command
             .args(&argv)
             .env(env_key, env_value)
-            .current_dir(&home_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -355,12 +402,28 @@ pub(in crate::shell_tests) fn run_with_secret(
         command.env("HOME", &home_dir);
         #[cfg(windows)]
         command.env("USERPROFILE", &home_dir);
+        command.current_dir(&home_dir);
+        if let Some(dir) = &current_dir {
+            command.current_dir(dir);
+        }
+        for (key, value) in &extra_env {
+            command.env(key, value);
+        }
         let mut child = command.spawn().expect("spawn shell child");
         // stdin-only; close the pipe for EOF. An early-exit refusal closes
         // the pipe first, so only `BrokenPipe` is tolerated downstream.
         if let Some(mut stdin) = child.stdin.take() {
-            write_secret_stdin(&mut stdin, secret.as_bytes()).await;
-            drop(stdin);
+            match &secret {
+                Some(secret) => {
+                    write_secret_stdin(&mut stdin, secret.as_bytes()).await;
+                }
+                None => {
+                    // No secret on stdin: close the pipe so an empty read
+                    // is EOF, not a hang. Early-exit refusals tolerate the
+                    // resulting `BrokenPipe` exactly as above.
+                    drop(stdin);
+                }
+            }
         }
         let output = child
             .wait_with_output()
@@ -380,9 +443,53 @@ pub(in crate::shell_tests) fn run_with_secret(
     }
 }
 
-/// Write the canary line to the child's stdin, then flush+shutdown.
-/// `ErrorKind::BrokenPipe` is accepted (early-exit refusal); every other
-/// error is a fixture bug and panics. The line is `Zeroizing`-scrubbed.
+/// One child command for THIS test binary running ONLY the named test
+/// (`--exact ... --nocapture`), so the spawn never recurses across the
+/// whole suite: every secret-bearing and home variable stripped, the
+/// fixture's isolated profile home applied as home and working directory,
+/// both output pipes captured (the child's stdout legitimately carries
+/// libtest framing), stdin piped for the caller to stage. `gate` selects
+/// the child entry (set to "1" by the caller).
+pub(in crate::shell_tests) fn scripted_child_command(
+    fixture: &ShellFixture,
+    gate: &'static str,
+    exact_test: &str,
+) -> tokio::process::Command {
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("test binary path"));
+    command
+        .args(["--exact", exact_test, "--nocapture"])
+        .env(gate, "1");
+    for var in [
+        "SHAMIR_SHELL_PASSWORD",
+        "SHAMIR_SHELL_TOKEN",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+    ] {
+        command.env_remove(var);
+    }
+    let (env_key, env_value) = profile_env(fixture);
+    let home_dir = profile_home_path(fixture);
+    command.env(env_key, env_value);
+    #[cfg(unix)]
+    command.env("HOME", &home_dir);
+    #[cfg(windows)]
+    command.env("USERPROFILE", &home_dir);
+    command
+        .current_dir(&home_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+/// Write one full stdin payload (secret line + script lines) to the child,
+/// then flush+shutdown. `ErrorKind::BrokenPipe` is accepted (early-exit
+/// refusal); every other error is a fixture bug and panics. The payload is
+/// `Zeroizing`-scrubbed.
 async fn write_secret_stdin(stdin: &mut tokio::process::ChildStdin, secret: &[u8]) {
     // Preallocated (secret + LF), zeroized so the assembled line is
     // scrubbed on drop.

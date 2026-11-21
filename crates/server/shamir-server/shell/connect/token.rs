@@ -3,6 +3,7 @@
 #[cfg(not(unix))]
 use std::fs;
 use std::fs::File;
+use std::future::Future;
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
@@ -25,6 +26,47 @@ use crate::shell::output::ShellError;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TOTAL: Duration = Duration::from_secs(30);
 const MAX_CA_BYTES: u64 = 1024 * 1024;
+
+/// §3.2 phase budgets for one token connect, both ABSOLUTE from the start
+/// (matching the SCRAM outer horizon `start + 30 s`; the total cap never
+/// widens): DNS + TCP dial by `start + 10 s`, TLS + authentication — WSS
+/// upgrade + bind, or HTTPS establishment with the folded explicit
+/// `connect` Ping — by `start + 30 s`. A late dial consumes the TLS/auth
+/// budget, never the reverse. Per-command requests stay on the 60 s budget.
+pub(in crate::shell::connect) struct ConnectBudget {
+    start: Instant,
+}
+
+impl ConnectBudget {
+    pub(in crate::shell::connect) fn start(now: Instant) -> Self {
+        Self { start: now }
+    }
+
+    pub(in crate::shell::connect) fn dial_deadline(&self) -> Instant {
+        self.start + DIAL_TIMEOUT
+    }
+
+    /// TLS/auth horizon, absolute `start + 30 s` like the SCRAM connector.
+    pub(in crate::shell::connect) fn auth_deadline(&self) -> Instant {
+        self.start + CONNECT_TOTAL
+    }
+
+    /// Bounds ONE TLS/auth step (REST establishment, the folded explicit
+    /// `connect` Ping) by the shared absolute `start + 30 s` horizon — no
+    /// fresh per-step budget: expiry is the typed connection failure.
+    pub(in crate::shell::connect) async fn authenticate<F, T>(
+        &self,
+        step: F,
+    ) -> Result<T, ShellError>
+    where
+        F: Future<Output = Result<T, ClientError>>,
+    {
+        timeout_at(self.auth_deadline(), step)
+            .await
+            .map_err(|_| ShellError::Connection)?
+            .map_err(request_error)
+    }
+}
 
 /// Shell-only dispatch; the parser gates commands before using this client.
 pub(in crate::shell) enum SessionClient {
@@ -87,16 +129,6 @@ impl SessionClient {
             Self::TokenRest(session) => session.client.execute(db, batch).await,
         }
     }
-
-    /// Authenticates an explicit REST `connect`. Batch commands should send
-    /// only their own request, and WSS has already authenticated at upgrade.
-    /// cancel-safe: NO — a cancelled Ping may remain in flight; drop the session.
-    pub(in crate::shell) async fn verify_rest(&self) -> Result<(), ClientError> {
-        match self {
-            Self::TokenRest(session) => session.client.ping().await,
-            Self::Scram(_) | Self::TokenWs(_) => Ok(()),
-        }
-    }
 }
 
 // Only called on catalogue JSON already depth-bounded by output::value.
@@ -136,7 +168,18 @@ pub(in crate::shell) fn prepare_token(profile: &Profile) -> Result<TokenConnecti
     }
     let (host, port) = profile.tls_address()?;
     let trust = match profile.ca_path.as_deref() {
-        Some(path) => read_ca(path)?,
+        Some(path) => {
+            // A relative trust-anchor path would be resolved against the
+            // PROCESS working directory, so the same protected profile
+            // could select a different CA depending on where the shell was
+            // started. The design is silent on relative `ca_path`; the
+            // narrow safe choice is refusal with the existing typed
+            // profile error (guide wording to follow out of scope here).
+            if path.is_relative() {
+                return Err(ShellError::InvalidProfile);
+            }
+            read_ca(path)?
+        }
         None => TokenTrust::webpki_roots(),
     };
     Ok(TokenConnection {
@@ -150,9 +193,12 @@ pub(in crate::shell) fn prepare_token(profile: &Profile) -> Result<TokenConnecti
 
 impl TokenConnection {
     /// cancel-safe: NO — an upgrade may have reached the peer; abandon the dial.
+    /// `explicit_auth` probes an explicit REST `connect` with one Ping inside
+    /// the same auth horizon; an implicit dial sends only its own command.
     pub(in crate::shell) async fn connect(
         self,
         secret: Zeroizing<Vec<u8>>,
+        explicit_auth: bool,
     ) -> Result<SessionClient, ShellError> {
         let text = std::str::from_utf8(&secret).map_err(|_| ShellError::Authentication)?;
         // ApiToken::new takes ownership of the String in order to zeroize it.
@@ -160,8 +206,8 @@ impl TokenConnection {
         let credential = Zeroizing::new(text.to_owned());
         drop(secret);
 
-        let start = Instant::now();
-        let dial_deadline = start + DIAL_TIMEOUT;
+        let budget = ConnectBudget::start(Instant::now());
+        let dial_deadline = budget.dial_deadline();
         let addr = timeout_at(
             dial_deadline,
             tokio::net::lookup_host((self.host.as_str(), self.port)),
@@ -173,29 +219,66 @@ impl TokenConnection {
         .ok_or(ShellError::Connection)?;
         let endpoint = TokenEndpoint::https(addr, self.sni.unwrap_or(self.host), self.trust);
         let dial_remaining = Some(dial_deadline.saturating_duration_since(Instant::now()));
+        // TLS + auth share the single absolute start + 30 s horizon (SCRAM
+        // outer horizon; a late dial consumes it — never the reverse).
+        let auth_remaining = budget
+            .auth_deadline()
+            .saturating_duration_since(Instant::now());
         if self.wss {
+            // SDK WSS: `connect_timeout` bounds only TCP; `handshake_timeout`
+            // bounds TLS + upgrade + bind; the horizon backstops. The 408-
+            // before-channel WSS classification needs the raw ClientError,
+            // so this branch stays on the inline horizon bound.
             let opts = TokenWsOptions::new(endpoint, token)
                 .with_connect_timeout(dial_remaining)
+                .with_handshake_timeout(Some(auth_remaining))
                 .with_request_timeout(Some(REQUEST_TIMEOUT));
-            timeout_at(start + CONNECT_TOTAL, Client::connect_token_ws(opts))
+            timeout_at(budget.auth_deadline(), Client::connect_token_ws(opts))
                 .await
                 .map_err(|_| ShellError::Connection)?
                 .map(|client| SessionClient::TokenWs(GuardedTokenClient { credential, client }))
-                .map_err(request_error)
+                .map_err(wss_connect_error)
         } else {
+            // REST: TCP gets the 10 s dial deadline; establishment and the
+            // optional explicit `connect` Ping share the single absolute
+            // start + 30 s horizon in ONE step through `authenticate` (a
+            // late dial consumes it — never the reverse, no fresh
+            // per-step budget).
             let opts = TokenHttpOptions::new(endpoint, token)
-                .with_connect_timeout(dial_remaining)
+                .with_connect_timeout(Some(auth_remaining))
                 .with_request_timeout(Some(REQUEST_TIMEOUT));
-            timeout_at(dial_deadline, TokenHttpClient::connect_once(opts))
+            budget
+                .authenticate(async {
+                    let client =
+                        TokenHttpClient::connect_once_with_tcp_deadline(opts, dial_deadline)
+                            .await?;
+                    if explicit_auth {
+                        client.ping().await?;
+                    }
+                    Ok(client)
+                })
                 .await
-                .map_err(|_| ShellError::Connection)?
                 .map(|client| {
                     SessionClient::TokenRest(Box::new(GuardedTokenClient { credential, client }))
                 })
-                .map_err(request_error)
         }
     }
 }
+
+/// A WSS upgrade answers HTTP 408 BEFORE any channel exists: a connection
+/// failure; the REST 408 classifier applies only after a request was sent.
+fn wss_connect_error(error: ClientError) -> ShellError {
+    match error {
+        // A WSS upgrade answers HTTP 408 only BEFORE any channel exists,
+        // so every 408 here is a connection failure.
+        ClientError::Http { status: 408, .. } => ShellError::Connection,
+        other => request_error(other),
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/token_deadlines.rs"]
+mod token_deadlines;
 
 fn read_ca(path: &Path) -> Result<TokenTrust, ShellError> {
     // The operator chooses this trust source in a verified profile. Reject

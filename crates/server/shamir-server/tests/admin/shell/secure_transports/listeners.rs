@@ -1,7 +1,5 @@
 //! R5 PR2 acceptance against the real listener and production shell binary.
 
-use std::io::Cursor;
-use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,85 +13,20 @@ use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use zeroize::Zeroizing;
 
-use crate::shell::output::ShellError;
-use crate::shell::parser::run_scripted;
-use crate::shell::terminal::secret::{HiddenLineSession, Terminal};
-
-use super::harness::{
-    overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellRun, DB_NAME, FN_NAME,
-    INDEXED_TABLE, INDEX_NAME, INDEX_ODD_NAME, PLAIN_TABLE, PROFILE_NAME, REPO_NAME, SCHEMA_TABLE,
+use crate::shell_tests::harness::{
+    overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellFixture, ShellRun, DB_NAME,
+    FN_NAME, INDEXED_TABLE, INDEX_NAME, INDEX_ODD_NAME, PLAIN_TABLE, REPO_NAME, SCHEMA_TABLE,
     SHELL_USER,
 };
-use super::secure_fixture::{
+use crate::shell_tests::secure_fixture::{
     boot_secure, boot_secure_root_list, provision_token, revoke_fixture_token, run_token_shell,
     run_with_secret, set_acl_mode, write_secure_profile, SecureFixture,
 };
 
-fn assert_clean(run: &ShellRun, secret: &str) {
-    assert!(
-        !run.contains_canary(secret),
-        "secret leaked onto a child stream"
-    );
-    for stream in [&run.stdout, &run.stderr] {
-        assert!(
-            stream
-                .iter()
-                .all(|&byte| !matches!(byte, b'\t' | 0x07 | 0x1b)),
-            "unexpected raw TAB, BEL or ESC on a child stream"
-        );
-    }
-}
-
-fn record(run: &ShellRun, command: &str) -> Value {
-    let line = run
-        .stdout
-        .strip_suffix(b"\n")
-        .expect("LF-terminated stdout");
-    assert!(!line.contains(&b'\n'), "expected a single stdout record");
-    let value: Value = serde_json::from_slice(line).expect("valid JSON record");
-    assert!(value["version"].as_u64() == Some(1), "expected v1");
-    assert!(
-        value["command"].as_str() == Some(command),
-        "wrong command ID"
-    );
-    value
-}
-
-fn result(run: &ShellRun, command: &str, op: Option<&str>) -> Value {
-    assert_eq!(run.exit_code, 0, "{command}: expected success");
-    let value = record(run, command);
-    assert!(value["kind"].as_str() == Some("result"), "expected result");
-    assert!(
-        value.get("op").is_some_and(|value| match op {
-            Some(name) => value.as_str() == Some(name),
-            None => value.is_null(),
-        }),
-        "wrong op"
-    );
-    assert!(
-        value.get("node").is_some_and(Value::is_null),
-        "unexpected node"
-    );
-    assert!(value.get("code").is_none() && value.get("message").is_none());
-    assert!(!value["data"].is_null(), "missing result data");
-    value
-}
-
-fn error(run: &ShellRun, command: &str, exit: i32, code: &str, message: &str) {
-    assert_eq!(run.exit_code, exit, "{command}: expected {code}");
-    let value = record(run, command);
-    assert!(value["kind"].as_str() == Some("error"), "expected error");
-    assert!(value["code"].as_str() == Some(code), "wrong error code");
-    assert!(
-        value["message"].as_str() == Some(message),
-        "wrong fixed message"
-    );
-    assert!(value.get("data").is_some_and(Value::is_null));
-    assert!(
-        run.stderr.is_empty(),
-        "unexpected diagnostics in default batch mode"
-    );
-}
+use super::capture::{
+    assert_clean, assert_member, error, result, scripted_child, CONNECT_FAILURE, DENIED,
+    SERVER_FAILURE, TOKEN_SUBSET,
+};
 
 fn ping_and_connect(run: &impl Fn(&[&str]) -> ShellRun) {
     let connected = result(&run(&["connect"]), "connect", None);
@@ -104,14 +37,6 @@ fn ping_and_connect(run: &impl Fn(&[&str]) -> ShellRun) {
 fn db_list(run: &impl Fn(&[&str]) -> ShellRun) {
     let value = result(&run(&["db", "list"]), "db list", Some("List"));
     assert_member(&value["data"]["databases"], DB_NAME);
-}
-
-fn assert_member(items: &Value, member: &str) {
-    let items = items.as_array().expect("expected catalogue array");
-    assert!(
-        items.iter().any(|item| item.as_str() == Some(member)),
-        "missing fixture member"
-    );
 }
 
 fn shared_catalogue(run: &impl Fn(&[&str]) -> ShellRun) {
@@ -208,11 +133,6 @@ fn repo_description(run: &impl Fn(&[&str]) -> ShellRun) {
 }
 
 const MISSING_REPO: &str = "missing_repo_reflection_marker";
-const DENIED: &str = "permission denied by the server";
-const SERVER_FAILURE: &str = "the operation failed on the server";
-const CONNECT_FAILURE: &str = "connection to the server failed";
-const TOKEN_SUBSET: &str =
-    "token sessions expose only the read-only shell subset; log in with SCRAM for this command";
 
 #[test]
 fn shell_secure_native_wss_scram_catalogue() {
@@ -275,7 +195,7 @@ fn shell_secure_native_wss_scram_reflection_and_pin_refusal() {
         !missing.contains_canary(MISSING_REPO),
         "opaque peer error reflected"
     );
-    assert_human_reflection(&profile, &shell.canary);
+    assert_human_reflection(&fixture.shell, &fixture.shell.canary);
 
     let profile_text = std::fs::read_to_string(&profile).expect("read pinned profile");
     let bad_pin = profile_text.replacen(&shell.pin_hex(), &"00".repeat(32), 1);
@@ -358,7 +278,7 @@ fn shell_secure_https_and_token_wss_catalogue() {
         };
         ping_and_connect(&scoped_run);
         shared_catalogue(&scoped_run);
-        assert_token_repl(&profile, &scoped);
+        assert_token_repl(&fixture.shell, scoped.clone());
         // Same command, same principal, same routing DB. The scoped token
         // hits the perimeter denial; the unscoped token reaches Root ACL.
         error(
@@ -531,28 +451,11 @@ fn assert_server_db_denial(
     });
 }
 
-/// The existing scripted seam drives the production REPL without a platform PTY.
-struct PromptSecret(Zeroizing<Vec<u8>>);
-
-impl Terminal for PromptSecret {
-    fn begin_hidden_read(&self) -> Result<Box<dyn HiddenLineSession + '_>, ShellError> {
-        Ok(Box::new(PromptSecret(self.0.clone())))
-    }
-}
-
-impl HiddenLineSession for PromptSecret {
-    fn read_line(&mut self) -> Result<Zeroizing<Vec<u8>>, ShellError> {
-        Ok(std::mem::take(&mut self.0))
-    }
-
-    fn restore(self: Box<Self>) -> Result<(), ShellError> {
-        Ok(())
-    }
-}
-
-fn assert_human_reflection(profile: &Path, password: &str) {
-    let script = format!("index list {REPO_NAME} {INDEXED_TABLE}\nrepo describe {MISSING_REPO}\n");
-    let run = scripted_output(profile, password, script);
+fn assert_human_reflection(shell: &ShellFixture, password: &Zeroizing<String>) {
+    let script =
+        format!("index list {REPO_NAME} {INDEXED_TABLE}\nrepo describe {MISSING_REPO}\nquit\n");
+    let run = scripted_child(shell, password, &script);
+    assert_eq!(run.exit_code, 0, "scripted REPL reaches quit");
     assert!(
         !run.contains_canary(MISSING_REPO),
         "opaque peer error in human output"
@@ -568,9 +471,10 @@ fn assert_human_reflection(profile: &Path, password: &str) {
     );
 }
 
-fn assert_token_repl(profile: &Path, token: &str) {
-    let script = format!("connect --auth token\nping\nrepo describe {REPO_NAME}\nping\n");
-    let run = scripted_output(profile, token, script);
+fn assert_token_repl(shell: &ShellFixture, token: Zeroizing<String>) {
+    let script = format!("connect --auth token\nping\nrepo describe {REPO_NAME}\nping\nquit\n");
+    let run = scripted_child(shell, &token, &script);
+    assert_eq!(run.exit_code, 0, "scripted REPL reaches quit");
     let (_, suffix) = token.rsplit_once('.').expect("issued bearer format");
     assert!(!run.contains_canary(suffix), "token suffix in human output");
     let human = String::from_utf8_lossy(&run.stderr);
@@ -583,24 +487,4 @@ fn assert_token_repl(profile: &Path, token: &str) {
         "expected token connect, ping, refusal, and another ping in that order"
     );
     assert!(human.contains("token_request_denied") && human.contains(TOKEN_SUBSET));
-}
-
-fn scripted_output(profile: &Path, secret: &str, script: String) -> ShellRun {
-    let terminal = PromptSecret(Zeroizing::new(secret.as_bytes().to_vec()));
-    let mut output = Vec::new();
-    let exit = run_scripted(
-        ["-q".into(), "--profile".into(), PROFILE_NAME.into()],
-        &mut Cursor::new(script),
-        &mut output,
-        &terminal,
-        Some(profile.parent().expect("fixture profiles root")),
-    );
-    assert_eq!(exit, 0, "scripted REPL reaches EOF");
-    let run = ShellRun {
-        exit_code: i32::from(exit),
-        stdout: Vec::new(),
-        stderr: output,
-    };
-    assert_clean(&run, secret);
-    run
 }
