@@ -8,3 +8,4 @@ mod fail_closed_tests;
 mod identity_tests;
 mod plan_tests;
 mod status_tests;
+mod target_fence_tests;

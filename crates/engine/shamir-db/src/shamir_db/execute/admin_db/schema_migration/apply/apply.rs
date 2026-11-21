@@ -131,14 +131,46 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
 
-    // (5) Already-applied ordinal: identical body → durable no-op result;
-    // changed body → refusal without any write.
+    // (5) Already-applied ordinal: identical body → stored result (after
+    // clearing a matching Applied-tail fence if necessary); changed body → refusal.
     if let Some(applied) = history
         .applied
         .iter()
         .find(|event| event.migration.ordinal == submission.metadata.ordinal)
     {
         if applied.migration == submission.metadata && applied.checksum == recomputed {
+            if history.events.last().is_some_and(|event| {
+                event.kind == JournalEventKind::Applied
+                    && event.fence_generation == applied.fence_generation
+                    && event.migration == applied.migration
+                    && event.checksum == applied.checksum
+            }) {
+                let gate = {
+                    let _control = executor.shamir.lock_replication_control().await;
+                    validate_serving_identity(executor, &db, serving)?;
+                    executor
+                        .shamir
+                        .reserve_applied_fence_release(serving, applied.fence_generation)
+                };
+                if let Some(mut gate) = gate {
+                    gate.hold(applied.fence_generation);
+                    let context =
+                        SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+                    Box::pin(store.release_schema_migration_fence(
+                        serving,
+                        applied.fence_generation,
+                        applied.migration.clone(),
+                        applied.checksum,
+                        &context,
+                    ))
+                    .await
+                    .map_err(|error| super::apply_journal::durability_error(error, true))?;
+                    gate.mark_succeeded();
+                }
+            }
+            // A visible FenceReleased is not proof its durability tail finished.
+            // Do not clear a retained in-doubt marker on this no-op; reopen
+            // reconciles it against the recovered journal.
             return Ok(applied_value(
                 request.protocol_version,
                 submission.metadata.id.clone(),
@@ -164,10 +196,8 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // mismatch is refused with the fresh-path stable codes, writing nothing.
     let mut resume = false;
     if let Some(event) = history.unresolved.last() {
-        if executor
-            .shamir
-            .schema_migration_gate_generation(&db)
-            .is_some()
+        if executor.shamir.schema_migration_refusal_code(serving)
+            == Some("schema_migration_in_progress")
         {
             return Err(coded(
                 "schema_migration_in_progress",
@@ -344,16 +374,6 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // acquire also re-validates id/ordinal/checksum against the journal and
     // persists+syncs the `started` event WITH the complete checksum-verified
     // body before any effect (§4.1 runner sequence).
-    let Some(gate) = executor.shamir.reserve_schema_migration_gate(&db) else {
-        return Err(coded(
-            "schema_migration_in_progress",
-            format!(
-                "an application-schema migration already holds the maintenance fence \
-                 for database '{db}'"
-            ),
-        ));
-    };
-    let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
     // Recovery CASes the fence at the CURRENT durable generation, i.e. the
     // generation of the latest journal event (the control-record validation
     // pins control.generation to exactly that value).
@@ -365,20 +385,35 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     } else {
         request.expected_fence_generation
     };
-    let generation = store
-        .acquire_schema_migration_fence(
-            serving,
-            expected_generation,
-            submission.metadata.clone(),
-            body.clone(),
-            resume,
-            &context,
-        )
-        .await
-        .map_err(map_fence_error)?;
+    let mut gate = {
+        let _control = executor.shamir.lock_replication_control().await;
+        validate_serving_identity(executor, &db, serving)?;
+        executor
+            .shamir
+            .reserve_schema_migration_run(serving, resume.then_some(expected_generation))
+            .map_err(|code| {
+                coded(
+                    code,
+                    format!(
+                        "an application-schema migration already holds the maintenance fence \
+                         for database '{db}'"
+                    ),
+                )
+            })?
+    };
+    let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+    let generation = Box::pin(store.acquire_schema_migration_fence_tracked(
+        (serving, expected_generation),
+        submission.metadata.clone(),
+        body.clone(),
+        resume,
+        &context,
+        &mut |generation| gate.observe_acquire_commit(generation),
+    ))
+    .await
+    .map_err(map_fence_error)?;
 
-    // Fence owned durably: the runner holds the in-process gate under an
-    // RAII guard so EVERY exit path releases it.
+    // Fence owned durably: the runner promotes the reservation before its first await.
     Box::pin(run_operations(
         FencedRun {
             executor,
@@ -394,6 +429,21 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         gate,
     ))
     .await
+}
+
+fn validate_serving_identity(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    serving: DatabaseIdentity,
+) -> Result<(), BatchError> {
+    if executor.shamir.database_identity_for_fence(db) == Some(serving) {
+        Ok(())
+    } else {
+        Err(coded(
+            "schema_migration_identity_mismatch",
+            format!("apply targets database identity {serving} but the serving database changed"),
+        ))
+    }
 }
 
 /// Convert an admitted migration operation to its `BatchOp` shape for the

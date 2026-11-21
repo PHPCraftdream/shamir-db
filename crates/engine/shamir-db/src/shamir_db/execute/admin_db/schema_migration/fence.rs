@@ -1,46 +1,15 @@
 //! In-process application-schema maintenance fence (release-1 R1c step 2b-3a,
 //! design §4.3/§4.5).
 //!
-//! While a migration owns the durable fence generation for a database, the
-//! engine also holds an IN-PROCESS per-database gate here: a
-//! `DashMap<db name, held generation>` on [`ShamirDb`]. The batch execution entries
-//! consult it through the synchronous [`maintenance_fence_refusal`] helper:
-//! from the moment the gate is RESERVED (before the durable fence CAS), any
-//! batch containing a write, a DDL
-//! operation, or a stored-procedure call (`CallOp` — guest code may write
-//! through the direct intrinsics) is refused with the stable
-//! `schema_migration_in_progress` code; reads and the `ApplicationSchema`
-//! operations themselves pass (apply enforces its own admission against the
-//! durable journal). The migration's own DDL handlers are invoked directly
-//! and do not traverse the batch entries, so they are unaffected.
-//!
-//! R1c step 2b-3b: the fence survives restart. At database open,
-//! `init_inner` seeds an IN-DOUBT marker (`schema_migration_gate_in_doubt`)
-//! for every database whose ordinary journal read shows the control record
-//! still OWNS the fence and the journal is unresolved — i.e. a runner
-//! crashed or the server restarted before resume. Any corrupt or
-//! unattributable durable journal row fails the WHOLE startup closed with
-//! the typed journal error instead (no per-database quarantine). While only
-//! the marker is present, the same write/DDL/`CallOp` refusals carry
-//! `schema_migration_in_doubt`; a resumed runner's `hold` clears the marker
-//! and installs the live gate (`in_progress`), and its RAII release removes
-//! it as before. The marker is in-memory only: it never widens the durable
-//! contract.
-//!
-//! Release is NOT a single guaranteed action on every apply exit path:
-//! dropping the guard before `hold` merely CANCELS the in-process
-//! reservation (it does not undo a durable transition that may already
-//! have committed); a successful run releases the live gate; a run that
-//! exits after `hold` with the fence still OWNED and the journal unresolved
-//! leaves the gate as a KNOWN in-doubt marker (`mark_schema_migration_gate_in_doubt`).
-//! The durable fence generation itself is released through the step-2a
-//! `SystemStore` API only after the `applied` event is durable.
-//!
-//! The engine-side primary-only guard for apply also lives here: the server
-//! lowers its node mode once at launch (`set_node_read_only`); a read-only
-//! (follower/replica) engine refuses application-schema apply with
-//! `schema_migration_follower_read_only` even if a future embedder bypasses
-//! the server gate.
+//! One in-memory state per stable database identity. A migration reserves
+//! before the durable CAS and holds the live generation after it succeeds.
+//! A verified resume atomically replaces an in-doubt marker with a
+//! reservation and restores the marker if it exits before attempting commit.
+//! Once commit may publish, drop leaves the attempted generation in doubt.
+//! Cancellation may leave no matching journal entry; in that case restart
+//! and let journal replay establish ownership. A live read is not proof of abort.
+//! A live runner releases on durable success or leaves its generation in
+//! doubt on failure. Lifecycle mutations reserve only vacant identities.
 
 use std::sync::atomic::Ordering;
 
@@ -52,14 +21,10 @@ use crate::shamir_db::shamir_db::ShamirDb;
 use crate::shamir_db::system_store::DatabaseIdentity;
 use crate::DbResult;
 
+use super::super::admin_dispatch::explicit_migration_target;
+
 /// Stable §5.3 code for a fence held by a live runner of this process.
 const IN_PROGRESS: &str = "schema_migration_in_progress";
-
-/// Generation placeholder of a gate that is RESERVED (admission passed, the
-/// durable fence CAS is still in flight): the gate is visible to every other
-/// applier and to the batch entries from the reservation on, so no applier can
-/// observe a durably started migration with no in-process gate.
-const GATE_PENDING: u64 = u64::MAX;
 
 /// Stable §5.3 code for a fence that is still durably OWNED but has NO live
 /// runner in this process (R1c step 2b-3b: the runner crashed or the server
@@ -93,6 +58,24 @@ pub(in crate::shamir_db) fn schema_migration_lifecycle_refusal_message(
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::shamir_db) enum FenceState {
+    Reserved { previous_in_doubt: Option<u64> },
+    Live(u64),
+    InDoubt(u64),
+    Lifecycle,
+}
+
+impl FenceState {
+    fn refusal_code(self) -> Option<&'static str> {
+        match self {
+            Self::Reserved { .. } | Self::Live(_) => Some(IN_PROGRESS),
+            Self::InDoubt(_) => Some(IN_DOUBT),
+            Self::Lifecycle => None,
+        }
+    }
+}
+
 impl ShamirDb {
     /// §4.5: lower the server's node mode into the engine. Called once at
     /// server launch; `true` marks this engine a follower/read replica, and
@@ -107,173 +90,270 @@ impl ShamirDb {
         self.node_read_only.load(Ordering::Relaxed)
     }
 
-    /// The generation of the fence currently held in-process for `db`, if any.
-    pub(in crate::shamir_db) fn schema_migration_gate_generation(&self, db: &str) -> Option<u64> {
-        self.schema_migration_gate.get(db).map(|entry| *entry)
-    }
-
-    /// Reserve the in-process gate for `db` BEFORE the durable fence CAS:
-    /// atomic insert-if-absent, so exactly one applier of this process gets
-    /// the reservation and every other one is refused with
-    /// `schema_migration_in_progress` (a durable `started` row is therefore
-    /// never visible without its in-process gate, and a concurrent applier
-    /// can never take over a live runner as if it had crashed). The returned
-    /// guard cancels the reservation if dropped before
-    /// [`SchemaMigrationGateGuard::hold`].
-    pub(in crate::shamir_db) fn reserve_schema_migration_gate(
+    pub(in crate::shamir_db) fn database_identity_for_fence(
         &self,
         db: &str,
-    ) -> Option<SchemaMigrationGateGuard<'_>> {
-        match self.schema_migration_gate.entry(db.to_string()) {
-            Entry::Occupied(_) => None,
+    ) -> Option<DatabaseIdentity> {
+        self.database_identities.get(db).map(|entry| *entry)
+    }
+
+    fn fence_state(&self, id: DatabaseIdentity) -> Option<FenceState> {
+        self.schema_migration_fences.get(&id).map(|entry| *entry)
+    }
+
+    pub(in crate::shamir_db) fn schema_migration_refusal_code(
+        &self,
+        id: DatabaseIdentity,
+    ) -> Option<&'static str> {
+        self.fence_state(id)?.refusal_code()
+    }
+
+    /// Reserve a resolved identity for an explicit-target mutation. Classify
+    /// a refusal from the same entry that rejected the reservation.
+    pub(in crate::shamir_db) fn reserve_admin_migration_target(
+        &self,
+        id: DatabaseIdentity,
+    ) -> Result<SchemaMigrationLifecycleGuard<'_>, Option<&'static str>> {
+        match self.schema_migration_fences.entry(id) {
             Entry::Vacant(slot) => {
-                slot.insert(GATE_PENDING);
-                Some(SchemaMigrationGateGuard {
-                    shamir: self,
-                    db: db.to_string(),
-                    generation: None,
-                    succeeded: false,
-                })
+                self.publish_fence_slot();
+                slot.insert(FenceState::Lifecycle);
+                Ok(SchemaMigrationLifecycleGuard { shamir: self, id })
             }
+            Entry::Occupied(slot) => Err(slot.get().refusal_code()),
         }
     }
 
-    /// Mark `db` as fenced in-process under `generation`. Only the winner of
-    /// the durable fence CAS (step-2a `acquire_schema_migration_fence`, fresh
-    /// or recovery) reaches this, so the blind insert cannot oversubscribe
-    /// the gate. It also clears any open-time in-doubt marker: a resumed
-    /// runner converts the in-doubt fence into a live one.
-    pub(in crate::shamir_db) fn hold_schema_migration_gate(&self, db: &str, generation: u64) {
-        self.schema_migration_gate_in_doubt.remove(db);
-        self.schema_migration_gate
-            .insert(db.to_string(), generation);
+    #[cfg(test)]
+    pub(in crate::shamir_db) fn reserve_schema_migration_lifecycle(
+        &self,
+        id: DatabaseIdentity,
+    ) -> Option<SchemaMigrationLifecycleGuard<'_>> {
+        self.reserve_admin_migration_target(id).ok()
     }
 
-    /// The generation of the fence the open-time rebuild recorded as durably
-    /// OWNED with an unresolved journal entry — i.e. in doubt, no runner.
-    /// Absent once a resumed runner has held the gate. Test-only reader.
+    pub(in crate::shamir_db) fn reserve_schema_migration_run(
+        &self,
+        id: DatabaseIdentity,
+        expected_resume_generation: Option<u64>,
+    ) -> Result<SchemaMigrationGateGuard<'_>, &'static str> {
+        let previous_in_doubt = match self.schema_migration_fences.entry(id) {
+            Entry::Vacant(slot) => {
+                self.publish_fence_slot();
+                slot.insert(FenceState::Reserved {
+                    previous_in_doubt: None,
+                });
+                None
+            }
+            Entry::Occupied(mut slot) => match *slot.get() {
+                FenceState::InDoubt(generation)
+                    if expected_resume_generation
+                        .is_some_and(|expected| expected >= generation) =>
+                {
+                    let previous_in_doubt = Some(generation);
+                    slot.insert(FenceState::Reserved { previous_in_doubt });
+                    previous_in_doubt
+                }
+                state => return Err(state.refusal_code().unwrap_or(IN_PROGRESS)),
+            },
+        };
+        Ok(SchemaMigrationGateGuard {
+            shamir: self,
+            id,
+            state: FenceState::Reserved { previous_in_doubt },
+            possibly_published: None,
+            succeeded: false,
+        })
+    }
+
+    pub(in crate::shamir_db) fn reserve_applied_fence_release(
+        &self,
+        id: DatabaseIdentity,
+        generation: u64,
+    ) -> Option<SchemaMigrationGateGuard<'_>> {
+        let Entry::Occupied(mut slot) = self.schema_migration_fences.entry(id) else {
+            return None;
+        };
+        if *slot.get() != FenceState::InDoubt(generation) {
+            return None;
+        }
+        let state = FenceState::Reserved {
+            previous_in_doubt: Some(generation),
+        };
+        slot.insert(state);
+        Some(SchemaMigrationGateGuard {
+            shamir: self,
+            id,
+            state,
+            possibly_published: None,
+            succeeded: false,
+        })
+    }
+
+    fn insert_fence_if_vacant(&self, id: DatabaseIdentity, state: FenceState) -> bool {
+        let Entry::Vacant(slot) = self.schema_migration_fences.entry(id) else {
+            return false;
+        };
+        self.publish_fence_slot();
+        slot.insert(state);
+        true
+    }
+
+    fn publish_fence_slot(&self) {
+        // Increment under the shard lock before publishing; decrement after removal.
+        // Zero cannot hide a published entry, even with transitions on different shards.
+        self.schema_migration_fence_count
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn transition_fence(
+        &self,
+        id: DatabaseIdentity,
+        from: FenceState,
+        to: Option<FenceState>,
+    ) -> bool {
+        let Entry::Occupied(mut slot) = self.schema_migration_fences.entry(id) else {
+            return false;
+        };
+        if *slot.get() != from {
+            return false;
+        }
+        if let Some(state) = to {
+            slot.insert(state);
+        } else {
+            slot.remove();
+            self.schema_migration_fence_count
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+        true
+    }
+
+    fn in_doubt_generation(&self, db: &str) -> Option<u64> {
+        match self.fence_state(self.database_identity_for_fence(db)?)? {
+            FenceState::InDoubt(generation) => Some(generation),
+            FenceState::Reserved { previous_in_doubt } => previous_in_doubt,
+            FenceState::Live(_) | FenceState::Lifecycle => None,
+        }
+    }
+
+    pub(in crate::shamir_db) fn schema_migration_in_doubt(&self, db: &str) -> bool {
+        self.in_doubt_generation(db).is_some()
+    }
+
+    /// Preliminary migration-only refusal; external DDL conflicts are
+    /// classified by the authoritative reservation, not by this observer.
+    pub(in crate::shamir_db) fn schema_migration_lifecycle_blocked(&self, db: &str) -> bool {
+        self.database_identity_for_fence(db)
+            .and_then(|id| self.schema_migration_refusal_code(id))
+            .is_some()
+    }
+
+    #[cfg(test)]
+    pub(in crate::shamir_db) fn schema_migration_gate_generation(&self, db: &str) -> Option<u64> {
+        match self.fence_state(self.database_identity_for_fence(db)?)? {
+            FenceState::Reserved { .. } => Some(u64::MAX),
+            FenceState::Live(generation) => Some(generation),
+            FenceState::InDoubt(_) | FenceState::Lifecycle => None,
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::shamir_db) fn schema_migration_gate_in_doubt_generation(
         &self,
         db: &str,
     ) -> Option<u64> {
-        self.schema_migration_gate_in_doubt
-            .get(db)
-            .map(|entry| *entry)
+        self.in_doubt_generation(db)
     }
 
-    /// Whether an in-doubt marker is present for `db` (always with a KNOWN
-    /// generation: corrupt journal damage fails the whole startup at open
-    /// instead of leaving an unknowable marker).
-    pub(in crate::shamir_db) fn schema_migration_in_doubt(&self, db: &str) -> bool {
-        self.schema_migration_gate_in_doubt.contains_key(db)
-    }
-
-    /// Lifecycle-guard predicate (R1c-4 FINAL follow-up 3, decision 2):
-    /// one source of truth for the database lifecycle checks (rename/drop):
-    /// TRUE for any live fence state — reserved/held gate (`GATE_PENDING`
-    /// included, from the reservation on) or open-time in-doubt marker.
-    /// Seed publication stays marker-only by decision. Defined only here.
-    pub(in crate::shamir_db) fn schema_migration_lifecycle_blocked(&self, db: &str) -> bool {
-        self.schema_migration_gate_generation(db).is_some() || self.schema_migration_in_doubt(db)
-    }
-
-    /// Convert a LIVE gate into an IN-DOUBT marker: the run exited while the
-    /// durable fence is still OWNED with an unresolved journal (in-doubt or
-    /// postcondition-failure exit). The marker is installed BEFORE the live
-    /// entry is removed (same generation guard as a plain release), so the
-    /// transition never exposes a false free interval to a concurrent
-    /// lifecycle check; the marker carries the run's generation so a later
-    /// resume's `hold` (higher generation) converts it back to a live gate;
-    /// writes stay refused with `schema_migration_in_doubt` until then.
-    pub(in crate::shamir_db) fn mark_schema_migration_gate_in_doubt(
+    #[cfg(test)]
+    pub(in crate::shamir_db) fn reserve_schema_migration_gate(
         &self,
         db: &str,
-        generation: u64,
-    ) {
-        // Marker first: no free interval between live and in-doubt states.
-        self.schema_migration_gate_in_doubt
-            .insert(db.to_string(), generation);
-        self.release_schema_migration_gate(db, generation);
+    ) -> Option<SchemaMigrationGateGuard<'_>> {
+        self.reserve_schema_migration_run(self.database_identity_for_fence(db)?, None)
+            .ok()
     }
 
-    /// One-time open-time seed of the in-doubt marker. No-op without a
-    /// durable journal. Otherwise a routing scan plus one full read per
-    /// routed identity, both through the ordinary step-2a reader:
-    ///
-    /// 1. `schema_migration_journal_routed_identities` validates the routing
-    ///    envelope of every row and enumerates the distinct routed identities
-    ///    (loaded databases and orphan histories a normal DROP left behind).
-    /// 2. Each routed identity goes through `owned_schema_migration_fence`,
-    ///    the ordinary step-2a history reader. A valid orphan history is
-    ///    accepted and simply produces no marker; an unresolved history marks
-    ///    its database in doubt with its KNOWN durable generation.
-    ///
-    /// ANY failure — the typed `DbError::SchemaMigrationJournalUnreadable`
-    /// for corrupt or unattributable durable rows, and infra failures
-    /// (`Locked`, backend errors) alike — PROPAGATES and fails the WHOLE
-    /// startup closed. There is no per-database quarantine and no
-    /// unknown-generation marker: corrupt journal damage is never masked as
-    /// an in-doubt state. The marker is in-memory only; it is cleared by a
-    /// resumed runner's `hold`. Called by `init_inner` only; never on the
-    /// batch path.
-    pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(
-        &self,
-        identities: &[(String, DatabaseIdentity)],
-    ) -> DbResult<()> {
+    #[cfg(test)]
+    pub(in crate::shamir_db) fn hold_schema_migration_gate(&self, db: &str, generation: u64) {
+        let id = self
+            .database_identity_for_fence(db)
+            .expect("test database identity");
+        if let Some(state @ FenceState::InDoubt(_)) = self.fence_state(id) {
+            self.transition_fence(id, state, Some(FenceState::Live(generation)));
+        } else {
+            assert!(self.insert_fence_if_vacant(id, FenceState::Live(generation)));
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::shamir_db) fn release_schema_migration_gate(&self, db: &str, generation: u64) {
+        if let Some(id) = self.database_identity_for_fence(db) {
+            self.transition_fence(id, FenceState::Live(generation), None);
+        }
+    }
+
+    /// Validate all routed histories, including orphans. Only loaded database
+    /// identities receive an in-memory marker; damage fails the whole open.
+    pub(in crate::shamir_db) async fn seed_schema_migration_in_doubt(&self) -> DbResult<()> {
         let store = self.system_store();
         if !store.schema_migration_journal_durable() {
             return Ok(());
         }
-        // Boxed: keeps the scan future out of the caller's init future.
         let routed = Box::pin(store.schema_migration_journal_routed_identities()).await?;
-        let mut owned: Vec<(DatabaseIdentity, u64)> = Vec::new();
-        for identity in routed {
-            if let Some(generation) = Box::pin(store.owned_schema_migration_fence(identity)).await?
-            {
-                owned.push((identity, generation));
-            }
-        }
-        for (name, identity) in identities {
-            if let Some((_, generation)) = owned.iter().find(|(id, _)| id == identity) {
-                self.schema_migration_gate_in_doubt
-                    .insert(name.clone(), *generation);
+        let loaded: shamir_collections::TFxSet<_> = self
+            .database_identities
+            .iter()
+            .map(|entry| *entry.value())
+            .collect();
+        for id in routed {
+            if let Some(generation) = Box::pin(store.owned_schema_migration_fence(id)).await? {
+                if loaded.contains(&id) {
+                    self.insert_fence_if_vacant(id, FenceState::InDoubt(generation));
+                }
             }
         }
         Ok(())
     }
+}
 
-    /// Release the in-process gate, but only if the recorded generation still
-    /// belongs to the releasing migration (a newer owner must not be evicted).
-    pub(in crate::shamir_db) fn release_schema_migration_gate(&self, db: &str, generation: u64) {
-        self.schema_migration_gate
-            .remove_if(db, |_, held| *held == generation);
+pub(in crate::shamir_db) struct SchemaMigrationLifecycleGuard<'a> {
+    shamir: &'a ShamirDb,
+    id: DatabaseIdentity,
+}
+
+impl Drop for SchemaMigrationLifecycleGuard<'_> {
+    fn drop(&mut self) {
+        self.shamir
+            .transition_fence(self.id, FenceState::Lifecycle, None);
     }
 }
 
-/// RAII owner of the in-process gate of one apply run, from the reservation
-/// before the durable fence CAS to the end of the run. Dropped before
-/// [`Self::hold`] it cancels the reservation (the CAS failed or the apply
-/// future was dropped); after `hold` it releases the live gate on success and
-/// converts it to the in-doubt marker otherwise. Every transition is
-/// synchronous, so no await can separate the reservation from its owner.
 pub(in crate::shamir_db) struct SchemaMigrationGateGuard<'a> {
     shamir: &'a ShamirDb,
-    db: String,
-    generation: Option<u64>,
+    id: DatabaseIdentity,
+    state: FenceState,
+    possibly_published: Option<u64>,
     succeeded: bool,
 }
 
 impl SchemaMigrationGateGuard<'_> {
-    /// The durable fence is owned under `generation`: replace the reservation
-    /// with the live gate (also clearing an open-time in-doubt marker).
-    pub(in crate::shamir_db) fn hold(&mut self, generation: u64) {
-        self.shamir.hold_schema_migration_gate(&self.db, generation);
-        self.generation = Some(generation);
+    pub(super) fn observe_acquire_commit(&mut self, generation: Option<u64>) {
+        self.possibly_published = generation;
     }
 
-    /// The run ended with `applied` durable: the drop releases the gate
-    /// instead of leaving an in-doubt marker.
+    pub(in crate::shamir_db) fn hold(&mut self, generation: u64) {
+        let live = FenceState::Live(generation);
+        assert!(
+            matches!(self.state, FenceState::Reserved { .. })
+                && self
+                    .shamir
+                    .transition_fence(self.id, self.state, Some(live)),
+            "migration gate lost its reservation before hold"
+        );
+        self.state = live;
+    }
+
     pub(in crate::shamir_db) fn mark_succeeded(&mut self) {
         self.succeeded = true;
     }
@@ -281,30 +361,25 @@ impl SchemaMigrationGateGuard<'_> {
 
 impl Drop for SchemaMigrationGateGuard<'_> {
     fn drop(&mut self) {
-        match self.generation {
-            None => {
-                self.shamir
-                    .schema_migration_gate
-                    .remove_if(&self.db, |_, held| *held == GATE_PENDING);
+        let next = match self.state {
+            FenceState::Reserved { previous_in_doubt } => self
+                .possibly_published
+                .or(previous_in_doubt)
+                .map(FenceState::InDoubt),
+            FenceState::Live(generation) if !self.succeeded => {
+                Some(FenceState::InDoubt(generation))
             }
-            Some(generation) if self.succeeded => {
-                self.shamir
-                    .release_schema_migration_gate(&self.db, generation);
-            }
-            Some(generation) => {
-                self.shamir
-                    .mark_schema_migration_gate_in_doubt(&self.db, generation);
-            }
-        }
+            FenceState::Live(_) | FenceState::InDoubt(_) | FenceState::Lifecycle => None,
+        };
+        self.shamir.transition_fence(self.id, self.state, next);
     }
 }
 
 /// Synchronous batch-entry gate (design §4.3 "safe initial release default"):
 /// while the database's maintenance fence is held in-process, refuse the
-/// whole batch if ANY operation in the tree — nested `Batch`/`ForEach` bodies
-/// included — is a write, a DDL/admin op, or a `CallOp`. Reads and the
-/// `ApplicationSchema` ops (status/plan/apply, which run their own admission
-/// against the durable journal) pass.
+/// whole batch if a leaf targeting the serving database writes or calls a
+/// procedure. Dispatch handles explicit database mutators after target
+/// authorization. Reads and `ApplicationSchema` operations pass this check.
 ///
 /// `#[inline(never)]` + sync: the whole tree walk lives in this plain stack
 /// frame so the async entry points only carry the one call (same
@@ -315,27 +390,26 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
     db_name: &str,
     request: &BatchRequest,
 ) -> Option<BatchError> {
-    // Nothing is held for this database: neither a live runner's gate nor an
-    // open-time in-doubt marker → nothing to refuse.
-    let live = shamir.schema_migration_gate_generation(db_name);
-    let in_doubt = shamir.schema_migration_in_doubt(db_name);
-    if live.is_none() && !in_doubt {
+    if shamir.schema_migration_fence_count.load(Ordering::Acquire) == 0 {
         return None;
     }
-    // A live runner of this process is authoritative over the open-time
-    // in-doubt marker (hold clears it anyway); the code distinguishes the
-    // two states for callers.
-    let code = if live.is_some() {
-        IN_PROGRESS
-    } else {
-        IN_DOUBT
-    };
+    let id = shamir.database_identity_for_fence(db_name)?;
+    let code = shamir.schema_migration_refusal_code(id)?;
     for visit in BatchTreeVisitor::new(&request.queries) {
         let op = &visit.entry.op;
-        // The application-schema operations keep working during a fence:
-        // status reports the in-flight state, plan/apply refuse themselves
-        // with the exact §5.3 code.
-        if matches!(op, BatchOp::ApplicationSchema(_)) {
+        // Visit leaves only. Explicit target mutations (including same-DB
+        // targets) authorize and reserve in dispatch. CREATE only claims a
+        // namespace slot: keep the serving check for same-name CREATE, but
+        // never check a foreign CREATE against the existing target's fence.
+        if matches!(
+            op,
+            BatchOp::ApplicationSchema(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
+        ) {
+            continue;
+        }
+        if explicit_migration_target(op)
+            .is_some_and(|target| !matches!(op, BatchOp::CreateDb(_)) || target != db_name)
+        {
             continue;
         }
         if op.is_write() || matches!(op, BatchOp::Call(_)) {

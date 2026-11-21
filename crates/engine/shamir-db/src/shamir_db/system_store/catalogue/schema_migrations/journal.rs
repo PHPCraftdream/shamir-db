@@ -5,13 +5,14 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use super::event::{
-    decode_event, event_row, JournalEvent, JournalEventInput, JournalEventKind,
+    decode_event_row, event_row, JournalEvent, JournalEventInput, JournalEventKind,
     SchemaMigrationContext, JOURNAL_RECORD_VERSION,
 };
 use super::history::{validate_history, MigrationHistory};
 use super::identity::DatabaseIdentity;
 use super::step::SchemaMigrationStep;
 use crate::access::Actor;
+use crate::query::batch::BatchError;
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::ReadQuery;
 use crate::query::write::{InsertOp, UpdateOp};
@@ -43,14 +44,12 @@ impl RecordRoute {
             RecordRoute::Control { identity } | RecordRoute::Event { identity, .. } => *identity,
         }
     }
-
     fn record_type(&self) -> &'static str {
         match self {
             RecordRoute::Control { .. } => "control",
             RecordRoute::Event { .. } => "event",
         }
     }
-
     fn canonical_key(&self) -> String {
         match self {
             RecordRoute::Control { identity } => format!("control/{identity}"),
@@ -100,7 +99,7 @@ fn unattributable(row_id: &str, cause: String) -> DbError {
 }
 
 /// Full routing envelope of one row, shared by the open scan and history
-/// read (readable body identity is probed separately).
+/// read. The owning partition must still fully decode and validate the event.
 fn row_route(row_id: &str, value: &QueryValue) -> DbResult<RecordRoute> {
     let stored_identity = value
         .get("database_identity")
@@ -136,11 +135,8 @@ impl SystemStore {
     pub async fn schema_migration_identity(&self, database: &str) -> DbResult<DatabaseIdentity> {
         super::ensure_database_identity(self, database).await
     }
-
-    /// ONE startup scan of the durable journal (shared `row_route`, no
-    /// payload decode): the distinct routed identities — loaded databases
-    /// and orphan histories alike. ANY unattributable row fails the WHOLE
-    /// startup closed with the typed `SchemaMigrationJournalUnreadable`.
+    /// Startup-only routing scan, including a complete event decode before
+    /// accepting an identity. Ordinary reads still decode only their own rows.
     pub(crate) async fn schema_migration_journal_routed_identities(
         &self,
     ) -> DbResult<Vec<DatabaseIdentity>> {
@@ -150,11 +146,22 @@ impl SystemStore {
         let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
         let mut identities = TFxSet::default();
         for (row_id, value) in read_journal_partition_records(&table).await? {
-            identities.insert(row_route(&row_id, &value)?.identity());
+            let route = row_route(&row_id, &value)?;
+            if let RecordRoute::Event { identity, .. } = route {
+                let event = decode_event_row(&row_id, &value).map_err(|error| {
+                    unattributable(&row_id, format!("startup routing: {error}"))
+                })?;
+                if event.database_identity != identity {
+                    return Err(unattributable(
+                        &row_id,
+                        "event payload identity contradicts the row's routed key".into(),
+                    ));
+                }
+            }
+            identities.insert(route.identity());
         }
         Ok(identities.into_iter().collect())
     }
-
     pub async fn read_schema_migration_history(
         &self,
         identity: DatabaseIdentity,
@@ -199,14 +206,7 @@ impl SystemStore {
                     sequence: key_sequence,
                     ..
                 } => {
-                    let bytes = value
-                        .get("event")
-                        .and_then(|value| match value {
-                            QueryValue::Bin(bytes) => Some(bytes.as_slice()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| corrupt(&row_id, "missing or non-binary event payload"))?;
-                    let event = decode_event(bytes, &row_id).map_err(|error| {
+                    let event = decode_event_row(&row_id, &value).map_err(|error| {
                         DbError::SchemaMigrationJournalUnreadable(error.to_string())
                     })?;
                     let routed_identity = route.identity();
@@ -267,6 +267,25 @@ impl SystemStore {
         body: SchemaMigrationBody,
         recovery: bool,
         context: &SchemaMigrationContext,
+    ) -> DbResult<u64> {
+        Box::pin(self.acquire_schema_migration_fence_tracked(
+            (identity, expected_generation),
+            metadata,
+            body,
+            recovery,
+            context,
+            &mut |_| {},
+        ))
+        .await
+    }
+    pub(in crate::shamir_db) async fn acquire_schema_migration_fence_tracked(
+        &self,
+        (identity, expected_generation): (DatabaseIdentity, u64),
+        metadata: SchemaMigrationMetadata,
+        body: SchemaMigrationBody,
+        recovery: bool,
+        context: &SchemaMigrationContext,
+        observe_commit: &mut (dyn FnMut(Option<u64>) + Send),
     ) -> DbResult<u64> {
         self.require_durable_schema_migration_store()?;
         let _admin = self.schema_migration_admin_lock().await;
@@ -399,24 +418,18 @@ impl SystemStore {
         validate_candidate(&history, event.clone())?;
         let mut fields = control_fields(identity, control.as_ref());
         fields.insert("generation".into(), QueryValue::Str(generation.to_string()));
-        fields.insert(
-            "sequence".into(),
-            QueryValue::Str(
-                sequence
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        DbError::Internal("schema migration event sequence overflow".into())
-                    })?
-                    .to_string(),
-            ),
-        );
+        fields.insert("sequence".into(), next_sequence(sequence)?);
         fields.insert("owner".into(), QueryValue::Str(metadata.id.clone()));
         fields.insert("state".into(), QueryValue::Str("owned".into()));
-        self.commit_transition(control.as_ref(), QueryValue::Map(fields), &event)
-            .await?;
+        Box::pin(self.commit_transition(
+            control.as_ref(),
+            QueryValue::Map(fields),
+            &event,
+            observe_commit,
+        ))
+        .await?;
         Ok(generation)
     }
-
     pub async fn append_schema_migration_event(
         &self,
         identity: DatabaseIdentity,
@@ -477,23 +490,16 @@ impl SystemStore {
         );
         validate_candidate(&history, event.clone())?;
         let mut fields = control_fields(identity, Some(&control));
-        fields.insert(
-            "sequence".into(),
-            QueryValue::Str(
-                control
-                    .sequence
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        DbError::Internal("schema migration event sequence overflow".into())
-                    })?
-                    .to_string(),
-            ),
-        );
-        self.commit_transition(Some(&control), QueryValue::Map(fields), &event)
-            .await?;
+        fields.insert("sequence".into(), next_sequence(control.sequence)?);
+        Box::pin(self.commit_transition(
+            Some(&control),
+            QueryValue::Map(fields),
+            &event,
+            &mut |_| {},
+        ))
+        .await?;
         Ok(event)
     }
-
     pub async fn release_schema_migration_fence(
         &self,
         identity: DatabaseIdentity,
@@ -564,42 +570,32 @@ impl SystemStore {
         validate_candidate(&history, event.clone())?;
         let mut fields = control_fields(identity, Some(&control));
         fields.insert("generation".into(), QueryValue::Str(generation.to_string()));
-        fields.insert(
-            "sequence".into(),
-            QueryValue::Str(
-                control
-                    .sequence
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        DbError::Internal("schema migration event sequence overflow".into())
-                    })?
-                    .to_string(),
-            ),
-        );
+        fields.insert("sequence".into(), next_sequence(control.sequence)?);
         fields.insert("owner".into(), QueryValue::Null);
         fields.insert("state".into(), QueryValue::Str("released".into()));
-        self.commit_transition(Some(&control), QueryValue::Map(fields), &event)
-            .await?;
+        Box::pin(self.commit_transition(
+            Some(&control),
+            QueryValue::Map(fields),
+            &event,
+            &mut |_| {},
+        ))
+        .await?;
         Ok(generation)
     }
-
-    /// Open-time fence snapshot (R1c step 2b-3b): the durable generation of
-    /// the partition's fence iff the journal carries an unresolved entry,
-    /// else `None`. The full ordinary-journal validation runs first, so a
-    /// damaged journal or control record fails closed with the typed error
-    /// rather than silently reporting the fence free. One-shot read at boot;
-    /// never on the batch path.
+    /// Open-time fence snapshot after full journal and control validation.
+    /// A terminal `Applied` proves effects, but only `FenceReleased` frees
+    /// the fence. Do not add `Applied` to the operation-recovery queue.
     pub async fn owned_schema_migration_fence(
         &self,
         identity: DatabaseIdentity,
     ) -> DbResult<Option<u64>> {
         let history = self.read_schema_migration_history(identity).await?;
         Ok(history
-            .unresolved
+            .events
             .last()
+            .filter(|event| event.kind != JournalEventKind::FenceReleased)
             .map(|event| event.fence_generation))
     }
-
     async fn flush_journal_tail(&self) -> DbResult<()> {
         let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
         self.persist_table_interner(&table, None).await?;
@@ -674,28 +670,26 @@ impl SystemStore {
         let control = decode_control(&raw_value, &row_id, identity, version)?;
         Ok(Some(control))
     }
-
     async fn commit_transition(
         &self,
         prior: Option<&ControlRecord>,
         control_row: QueryValue,
         event: &JournalEvent,
+        observe_commit: &mut (dyn FnMut(Option<u64>) + Send),
     ) -> DbResult<()> {
         self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
         let event_row = event_row(event)?;
-        let event_insert = InsertOp {
+        let mut inserts = InsertOp {
             insert_into: TableRef::new(TABLE_SCHEMA_MIGRATION_EVENTS),
             values: vec![event_row.clone()],
             records_idmsgpack: Vec::new(),
             select: None,
         };
-        let initial_control_insert = prior.is_none().then(|| InsertOp {
-            insert_into: TableRef::new(TABLE_SCHEMA_MIGRATION_EVENTS),
-            values: vec![control_row.clone()],
-            records_idmsgpack: Vec::new(),
-            select: None,
-        });
+        if prior.is_none() {
+            inserts.values.insert(0, control_row.clone());
+        }
+        let expected = if prior.is_none() { 2 } else { 1 };
         let update = prior.map(|prior| UpdateOp {
             update: TableRef::new(TABLE_SCHEMA_MIGRATION_EVENTS),
             where_clause: Some(Filter::And {
@@ -718,41 +712,58 @@ impl SystemStore {
             select: None,
             expected_version: Some(prior.version),
         });
-        let owned_table = table.clone();
-        let write_result = self.system_repo()?.run_implicit_batch_tx(Actor::System, "schema_migration_transition", move |tx| {
-            let table = owned_table.clone();
-            let update = update.clone();
-            let initial_control_insert = initial_control_insert.clone();
-            let event_insert = event_insert.clone();
-            Box::pin(async move {
-                if let Some(update) = update {
-                    let refs = new_map();
-                    let context = table.info_store_read_view().filter_context(&refs).await?;
-                    let updated = table.execute_update_tx(&update, &context, tx, None, &Actor::System).await?;
-                    if updated.affected != 1 {
-                        return Err(crate::storage::error::DbError::Validation("schema migration control CAS did not affect exactly one row".into()));
-                    }
-                    let inserted = table.execute_insert_tx(&event_insert, tx, false, None, &Actor::System).await?;
-                    if inserted.affected != 1 {
-                        return Err(crate::storage::error::DbError::Validation("schema migration event insert did not affect exactly one row".into()));
-                    }
-                } else {
-                    let control_insert = initial_control_insert.ok_or_else(|| crate::storage::error::DbError::Validation("initial schema migration control insert missing".into()))?;
-                    let mut inserts = control_insert;
-                    inserts.values.extend(event_insert.values);
-                    let inserted = table.execute_insert_tx(&inserts, tx, false, None, &Actor::System).await?;
-                    if inserted.affected != 2 {
-                        return Err(crate::storage::error::DbError::Validation("initial schema migration control/event insert must affect exactly two rows".into()));
-                    }
+        let repo = self.system_repo()?;
+        let alias = "schema_migration_transition";
+        let (mut tx, snapshot) = Box::pin(repo.begin_implicit_batch_tx(Actor::System, alias))
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        Box::pin(async {
+            if let Some(update) = update {
+                let refs = new_map();
+                let context = table.info_store_read_view().filter_context(&refs).await?;
+                let updated = table
+                    .execute_update_tx(&update, &context, &mut tx, None, &Actor::System)
+                    .await?;
+                if updated.affected != 1 {
+                    return Err(DbError::Validation(
+                        "schema migration control CAS did not affect exactly one row".into(),
+                    ));
                 }
-                Ok(crate::query::write::WriteResult { affected: 1, records: Vec::new(), execution_time_us: 0 })
-            })
-        }).await.map_err(|error| DbError::Internal(error.to_string()))?;
-        if write_result.affected != 1 {
-            return Err(DbError::Internal(
-                "schema migration transition transaction did not commit exactly once".into(),
-            ));
-        }
+            }
+            let inserted = table
+                .execute_insert_tx(&inserts, &mut tx, false, None, &Actor::System)
+                .await?;
+            if inserted.affected != expected {
+                return Err(DbError::Validation(if expected == 1 {
+                    "schema migration event insert did not affect exactly one row".into()
+                } else {
+                    "initial schema migration control/event insert must affect exactly two rows"
+                        .into()
+                }));
+            }
+            Ok::<(), DbError>(())
+        })
+        .await
+        .map_err(|error| {
+            let batch = BatchError::QueryError {
+                alias: alias.into(),
+                message: error.to_string(),
+                code: error.code().map(str::to_owned),
+            };
+            DbError::Internal(batch.to_string())
+        })?;
+        // The engine driver can detach when the awaiting request is dropped.
+        observe_commit(Some(event.fence_generation));
+        let result = Box::pin(repo.commit_implicit_batch_tx(tx, alias)).await;
+        drop(snapshot);
+        result.map_err(|error| {
+            // Synchronous implicit commit reports publication as Ok (including
+            // WAL durability warnings), and ambiguous WAL errors as requires-reopen.
+            if error.code() != Some("wal_requires_reopen") {
+                observe_commit(None);
+            }
+            DbError::Internal(error.to_string())
+        })?;
         self.persist_table_interner(&table, Some(&event_row))
             .await?;
         self.flush_system_repo_durable(&table).await
@@ -807,6 +818,13 @@ async fn read_journal_partition_records(
     Ok(records)
 }
 
+fn next_sequence(sequence: u64) -> DbResult<QueryValue> {
+    sequence
+        .checked_add(1)
+        .map(|next| QueryValue::Str(next.to_string()))
+        .ok_or_else(|| DbError::Internal("schema migration event sequence overflow".into()))
+}
+
 fn control_key(identity: DatabaseIdentity) -> String {
     format!("control/{identity}")
 }
@@ -826,29 +844,17 @@ fn control_fields(
         "database_identity".into(),
         QueryValue::Str(identity.to_string()),
     );
-    fields.insert(
-        "generation".into(),
-        QueryValue::Str(control.map_or(0, |value| value.generation).to_string()),
-    );
-    fields.insert(
-        "sequence".into(),
-        QueryValue::Str(control.map_or(1, |value| value.sequence).to_string()),
-    );
+    let generation = control.map_or(0, |value| value.generation);
+    let sequence = control.map_or(1, |value| value.sequence);
+    fields.insert("generation".into(), QueryValue::Str(generation.to_string()));
+    fields.insert("sequence".into(), QueryValue::Str(sequence.to_string()));
+    let owner = control.and_then(|value| value.owner.clone());
     fields.insert(
         "owner".into(),
-        control
-            .and_then(|value| value.owner.clone())
-            .map(QueryValue::Str)
-            .unwrap_or(QueryValue::Null),
+        owner.map_or(QueryValue::Null, QueryValue::Str),
     );
-    fields.insert(
-        "state".into(),
-        QueryValue::Str(
-            control
-                .map_or("idle", |value| value.state.as_str())
-                .to_owned(),
-        ),
-    );
+    let state = control.map_or("idle", |value| value.state.as_str());
+    fields.insert("state".into(), QueryValue::Str(state.to_owned()));
     fields
 }
 

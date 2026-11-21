@@ -18,11 +18,9 @@ async fn an_injected_journal_write_failure_never_returns_applied() {
     let migration = body("alpha-001", 1);
     let request = apply_request(&target, empty_predecessor(), 0, submission(&migration));
 
-    // Arm the seam so the FIRST durable catalogue tail of the apply run —
-    // the fence acquisition's preflight flush — fails (see
-    // `arm_durability_tail_faults_after` in the fence tests: the acquisition
-    // spends its first tail on the preflight).
-    db.system_store().arm_durability_tail_faults(1);
+    // On this fixture, tick 1 is the identity flush and tick 2 is the
+    // acquisition preflush. Neither stages a journal row.
+    db.system_store().arm_durability_tail_faults_after(1, 1);
 
     let error = run_apply(&db, request)
         .await
@@ -35,16 +33,64 @@ async fn an_injected_journal_write_failure_never_returns_applied() {
         .read_schema_migration_history(target)
         .await
         .unwrap();
-    assert!(history.applied.is_empty(), "{history:?}");
-    assert!(
-        !history.events.iter().any(|event| matches!(
-            event.kind,
-            JournalEventKind::Applied | JournalEventKind::OperationComplete
-        )),
-        "no completion may survive the failure: {history:?}"
-    );
+    assert!(history.events.is_empty(), "{history:?}");
+    assert!(!db.schema_migration_in_doubt("testdb"));
     assert!(!db.get_db("testdb").unwrap().has_table("main", "items_1"));
     assert!(db.schema_migration_gate_generation("testdb").is_none());
+}
+
+#[test]
+fn fresh_acquire_tail_failure_keeps_the_fence_in_doubt() {
+    super::super::helpers::on_big_stack(|| async {
+        let scenario = Box::pin(async {
+            let (_dir, db) = persistent_owner_db().await;
+            let target = identity(&db).await;
+            let migration = body("alpha-001", 1);
+            let request = |generation| {
+                apply_request(
+                    &target,
+                    empty_predecessor(),
+                    generation,
+                    submission(&migration),
+                )
+            };
+
+            let error = run_apply(&db, request(1)).await.unwrap_err();
+            assert!(error.to_string().contains("fence CAS conflict"), "{error}");
+            assert_code(error, "schema_migration_in_progress");
+            assert!(!db.schema_migration_in_doubt("testdb"));
+
+            // Use the generic APPLY fixture's tick count below, not the
+            // resume fixtures' intent-fault assumption. ACL paths differ by
+            // actor; pin the actual seam with the error, history and marker.
+            db.system_store().arm_durability_tail_faults_after(2, 1);
+            let error = run_apply(&db, request(0)).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected durability-tail failure"),
+                "{error}"
+            );
+            assert_code(error, "schema_migration_durability_unavailable");
+            let history = db
+                .system_store()
+                .read_schema_migration_history(target)
+                .await
+                .unwrap();
+            assert_eq!(history.events.len(), 1);
+            assert_eq!(history.events[0].kind, JournalEventKind::Started);
+            assert_eq!(history.events[0].fence_generation, 1);
+            assert!(!db.get_db("testdb").unwrap().has_table("main", "items_1"));
+            assert_eq!(db.schema_migration_gate_generation("testdb"), None);
+            assert_eq!(
+                db.schema_migration_gate_in_doubt_generation("testdb"),
+                Some(1)
+            );
+        });
+        tokio::time::timeout(Duration::from_secs(180), scenario)
+            .await
+            .expect("fresh acquire fault scenario timed out");
+    });
 }
 
 /// A TRUE post-effect journal sync failure on the STANDARD fixture — no

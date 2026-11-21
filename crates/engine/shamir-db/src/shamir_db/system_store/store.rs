@@ -180,18 +180,26 @@ impl SystemStore {
         Ok(())
     }
 
-    /// Create the journal's unique record-key index when it is missing. Boxed at
-    /// the call site: the index-creation future must not widen the init future.
-    ///
-    /// Journal-specific failure mapping: a `UniqueIndexCreationFailed` HERE
-    /// can only be the journal record-key index (this is its dedicated
-    /// creation site), so it is mapped to the typed journal error — without
-    /// echoing the engine's duplicate sample. Generic repo-open failures
-    /// (locks, backend errors) propagate unchanged, never masked.
+    // This is the only indexed table in the system repo config below.
+    // Rebuilds can fail during recovery or the first table lookup. Do not
+    // expose the engine's duplicate sample or reclassify backend failures.
+    fn map_journal_index_open_error(error: DbError) -> DbError {
+        match error {
+            DbError::UniqueIndexCreationFailed(..) => DbError::SchemaMigrationJournalUnreadable(
+                "the schema migration record-key unique index could not be \
+                 created on open: a journal row's record_key is corrupt"
+                    .into(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Create the journal's unique record-key index when it is missing.
     async fn ensure_journal_index(db: &DbInstance) -> DbResult<()> {
         let journal = db
             .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
-            .await?;
+            .await
+            .map_err(Self::map_journal_index_open_error)?;
         if !journal
             .unique_index_exists("schema_migration_record_key")
             .await
@@ -199,16 +207,7 @@ impl SystemStore {
             journal
                 .create_unique_index("schema_migration_record_key", &["record_key"])
                 .await
-                .map_err(|error| match error {
-                    DbError::UniqueIndexCreationFailed(..) => {
-                        DbError::SchemaMigrationJournalUnreadable(
-                            "the schema migration record-key unique index could not be \
-                             created on open: a journal row's record_key is corrupt"
-                                .into(),
-                        )
-                    }
-                    other => other,
-                })?;
+                .map_err(Self::map_journal_index_open_error)?;
         }
         Ok(())
     }
@@ -259,7 +258,9 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_SCHEMA_MIGRATION_EVENTS).with_indexes());
 
         // DbInstance recovers/certifies before exposing the system repo.
-        db.add_repo_with_durability(repo_config, policy).await?;
+        db.add_repo_with_durability(repo_config, policy)
+            .await
+            .map_err(Self::map_journal_index_open_error)?;
         Box::pin(Self::ensure_journal_index(&db)).await?;
 
         let store = Self {

@@ -7,10 +7,37 @@ use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{AdminExecutor, BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::ports::RepoAdminObserver;
-use shamir_query_types::admin::AlterRepoOp;
+use shamir_query_types::admin::{AlterRepoOp, ResourceRef};
 
-use super::super::shamir_db::ShamirDb;
+use super::super::shamir_db::{ShamirDb, SYSTEM_DB_NAME};
+use super::admin_db_schema_migration::SchemaMigrationLifecycleGuard;
 use super::helpers::admin_result;
+
+/// Names an explicit database mutation (including the namespace slot for
+/// CREATE), not a read, global object's reference or rename destination.
+pub(super) fn explicit_migration_target(op: &BatchOp) -> Option<&str> {
+    let resource = match op {
+        BatchOp::CreateDb(op) => return Some(&op.create_db),
+        BatchOp::DropDb(op) => return Some(&op.drop_db),
+        BatchOp::RenameDb(op) => return Some(&op.rename_db),
+        BatchOp::BindValidator(op) => return Some(&op.db),
+        BatchOp::UnbindValidator(op) => return Some(&op.db),
+        BatchOp::Chmod(op) => &op.chmod,
+        BatchOp::Chown(op) => &op.chown,
+        BatchOp::Chgrp(op) => &op.chgrp,
+        _ => return None,
+    };
+    resource_migration_target(resource)
+}
+
+pub(super) fn resource_migration_target(resource: &ResourceRef) -> Option<&str> {
+    match resource {
+        ResourceRef::Database { database: db }
+        | ResourceRef::Store { store: [db, _] }
+        | ResourceRef::Table { table: [db, ..] } => Some(db),
+        _ => None,
+    }
+}
 
 /// AdminExecutor that operates on ShamirDb.
 pub(super) struct ShamirAdminExecutor {
@@ -30,9 +57,17 @@ impl AdminExecutor for ShamirAdminExecutor {
         };
 
         match op {
+            BatchOp::CreateDb(_)
+            | BatchOp::DropDb(_)
+            | BatchOp::RenameDb(_)
+            | BatchOp::BindValidator(_)
+            | BatchOp::UnbindValidator(_)
+            | BatchOp::ListValidators(_)
+            | BatchOp::Chmod(_)
+            | BatchOp::Chown(_)
+            | BatchOp::Chgrp(_)
+            | BatchOp::AccessTree(_) => self.dispatch_target_admin(op).await,
             // ── DB / Repo ──────────────────────────────────────────────
-            BatchOp::CreateDb(op) => self.handle_create_db(op).await,
-            BatchOp::DropDb(op) => self.handle_drop_db(op).await,
             BatchOp::CreateRepo(op) => self.handle_create_repo(op).await,
             BatchOp::DropRepo(op) => self.handle_drop_repo(op).await,
             BatchOp::RenameRepo(op) => self.handle_rename_repo(op).await,
@@ -42,7 +77,6 @@ impl AdminExecutor for ShamirAdminExecutor {
             // overflow; same mechanism as the Round-14 replication fix).
             BatchOp::AlterRepo(op) => Self::dispatch_alter_repo(self, op).await,
             BatchOp::DescribeRepo(op) => self.handle_describe_repo(op).await,
-            BatchOp::RenameDb(op) => self.handle_rename_db(op).await,
 
             // ── Table / Index ──────────────────────────────────────────
             BatchOp::CreateTable(op) => self.handle_create_table(op).await,
@@ -73,15 +107,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::MigrationStatus(_) => self.handle_migration_status(op).await,
 
             // ── Access control ─────────────────────────────────────────
-            BatchOp::Chmod(op) => self.handle_chmod(op).await,
-            BatchOp::Chown(op) => self.handle_chown(op).await,
-            BatchOp::Chgrp(op) => self.handle_chgrp(op).await,
             BatchOp::CreateGroup(op) => self.handle_create_group(op).await,
             BatchOp::DropGroup(op) => self.handle_drop_group(op).await,
             BatchOp::RenameGroup(op) => self.handle_rename_group(op).await,
             BatchOp::AddGroupMember(op) => self.handle_add_group_member(op).await,
             BatchOp::RemoveGroupMember(op) => self.handle_remove_group_member(op).await,
-            op @ BatchOp::AccessTree(_) => self.handle_access_tree(op).await,
 
             // ── Function DDL ───────────────────────────────────────────
             op @ BatchOp::CreateFunction(_) => self.handle_create_function(op).await,
@@ -98,9 +128,6 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::CreateValidator(_) => self.handle_create_validator(op).await,
             op @ BatchOp::DropValidator(_) => self.handle_drop_validator(op).await,
             op @ BatchOp::RenameValidator(_) => self.handle_rename_validator(op).await,
-            op @ BatchOp::BindValidator(_) => self.handle_bind_validator(op).await,
-            op @ BatchOp::UnbindValidator(_) => self.handle_unbind_validator(op).await,
-            op @ BatchOp::ListValidators(_) => self.handle_list_validators(op).await,
 
             // ── Declarative schema DDL (Phase A) ──────────────────────
             BatchOp::SetTableSchema(op) => self.handle_set_table_schema(op).await,
@@ -170,6 +197,81 @@ type AdminDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = Result<QueryResult, BatchError>> + Send + 'a>>;
 
 impl ShamirAdminExecutor {
+    #[inline(never)]
+    fn dispatch_target_admin<'a>(&'a self, op: &'a BatchOp) -> AdminDispatchFuture<'a> {
+        Box::pin(async move {
+            match op {
+                BatchOp::CreateDb(op) => Box::pin(self.handle_create_db(op)).await,
+                BatchOp::DropDb(op) => Box::pin(self.handle_drop_db(op)).await,
+                BatchOp::RenameDb(op) => Box::pin(self.handle_rename_db(op)).await,
+                BatchOp::Chmod(op) => Box::pin(self.handle_chmod(op)).await,
+                BatchOp::Chown(op) => Box::pin(self.handle_chown(op)).await,
+                BatchOp::Chgrp(op) => Box::pin(self.handle_chgrp(op)).await,
+                BatchOp::AccessTree(_) => Box::pin(self.handle_access_tree(op)).await,
+                BatchOp::ListValidators(_) => Box::pin(self.handle_list_validators(op)).await,
+                BatchOp::BindValidator(_) | BatchOp::UnbindValidator(_) => {
+                    Box::pin(self.dispatch_validator_binding(op)).await
+                }
+                _ => unreachable!("not a target admin operation"),
+            }
+        })
+    }
+
+    /// Bind the target identity before ACL under the existing rename/drop interlock.
+    /// The returned reservation holds no control lock: table metadata writes reacquire it.
+    pub(super) async fn authorize_admin_target_write(
+        &self,
+        db: Option<&str>,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<Option<SchemaMigrationLifecycleGuard<'_>>, BatchError> {
+        let db = db.filter(|db| *db != SYSTEM_DB_NAME);
+        let _control = if db.is_some() {
+            Some(self.shamir.lock_replication_control().await)
+        } else {
+            None
+        };
+        // Capture only; ACL still takes precedence over missing-target errors.
+        let target = db.map(|db| (db, self.shamir.database_identity_for_fence(db)));
+        self.shamir
+            .authorize_access(&self.actor, path, action)
+            .await
+            .map_err(|error| BatchError::query_coded("", "access_denied", error.to_string()))?;
+        let Some((db, id)) = target else {
+            return Ok(None);
+        };
+        let missing = || BatchError::QueryError {
+            alias: String::new(),
+            message: format!("Database '{db}' not found"),
+            code: None,
+        };
+        let id = id.ok_or_else(missing)?;
+        let guard = self
+            .shamir
+            .reserve_admin_migration_target(id)
+            .map_err(|code| match code {
+                Some(code) => BatchError::query_coded(
+                    "",
+                    code,
+                    format!(
+                        "an application-schema migration holds the maintenance fence for \
+                             database '{db}'; writes, DDL and stored-procedure calls are refused \
+                             until it completes"
+                    ),
+                ),
+                None => BatchError::QueryError {
+                    alias: String::new(),
+                    message: format!("another database operation is in progress for '{db}'"),
+                    code: None,
+                },
+            })?;
+        // Once verified, the reservation prevents rename/drop until the write finishes.
+        if self.shamir.database_identity_for_fence(db) != Some(id) {
+            return Err(missing());
+        }
+        Ok(Some(guard))
+    }
+
     /// Round-14: replication DDL dispatcher, kept OUT of `execute_admin`'s
     /// own future. `#[inline(never)]` + explicit boxing means the nine
     /// replication arms' await state lives on the heap, not in every

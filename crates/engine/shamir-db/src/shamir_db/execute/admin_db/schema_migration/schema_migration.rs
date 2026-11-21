@@ -105,16 +105,24 @@ impl ShamirAdminExecutor {
             .read_schema_migration_history(serving)
             .await
             .map_err(map_store_error)?;
+        // The process-local owner takes precedence over legacy journal-only
+        // status (for example, a fence acquired directly through SystemStore).
+        let error = match self.shamir.schema_migration_refusal_code(serving) {
+            Some("schema_migration_in_progress") => {
+                Some(SchemaMigrationErrorCode::SchemaMigrationInProgress)
+            }
+            Some("schema_migration_in_doubt") => {
+                Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt)
+            }
+            _ if history.in_doubt => Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt),
+            _ => None,
+        };
         let outcome = StatusOutcome {
             protocol_version: request.protocol_version,
             identity: serving,
             history: Some(&history),
             checksum_validation: validate_last_applied_checksum(&history),
-            error: if history.in_doubt {
-                Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt)
-            } else {
-                None
-            },
+            error,
         };
         Ok(admin_result(status_value(&outcome)))
     }
@@ -171,7 +179,7 @@ fn status_value(outcome: &StatusOutcome<'_>) -> QueryValue {
     value.insert("target".to_string(), QueryValue::Map(target));
     let (last_applied_id, last_applied_ordinal, last_applied_checksum, in_flight) =
         match outcome.history {
-            Some(history) => applied_fields(history),
+            Some(history) => applied_fields(history, outcome.error.is_some()),
             None => (None, 0, None, None),
         };
     if let Some(id) = last_applied_id {
@@ -257,9 +265,19 @@ fn applied_entries(history: &MigrationHistory) -> Vec<QueryValue> {
 /// Derive last-applied and in-flight fields from the durable history.
 fn applied_fields(
     history: &MigrationHistory,
+    has_fence_error: bool,
 ) -> (Option<String>, u64, Option<[u8; 32]>, Option<QueryValue>) {
     let applied = history.applied.last();
-    let in_flight = history.unresolved.last().map(|event| {
+    // Applied stays in the prefix even if the fence is still owned. Only
+    // show it in flight if the journal tail hasn't reached FenceReleased
+    // and status still sees a fence; release may win between the two reads.
+    let pending = history.unresolved.last().or_else(|| {
+        history
+            .events
+            .last()
+            .filter(|event| has_fence_error && event.kind == JournalEventKind::Applied)
+    });
+    let in_flight = pending.map(|event| {
         let mut map = new_map();
         map.insert(
             "migration_id".to_string(),

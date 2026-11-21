@@ -8,7 +8,7 @@ use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
-use super::admin_dispatch::ShamirAdminExecutor;
+use super::admin_dispatch::{explicit_migration_target, ShamirAdminExecutor};
 use super::helpers::admin_result;
 
 impl ShamirAdminExecutor {
@@ -171,9 +171,30 @@ impl ShamirAdminExecutor {
         })))
     }
 
+    /// Ordinary dispatch reserves the target after ACL. Migration apply calls
+    /// the handlers below directly while holding its own migration gate.
+    pub(super) async fn dispatch_validator_binding(
+        &self,
+        op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        match op {
+            BatchOp::BindValidator(_) => self.bind_validator(op, true).await,
+            BatchOp::UnbindValidator(_) => self.unbind_validator(op, true).await,
+            _ => unreachable!("dispatch_validator_binding called with a non-binding op"),
+        }
+    }
+
     pub(super) async fn handle_bind_validator(
         &self,
         batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        self.bind_validator(batch_op, false).await
+    }
+
+    async fn bind_validator(
+        &self,
+        batch_op: &BatchOp,
+        reserve_target: bool,
     ) -> Result<QueryResult, BatchError> {
         let BatchOp::BindValidator(op) = batch_op else {
             unreachable!("handle_bind_validator called with non-BindValidator op");
@@ -184,28 +205,22 @@ impl ShamirAdminExecutor {
             message: msg,
             code: None,
         };
-        let err_code = |code: &str, msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: Some(code.to_string()),
-        };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
-
-        // Auth: Write on the target Table (binding changes the
-        // table's write behaviour).
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::Table {
-                    db: op.db.clone(),
-                    store: op.repo.clone(),
-                    table: op.table.clone(),
-                },
+        let path = ResourcePath::table(&op.db, &op.repo, &op.table);
+        let _reservation = if reserve_target {
+            self.authorize_admin_target_write(
+                explicit_migration_target(batch_op),
+                &path,
                 Action::Write,
             )
-            .await
-            .map_err(err_access)?;
+            .await?
+        } else {
+            // The migration runner already owns the fence, but still needs ACL.
+            self.shamir
+                .authorize_access(&self.actor, &path, Action::Write)
+                .await
+                .map_err(|error| BatchError::query_coded("", "access_denied", error.to_string()))?;
+            None
+        };
         self.shamir
             .bind_validator_as(
                 &op.db,
@@ -228,6 +243,14 @@ impl ShamirAdminExecutor {
         &self,
         batch_op: &BatchOp,
     ) -> Result<QueryResult, BatchError> {
+        self.unbind_validator(batch_op, false).await
+    }
+
+    async fn unbind_validator(
+        &self,
+        batch_op: &BatchOp,
+        reserve_target: bool,
+    ) -> Result<QueryResult, BatchError> {
         let BatchOp::UnbindValidator(op) = batch_op else {
             unreachable!("handle_unbind_validator called with non-UnbindValidator op");
         };
@@ -237,27 +260,22 @@ impl ShamirAdminExecutor {
             message: msg,
             code: None,
         };
-        let err_code = |code: &str, msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: Some(code.to_string()),
-        };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
-
-        // Auth: Write on the target Table.
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::Table {
-                    db: op.db.clone(),
-                    store: op.repo.clone(),
-                    table: op.table.clone(),
-                },
+        let path = ResourcePath::table(&op.db, &op.repo, &op.table);
+        let _reservation = if reserve_target {
+            self.authorize_admin_target_write(
+                explicit_migration_target(batch_op),
+                &path,
                 Action::Write,
             )
-            .await
-            .map_err(err_access)?;
+            .await?
+        } else {
+            // The migration runner already owns the fence, but still needs ACL.
+            self.shamir
+                .authorize_access(&self.actor, &path, Action::Write)
+                .await
+                .map_err(|error| BatchError::query_coded("", "access_denied", error.to_string()))?;
+            None
+        };
         let removed = self
             .shamir
             .unbind_validator_as(
