@@ -1,4 +1,7 @@
+use std::future::Future;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use shamir_collections::TMap;
 use shamir_connect::server::token::{encode_token, generate_token_parts};
@@ -10,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::builder::batch::Batch;
 use crate::builder::query::Query;
-use crate::{ApiToken, ClientError, TokenEndpoint, TokenHttpClient, TokenHttpOptions};
+use crate::{ApiToken, ClientError, CloseCause, TokenEndpoint, TokenHttpClient, TokenHttpOptions};
 
 fn pong_body() -> Vec<u8> {
     rmp_serde::encode::to_vec_named(&DbResponse::Pong).expect("encode pong")
@@ -28,7 +31,8 @@ fn content_length(head: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-async fn serve_connection(mut socket: TcpStream, status: &'static str, body: Vec<u8>) {
+/// cancel-safe: NO — cancellation drops the test socket and any partial reply.
+async fn serve_connection(mut socket: TcpStream, status: &'static str, body: Vec<u8>, close: bool) {
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let head_end = loop {
@@ -50,12 +54,14 @@ async fn serve_connection(mut socket: TcpStream, status: &'static str, body: Vec
             }
         }
         buf.drain(..total);
+        let connection = if close { "Connection: close\r\n" } else { "" };
         let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/msgpack\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {status}\r\n{connection}Content-Type: application/msgpack\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
         if socket.write_all(head.as_bytes()).await.is_err()
             || socket.write_all(&body).await.is_err()
+            || close
         {
             return;
         }
@@ -67,19 +73,106 @@ async fn spawn_fake(status: &'static str, body: Vec<u8>) -> SocketAddr {
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
-            tokio::spawn(serve_connection(socket, status, body.clone()));
+            tokio::spawn(serve_connection(socket, status, body.clone(), false));
         }
     });
     addr
 }
 
-async fn connect(addr: SocketAddr) -> TokenHttpClient {
+fn options(addr: SocketAddr) -> TokenHttpOptions {
     let (id, secret) = generate_token_parts().expect("token parts");
     let token = ApiToken::new(encode_token(&id, &secret).to_string()).expect("token");
     let endpoint = TokenEndpoint::plain_loopback(addr).expect("endpoint");
-    TokenHttpClient::connect(TokenHttpOptions::new(endpoint, token))
+    TokenHttpOptions::new(endpoint, token)
+}
+
+async fn connect(addr: SocketAddr) -> TokenHttpClient {
+    TokenHttpClient::connect(options(addr))
         .await
         .expect("connect")
+}
+
+async fn with_closing_peer<T, F: Future<Output = T>>(
+    body: Vec<u8>,
+    run: impl FnOnce(SocketAddr) -> F,
+) -> (T, usize) {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut accepts = 0;
+        let result = tokio::select! {
+            result = run(addr) => result,
+            err = async {
+                loop {
+                    match listener.accept().await {
+                        Ok((socket, _)) => {
+                            accepts += 1;
+                            serve_connection(socket, "200 OK", body.clone(), true).await;
+                        }
+                        Err(err) => break err,
+                    }
+                }
+            } => panic!("accept: {err}"),
+        };
+
+        // The client has finished. Count any queued dials even if they sent no request.
+        let listener = listener.into_std().expect("convert listener");
+        loop {
+            match listener.accept() {
+                Ok(_) => accepts += 1,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) => panic!("drain accepts: {err}"),
+            }
+        }
+        (result, accepts)
+    })
+    .await
+    .expect("client and peer finish within 120 seconds")
+}
+
+#[tokio::test]
+async fn connect_once_ping_rejects_typed_non_pong_on_200() {
+    let body = rmp_serde::encode::to_vec_named(&DbResponse::DdlOpStatus { status: None })
+        .expect("encode DDL status");
+    let (err, _) = with_closing_peer(body, |addr| async move {
+        let client = TokenHttpClient::connect_once(options(addr))
+            .await
+            .expect("connect once");
+        let err = client.ping().await.expect_err("non-Pong response");
+        client.close().await;
+
+        let client = connect(addr).await;
+        client
+            .ping()
+            .await
+            .expect("default SDK ping accepts HTTP 200");
+        client.close().await;
+        err
+    })
+    .await;
+    assert!(matches!(err, ClientError::Protocol(message) if message == "expected Pong response"));
+}
+
+#[tokio::test]
+async fn connect_once_ping_does_not_redial_after_connection_close() {
+    let (second_ping, accepts) = with_closing_peer(pong_body(), |addr| async move {
+        let client = TokenHttpClient::connect_once(options(addr))
+            .await
+            .expect("connect once");
+        client.ping().await.expect("typed Pong");
+        let second_ping = client.ping().await;
+        client.close().await;
+        second_ping
+    })
+    .await;
+    assert_eq!(
+        accepts, 1,
+        "connect_once must not dial a replacement socket"
+    );
+    assert!(matches!(
+        second_ping,
+        Err(ClientError::ConnectionClosed(CloseCause::PeerEof))
+    ));
 }
 
 #[tokio::test]

@@ -424,14 +424,12 @@ fn shell_transport_typed_refusals() {
     // Plaintext alias (loopback included): refused before any socket.
     refuse_profile_text(&fixture, pinned("plain", DB_NAME), "plaintext_refused", 6);
 
-    // Token transports (PR2 surface, refused in PR1), browser deferral,
-    // session resume: exit 6.
+    // Token-only spellings still refuse the default SCRAM auth; native WSS
+    // is now supported and its pin checks live in the PR2 refusal tests.
     for (transport, code) in [
         ("token", "unsupported"),
         ("https", "unsupported"),
         ("rest", "unsupported"),
-        ("wss", "unsupported"),
-        ("native-wss", "unsupported"),
         ("browser-wss", "deferred"),
         ("tls-resume", "resume_refused"),
     ] {
@@ -441,8 +439,12 @@ fn shell_transport_typed_refusals() {
     // Token auth via `--auth token` is refused after the command parse —
     // one batch error record, the fixed local message, exit 6, no dial —
     // against a valid IPC profile AND (identically) the TLS-TCP profile.
-    for profile in [&pinned("ipc", DB_NAME), &pinned("tls-tcp", DB_NAME)] {
-        overwrite_profile(&fixture, profile);
+    for (transport, address, sni) in [
+        ("ipc", fixture.ipc_addr.clone(), None),
+        ("tls-tcp", fixture.tls_addr.to_string(), Some("localhost")),
+    ] {
+        let profile = pinned_profile(&fixture, transport, &address, sni, DB_NAME);
+        overwrite_profile(&fixture, &profile);
         let run = run_shell(&fixture, &["--auth", "token", "--", "ping"]);
         assert_no_leak(&fixture, &run);
         let record = parse_one_record(&run);

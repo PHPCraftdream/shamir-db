@@ -28,11 +28,11 @@ use std::path::Path;
 use clap::Parser as ClapParser;
 use serde_json::json;
 use serde_json::Value as Json;
-use shamir_client::Client;
+use zeroize::Zeroizing;
 
 use super::commands::Catalogue;
 use super::connect;
-use super::connect::Profile;
+use super::connect::{Profile, SessionClient};
 use super::output::{self, ShellError};
 use super::terminal::secret::Terminal;
 use super::terminal::{self, SecretSource};
@@ -41,7 +41,7 @@ use super::terminal::{self, SecretSource};
 const LINE_MAX_BYTES: usize = 8 * 1024;
 
 /// Fixed interactive help (stderr only; never argv-derived).
-const INTERACTIVE_HELP: &str = "commands:\n  connect [NAME] [--auth scram]\n  ping\n  profile list | profile show NAME\n  db list\n  repo list\n  table list REPO | table describe REPO TABLE | table schema REPO TABLE\n  index list REPO TABLE\n  function list [FOLDER]\n  quit | exit\nsecret source flags: --secret-stdin | --secret-fd N (Unix only) | --secret-env NAME | --secret-prompt\ncaution: --secret-env NAME accepts only the fixed variable SHAMIR_SHELL_PASSWORD; an environment variable's value can be visible to other processes on the host and to shell history, so prefer --secret-stdin or the no-echo --secret-prompt. Profiles are stored in the profile directory (see `profile list`); the pin is never displayed.\n";
+const INTERACTIVE_HELP: &str = "commands:\n  connect [NAME] [--auth scram|token]\n  ping\n  profile list | profile show NAME\n  db list\n  repo list | repo describe REPO\n  table list REPO | table describe REPO TABLE | table schema REPO TABLE\n  index list REPO TABLE\n  function list [FOLDER]\n  quit | exit\nsecret source flags: --secret-stdin | --secret-fd N (Unix only) | --secret-env NAME | --secret-prompt\ncaution: --secret-env NAME accepts only SHAMIR_SHELL_PASSWORD for SCRAM or SHAMIR_SHELL_TOKEN for token auth; an environment variable's value can be visible to other processes on the host and to shell history, so prefer --secret-stdin or the no-echo --secret-prompt. Profiles are stored in the profile directory (see `profile list`); the pin is never displayed.\n";
 
 /// Batch or interactive; interactive defaults the no-echo prompt source.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,11 +53,29 @@ enum Mode {
 /// One dispatched outcome: command id, wire op, result.
 type Outcome = (&'static str, Option<&'static str>, Result<Json, ShellError>);
 
-/// Persistent interactive session; `dead` is the sticky refusal sentinel.
+/// An attempted session without a live client stays dead until explicit connect.
 struct Session {
-    profile: Option<Profile>,
-    client: Option<Client>,
-    dead: bool,
+    auth: AuthKind,
+    live: Option<(Profile, SessionClient)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AuthKind {
+    Scram,
+    Token,
+    Browser,
+    HttpLogin,
+    Resume,
+}
+
+impl AuthKind {
+    fn check(self) -> Result<(), ShellError> {
+        match self {
+            Self::Scram | Self::Token => Ok(()),
+            Self::Browser | Self::HttpLogin => Err(ShellError::Deferred),
+            Self::Resume => Err(ShellError::Resume),
+        }
+    }
 }
 
 /// Injectable environment behind [`run_scripted`]: injected input,
@@ -97,9 +115,9 @@ struct ShellArgs {
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
 
-    /// Authentication kind. Only `scram` is supported in this stage.
-    #[arg(long, value_parser = ["scram", "token"], value_name = "AUTH")]
-    auth: Option<String>,
+    /// Authentication kind (SCRAM by default).
+    #[arg(long, value_enum, default_value = "scram", value_name = "AUTH")]
+    auth: AuthKind,
 
     /// Session resume is refused outright.
     #[arg(long)]
@@ -113,8 +131,7 @@ struct ShellArgs {
     #[arg(long, value_name = "N")]
     secret_fd: Option<u32>,
 
-    /// Read the secret from the environment. The name must be exactly
-    /// SHAMIR_SHELL_PASSWORD; any other name is a typed refusal.
+    /// Read the secret from the fixed, auth-matched environment variable.
     #[arg(long, value_name = "NAME")]
     secret_env: Option<String>,
 
@@ -155,11 +172,11 @@ struct CommandArgs {
 /// The command grammar; no free-form tail, so extra argv tokens are usage refusals.
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Dial, verify the profile pin and authenticate with SCRAM.
+    /// Establish or switch an authenticated session.
     Connect {
         name: Option<String>,
-        #[arg(long)]
-        auth: Option<String>,
+        #[arg(long, value_enum)]
+        auth: Option<AuthKind>,
     },
     /// Round-trip the live connection.
     Ping,
@@ -208,8 +225,8 @@ enum DbCommand {
 enum RepoCommand {
     /// List repositories.
     List,
-    /// PR2: intentionally unsupported in this stage (typed refusal).
-    Describe { repo: Option<String> },
+    /// Describe repository durability (SCRAM only).
+    Describe { repo: String },
 }
 
 #[derive(clap::Subcommand)]
@@ -321,9 +338,6 @@ pub(crate) fn run_scripted(
             if shell.resume {
                 return pre_refuse(ShellError::Resume);
             }
-            if shell.auth.as_deref() == Some("token") {
-                return pre_refuse(ShellError::Token);
-            }
             if shell.output_version.is_some_and(|version| version != 1) {
                 return pre_refuse(ShellError::OutputVersion);
             }
@@ -402,9 +416,6 @@ fn run_batch(
     if shell.resume {
         return output::emit(true, id, None, Err(ShellError::Resume));
     }
-    if shell.auth.as_deref() == Some("token") {
-        return output::emit(true, id, None, Err(ShellError::Token));
-    }
     if shell.output_version.is_some_and(|version| version != 1) {
         return output::emit(true, id, None, Err(ShellError::OutputVersion));
     }
@@ -448,6 +459,10 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         ) {
             Ok(args) => args.command,
             Err(_) => {
+                if tokens[0] == "connect" {
+                    let auth = session.as_ref().map_or(shell.auth, |state| state.auth);
+                    session = Some(Session { auth, live: None });
+                }
                 output::emit_human(&mut *ctx.stderr, "shell", Err(ShellError::Usage));
                 continue;
             }
@@ -466,8 +481,7 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         );
         if let Some(session) = session.as_mut() {
             if connection_lost {
-                session.client = None;
-                session.dead = true;
+                session.live = None;
             }
         }
         // One human record per command; stdout stays silent. Ctrl+C exits
@@ -608,6 +622,34 @@ fn finish_line(buffer: &[u8]) -> ReadLine {
     }
 }
 
+/// Closed §3.3 policy. Connect is lifecycle, not a remote data command.
+fn allowed_with_token(command: &Command) -> bool {
+    match command {
+        Command::Connect { .. }
+        | Command::Ping
+        | Command::Db {
+            action: DbCommand::List,
+        }
+        | Command::Repo {
+            action: RepoCommand::List,
+        }
+        | Command::Table {
+            action:
+                TableCommand::List { .. } | TableCommand::Describe { .. } | TableCommand::Schema { .. },
+        }
+        | Command::Index {
+            action: IndexCommand::List { .. },
+        }
+        | Command::Function {
+            action: FunctionCommand::List { .. },
+        } => true,
+        Command::Profile { .. }
+        | Command::Repo {
+            action: RepoCommand::Describe { .. },
+        } => false,
+    }
+}
+
 /// Dispatches one parsed command; batch callers pass a fresh `None` session.
 fn dispatch(
     shell: &ShellArgs,
@@ -617,111 +659,75 @@ fn dispatch(
     runtime: &tokio::runtime::Runtime,
     ctx: &mut Ctx<'_>,
 ) -> Outcome {
-    match command {
+    let id = command_id(&command);
+    let auth = session.as_ref().map_or(shell.auth, |state| state.auth);
+    let token = session
+        .as_ref()
+        .and_then(|state| state.live.as_ref())
+        .map_or(auth == AuthKind::Token, |(_, client)| client.is_token());
+    if token && !allowed_with_token(&command) {
+        return (id, None, Err(ShellError::TokenRequestDenied));
+    }
+    if let (false, None, Err(err)) = (
+        matches!(command, Command::Connect { .. }),
+        session.as_ref(),
+        auth.check(),
+    ) {
+        return (id, None, Err(err));
+    }
+    let which = match command {
         Command::Connect { name, auth } => {
-            // `--auth`: `scram` (or default) is the only supported kind.
-            let outcome = match auth.as_deref() {
-                None | Some("scram") => {
-                    establish_profile(shell, mode, name.as_deref(), runtime, false, ctx)
-                }
-                Some("token") => Err(ShellError::Token),
-                Some("browser") | Some("http-login") => Err(ShellError::Deferred),
-                Some("resume") => Err(ShellError::Resume),
-                Some(_) => Err(ShellError::Usage),
-            };
-            match outcome {
-                Ok((profile, client)) => {
-                    *session = Some(Session {
-                        profile: Some(profile),
-                        client: Some(client),
-                        dead: false,
+            let auth = auth.unwrap_or(shell.auth);
+            // Drop the old connection before any profile, prompt or dial.
+            *session = Some(Session { auth, live: None });
+            let outcome =
+                establish_profile(shell, mode, (auth, name.as_deref()), runtime, false, ctx)
+                    .and_then(|(profile, client)| {
+                        // REST has no bind handshake. Only explicit connect
+                        // probes; an implicit dial sends just its own command.
+                        runtime.block_on(guarded(async {
+                            client.verify_rest().await.map_err(connect::request_error)
+                        }))?;
+                        *session = Some(Session {
+                            auth,
+                            live: Some((profile, client)),
+                        });
+                        note(shell.verbose, "connected");
+                        Ok(json!({ "connected": true }))
                     });
-                    note(shell.verbose, "connected");
-                    ("connect", None, Ok(json!({ "connected": true })))
-                }
-                // EVERY failed explicit connect — dial failure and every
-                // auth refusal alike — sticks the disconnected sentinel, so
-                // `with_session` never implicitly re-dials (re-reading a
-                // consumed secret source); `connect` itself never consults
-                // the sentinel, so an explicit retry stays possible.
-                Err(err) => {
-                    *session = Some(Session {
-                        profile: None,
-                        client: None,
-                        dead: true,
-                    });
-                    ("connect", None, Err(err))
-                }
-            }
+            return (id, None, outcome);
         }
         Command::Ping => {
-            let outcome =
-                with_session(shell, mode, session, runtime, false, ctx).and_then(|(_, client)| {
-                    runtime.block_on(guarded(async {
-                        client.ping().await.map_err(connect::request_error)
-                    }))
-                });
-            (
-                "ping",
-                Some("Ping"),
-                outcome.map(|()| json!({ "ok": true })),
-            )
+            let outcome = with_session(shell, mode, session, runtime, false, ctx)
+                .and_then(|(_, client)| runtime.block_on(guarded(ping(client))));
+            return (id, Some("Ping"), outcome.map(|()| json!({ "ok": true })));
         }
-        Command::Profile { action } => profile_outcome(shell, action, ctx),
+        Command::Profile { action } => return profile_outcome(shell, action, ctx),
         Command::Db {
             action: DbCommand::List,
-        } => catalogue(shell, mode, session, runtime, ctx, Catalogue::Databases),
+        } => Catalogue::Databases,
         Command::Repo { action } => match action {
-            RepoCommand::List => catalogue(shell, mode, session, runtime, ctx, Catalogue::Repos),
-            RepoCommand::Describe { .. } => ("repo describe", None, Err(ShellError::Unsupported)),
+            RepoCommand::List => Catalogue::Repos,
+            RepoCommand::Describe { repo } => Catalogue::DescribeRepo { repo },
         },
         Command::Table { action } => match action {
-            TableCommand::List { repo } => catalogue(
-                shell,
-                mode,
-                session,
-                runtime,
-                ctx,
-                Catalogue::Tables { repo },
-            ),
-            TableCommand::Describe { repo, table } => catalogue(
-                shell,
-                mode,
-                session,
-                runtime,
-                ctx,
-                Catalogue::Describe { repo, table },
-            ),
-            TableCommand::Schema { repo, table } => catalogue(
-                shell,
-                mode,
-                session,
-                runtime,
-                ctx,
-                Catalogue::Schema { repo, table },
-            ),
+            TableCommand::List { repo } => Catalogue::Tables { repo },
+            TableCommand::Describe { repo, table } => Catalogue::Describe { repo, table },
+            TableCommand::Schema { repo, table } => Catalogue::Schema { repo, table },
         },
         Command::Index {
             action: IndexCommand::List { repo, table },
-        } => catalogue(
-            shell,
-            mode,
-            session,
-            runtime,
-            ctx,
-            Catalogue::Indexes { repo, table },
-        ),
+        } => Catalogue::Indexes { repo, table },
         Command::Function {
             action: FunctionCommand::List { folder },
-        } => catalogue(
-            shell,
-            mode,
-            session,
-            runtime,
-            ctx,
-            Catalogue::Functions { folder },
-        ),
-    }
+        } => Catalogue::Functions { folder },
+    };
+    catalogue(shell, mode, session, runtime, ctx, which)
+}
+
+/// cancel-safe: NO — the request may already be sent; the caller drops the session.
+async fn ping(client: &SessionClient) -> Result<(), ShellError> {
+    client.ping().await.map_err(connect::request_error)
 }
 
 /// Catalogue command; the `database` floor is validated in [`with_session`].
@@ -764,10 +770,7 @@ fn profile_outcome(shell: &ShellArgs, action: ProfileCommand, ctx: &Ctx<'_>) -> 
             Err(err) => ("profile list", None, Err(err)),
         },
         ProfileCommand::Show { name } => {
-            let loaded = match ctx.profile_root {
-                Some(root) => connect::load_from(root, &name),
-                None => connect::load(&name),
-            };
+            let loaded = ctx.load_profile(&name);
             match loaded {
                 Ok(profile) => ("profile show", None, Ok(profile_record(&name, &profile))),
                 Err(err) => ("profile show", None, Err(err)),
@@ -782,7 +785,7 @@ fn profile_record(name: &str, profile: &Profile) -> Json {
         "name": output::sanitize(name),
         "address": output::sanitize(&profile.address),
         "transport": output::sanitize(&profile.transport),
-        "username": output::sanitize(&profile.username),
+        "username": profile.username.as_deref().map(output::sanitize),
         "database": profile.database.as_deref().map(output::sanitize),
         "pin_present": profile.pin.is_some(),
     })
@@ -797,84 +800,81 @@ fn with_session<'a>(
     session: &'a mut Option<Session>,
     runtime: &tokio::runtime::Runtime,
     require_database: bool,
-    // A fresh shorter lifetime: the returned references borrow only
-    // `session`, never the context, and unifying both parameters on `'a`
-    // would force every caller's `session` to outlive its `Ctx`.
     ctx: &mut Ctx<'_>,
-) -> Result<(&'a Profile, &'a mut Client), ShellError> {
+) -> Result<(&'a Profile, &'a SessionClient), ShellError> {
     if session.is_none() {
-        let established = establish_profile(shell, mode, None, runtime, require_database, ctx);
-        match established {
-            Ok((profile, client)) => {
-                *session = Some(Session {
-                    profile: Some(profile),
-                    client: Some(client),
-                    dead: false,
-                });
-            }
-            Err(err) => {
-                *session = Some(Session {
-                    profile: None,
-                    client: None,
-                    dead: true,
-                });
-                return Err(err);
-            }
-        }
+        let auth = shell.auth;
+        *session = Some(Session { auth, live: None });
+        let live = establish_profile(shell, mode, (auth, None), runtime, require_database, ctx)?;
+        *session = Some(Session {
+            auth,
+            live: Some(live),
+        });
     }
-    let session = session.as_mut().expect("session established above");
-    if session.dead {
-        return Err(ShellError::Connection);
-    }
-    match (session.profile.as_ref(), session.client.as_mut()) {
-        (Some(profile), Some(client)) => Ok((profile, client)),
-        _ => Err(ShellError::Usage),
-    }
-}
-
-/// Shared establish path: profile load → route check → transport/pin
-/// validation → secret source → secret read → dial (`require_database`
-/// enforces the catalogue routing floor).
-fn establish_profile(
-    shell: &ShellArgs,
-    mode: Mode,
-    name: Option<&str>,
-    runtime: &tokio::runtime::Runtime,
-    require_database: bool,
-    ctx: &mut Ctx<'_>,
-) -> Result<(Profile, Client), ShellError> {
-    let profile = load_profile(shell, name, ctx)?;
-    if require_database && profile.database.is_none() {
-        return Err(ShellError::Usage);
-    }
-    let connection = connect::prepare(&profile)?;
-    let source = secret_source(shell, mode)?;
-    // The no-echo prompt opens the injected terminal adapter.
-    let secret = terminal::secret::read_secret_with_writer(source, ctx.terminal, ctx.stderr)?;
-    let client = runtime.block_on(guarded(async move {
-        connection
-            .connect(secret)
-            .await
-            .map_err(connect::request_error)
-    }))?;
+    let (profile, client) = session
+        .as_ref()
+        .and_then(|state| state.live.as_ref())
+        .ok_or(ShellError::Connection)?;
     Ok((profile, client))
 }
 
-/// Resolves the profile name (command argument first, then `--profile`).
-fn load_profile(
+/// Validate the profile and transport before reading any secret.
+fn establish_profile(
     shell: &ShellArgs,
-    name: Option<&str>,
-    ctx: &Ctx<'_>,
-) -> Result<Profile, ShellError> {
+    mode: Mode,
+    (auth, name): (AuthKind, Option<&str>),
+    runtime: &tokio::runtime::Runtime,
+    require_database: bool,
+    ctx: &mut Ctx<'_>,
+) -> Result<(Profile, SessionClient), ShellError> {
+    auth.check()?;
     let name = name.or(shell.profile.as_deref()).ok_or(ShellError::Usage)?;
-    ctx.load_profile(name)
+    let profile = ctx.load_profile(name)?;
+    if require_database && profile.database.is_none() {
+        return Err(ShellError::Usage);
+    }
+    let client = match auth {
+        AuthKind::Scram => {
+            let connection = connect::prepare(&profile)?;
+            let secret = read_secret(shell, mode, auth, ctx)?;
+            runtime.block_on(interruptible(async move {
+                connection
+                    .connect(secret)
+                    .await
+                    .map(SessionClient::Scram)
+                    .map_err(connect::request_error)
+            }))?
+        }
+        AuthKind::Token => {
+            let connection = connect::prepare_token(&profile)?;
+            let secret = read_secret(shell, mode, auth, ctx)?;
+            runtime.block_on(interruptible(connection.connect(secret)))?
+        }
+        AuthKind::Browser | AuthKind::HttpLogin => return Err(ShellError::Deferred),
+        AuthKind::Resume => return Err(ShellError::Resume),
+    };
+    Ok((profile, client))
+}
+
+fn read_secret(
+    shell: &ShellArgs,
+    mode: Mode,
+    auth: AuthKind,
+    ctx: &mut Ctx<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ShellError> {
+    let source = secret_source(shell, mode, auth)?;
+    terminal::secret::read_secret_with_writer(source, ctx.terminal, ctx.stderr)
 }
 
 /// Resolves the secret source: no clap ArgGroup — multiple explicit
 /// selectors are the typed [`ShellError::SecretSourceConflict`] refusal;
 /// the hidden prompt is the default ONLY interactively; `--secret-fd` is
 /// Unix-only and refused before any secret read or network activity.
-fn secret_source(shell: &ShellArgs, mode: Mode) -> Result<SecretSource, ShellError> {
+fn secret_source(
+    shell: &ShellArgs,
+    mode: Mode,
+    auth: AuthKind,
+) -> Result<SecretSource, ShellError> {
     check_secret_conflict(shell)?;
     #[cfg(windows)]
     if shell.secret_fd.is_some() {
@@ -888,18 +888,13 @@ fn secret_source(shell: &ShellArgs, mode: Mode) -> Result<SecretSource, ShellErr
         return Ok(SecretSource::Stdin);
     }
     if let Some(name) = shell.secret_env.as_deref() {
-        // Design §3.2: the variable name is fixed (the value can be visible
-        // to other host processes).
-        if name != "SHAMIR_SHELL_PASSWORD" {
-            return Err(ShellError::Usage);
-        }
-        return Ok(SecretSource::Env);
+        return match (auth, name) {
+            (AuthKind::Scram, "SHAMIR_SHELL_PASSWORD") => Ok(SecretSource::Env),
+            (AuthKind::Token, "SHAMIR_SHELL_TOKEN") => Ok(SecretSource::EnvToken),
+            _ => Err(ShellError::Usage),
+        };
     }
-    if shell.secret_prompt {
-        return Ok(SecretSource::Prompt);
-    }
-    // The hidden prompt is the default only in interactive mode.
-    if mode == Mode::Interactive {
+    if shell.secret_prompt || mode == Mode::Interactive {
         Ok(SecretSource::Prompt)
     } else {
         Err(ShellError::InsecureSecret)
@@ -919,19 +914,23 @@ fn check_secret_conflict(shell: &ShellArgs) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Bounds one awaited request by the timeout; Ctrl+C → `Interrupted`; on
-/// timeout the connection must be treated as gone.
-async fn guarded<T>(future: impl Future<Output = Result<T, ShellError>>) -> Result<T, ShellError> {
-    let guarded = async {
-        tokio::select! {
-            outcome = future => outcome,
-            _ = tokio::signal::ctrl_c() => Err(ShellError::Interrupted),
-        }
-    };
-    match tokio::time::timeout(connect::REQUEST_TIMEOUT, guarded).await {
-        Ok(outcome) => outcome,
-        Err(_) => Err(ShellError::Timeout),
+/// Connectors own the dial and handshake budgets; this only adds Ctrl+C.
+/// cancel-safe: NO — the caller abandons the client on cancellation.
+async fn interruptible<T>(
+    future: impl Future<Output = Result<T, ShellError>>,
+) -> Result<T, ShellError> {
+    tokio::select! {
+        outcome = future => outcome,
+        _ = tokio::signal::ctrl_c() => Err(ShellError::Interrupted),
     }
+}
+
+/// Apply the request deadline only after establishment. On expiry the caller
+/// drops the session rather than retrying an operation that may have been sent.
+async fn guarded<T>(future: impl Future<Output = Result<T, ShellError>>) -> Result<T, ShellError> {
+    tokio::time::timeout(connect::REQUEST_TIMEOUT, interruptible(future))
+        .await
+        .map_err(|_| ShellError::Timeout)?
 }
 
 /// One verbose informational line on stderr only (never secret material).
