@@ -1,8 +1,9 @@
-use super::super::super::{AuditRecoveryError, FjallAuditAppender};
+use super::super::super::{recovery, rotation, AuditRecoveryError, FjallAuditAppender};
 use shamir_connect::server::audit_chain::{
     compute_entry_hmac, AuditChain, AuditChainWriter, AuditEntry, AuditError,
 };
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -432,4 +433,194 @@ async fn crash_drops_published_but_unflushed_entries_and_resumes_without_gap() {
     drop(appender);
     let [first, second] = durable;
     assert_full_history(dir.path(), &[first, second, resumed]);
+}
+
+#[tokio::test]
+async fn nonmonotonic_archive_names_recover_in_content_order() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 3, None);
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let split = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(1)
+        .map(|(offset, _)| offset + 1)
+        .unwrap();
+    // Names step backward while the chain steps forward: filename order and
+    // content order disagree, and content order must win.
+    fs::write(
+        dir.path().join("audit.log.00000000000000000099"),
+        &bytes[..split],
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("audit.log.00000000000000000005"),
+        &bytes[split..],
+    )
+    .unwrap();
+    fs::remove_file(&path).unwrap();
+    let (appender, position) = recover(dir.path(), &KEY, None).unwrap();
+    assert_eq!(position, after(&entries[2]));
+    drop(appender);
+    assert_full_history(dir.path(), &entries);
+}
+
+#[tokio::test]
+async fn unrelated_prefixed_file_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    fs::write(dir.path().join("audit.log.bak"), b"operator backup").unwrap();
+    fs::write(dir.path().join("audit.log.not-a-rotation"), b"junk").unwrap();
+    let (appender, position) = recover(dir.path(), &KEY, None).unwrap();
+    assert_eq!(position, after(&entries[1]));
+    drop(appender);
+    // The diagnostic reader includes only exact-pattern archives and the
+    // active log — never the ignored files.
+    assert_full_history(dir.path(), &entries);
+}
+
+#[tokio::test]
+async fn overflowing_rotation_name_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    let invalid = dir.path().join("audit.log.99999999999999999999");
+    fs::write(&invalid, b"beyond u64").unwrap();
+    let error = assert_rejected(dir.path(), &KEY, None);
+    assert!(
+        matches!(error, AuditRecoveryError::InvalidRotationName { .. }),
+        "{error:?}"
+    );
+    // The refusal preserves the exact invalid fixture byte-for-byte.
+    assert_eq!(fs::read(&invalid).unwrap(), b"beyond u64");
+    fs::remove_file(&invalid).unwrap();
+    assert_full_history(dir.path(), &entries);
+}
+
+#[tokio::test]
+async fn empty_exact_pattern_archive_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    let invalid = dir.path().join("audit.log.00000000000000000002");
+    fs::write(&invalid, b"").unwrap();
+    let error = assert_rejected(dir.path(), &KEY, None);
+    assert!(
+        matches!(error, AuditRecoveryError::MalformedRecord { offset: 0, .. }),
+        "{error:?}"
+    );
+    // The refusal preserves the exact invalid fixture byte-for-byte.
+    assert_eq!(fs::read(&invalid).unwrap(), b"");
+    fs::remove_file(&invalid).unwrap();
+    assert_full_history(dir.path(), &entries);
+}
+
+// Finding 7 — the recovery-side directory-sync seam. Production passes the
+// real `rotation::sync_parent`; these tests substitute closures to prove the
+// sync is issued only AFTER the verified truncation and the `audit.log`
+// reopen/create, and that a sync failure is a typed refusal that leaves the
+// prior persisted checkpoint untouched.
+
+/// A torn active tail is truncated before the seam: the closure sees exactly
+/// the recovered active bytes, then runs the REAL parent-directory sync.
+/// Parent counterfactual: `recover` called `sync_parent` before
+/// `set_len`/`open_log`, so the closure would observe the torn byte.
+#[tokio::test]
+async fn recovery_syncs_directory_after_truncation_and_reopen() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, Some(1));
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let end = first_line_end(&bytes);
+    fs::write(&path, &bytes[..end + 1]).unwrap();
+    let active = dir.path().join(ACTIVE);
+    let expected = bytes[..end].to_vec();
+    let expected_in_sync = expected.clone();
+    let recovered =
+        recovery::recover_with_dir_sync(dir.path(), &KEY, Some(GENESIS), move |log_path| {
+            assert_eq!(log_path, active);
+            // Truncation already applied and the writable handle already
+            // reopened: the active file holds exactly the verified prefix.
+            assert_eq!(fs::read(log_path).unwrap(), expected_in_sync);
+            rotation::sync_parent(log_path)
+        })
+        .unwrap();
+    assert_eq!(recovered.position, after(&entries[0]));
+    assert_eq!(recovered.initial_size, u64::try_from(end).unwrap());
+    drop(recovered);
+    assert_eq!(fs::read(&path).unwrap(), expected);
+}
+
+/// A missing active log is recreated (zero length) before the seam: the
+/// closure sees the fresh empty file, then runs the REAL sync.
+/// Parent counterfactual: a sync issued before `open_log` would see no file.
+#[tokio::test]
+async fn recovery_syncs_directory_after_creating_the_active_log() {
+    let dir = TempDir::new().unwrap();
+    let active = dir.path().join(ACTIVE);
+    assert!(!active.exists());
+    let active_in_sync = active.clone();
+    let recovered = recovery::recover_with_dir_sync(dir.path(), &KEY, None, move |log_path| {
+        assert_eq!(log_path, active_in_sync);
+        assert_eq!(fs::metadata(log_path).unwrap().len(), 0);
+        rotation::sync_parent(log_path)
+    })
+    .unwrap();
+    assert_eq!(recovered.position, GENESIS);
+    assert_eq!(recovered.initial_size, 0);
+    drop(recovered);
+    assert_eq!(fs::metadata(&active).unwrap().len(), 0);
+}
+
+/// An injected sync failure after a verified truncation is a typed refusal
+/// and leaves the prior persisted checkpoint exactly as it was.
+/// Parent counterfactual: without the seam (or an untyped panic/mask) the
+/// failure would either be unobservable or lose its `AuditRecoveryError::Io`
+/// type, and an anchor write could not be ruled out.
+#[tokio::test]
+async fn recovery_refuses_when_the_directory_sync_fails_and_keeps_the_checkpoint() {
+    let dir = TempDir::new().unwrap();
+    // Anchor at the FIRST row; two more complete rows plus a torn third
+    // would verify a NEW tail position if recovery ever anchored before the
+    // sync — the unchanged-anchor assertion can detect that premature
+    // advance only because the verified position differs from the anchor.
+    let entries = strict_history(dir.path(), 3, Some(1));
+    let anchor = after(&entries[0]);
+    assert_eq!(
+        FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
+        Some(anchor)
+    );
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let torn = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(1)
+        .map(|(offset, _)| offset + 1)
+        .unwrap();
+    fs::write(&path, &bytes[..torn + 1]).unwrap();
+    let error = recovery::recover_with_dir_sync(dir.path(), &KEY, Some(GENESIS), |_| {
+        Err(io::Error::other("injected directory sync failure"))
+    })
+    .err()
+    .expect("recovery accepted a failing directory sync");
+    // Typed refusal at the exact active log path, carrying the injected
+    // source — not a panic or a masked generic error.
+    let AuditRecoveryError::Io {
+        path: io_path,
+        source,
+    } = error
+    else {
+        panic!("unexpected refusal: {error:?}");
+    };
+    assert_eq!(io_path, dir.path().join(ACTIVE));
+    assert_eq!(source.to_string(), "injected directory sync failure");
+    // The sync runs after the verified truncation, so the on-disk active
+    // file is the truncated verified prefix — but nothing was anchored.
+    assert_eq!(fs::read(&path).unwrap(), &bytes[..torn]);
+    assert_eq!(
+        FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
+        Some(anchor)
+    );
 }

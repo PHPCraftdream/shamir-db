@@ -106,15 +106,28 @@ pub(super) async fn open(
             .audit_checkpoint_checked()
             .map_err(BootError::AuditCheckpointRead)?;
         let key = Zeroizing::new(meta.audit_chain_key().map_err(BootError::AuditKeyRead)?);
-        let (appender, (next_seq, prev_hmac)) = FjallAuditAppender::open_recovered_batched(
-            &config.data_dir,
-            &key,
-            legacy_checkpoint,
-            Duration::from_secs(5),
-            audit_max_bytes,
-            config.audit.retention_days,
-        )
-        .map_err(BootError::AuditRecovery)?;
+        // Rotation-boundary anchor (finding 1): persist the meta anchor at
+        // every rotation boundary AND the final batched shutdown, before
+        // retention can prune, so a legitimately pruned history always
+        // keeps a usable anchor. A MetaError becomes an io::Error that
+        // keeps it as its source.
+        let meta_anchor = Arc::clone(&meta);
+        let on_rotation_or_close = move |next_seq: u64, prev_hmac: [u8; 32]| {
+            meta_anchor
+                .store_audit_checkpoint(next_seq, prev_hmac)
+                .map_err(std::io::Error::other)
+        };
+        let (appender, (next_seq, prev_hmac)) =
+            FjallAuditAppender::open_recovered_batched_with_meta(
+                &config.data_dir,
+                &key,
+                legacy_checkpoint,
+                Duration::from_secs(5),
+                audit_max_bytes,
+                config.audit.retention_days,
+                on_rotation_or_close,
+            )
+            .map_err(BootError::AuditRecovery)?;
 
         // Recovery has made the verified tail durable. Refresh both anchors
         // (including genesis), before any writer can append to the chain.

@@ -35,7 +35,11 @@ use zeroize::Zeroizing;
 
 pub use shamir_sync::meta_port::{BootstrapTokenSnapshot, MetaError};
 
-use shamir_connect::common::crypto::try_random_bytes;
+/// One audit-chain anchor position: `(next_seq, prev_hmac)`.
+type AuditPosition = (u64, [u8; 32]);
+
+use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
+use shamir_connect::common::crypto::{constant_time_eq, try_random_bytes};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
@@ -547,13 +551,13 @@ impl ServerMetaStore {
     }
 
     /// Audit checkpoint: `(seq, hmac)` if any has ever been stored.
-    pub fn audit_checkpoint(&self) -> Option<(u64, [u8; 32])> {
+    pub fn audit_checkpoint(&self) -> Option<AuditPosition> {
         let p: PersistedAuditCheckpoint = self.read_blob(KEY_AUDIT_CHECKPOINT).ok().flatten()?;
         Some((p.last_audit_seq, bytes32(&p.last_audit_hmac)))
     }
 
-    /// Read the boot recovery anchor without treating corruption as absence.
-    pub(crate) fn audit_checkpoint_checked(&self) -> Result<Option<(u64, [u8; 32])>, MetaError> {
+    /// Boot recovery anchor read; corruption is absence never (`pub(super)`).
+    pub(super) fn audit_checkpoint_checked(&self) -> Result<Option<AuditPosition>, MetaError> {
         let Some(p) = self.read_blob::<PersistedAuditCheckpoint>(KEY_AUDIT_CHECKPOINT)? else {
             return Ok(None);
         };
@@ -820,18 +824,71 @@ impl ServerMetaStore {
     }
 
     /// Persist a fresh audit-checkpoint snapshot.
+    /// MONOTONIC (audit-chain review, finding 2): a write may never lower
+    /// the stored anchor — a regression or digest conflict (constant-time
+    /// compare) is a typed refusal; an identical write re-persists, healing
+    /// an earlier insert whose sync failed. Genesis is `(1, zero digest)`.
     pub fn store_audit_checkpoint(
         &self,
         next_seq: u64,
         prev_hmac: [u8; 32],
     ) -> Result<(), MetaError> {
         let _guard = self.write_lock.lock();
-        let next = PersistedAuditCheckpoint {
-            last_audit_seq: next_seq,
-            last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
-        };
-        self.put(KEY_AUDIT_CHECKPOINT, &next)?;
+        if next_seq == 0 {
+            return Err(MetaError::Encoding(
+                "audit checkpoint next sequence must be at least 1".into(),
+            ));
+        }
+        if next_seq == 1 && !constant_time_eq(&prev_hmac, &[0u8; 32]) {
+            return Err(MetaError::Encoding(
+                "audit checkpoint at next sequence 1 must carry the zero genesis digest".into(),
+            ));
+        }
+        if let Some((current_seq, current_hmac)) = self.audit_checkpoint_checked()? {
+            if next_seq < current_seq {
+                return Err(MetaError::Encoding(format!(
+                    "refusing to lower the audit anchor from next sequence {current_seq} to \
+                     {next_seq}"
+                )));
+            }
+            if next_seq == current_seq {
+                if !constant_time_eq(&prev_hmac, &current_hmac) {
+                    return Err(MetaError::Encoding(format!(
+                        "audit anchor digest conflict at next sequence {next_seq}"
+                    )));
+                }
+                // Identical write: persist anyway in case the first insert
+                // was visible but its sync failed.
+                return self.persist();
+            }
+        }
+        self.put(
+            KEY_AUDIT_CHECKPOINT,
+            &PersistedAuditCheckpoint {
+                last_audit_seq: next_seq,
+                last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
+            },
+        )?;
         self.persist()
+    }
+
+    /// Offline-CLI seam (audit-chain review, finding 2): authenticate the
+    /// durable audit history against BOTH trusted anchors (the appender
+    /// checkpoint and this store's anchor, read strictly) and return the
+    /// strict appender at the verified tail; a malformed meta anchor is a
+    /// refusal, never absence.
+    pub(crate) fn open_audit_recovered_strict(
+        &self,
+        data_dir: &Path,
+        audit_chain_key: &[u8; 32],
+    ) -> Result<(Arc<FjallAuditAppender>, AuditPosition), AuditRecoveryError> {
+        let anchor_meta = data_dir.join("server_meta");
+        let meta_err = |e: MetaError| AuditRecoveryError::Io {
+            path: anchor_meta.clone(),
+            source: std::io::Error::other(e),
+        };
+        let anchor = self.audit_checkpoint_checked().map_err(meta_err)?;
+        FjallAuditAppender::open_recovered_strict(data_dir, audit_chain_key, anchor)
     }
 
     /// Load the last persisted lockout snapshot, if any.

@@ -187,26 +187,23 @@ pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
         &EpochPolicy::compiled(),
     )?;
     let m = ServerMetaStore::open_or_init(c.data_dir.join("server_meta"))?;
-    let key = m.audit_chain_key()?;
-    let log = FjallAuditAppender::read_log_for_verify(&c.data_dir)?;
-    // Rotation, retention and online restarts can leave a log that does not verify from
-    // genesis; the operator command then resumes from the log tail instead of refusing.
-    if AuditChain::verify_chain(&key, &log).is_ok() {
-        let ac = FjallAuditAppender::load_checkpoint(&c.data_dir)?;
-        let mc = m.audit_checkpoint();
-        for cp in [ac, mc].into_iter().flatten() {
-            AuditChain::verify_against_checkpoint(&log, cp.0, &cp.1)?;
-        }
-    } else {
-        tracing::warn!("audit log does not verify from genesis; resuming from its tail");
-    }
-    let tail = log
-        .last()
-        .map(|e| (e.seq.saturating_add(1), e.hmac))
-        .unwrap_or((1, [0; 32]));
-    let app = FjallAuditAppender::open_strict(&c.data_dir)?;
+    // Load the key once; the strict helper authenticates with the same copy.
+    let key = Zeroizing::new(m.audit_chain_key()?);
+    // Shared strict recovery (finding 2): the SAME routine boot uses, against
+    // BOTH trusted anchors; on failure refuse — never resume from an
+    // unverified tail. The typed error is preserved as anyhow's source (the
+    // entry point prints `{error:#}`).
+    let (app, (tail_seq, tail_hmac)) =
+        m.open_audit_recovered_strict(&c.data_dir, &key)
+            .map_err(|e| {
+                anyhow::Error::new(e).context(
+                    "the audit history in this data directory failed verification; no token \
+                 command ran. Keep the server STOPPED, verify the audit history, and restore \
+                 an audit-consistent backup before retrying",
+                )
+            })?;
     let w = Arc::new(AuditChainWriter::new_with_shared(
-        Arc::new(AuditChain::from_checkpoint(key, tail.0, tail.1)),
+        Arc::new(AuditChain::from_checkpoint(*key, tail_seq, tail_hmac)),
         app.clone(),
     ));
     let d = Arc::new(FjallUserDirectory::open(c.data_dir.join("users"))?);

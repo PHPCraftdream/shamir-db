@@ -291,22 +291,85 @@ async fn clean_restart_continues_persisted_audit_chain() {
     let key = Zeroizing::new(meta.audit_chain_key().expect("persisted audit chain key"));
     AuditChain::verify_chain(&key, &after).expect("verify entire persisted chain after restart");
 
-    let resumed_seq = old_tail.seq + 1;
-    // Metadata records where the server resumed; online checkpoints can advance.
+    let final_tail = after
+        .last()
+        .expect("second boot must leave audit entries on disk");
+    // With the finding-1 fix the clean close checkpoints the FINAL position,
+    // so BOTH real stores must record exactly the second shutdown's tail.
+    let final_position = (final_tail.seq + 1, final_tail.hmac);
     assert_eq!(
         meta.audit_checkpoint(),
-        Some((resumed_seq, old_tail.hmac)),
-        "metadata checkpoint must match the verified tail at restart"
+        Some(final_position),
+        "metadata checkpoint must match the final shutdown tail"
     );
-    let (next_seq, prev_hmac) = FjallAuditAppender::load_checkpoint(data_dir)
+    let appender_position = FjallAuditAppender::load_checkpoint(data_dir)
         .expect("load audit appender checkpoint after the second clean shutdown")
         .expect("audit appender checkpoint must be persisted");
-    assert!(
-        next_seq >= resumed_seq,
-        "audit appender checkpoint next sequence {next_seq} precedes restart sequence {resumed_seq}"
+    assert_eq!(
+        appender_position, final_position,
+        "appender checkpoint must match the final shutdown tail"
     );
-    AuditChain::verify_against_checkpoint(&after, next_seq, &prev_hmac)
-        .expect("audit appender checkpoint must match the persisted chain");
+    AuditChain::verify_against_checkpoint(&after, final_tail.seq + 1, &final_tail.hmac)
+        .expect("final checkpoint must match the persisted chain");
+}
+
+/// Finding 4 of the audit-chain review: a final record that is authenticated
+/// but lost only its LF is refused by boot AND by the offline token CLI with
+/// the SAME typed `UnterminatedActiveRecord`, and nothing may rewrite it.
+/// This test covers the boot surface; the CLI surface is covered by
+/// `create_and_list_refuse_unterminated_final_record_and_never_append` in the
+/// token CLI tests on the same fixture boundary (real stores, real key).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boot_rejects_authenticated_final_record_missing_only_lf_without_rewriting_it() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let guard = FlakeGuard::new("boot_rejects_authenticated_final_record_missing_only_lf");
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let data_dir = temp.path();
+    let (complete, _) = authenticated_audit_run(data_dir, 1, &guard).await;
+    assert!(complete.ends_with(b"\n"), "expected a complete audit log");
+    let stripped = &complete[..complete.len() - 1];
+    // The typed offset is the unterminated record's BEGINNING, not its end.
+    let record_start = stripped
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0usize, |pos| pos + 1);
+    let log_path = data_dir.join("audit.log");
+    std::fs::write(&log_path, stripped).expect("write audit.log without its final LF");
+    guard.mark("wrote audit.log missing only the final LF");
+
+    let result = timeout(
+        AUDIT_PHASE_TIMEOUT,
+        Box::pin(make_launcher(data_dir).launch()),
+    )
+    .await
+    .expect("unterminated-record boot timed out");
+    let error = match result {
+        Err(error) => error,
+        Ok(handle) => {
+            timeout(AUDIT_PHASE_TIMEOUT, Box::pin(handle.shutdown()))
+                .await
+                .expect("shutdown after unexpected audit boot timed out");
+            panic!("boot accepted a final record missing only its LF");
+        }
+    };
+    assert!(
+        matches!(
+            &error,
+            shamir_server::server::BootError::AuditRecovery(
+                shamir_server::audit_appender::AuditRecoveryError::UnterminatedActiveRecord {
+                    path,
+                    offset,
+                }
+            ) if *offset as usize == record_start && path.ends_with("audit.log")
+        ),
+        "expected typed UnterminatedActiveRecord at offset {record_start}, got {error:?}"
+    );
+    guard.mark("boot rejected the unterminated final record");
+    assert_eq!(
+        std::fs::read(&log_path).expect("read audit.log after rejected boot"),
+        stripped,
+        "rejected boot must preserve the exact file bytes"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

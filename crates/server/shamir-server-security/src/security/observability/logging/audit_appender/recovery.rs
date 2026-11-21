@@ -2,30 +2,56 @@
 //! untrusted; the audit key and checkpoint stores are trusted.
 
 use super::{
-    AppenderError, AuditRecoveryError, FjallAuditAppender, Position, RotationPolicy,
-    AUDIT_LOG_FILENAME, CHECKPOINT_KEY, MAX_RECORD_BYTES,
+    AppenderError, AuditRecoveryError, FjallAuditAppender, Position, CHECKPOINT_KEY,
+    MAX_RECORD_BYTES,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use fjall::Keyspace;
+use fjall::{Database, Keyspace};
 use shamir_connect::common::crypto::constant_time_eq;
 use shamir_connect::server::audit_chain::{compute_entry_hmac, AuditEntry};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicU64, Arc};
-use std::time::Duration;
+use std::sync::Arc;
 
+/// Only names of the exact shape `audit.log.` + 20 ASCII decimal digits are
+/// rotation archives; every other name in the reserved namespace is ignored.
 const ROTATED_PREFIX: &[u8] = b"audit.log.";
 const GENESIS: Position = (1, [0; 32]);
 
-pub(super) fn open_recovered_batched(
+/// Verified log state recovered from an untrusted on-disk history: the
+/// reopened active file at its durable tail, the open checkpoint store, the
+/// verified resume position, and the active file's post-recovery size.
+pub(super) struct RecoveredLog {
+    pub(super) log_path: PathBuf,
+    pub(super) log_file: File,
+    pub(super) checkpoint: (Arc<Database>, Keyspace),
+    pub(super) position: Position,
+    pub(super) initial_size: u64,
+}
+
+pub(super) fn recover(
     dir: &Path,
     audit_chain_key: &[u8; 32],
-    legacy_checkpoint: Option<Position>,
-    flush_every: Duration,
-    max_size_bytes: Option<u64>,
-    retention_days: u32,
-) -> Result<(Arc<FjallAuditAppender>, Position), AuditRecoveryError> {
+    meta_checkpoint: Option<Position>,
+) -> Result<RecoveredLog, AuditRecoveryError> {
+    recover_with_dir_sync(
+        dir,
+        audit_chain_key,
+        meta_checkpoint,
+        super::rotation::sync_parent,
+    )
+}
+
+/// [`recover`] with the final parent-directory sync injectable: production
+/// passes [`super::rotation::sync_parent`], recovery-order tests substitute a
+/// closure. No other behavior differs.
+pub(super) fn recover_with_dir_sync(
+    dir: &Path,
+    audit_chain_key: &[u8; 32],
+    meta_checkpoint: Option<Position>,
+    dir_sync: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<RecoveredLog, AuditRecoveryError> {
     fs::create_dir_all(dir).map_err(|source| io_at(dir, source))?;
     let (log_path, db_path) = FjallAuditAppender::paths(dir);
     let checkpoint = FjallAuditAppender::open_db(&db_path).map_err(|source| {
@@ -35,9 +61,9 @@ pub(super) fn open_recovered_batched(
         }
     })?;
     let stored = read_checkpoint(&db_path, &checkpoint.1)?;
-    let mut scan = ChainScan::new(audit_chain_key, [stored, legacy_checkpoint])?;
+    let mut scan = ChainScan::new(audit_chain_key, [stored, meta_checkpoint])?;
     let mut record = Vec::new();
-    for path in rotated_paths(dir)? {
+    for path in ordered_archives(dir)? {
         require_regular(&path)?;
         let file = File::open(&path).map_err(|source| io_at(&path, source))?;
         scan_file(file, &path, &mut record, &mut scan, false)?;
@@ -58,56 +84,54 @@ pub(super) fn open_recovered_batched(
         Err(error) => return Err(error),
     };
     let position = scan.finish()?;
-    if let Some((file, truncate_to)) = active {
-        if let Some(offset) = truncate_to {
-            file.set_len(offset)
-                .map_err(|source| io_at(&log_path, source))?;
-        }
-        file.sync_all().map_err(|source| io_at(&log_path, source))?;
+    if let Some((file, Some(offset))) = active {
+        file.set_len(offset)
+            .map_err(|source| io_at(&log_path, source))?;
     }
+    // Reopen through the writer's append/create path and sync that writable
+    // handle once, so a verified truncate — and any still-unsynced durable
+    // tail this recovery is about to anchor — is durable. An unchanged file
+    // is synced here exactly once, not twice.
     let log_file =
         FjallAuditAppender::open_log(&log_path).map_err(|source| io_at(&log_path, source))?;
+    log_file
+        .sync_all()
+        .map_err(|source| io_at(&log_path, source))?;
+    // A pre-restart crash may have completed a rename/reopen without the
+    // directory sync, and this verified state is about to be anchored: make
+    // the containing directory durable before returning. This runs AFTER
+    // the verified truncation above and AFTER the reopen/create through
+    // `open_log` — the seam exists so tests can observe exactly that order.
+    dir_sync(&log_path).map_err(|source| io_at(&log_path, source))?;
     let initial_size = log_file
         .metadata()
         .map_err(|source| io_at(&log_path, source))?
         .len();
-    let appender = FjallAuditAppender::start_batched(
+    Ok(RecoveredLog {
         log_path,
         log_file,
         checkpoint,
-        flush_every,
-        max_size_bytes.map(|max_size_bytes| RotationPolicy {
-            max_size_bytes,
-            current_size: AtomicU64::new(initial_size),
-            retention_days,
-        }),
-    );
-    Ok((appender, position))
+        position,
+        initial_size,
+    })
 }
 
 pub(super) fn read_log_for_verify(dir: &Path) -> Result<Vec<AuditEntry>, AppenderError> {
     let (log_path, _db_path) = FjallAuditAppender::paths(dir);
-    let active_name = log_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(AUDIT_LOG_FILENAME)
-        .to_string();
-    let prefix = format!("{active_name}.");
+    let invalid = |error: AuditRecoveryError| {
+        AppenderError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    };
 
-    let mut rotated: Vec<PathBuf> = if dir.exists() {
-        std::fs::read_dir(dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
-            })
-            .collect()
+    // Same archive set and content order as boot recovery; this diagnostic
+    // reader still does not verify the chain.
+    let rotated = if dir.exists() {
+        ordered_archives(dir).map_err(invalid)?
     } else {
         Vec::new()
     };
-    rotated.sort();
 
     let mut all_paths = rotated;
     if log_path.exists() {
@@ -273,28 +297,99 @@ fn require_regular(path: &Path) -> Result<(), AuditRecoveryError> {
     Ok(())
 }
 
-fn rotated_paths(dir: &Path) -> Result<Vec<PathBuf>, AuditRecoveryError> {
-    let mut paths = Vec::new();
+/// Classify a directory entry in the reserved `audit.log.*` namespace.
+/// Only the exact rotation shape — the prefix followed by exactly 20 ASCII
+/// decimal digits that fit a `u64` — is an archive (`Some`); any other
+/// prefixed name is ignored with a warning (`None`); a 20-digit name whose
+/// value overflows `u64` is a refusal.
+pub(super) fn archive_name(path: &Path) -> Result<Option<u64>, AuditRecoveryError> {
+    let Some(name) = path.file_name() else {
+        return Ok(None);
+    };
+    let Some(suffix) = name.as_encoded_bytes().strip_prefix(ROTATED_PREFIX) else {
+        return Ok(None);
+    };
+    if suffix.len() != 20 || !suffix.iter().all(u8::is_ascii_digit) {
+        tracing::warn!(
+            ?path,
+            "ignoring a non-rotation file in the reserved audit log namespace"
+        );
+        return Ok(None);
+    }
+    // 20 ASCII digits, so UTF-8 cannot fail; only overflow can.
+    let digits = std::str::from_utf8(suffix).unwrap_or_default();
+    digits
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| AuditRecoveryError::InvalidRotationName {
+            path: path.to_path_buf(),
+        })
+}
+
+/// Rotation archives in the directory, ordered by the sequence of each
+/// archive's first record (filename order is only a tiebreak). The chain
+/// sequence/link/HMAC checks remain the authority; this ordering only makes
+/// wall-clock-rolled-back archive names recoverable. Memory is bounded by one
+/// record's working buffer and the path list; at most one archive is open at
+/// a time and no record rows are retained.
+pub(super) fn ordered_archives(dir: &Path) -> Result<Vec<PathBuf>, AuditRecoveryError> {
+    let mut archives = Vec::new();
     for entry in fs::read_dir(dir).map_err(|source| io_at(dir, source))? {
         let entry = entry.map_err(|source| io_at(dir, source))?;
-        let name = entry.file_name();
-        let Some(suffix) = name.as_encoded_bytes().strip_prefix(ROTATED_PREFIX) else {
-            continue;
-        };
-        if suffix.len() != 20
-            || !suffix.iter().all(u8::is_ascii_digit)
-            || std::str::from_utf8(suffix)
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .is_none()
-        {
-            return Err(AuditRecoveryError::InvalidRotationName { path: entry.path() });
+        if archive_name(&entry.path())?.is_some() {
+            archives.push(entry.path());
         }
-        paths.push(entry.path());
     }
-    // Fixed-width ASCII decimals sort in numeric order.
-    paths.sort_unstable();
-    Ok(paths)
+    let mut ordered: Vec<(u64, PathBuf)> = Vec::with_capacity(archives.len());
+    for path in archives {
+        require_regular(&path)?;
+        ordered.push((first_record_seq(&path)?, path));
+    }
+    ordered.sort_unstable();
+    Ok(ordered.into_iter().map(|(_, path)| path).collect())
+}
+
+/// Sequence of an archive's first record, read without retaining the row.
+/// An exact-pattern archive that is empty, or whose first line is not a
+/// terminated record of the fixed format, is malformed.
+fn first_record_seq(path: &Path) -> Result<u64, AuditRecoveryError> {
+    let file = File::open(path).map_err(|source| io_at(path, source))?;
+    let mut record = Vec::new();
+    let size = (&mut BufReader::new(file))
+        .take((MAX_RECORD_BYTES + 1) as u64)
+        .read_until(b'\n', &mut record)
+        .map_err(|source| io_at(path, source))?;
+    if size == 0 {
+        return Err(AuditRecoveryError::MalformedRecord {
+            path: path.to_path_buf(),
+            offset: 0,
+            source: AppenderError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "empty audit archive has no records",
+            )),
+        });
+    }
+    if size > MAX_RECORD_BYTES {
+        return Err(AuditRecoveryError::RecordTooLarge {
+            path: path.to_path_buf(),
+            offset: 0,
+        });
+    }
+    if !record.ends_with(b"\n") {
+        return Err(AuditRecoveryError::ArchivedFragment {
+            path: path.to_path_buf(),
+            offset: 0,
+        });
+    }
+    record.pop();
+    let entry = parse_record(record.strip_suffix(b"\r").unwrap_or(&record)).map_err(|source| {
+        AuditRecoveryError::MalformedRecord {
+            path: path.to_path_buf(),
+            offset: 0,
+            source,
+        }
+    })?;
+    Ok(entry.seq)
 }
 
 /// Return the truncation point only for an unterminated active record.
