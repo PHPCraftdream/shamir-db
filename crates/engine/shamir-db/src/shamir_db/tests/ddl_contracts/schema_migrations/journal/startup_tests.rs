@@ -73,7 +73,8 @@ async fn assert_open_damage(path: &Path, diagnostics: &[&str]) {
     };
     assert_eq!(
         error.code(),
-        Some("schema_migration_durability_unavailable")
+        Some("schema_migration_durability_unavailable"),
+        "unexpected startup error: {error:?}; expected diagnostics: {diagnostics:?}"
     );
     assert!(
         matches!(error, DbError::SchemaMigrationJournalUnreadable(ref detail)

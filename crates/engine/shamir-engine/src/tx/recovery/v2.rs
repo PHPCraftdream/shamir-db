@@ -763,11 +763,9 @@ async fn replay_v2_entry_admitted_inner(
     for op in &entry.ops {
         replay_v2_op_admitted(op, repo, permit, strict)
             .await
-            .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
-                    "replay tx {} op failed: {}",
-                    entry.txn_id, e
-                ))
+            .map_err(|e| match e {
+                error @ DbError::UniqueIndexCreationFailed(..) => error,
+                e => DbError::Internal(format!("replay tx {} op failed: {}", entry.txn_id, e)),
             })?;
     }
     Box::pin(seed_version_cache_for_entry(entry, repo, permit, strict)).await?;
