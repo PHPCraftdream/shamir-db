@@ -30,6 +30,7 @@ use crate::config::{Config, ResolvedSchedule};
 use crate::connection::{ConnTasks, ConnectionContext};
 use crate::server::boot_error::BootError;
 use crate::server_meta::ServerMetaStore;
+use crate::sync::durability::backup::provision_snapshot_lease;
 use crate::user_directory::FjallUserDirectory;
 
 use crate::bootstrap::BootstrapOutcome;
@@ -42,6 +43,21 @@ pub(super) fn resolve_backup(
     };
     let source = config.data_dir.canonicalize()?;
     let resolved = backup.resolve(&source)?;
+    // R2d-FIX-C: the destination is canonical and verified private after
+    // `resolve`, so provision the reserved snapshot-lease marker now, before
+    // retention can ever consider a deletion. Best-effort: a transient
+    // provisioning failure must not fail server startup — both readers and
+    // retention provision the same marker lazily before any read or delete
+    // (and `resolve` already made the privacy of the root a hard boot
+    // requirement), so a warning keeps boot semantics unchanged.
+    if let Err(error) = provision_snapshot_lease(&resolved.destination) {
+        tracing::warn!(
+            root = %resolved.destination.display(),
+            %error,
+            "could not pre-provision the snapshot lease marker at boot; \
+             it will be created lazily"
+        );
+    }
     Ok(Some((resolved, source)))
 }
 

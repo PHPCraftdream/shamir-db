@@ -18,7 +18,9 @@ use crate::boot::config::diagnostics::backup_online::schedule::runner::spawn_for
 use crate::boot::config::HttpListenerSettings;
 use crate::config::{Config, ListenerConfig, ListenerKind, TlsConfig};
 use crate::server::{BootstrapMode, ServerLauncher};
-use crate::sync::durability::backup::{verify_manifest, MANIFEST_FILE_NAME};
+use crate::sync::durability::backup::{
+    verify_manifest, MANIFEST_FILE_NAME, SNAPSHOT_LEASE_FILE_NAME,
+};
 
 const TEST_NAME: &str = "scheduled_backups_verify_prune_and_export_metrics_on_a_real_server";
 const EXAMPLE: &str = include_str!(concat!(
@@ -84,6 +86,17 @@ async fn run() {
     let handle = ServerLauncher::new(config)
         .with_bootstrap(BootstrapMode::Skip)
         .launch_with_backup_test(|resolved, registry, owner, shutdown| {
+            // Boot provisioning (R2d-FIX-C), deterministic: `resolve_backup`
+            // creates the marker before the schedule runner is spawned, so
+            // inside this callback — before `spawn_for_test` arms the first
+            // scheduled copy — it must already exist as a regular file.
+            let boot_marker = resolved.destination.join(SNAPSHOT_LEASE_FILE_NAME);
+            let marker_meta =
+                fs::symlink_metadata(&boot_marker).expect("lease marker provisioned at boot");
+            assert!(
+                marker_meta.is_file(),
+                "lease marker must be a regular file, not a link or directory"
+            );
             let scheduler_shutdown = shutdown.child_token();
             let mut successes = 0;
             spawn_for_test(
@@ -143,10 +156,11 @@ async fn run() {
         fs::read(&invalid_manifest).expect("invalid manifest"),
         b"invalid manifest"
     );
+    let marker = backups.join(SNAPSHOT_LEASE_FILE_NAME);
     let retained: Vec<_> = fs::read_dir(&backups)
         .expect("read backup root")
         .map(|entry| entry.expect("backup entry").path())
-        .filter(|path| path != &foreign && path != &invalid)
+        .filter(|path| path != &foreign && path != &invalid && path != &marker)
         .collect();
     assert_eq!(retained.len(), 2, "unexpected retained paths: {retained:?}");
     for snapshot in retained {

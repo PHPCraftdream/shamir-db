@@ -5,7 +5,9 @@ use std::path::Path;
 use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, BACKUP_META_FILE_NAME, MANIFEST_FORMAT_VERSION_V2,
 };
-use crate::sync::durability::backup::{verify_manifest, BackupError, MANIFEST_FILE_NAME};
+use crate::sync::durability::backup::{
+    verify_retention_candidate, BackupError, MANIFEST_FILE_NAME,
+};
 use crate::sync::format_stamp::STAMP_FILE_NAME;
 
 use super::budget::{metadata, plain_on_root, Budget, Refusal};
@@ -42,7 +44,7 @@ pub(super) fn verified_time(
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
-    // Account for reads in verify_manifest in addition to our own reads.
+    // Account for verifier reads in addition to our own reads.
     budget.bytes(raw.len() as u64)?;
     match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
@@ -112,7 +114,7 @@ pub(super) fn verified_time(
     }
 
     budget.checkpoint()?;
-    let verified = verify_manifest(dir);
+    let verified = verify_retention_candidate(dir);
     budget.checkpoint()?;
     verified.map_err(|error| match error {
         BackupError::Io(_) => Refusal::Incomplete,

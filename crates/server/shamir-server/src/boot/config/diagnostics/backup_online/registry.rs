@@ -10,6 +10,11 @@
 //! protocol's `CancelFlag`, whose cleanup removes the destination and
 //! releases pins/seals (R4).
 //!
+//! Snapshot lease (R2d-FIX-C): the protocol's self-verify runs inside
+//! `with_backup_writer_verification(&to, ..)` so it never waits on a reader
+//! or retention pass, and for scheduled runs the lease marker is provisioned
+//! BEFORE the snapshot is published (see `lease_provisioned` below).
+//!
 //! Destination handling (§4.2 A): the operator `to` must be absolute and is
 //! validated exactly like the offline backup — canonicalize the nearest
 //! existing ancestor and refuse anything inside (or equal to) the source
@@ -72,6 +77,7 @@ use crate::sync::durability::backup::online::protocol::{
     run_online_backup, BackupPermit, BackupReport, OnlineBackupError, OnlineBackupFailure,
     SealRecopyCap,
 };
+use crate::sync::durability::backup::with_backup_writer_verification;
 
 use super::adapter::{EngineBackupPort, PortRunState};
 use super::metrics as backup_metrics;
@@ -495,27 +501,61 @@ impl RunJob {
             Ok(())
         };
         let preflight_failed = preflight.is_err();
+        // Publication-window guard (R2d-FIX-C): provision the marker BEFORE
+        // the protocol publishes the fresh child, so an early standalone
+        // reader leases it. On failure the writer still runs, but retention
+        // is skipped for THIS run — a copy first published without a marker
+        // must never be tagged (made prune-eligible). Future runs retry the
+        // provisioning; a permanently untagged copy stays untouched by
+        // selection (rules unchanged).
+        let lease_provisioned = !preflight_failed
+            && scheduled.is_some()
+            && match crate::sync::durability::backup::provision_snapshot_lease(&to) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %to.display(),
+                        %error,
+                        "snapshot lease marker unavailable; retention skipped for this run"
+                    );
+                    false
+                }
+            };
         let outcome = preflight
             .inspect_err(|error| progress.record_failure(error.stage(), error))
             .and_then(|()| {
-                run_online_backup(
-                    &port,
-                    &data_dir,
-                    &to,
-                    &cancel,
-                    &mut progress,
-                    &options,
-                    &cap,
-                )
+                // Writer-scope bypass (R2d-FIX-C): the protocol's self-verify
+                // of the fresh `<to>/<timestamp>` child skips the root read
+                // lease; every other verify on the thread stays leased.
+                with_backup_writer_verification(&to, || {
+                    run_online_backup(
+                        &port,
+                        &data_dir,
+                        &to,
+                        &cancel,
+                        &mut progress,
+                        &options,
+                        &cap,
+                    )
+                })
             });
         let copy_duration = started_at.elapsed();
         // Stamp the guard with the verified snapshot BEFORE any
         // panic-prone post-processing: from this point a runner panic
         // must leave the completed snapshot recorded, never deleted.
+        // Release the BackupPermit BEFORE retention (R2d-FIX-C): prune needs
+        // no writer admission. `record.running` stays `true` until the
+        // publication below, so admission and cancel semantics are
+        // unchanged; as a local dropped before the `guard` parameter, the
+        // unwind order (permit, then failure publication) is preserved.
+        drop(permit_guard);
         if let Ok(report) = &outcome {
             guard.completed_dir = Some(report.dest_dir.clone());
             backup_metrics::note_success(report.total_bytes, copy_duration);
-            if let Some(scheduled) = scheduled.filter(|_| !cancel.is_cancelled()) {
+            if let Some(scheduled) = scheduled
+                .filter(|_| !cancel.is_cancelled())
+                .filter(|_| lease_provisioned)
+            {
                 let result = super::schedule::retention::prune(
                     &to,
                     &report.dest_dir,
@@ -524,6 +564,13 @@ impl RunJob {
                     &cancel,
                 );
                 backup_metrics::note_retention(result.deleted, result.failed, result.untouched);
+                // Normal next-pass contention, not an error: debug only.
+                if result.skipped_in_use > 0 {
+                    tracing::debug!(
+                        skipped = result.skipped_in_use,
+                        "scheduled retention skipped snapshots in use by readers"
+                    );
+                }
             }
         }
         // Owner-side final progress: the protocol only notes zeroed
@@ -547,9 +594,6 @@ impl RunJob {
         };
         drop(port);
         drop(db);
-        // Release the permit before publishing idle, or a new run can be
-        // refused.
-        drop(permit_guard);
         // §4.8 metrics hook values, prepared BEFORE the record lock: run
         // counters, copied bytes (the protocol's hashed-byte counters)
         // and the last run duration; the failure stage is where the

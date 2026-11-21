@@ -6,16 +6,20 @@ use shamir_private_dir::verify_private_dir;
 
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::progress::CancelFlag;
+use crate::sync::durability::backup::{
+    provision_snapshot_lease, try_snapshot_delete_lease, SNAPSHOT_LEASE_FILE_NAME,
+};
 
 use super::budget::{metadata, plain_on_root, Budget, Refusal, ROOT_ENTRIES};
 use super::ownership::{has_tag, is_owned, read_sidecar, tag_fresh};
 use super::preflight::verified_time;
 use super::RetentionOutcome;
 
-/// Run only after protocol success, holding registry admission until return.
-/// The private root must be the canonical path retained at boot, and the
-/// tree must have no concurrent writers. Same-account operators
-/// may copy out, but must not modify or mount anything inside this tree.
+/// Run only after protocol success, holding the existing registry admission
+/// until return. The private root must be the canonical
+/// path retained at boot, and the tree must have no concurrent writers.
+/// Same-account operators may copy out, but must not modify or mount
+/// anything inside this tree.
 pub(in crate::boot::config::diagnostics::backup_online) fn prune(
     root: &Path,
     fresh_copy: &Path,
@@ -61,17 +65,26 @@ pub(super) fn prune_inner(
     let mut untouched = 0;
     let mut fresh = None;
     let entries = fs::read_dir(&canonical).map_err(|_| Refusal::Incomplete)?;
-    for (index, entry) in entries.enumerate() {
+    let mut index = 0usize;
+    for entry in entries {
         budget.checkpoint()?;
-        if index >= ROOT_ENTRIES {
-            return Err(Refusal::Budget);
-        }
         let entry = entry.map_err(|_| Refusal::Incomplete)?;
         let name = entry.file_name();
         let path = entry.path();
         if path.parent() != Some(canonical.as_path()) {
             return Err(Refusal::Incomplete);
         }
+        // The reserved lease marker is never a candidate: skip it without
+        // advancing the non-marker index, so it neither consumes a visit-cap
+        // slot nor counts as untouched. Selection, checks and budget change
+        // not at all for timestamped entries.
+        if name == SNAPSHOT_LEASE_FILE_NAME {
+            continue;
+        }
+        if index >= ROOT_ENTRIES {
+            return Err(Refusal::Budget);
+        }
+        index += 1;
         let is_fresh = name == fresh_name;
         let mut classify = || -> Result<_, Refusal> {
             if !timestamp_name(&name) {
@@ -99,6 +112,10 @@ pub(super) fn prune_inner(
     let (time, fresh_path, sidecar) = fresh.ok_or(Refusal::Unverifiable)?;
     check_root(root, &canonical)?;
     check_child(&fresh_path, &root_meta)?;
+    // Publish the cross-process lease marker before tagging or deleting:
+    // readers bootstrap their shared lease on it (provisioning it lazily
+    // when absent), so a root without it must gain it here.
+    provision_snapshot_lease(&canonical).map_err(|_| Refusal::Incomplete)?;
     tag_fresh(&fresh_path, sidecar, owner, budget)?;
 
     owned.push((time, fresh_path.clone()));
@@ -114,12 +131,32 @@ pub(super) fn prune_inner(
         check_root(root, &canonical)?;
         check_child(&path, &root_meta)?;
         budget.checkpoint()?;
-        if let Err(error) = fs::remove_dir_all(path) {
+        // Fail closed on lease errors (account as failure, no delete);
+        // `None` is ordinary contention with a reader: skip, not an error.
+        let lease = match try_snapshot_delete_lease(&canonical) {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                outcome.skipped_in_use += 1;
+                continue;
+            }
+            Err(error) => {
+                outcome.failed += 1;
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    "scheduled backup retention could not take the delete lease"
+                );
+                continue;
+            }
+        };
+        // Hold the exclusive lease through the deletion so no reader can
+        // start between the last check and the recursive remove.
+        if let Err(error) = fs::remove_dir_all(&path) {
             outcome.failed += 1;
             tracing::warn!(kind = ?error.kind(), "scheduled backup retention deletion failed");
         } else {
             outcome.deleted += 1;
         }
+        drop(lease);
     }
     Ok(())
 }

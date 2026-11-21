@@ -4,10 +4,16 @@ use std::os::unix::fs::symlink;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use shamir_private_dir::create_private_dir;
 use tempfile::TempDir;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::Layer;
 
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::manifest::{
@@ -15,7 +21,9 @@ use crate::sync::durability::backup::online::manifest::{
     WalDirEntry, WalSection, WalSegmentEntry, BACKUP_META_FILE_NAME,
 };
 use crate::sync::durability::backup::online::progress::CancelFlag;
-use crate::sync::durability::backup::{verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME};
+use crate::sync::durability::backup::{
+    verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME, SNAPSHOT_LEASE_FILE_NAME,
+};
 
 use super::super::budget::{Budget, Refusal, ROOT_ENTRIES};
 use super::super::prune::prune_inner;
@@ -79,6 +87,7 @@ fn copy(root: &Path, name: &str, time: u128, owner: Option<&str>) -> PathBuf {
     );
     write_manifest(&dir, &encode(&manifest).expect("encode manifest")).expect("write manifest");
     write_backup_meta(&dir).expect("sidecar");
+    verify_manifest(&dir).expect("valid fixture");
     if let Some(owner) = owner {
         let mut value = sidecar(&dir);
         value["scheduled_retention"] = json!({"version": 1, "owner": owner});
@@ -88,7 +97,6 @@ fn copy(root: &Path, name: &str, time: u128, owner: Option<&str>) -> PathBuf {
         )
         .expect("write sidecar");
     }
-    verify_manifest(&dir).expect("valid fixture");
     dir
 }
 
@@ -108,6 +116,80 @@ fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
         },
         &CancelFlag::default(),
     )
+}
+
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct PauseAfterManifest {
+    loaded: mpsc::SyncSender<()>,
+    resume: Mutex<mpsc::Receiver<()>>,
+}
+
+impl<S: Subscriber> Layer<S> for PauseAfterManifest {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() == "shamir_sync::snapshot_verify" {
+            self.loaded.try_send(()).expect("signal manifest loaded");
+            self.resume
+                .lock()
+                .expect("resume receiver")
+                .recv_timeout(VERIFY_TIMEOUT)
+                .expect("resume verifier after prune");
+        }
+    }
+}
+
+#[test]
+fn retention_skips_snapshot_while_verify_is_reading() {
+    let (_temp, root) = private_root();
+    let old = copy(&root, "20200101_000001", 1, Some(OWNER));
+    let fresh = copy(&root, "20200101_000002", 2, None);
+
+    let marker = root.join(SNAPSHOT_LEASE_FILE_NAME);
+    assert!(
+        !marker.exists(),
+        "no marker before the reader provisions it"
+    );
+
+    let (first, reader_saw_marker, report) = thread::scope(|scope| {
+        let (loaded_tx, loaded_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let snapshot = &old;
+        let reader = scope.spawn(move || {
+            let subscriber = tracing_subscriber::registry().with(PauseAfterManifest {
+                loaded: loaded_tx,
+                resume: Mutex::new(resume_rx),
+            });
+            tracing::subscriber::with_default(subscriber, || verify_manifest(snapshot))
+        });
+
+        let first = loaded_rx.recv_timeout(VERIFY_TIMEOUT).map(|()| {
+            let reader_saw_marker = marker.is_file();
+            (retain(&root, &fresh, 1), reader_saw_marker)
+        });
+        let resumed = resume_tx.try_send(());
+        drop(resume_tx);
+        let report = reader.join();
+
+        let (first, reader_saw_marker) = first.expect("verifier loaded the manifest before prune");
+        resumed.expect("release paused verifier");
+        let report = report.expect("verifier thread panicked");
+        (first, reader_saw_marker, report)
+    });
+
+    assert_eq!(
+        (first.deleted, first.failed, first.skipped_in_use),
+        (0, 0, 1),
+        "retention must skip the snapshot while verification is paused"
+    );
+    assert_eq!(report.expect("snapshot still verifies").files_checked, 1);
+    assert!(reader_saw_marker, "reader provisioned the missing marker");
+    assert!(marker.is_file(), "marker remains after the skip");
+
+    let next = retain(&root, &fresh, 1);
+    assert_eq!((next.deleted, next.failed, next.skipped_in_use), (1, 0, 0));
+    assert!(!old.exists());
+    assert!(fresh.is_dir());
+    assert!(marker.is_file());
 }
 
 #[test]

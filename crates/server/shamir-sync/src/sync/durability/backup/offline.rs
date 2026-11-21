@@ -31,8 +31,9 @@
 //! offline CLI, which has no access to any live handle). Not done here
 //! because it requires a wire-protocol change.
 
-use std::fs;
-use std::io::{Read, Write};
+use std::cell::RefCell;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,7 @@ use shamir_collections::new_fx_set_wc;
 
 use super::online::manifest::{self as online_manifest, BackupKind, ManifestV2};
 use super::restore::fsync_dir;
+use super::snapshot_lease;
 use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation, StampError};
 
 mod source_lock;
@@ -53,6 +55,14 @@ mod v2_verify;
 /// through — chosen so a large fjall SST/journal file is hashed without
 /// ever materializing the whole file in RAM at once.
 const HASH_STREAM_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Reserved lease-file name at the ROOT of a managed backup root (outside
+/// every deletable `<timestamp>` snapshot child). Readers take a shared
+/// advisory lock on it, retention takes a non-blocking exclusive one before
+/// deleting a candidate. Defined here so the SERVER-facing re-export stays
+/// inside an existing public file; the private `snapshot_lease` module
+/// imports it inward.
+pub const SNAPSHOT_LEASE_FILE_NAME: &str = ".shamir-snapshot.lock";
 
 /// Stream `path`'s full contents through a fixed-size buffer into a running
 /// SHA-256 hasher, returning `(digest, size_bytes)`. Produces a
@@ -310,6 +320,27 @@ pub struct ManifestVerifyReport {
     pub consistency: Option<online_manifest::ConsistencySection>,
 }
 
+/// The exact decoded manifest a successful verification already produced,
+/// handed to the caller without a second parse of `manifest.json`.
+/// `pub(super)` — restore.rs is the intended consumer.
+#[derive(Debug)]
+pub(super) enum VerifiedManifest {
+    /// A v1 (offline stop-and-copy) manifest.
+    V1(Manifest),
+    /// A v2 (online) manifest.
+    V2(ManifestV2),
+}
+
+impl VerifiedManifest {
+    /// The manifest's file list, verbatim as verified.
+    pub(super) fn files(&self) -> &[ManifestFileEntry] {
+        match self {
+            VerifiedManifest::V1(manifest) => &manifest.files,
+            VerifiedManifest::V2(manifest) => &manifest.files,
+        }
+    }
+}
+
 /// Recursively copy `from` → `to/<timestamp>/`. The timestamp is
 /// `YYYYMMDD_HHMMSS` in UTC (sortable, human-readable).
 ///
@@ -544,40 +575,125 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Read `snapshot_dir/manifest.json`, re-hash every listed file, and
-/// confirm no extra unmanifested file is physically present. A checksum /
-/// size mismatch, a missing manifest, an unparseable manifest, or an extra
-/// unmanifested file are all hard errors — a corrupted or tampered snapshot
-/// must never be silently accepted.
+/// Verify `snapshot_dir` against its `manifest.json`, holding a shared
+/// read lease on the managed root (when it is one) for the duration so
+/// retention cannot delete mid-verify. Snapshot paths outside a managed
+/// root verify lock-free. The online backup writer's own self-verify skips
+/// the lease under its TLS scope only.
 pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
+    let _lease = if writer_verification_bypassed(snapshot_dir) {
+        None
+    } else {
+        snapshot_lease::read_snapshot(snapshot_dir).map_err(BackupError::Io)?
+    };
     verify_manifest_impl(snapshot_dir).map(|(report, _)| report)
 }
 
-/// Internal full verify that ALSO returns the exact decoded v2 manifest, so
-/// restore can consume the already-verified manifest without parsing
-/// `manifest.json` a second time. `Some` only for a v2 manifest that fully
-/// verified; `None` for every v1 manifest (restore's v1 path needs nothing
-/// beyond the report). `pub(crate)` — restore.rs is the intended caller.
-pub(crate) fn verify_manifest_for_restore(
+/// Internal full verify for restore: also returns the exact decoded
+/// manifest so restore need not re-parse `manifest.json`. `pub(super)`.
+/// Takes NO read lease: the caller holds the shared lease through the last
+/// source read (a second handle would be a distinct lease; see history).
+/// Verify-only callers should use [`verify_manifest`].
+pub(super) fn verify_manifest_for_restore(
     snapshot_dir: &Path,
-) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
+) -> Result<(ManifestVerifyReport, VerifiedManifest), BackupError> {
     verify_manifest_impl(snapshot_dir)
 }
 
-/// Shared implementation behind the two wrappers. Dispatches on the cheap
+/// Retention preflight: run the same verifier core over a candidate
+/// snapshot WITHOUT taking the blocking shared read lease (retention runs
+/// on a native scheduler worker and must never block). The exclusive
+/// delete lease is taken separately, immediately before deletion. Not used
+/// by any reader path.
+pub fn verify_retention_candidate(dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
+    verify_manifest_impl(dir).map(|(report, _)| report)
+}
+
+/// Provision the lease marker ([`SNAPSHOT_LEASE_FILE_NAME`]) at the root of
+/// a managed backup root, owner-private, without locking it. Idempotent;
+/// called when scheduled retention is enabled. Precondition: `root` is a
+/// private managed backup root the caller has already validated
+/// (`open_or_create` re-checks only the leaf).
+pub fn provision_snapshot_lease(root: &Path) -> io::Result<()> {
+    snapshot_lease::provision(root)
+}
+
+/// Non-blocking EXCLUSIVE delete lease. `Ok(Some(handle))` means retention
+/// may delete; `Ok(None)` means a read or delete lease is held — skip this
+/// pass. Dropping the handle releases the lease. Never blocks, never holds
+/// any registry permit.
+pub fn try_snapshot_delete_lease(root: &Path) -> io::Result<Option<File>> {
+    snapshot_lease::try_exclusive(root)
+}
+
+/// Thread-local scoped bypass: while `run` executes on the CURRENT native
+/// thread, [`verify_manifest`] skips the reader lease for snapshots that
+/// are DIRECT children of `root` (lexical `parent()` equality). The sole
+/// reason for the bypass is that the online backup writer cannot lease the
+/// snapshot it is still publishing; all other verifies on the thread, and
+/// all calls from other threads, stay leased. TLS state is restored by an
+/// RAII guard, including on unwind. Doc-hidden: only `run_online_backup`
+/// may call this.
+#[doc(hidden)]
+pub fn with_backup_writer_verification<R>(root: &Path, run: impl FnOnce() -> R) -> R {
+    let _guard = WriterVerificationScope::enter(root.to_path_buf());
+    run()
+}
+
+thread_local! {
+    /// Managed root (verbatim, as passed) this native thread's online
+    /// writer is currently self-verifying under; `None` outside the
+    /// bypass scope.
+    static WRITER_VERIFY_BYPASS: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// RAII scope restoring the previous TLS bypass state (including on
+/// unwind) when dropped.
+struct WriterVerificationScope {
+    previous: Option<PathBuf>,
+}
+
+impl WriterVerificationScope {
+    fn enter(root: PathBuf) -> Self {
+        let previous = WRITER_VERIFY_BYPASS.with(|cell| cell.borrow_mut().replace(root));
+        Self { previous }
+    }
+}
+
+impl Drop for WriterVerificationScope {
+    fn drop(&mut self) {
+        WRITER_VERIFY_BYPASS.with(|cell| *cell.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Whether `snapshot_dir` is the direct child of the TLS-scoped writer
+/// root on this thread, by plain lexical `Path` equality. `false` outside
+/// a bypass scope or for a rootless path; no filesystem access.
+fn writer_verification_bypassed(snapshot_dir: &Path) -> bool {
+    let Some(parent) = snapshot_dir.parent() else {
+        return false;
+    };
+    WRITER_VERIFY_BYPASS.with(|cell| cell.borrow().as_deref() == Some(parent))
+}
+
+/// Shared implementation behind the entry points. Dispatches on the cheap
 /// format-version peek: v2 snapshots route to the child module's
 /// [`v2_verify::verify_manifest_v2`], the v1 path stays byte-identical.
+/// Lease policy lives entirely in the callers ([`verify_manifest`] leases;
+/// [`verify_manifest_for_restore`] and [`verify_retention_candidate`] do
+/// not).
 fn verify_manifest_impl(
     snapshot_dir: &Path,
-) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
+) -> Result<(ManifestVerifyReport, VerifiedManifest), BackupError> {
     let manifest_path = snapshot_dir.join(MANIFEST_FILE_NAME);
     if !manifest_path.exists() {
         return Err(BackupError::ManifestMissing(manifest_path));
     }
     let raw = fs::read(&manifest_path)?;
+    tracing::trace!(target: "shamir_sync::snapshot_verify", "snapshot manifest loaded");
     if peek_manifest_format_version(&raw) == Some(online_manifest::MANIFEST_FORMAT_VERSION_V2) {
         let (report, manifest) = v2_verify::verify_manifest_v2(snapshot_dir, &raw)?;
-        return Ok((report, Some(manifest)));
+        return Ok((report, VerifiedManifest::V2(manifest)));
     }
     let manifest: Manifest = serde_json::from_slice(&raw).map_err(|e| {
         BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
@@ -654,7 +770,7 @@ fn verify_manifest_impl(
             binary_version: None,
             consistency: None,
         },
-        None,
+        VerifiedManifest::V1(manifest),
     ))
 }
 

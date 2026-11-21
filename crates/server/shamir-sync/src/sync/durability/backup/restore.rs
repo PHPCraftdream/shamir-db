@@ -27,6 +27,16 @@
 //!    safe here because `parent` is guaranteed to already exist). A copy
 //!    failure here best-effort removes the staged temp dir
 //!    ([`cleanup_staged_temp_dir`]) before propagating the original error.
+//!
+//! 3b. **Staged presence re-check** (staged_listing.rs): every file the
+//!    VERIFIED manifest lists must exist as a regular file under the staged
+//!    temp dir (a cheap listing comparison, no re-hash — a
+//!    `symlink_metadata` per entry). The copy walks the SOURCE tree, not the
+//!    verified list, so a deletion that raced the copy (e.g. a snapshot
+//!    removed mid-restore) would otherwise publish an INCOMPLETE target
+//!    with no error. Any absent or non-regular entry refuses with
+//!    [`RestoreError::StagedFileMissing`], cleans up the staged copy and
+//!    leaves `data_dir` untouched.
 //! 4. **Invalidate sessions IN THE STAGED COPY, before anything touches the
 //!    live `data_dir`**: open the `users` store INSIDE the temp dir (NOT
 //!    `data_dir`'s) and call `invalidate_all_tickets(now_ns)` there, then
@@ -65,8 +75,9 @@ use shamir_db::engine::meta::repo_identity::RepoIdentity;
 use shamir_db::ShamirDb;
 use thiserror::Error;
 
-use super::offline::{self as backup, copy_dir_recursive, BackupError};
+use super::offline::{self as backup, copy_dir_recursive, BackupError, VerifiedManifest};
 use super::online::manifest::{self as online_manifest, BackupKind, ManifestV2};
+use super::snapshot_lease;
 use crate::format_stamp::{restore_snapshot_gate, EpochPolicy};
 use crate::meta_port::MetaError;
 use crate::user_directory::FjallUserDirectory;
@@ -74,6 +85,7 @@ use crate::user_directory::FjallUserDirectory;
 mod catalogue;
 mod fjall_locks;
 mod online;
+mod staged_listing;
 #[cfg(test)]
 mod tests;
 mod wire_registry;
@@ -153,6 +165,17 @@ pub enum RestoreError {
     /// failed. Never implies anything about `data_dir`.
     #[error("staged system catalogue access failed: {0}")]
     Catalogue(shamir_db::DbError),
+    /// Step 3b staged presence re-check: a file the VERIFIED manifest lists
+    /// is absent from (or not a regular file under) the staged copy — the
+    /// snapshot's source tree lost it between verification and enumeration.
+    /// Publishing would produce an INCOMPLETE target, so the restore refuses
+    /// (staged copy cleaned up, `data_dir` untouched). Names the staged path.
+    #[error(
+        "staged copy is missing a file listed in the verified manifest: {0} — \
+         the snapshot changed between verification and the copy; refusing to \
+         publish an incomplete restore"
+    )]
+    StagedFileMissing(PathBuf),
 }
 
 /// Outcome of a successful restore.
@@ -212,6 +235,32 @@ pub fn restore_with_probe<F>(
 where
     F: FnOnce(&Path) -> Result<(), RestoreError>,
 {
+    restore_impl(from, data_dir, force, probe, || {})
+}
+
+/// The exact [`restore_with_probe`] body, with one private test seam:
+/// `before_copy` runs after verification and the format-stamp gate and
+/// before the step-3 source walk. Production callers pass a no-op (the
+/// delegating public wrapper above); the staged-listing regression test
+/// uses it to delete a manifest-listed file from the snapshot between
+/// verification and enumeration, deterministically reproducing a reader
+/// racing a deleter. The seam inserts NO behavior of its own.
+fn restore_impl<F, B>(
+    from: &Path,
+    data_dir: &Path,
+    force: bool,
+    probe: F,
+    before_copy: B,
+) -> Result<RestoreReport, RestoreError>
+where
+    F: FnOnce(&Path) -> Result<(), RestoreError>,
+    B: FnOnce(),
+{
+    // Shared cross-process read lease on a MANAGED-root snapshot (no-op for
+    // an exported copy): held from before the first read of the snapshot
+    // through its last source read, so scheduled retention skips it.
+    let source_lease = snapshot_lease::read_snapshot(from).map_err(BackupError::Io)?;
+
     // ---- Step 0: classify the snapshot kind from the raw manifest (pure
     // read, FAIL-CLOSED). A recognized v1 or v2-offline header stays on the
     // v1 path below with EXACTLY today's order — probe first, verify second.
@@ -234,8 +283,8 @@ where
     // manifest is assumed FIXED for the duration of the command (documented
     // operator prerequisite: a snapshot directory is immutable while being
     // restored); the staged bytes are the copy of those verified bytes and
-    // are NOT re-hashed.
-    let online_manifest: Option<ManifestV2> = if online_classified {
+    // are NOT re-hashed; its file list drives the staged presence re-check.
+    let verified_manifest: VerifiedManifest = if online_classified {
         let (report, manifest) = backup::verify_manifest_for_restore(from)?;
         if !matches!(report.kind, BackupKind::Online) {
             // Classified online but verified as something else: the
@@ -247,11 +296,9 @@ where
                 ),
             ));
         }
-        manifest
-    } else {
-        None
-    };
-    if online_manifest.is_some() {
+        // Read-only target probe, exactly where the original online path ran
+        // it: right after verify + kind check, before the stamp gate and the
+        // copy. The caller-supplied (target-MUTATING) probe is bypassed.
         if !force {
             backup::probe_source_stopped(data_dir).map_err(|e| match e {
                 BackupError::SourceRunning(_) => {
@@ -261,21 +308,39 @@ where
                 other => RestoreError::ManifestVerification(other),
             })?;
         }
+        manifest
     } else {
         if !force {
             probe(data_dir)?;
         }
 
         // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
-        // data_dir at all. ----
-        backup::verify_manifest(from)?;
-    }
+        // data_dir at all — and KEEP the exact verified manifest: the staged
+        // presence re-check (step 3b) needs its file list, so the source is
+        // verified exactly ONCE per kind, as before. The opposite flip — a
+        // legacy-classified snapshot that verifies as ONLINE — refuses with
+        // the same typed error instead of letting the replay pipeline run
+        // against a target that was only guarded by the legacy probe. ----
+        let (report, manifest) = backup::verify_manifest_for_restore(from)?;
+        if matches!(report.kind, BackupKind::Online) {
+            return Err(RestoreError::ManifestVerification(
+                BackupError::ManifestInvalid(
+                    "manifest kind changed between classification and verification".into(),
+                ),
+            ));
+        }
+        manifest
+    };
 
     // ---- Step 2b: verify the SOURCE snapshot's format stamp (design 3.5).
     // Newer, corrupt or newer-layout refuses; absent or older is allowed
     // (rollback must work). The copy brings its own stamp; nothing is
     // written here. ----
     restore_snapshot_gate(from, &EpochPolicy::compiled())?;
+
+    // ---- Test seam: runs after verification and the stamp gate, before the
+    // step-3 source walk. Production no-op (see `restore_impl`'s doc). ----
+    before_copy();
 
     // ---- Step 3: copy to a temporary sibling directory ----
     let stamp = restore_timestamp();
@@ -320,11 +385,42 @@ where
         cleanup_staged_temp_dir(&temp_dir);
         return Err(RestoreError::Io(e));
     }
+    // Last source read done — release the shared lease before any staging
+    // mutation, so retention is never blocked by non-reading work.
+    drop(source_lease);
 
-    // ---- Step 3b (online kind only): replay + staged-catalogue consistency
+    // The v2 payload for the online replay, extracted BEFORE the staged
+    // presence re-check so a kind-change between classification and
+    // verification fails closed before any further staging work.
+    let replay_manifest: Option<&ManifestV2> = match (online_classified, &verified_manifest) {
+        (true, VerifiedManifest::V2(manifest)) => Some(manifest),
+        (true, VerifiedManifest::V1(_)) => {
+            cleanup_staged_temp_dir(&temp_dir);
+            return Err(RestoreError::ManifestVerification(
+                BackupError::ManifestInvalid(
+                    "manifest kind changed between classification and verification".into(),
+                ),
+            ));
+        }
+        (false, _) => None,
+    };
+
+    // ---- Step 3b: staged presence re-check — every file the verified
+    // manifest lists must exist as a regular file under the staged copy
+    // (cheap listing comparison, NO re-hash). The verified manifest and the
+    // staged bytes are only trustworthy while the source cannot change; a
+    // deletion that raced the copy would otherwise publish an INCOMPLETE
+    // target silently. Refusal cleans the staged copy; `data_dir` is
+    // untouched. ----
+    if let Err(e) = staged_listing::verify_staged_files(&temp_dir, verified_manifest.files()) {
+        cleanup_staged_temp_dir(&temp_dir);
+        return Err(e);
+    }
+
+    // ---- Step 3c (online kind only): replay + staged-catalogue consistency
     // inside the staged copy. Every refusal propagates after best-effort
     // cleanup of the staged directory; `data_dir` is untouched. ----
-    let excluded_repositories = if let Some(manifest) = &online_manifest {
+    let excluded_repositories = if let Some(manifest) = replay_manifest {
         match online::run(&temp_dir, manifest) {
             Ok(excluded) => excluded,
             Err(e) => {
@@ -367,7 +463,7 @@ where
     // the swapped-in copy is already live. Refusal cleans the staged copy —
     // `data_dir` is untouched. `force` skips this too, matching the caller's
     // explicit certainty. ----
-    if online_manifest.is_some() && !force {
+    if online_classified && !force {
         if let Err(e) = backup::probe_source_stopped(data_dir) {
             cleanup_staged_temp_dir(&temp_dir);
             return Err(match e {

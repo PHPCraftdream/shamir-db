@@ -18,7 +18,9 @@ use crate::sync::durability::backup::online::manifest::{
     BACKUP_META_FILE_NAME,
 };
 use crate::sync::durability::backup::online::progress::BackupStage;
-use crate::sync::durability::backup::{verify_manifest, ManifestFileEntry};
+use crate::sync::durability::backup::{
+    verify_manifest, ManifestFileEntry, SNAPSHOT_LEASE_FILE_NAME,
+};
 
 use super::super::super::metrics::backup_metrics_snapshot;
 use super::super::super::OnlineBackupRegistry;
@@ -176,9 +178,20 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
         .expect("destination listing")
         .map(|entry| entry.expect("destination entry").file_name())
         .collect();
+    // The reader lease marker (created lazily by the `verify_manifest`
+    // probes on the seeded copies) is expected alongside the snapshots; it
+    // must be a regular file, and retention never lists it.
+    let marker_meta = fs::symlink_metadata(to.join(SNAPSHOT_LEASE_FILE_NAME))
+        .expect("lease marker exists after the verify probes");
+    assert!(marker_meta.is_file(), "lease marker must be a regular file");
     assert_eq!(
         entries,
-        BTreeSet::from([copies[0], copies[1], "foreign"].map(OsString::from))
+        BTreeSet::from([
+            OsString::from(SNAPSHOT_LEASE_FILE_NAME),
+            OsString::from(copies[0]),
+            OsString::from(copies[1]),
+            OsString::from("foreign"),
+        ])
     );
     for name in copies {
         verify_manifest(&to.join(name)).expect("existing copy remains verified");
