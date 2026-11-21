@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
@@ -14,8 +15,10 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+use super::manifest::BACKUP_META_FILE_NAME;
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
+use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
 /// Fixed reused buffer for streaming copies and hashes.
 const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
@@ -390,14 +393,15 @@ const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 
 /// Deterministic listing of every regular file under `source_root`
 /// (sorted per directory), skipping top-level directories named in
-/// `skip_top_level_dirs`, any non-regular entry, and files named in
-/// [`SKIP_FILE_NAMES`] (`.shamir.lock` and `lock` — runtime lock
-/// artifacts, see above). With a gate, cancel and the clock are checked
-/// at every directory iteration — the listing is inside the re-copy
-/// budget.
+/// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
+/// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
+/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above). With
+/// a gate, cancel and the clock are checked at every directory iteration
+/// — the listing is inside the re-copy budget.
 fn list_files(
     source_root: &Path,
     skip_top_level_dirs: &[&str],
+    skip_top_level_files: &[&str],
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
 ) -> Result<Vec<PathBuf>, CopyError> {
@@ -439,11 +443,21 @@ fn list_files(
                 }
                 stack.push(entry);
             } else if is_regular_file(&meta) {
-                let name = entry
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if SKIP_FILE_NAMES.contains(&name.as_str()) {
+                let Some(name) = entry.file_name() else {
+                    continue;
+                };
+                if SKIP_FILE_NAMES
+                    .iter()
+                    .any(|candidate| name == OsStr::new(candidate))
+                {
+                    continue;
+                }
+                if !skip_top_level_files.is_empty()
+                    && dir.as_path() == source_root
+                    && skip_top_level_files
+                        .iter()
+                        .any(|candidate| name == OsStr::new(candidate))
+                {
                     continue;
                 }
                 out.push(entry);
@@ -475,6 +489,29 @@ pub fn run_copy_pass(
         dest_root,
         &PassRules {
             skip_top_level_dirs,
+            skip_top_level_files: &[],
+            exclude_dirs,
+            cancel,
+            options,
+            gate: None,
+            preauth: &BTreeMap::new(),
+        },
+    )
+}
+
+pub(super) fn run_data_dir_copy_pass(
+    source_root: &Path,
+    dest_root: &Path,
+    exclude_dirs: &[PathBuf],
+    cancel: &CancelFlag,
+    options: &CopyOptions,
+) -> Result<CopyPassResult, CopyError> {
+    run_copy_pass_inner(
+        source_root,
+        dest_root,
+        &PassRules {
+            skip_top_level_dirs: &["cache"],
+            skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
             exclude_dirs,
             cancel,
             options,
@@ -488,6 +525,7 @@ pub fn run_copy_pass(
 /// lists short).
 struct PassRules<'a> {
     skip_top_level_dirs: &'a [&'a str],
+    skip_top_level_files: &'a [&'a str],
     exclude_dirs: &'a [PathBuf],
     cancel: &'a CancelFlag,
     options: &'a CopyOptions,
@@ -522,6 +560,7 @@ pub(crate) fn run_copy_pass_gated(
         dest_root,
         &PassRules {
             skip_top_level_dirs: &[],
+            skip_top_level_files: &[],
             exclude_dirs: &[],
             cancel,
             options,
@@ -552,7 +591,7 @@ pub(crate) fn authenticate_dest(
     {
         return Ok(BTreeMap::new());
     }
-    let listing = list_files(dest_root, &[], cancel, gate)?;
+    let listing = list_files(dest_root, &[], &[], cancel, gate)?;
     let mut out = BTreeMap::new();
     for path in listing {
         if let Some(gate) = gate {
@@ -583,6 +622,7 @@ fn run_copy_pass_inner(
     let listing = list_files(
         source_root,
         rules.skip_top_level_dirs,
+        rules.skip_top_level_files,
         rules.cancel,
         rules.gate,
     )?;

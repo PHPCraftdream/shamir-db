@@ -37,9 +37,9 @@ pub(crate) enum ShellError {
     ProjectionLimit,
     Unsupported,
     Plaintext,
-    /// Token auth on a transport PR1 does not carry (PR2 adds the
-    /// token-subset denial with exit 4).
+    /// Token auth on a transport that does not support it.
     Token,
+    TokenRequestDenied,
     Deferred,
     Resume,
     MissingPin,
@@ -74,6 +74,7 @@ impl ShellError {
             ShellError::Unsupported => "unsupported",
             ShellError::Plaintext => "plaintext_refused",
             ShellError::Token => "token_transport_refused",
+            ShellError::TokenRequestDenied => "token_request_denied",
             ShellError::Deferred => "deferred",
             ShellError::Resume => "resume_refused",
             ShellError::MissingPin => "missing_pin",
@@ -114,6 +115,9 @@ impl ShellError {
                 "refusing plaintext admin connection; use TLS TCP, WSS, or local IPC"
             }
             ShellError::Token => "API tokens require HTTPS REST or the native token WSS listener",
+            ShellError::TokenRequestDenied => {
+                "token sessions expose only the read-only shell subset; log in with SCRAM for this command"
+            }
             ShellError::Deferred => {
                 "browser profile and HTTP password login are deferred; HTTP login mints a reusable API token, not a session"
             }
@@ -159,7 +163,7 @@ impl ShellError {
             ShellError::Usage | ShellError::OutputVersion | ShellError::MissingTty => 1,
             ShellError::Connection => 2,
             ShellError::Authentication => 3,
-            ShellError::Denied => 4,
+            ShellError::Denied | ShellError::TokenRequestDenied => 4,
             ShellError::Server | ShellError::ProjectionLimit => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
