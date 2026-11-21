@@ -2,7 +2,7 @@
 //!
 //! Design: `docs/dev-artifacts/design/admin-shell.md` §3.2 (mutually
 //! exclusive sources, 4096-byte cap, TTY refused as `--secret-stdin` /
-//! `--secret-fd`, fixed `SHAMIR_SHELL_PASSWORD` variable), §6 (zeroize on
+//! `--secret-fd`, fixed auth-matched environment variables), §6 (zeroize on
 //! every path, no secret in errors or Debug, no history). The platform
 //! modules (`unix.rs`, `windows.rs`) implement the no-echo hidden-line
 //! session behind the [`Terminal`] seam; this file owns source dispatch,
@@ -37,6 +37,7 @@ use super::windows;
 /// allow-listed to exactly the auth-matched fixed variable; the parser
 /// validates the name upstream and only this constant reaches this module).
 const SECRET_ENV_VAR: &str = "SHAMIR_SHELL_PASSWORD";
+const TOKEN_ENV_VAR: &str = "SHAMIR_SHELL_TOKEN";
 
 /// Hard cap from design §3.2 (`BSTDIN` precedent): a longer input is a typed
 /// error, never a truncated secret.
@@ -61,6 +62,8 @@ pub(crate) enum SecretSource {
     Fd(i32),
     /// Fixed variable [`SECRET_ENV_VAR`].
     Env,
+    /// Fixed token variable [`TOKEN_ENV_VAR`].
+    EnvToken,
 }
 
 /// Platform no-echo session seam (test seam, design §8: the terminal layer
@@ -109,7 +112,8 @@ pub(crate) fn read_secret_with_writer(
         SecretSource::Prompt => prompt_secret(terminal, stderr),
         SecretSource::Stdin => read_stdin_secret(),
         SecretSource::Fd(fd) => read_fd_secret(fd),
-        SecretSource::Env => read_env_secret(),
+        SecretSource::Env => read_env_secret(SECRET_ENV_VAR),
+        SecretSource::EnvToken => read_env_secret(TOKEN_ENV_VAR),
     }
 }
 
@@ -311,9 +315,9 @@ fn read_fd_secret(_raw_fd: i32) -> Result<Zeroizing<Vec<u8>>, ShellError> {
 /// line-oriented consumer can silently truncate the secret to its first
 /// line; the value then flows through the same bounded reader as every
 /// other source.
-fn read_env_secret() -> Result<Zeroizing<Vec<u8>>, ShellError> {
+fn read_env_secret(name: &'static str) -> Result<Zeroizing<Vec<u8>>, ShellError> {
     let value = Zeroizing::new(
-        std::env::var_os(SECRET_ENV_VAR)
+        std::env::var_os(name)
             .ok_or(ShellError::InvalidSecret)?
             .into_encoded_bytes(),
     );
