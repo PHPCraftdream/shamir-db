@@ -26,8 +26,7 @@ use std::iter;
 use std::path::Path;
 
 use clap::Parser as ClapParser;
-use serde_json::json;
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 use zeroize::Zeroizing;
 
 use super::commands::Catalogue;
@@ -318,7 +317,11 @@ pub(crate) fn run_scripted(
         Err(_) => return pre_refuse(ShellError::Usage),
     };
     // Exactly one runtime, built before any policy refusal (§5 ordering).
-    let runtime = match build_runtime() {
+    // Interactive mode needs a runtime worker: the loop below blocks on
+    // synchronous terminal input OUTSIDE `block_on`, and only a worker
+    // thread keeps the SDK's spawned tasks (the WebSocket reader answering
+    // server pings) running while the operator is at the prompt.
+    let runtime = match build_runtime(command_tokens.is_none()) {
         Ok(runtime) => runtime,
         Err(err) => return pre_refuse(err),
     };
@@ -392,8 +395,20 @@ fn pre_refuse(err: ShellError) -> u8 {
     err.exit()
 }
 
-fn build_runtime() -> Result<tokio::runtime::Runtime, ShellError> {
-    tokio::runtime::Builder::new_current_thread()
+/// Interactive mode needs ONE runtime worker: the loop below blocks on
+/// synchronous terminal input OUTSIDE `block_on`, and only a runtime worker
+/// keeps the SDK's spawned tasks (the WebSocket reader answering server
+/// pings) running while the operator is at the prompt. Batch mode keeps the
+/// single-command current-thread runtime unchanged.
+fn build_runtime(interactive: bool) -> Result<tokio::runtime::Runtime, ShellError> {
+    if !interactive {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| ShellError::Connection);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()
         .map_err(|_| ShellError::Connection)
@@ -680,21 +695,23 @@ fn dispatch(
             let auth = auth.unwrap_or(shell.auth);
             // Drop the old connection before any profile, prompt or dial.
             *session = Some(Session { auth, live: None });
-            let outcome =
-                establish_profile(shell, mode, (auth, name.as_deref()), runtime, false, ctx)
-                    .and_then(|(profile, client)| {
-                        // REST has no bind handshake. Only explicit connect
-                        // probes; an implicit dial sends just its own command.
-                        runtime.block_on(guarded(async {
-                            client.verify_rest().await.map_err(connect::request_error)
-                        }))?;
-                        *session = Some(Session {
-                            auth,
-                            live: Some((profile, client)),
-                        });
-                        note(shell.verbose, "connected");
-                        Ok(json!({ "connected": true }))
-                    });
+            let outcome = establish_profile(
+                shell,
+                mode,
+                (auth, name.as_deref()),
+                runtime,
+                false,
+                true,
+                ctx,
+            )
+            .map(|(profile, client)| {
+                *session = Some(Session {
+                    auth,
+                    live: Some((profile, client)),
+                });
+                note(shell.verbose, "connected");
+                json!({ "connected": true })
+            });
             return (id, None, outcome);
         }
         Command::Ping => {
@@ -805,7 +822,15 @@ fn with_session<'a>(
     if session.is_none() {
         let auth = shell.auth;
         *session = Some(Session { auth, live: None });
-        let live = establish_profile(shell, mode, (auth, None), runtime, require_database, ctx)?;
+        let live = establish_profile(
+            shell,
+            mode,
+            (auth, None),
+            runtime,
+            require_database,
+            false,
+            ctx,
+        )?;
         *session = Some(Session {
             auth,
             live: Some(live),
@@ -825,6 +850,7 @@ fn establish_profile(
     (auth, name): (AuthKind, Option<&str>),
     runtime: &tokio::runtime::Runtime,
     require_database: bool,
+    explicit_auth: bool,
     ctx: &mut Ctx<'_>,
 ) -> Result<(Profile, SessionClient), ShellError> {
     auth.check()?;
@@ -848,7 +874,7 @@ fn establish_profile(
         AuthKind::Token => {
             let connection = connect::prepare_token(&profile)?;
             let secret = read_secret(shell, mode, auth, ctx)?;
-            runtime.block_on(interruptible(connection.connect(secret)))?
+            runtime.block_on(interruptible(connection.connect(secret, explicit_auth)))?
         }
         AuthKind::Browser | AuthKind::HttpLogin => return Err(ShellError::Deferred),
         AuthKind::Resume => return Err(ShellError::Resume),
@@ -925,6 +951,13 @@ async fn interruptible<T>(
     }
 }
 
+/// The handshake-phase budget (TLS + authentication) is owned entirely by
+/// the connectors in [`super::connect::token`]; per-command requests use the
+/// 60 s request deadline below. Expiry of that budget is a CONNECTION
+/// failure: a locally elapsed budget proves nothing about dispatch, and §5
+/// exit 7 (timeout after send / unknown outcome) is reserved for an actual
+/// returned HTTP 408 or an elapsed per-command request deadline.
+///
 /// Apply the request deadline only after establishment. On expiry the caller
 /// drops the session rather than retrying an operation that may have been sent.
 async fn guarded<T>(future: impl Future<Output = Result<T, ShellError>>) -> Result<T, ShellError> {

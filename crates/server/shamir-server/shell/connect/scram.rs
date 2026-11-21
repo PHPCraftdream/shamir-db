@@ -33,6 +33,7 @@ use shamir_client::{Client, ClientError, CloseCause, ConnectLocalOptions, Connec
 use shamir_connect::Error as ConnectError;
 use shamir_transport_ipc::validate_endpoint;
 use shamir_transport_tcp::framing::FrameError;
+use tokio_tungstenite::tungstenite::Error as WsError;
 
 use super::profile::{Profile, Transport as ProfileTransport};
 use crate::shell::output::ShellError;
@@ -265,6 +266,15 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         } => ShellError::Authentication,
         // Identity rotation pending: hard shell-policy refusal (§3.2/§6).
         ClientError::IdentityRotationPending { .. } => ShellError::PinMismatch,
+        // Native WSS upgrade rejected BEFORE SCRAM: dial_ws.rs wraps the
+        // typed tungstenite error under `Handshake.source` — a connection
+        // failure, not an authentication failure. Real SCRAM failures
+        // carry a `ConnectError` source and fall through to the generic
+        // `Handshake` arm below.
+        ClientError::Handshake {
+            source: Some(source),
+            ..
+        } if source.is::<WsError>() => ShellError::Connection,
         // SCRAM/KDF stage failure; classify by the typed source when one
         // exists (bad password surfaces the server's wire `AuthFailed`
         // wrapped here — pre-auth framing, auth_ok.rs wraps the typed
@@ -309,6 +319,9 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
             ShellError::Authentication
         }
         ClientError::Http { status: 403, .. } => ShellError::Denied,
+        // REST server answered 408 AFTER the request was dispatched:
+        // post-send timeout, outcome unknown (§6) — not generic exit 5.
+        ClientError::Http { status: 408, .. } => ShellError::Timeout,
         ClientError::Http { .. } => ShellError::Server,
     }
 }
@@ -348,9 +361,11 @@ fn handshake_source(source: Option<Box<dyn std::error::Error + Send + Sync>>) ->
 /// generic server error — the arbitrary code string is never reproduced.
 fn server_code(code: &str) -> ShellError {
     match code {
-        "permission_denied" | "access_denied" | "token_database_denied" | "token_read_only" => {
-            ShellError::Denied
-        }
+        "permission_denied" | "access_denied" | "token_database_denied" | "token_read_only"
+        // REST-only token used on the token WSS upgrade: the server's
+        // typed 403 `token_channel_denied` decoded by the SDK as `Db`
+        // (transport/token/status.rs) — permission refusal (§5 exit 4).
+        | "token_channel_denied" => ShellError::Denied,
         "token_request_denied" => ShellError::TokenRequestDenied,
         "not_supported" => ShellError::Unsupported,
         // Session-level invalidation after a successful connect: the
@@ -374,3 +389,7 @@ fn decode_pin(pin: &str) -> Option<[u8; 32]> {
     }
     Some(out)
 }
+
+#[cfg(test)]
+#[path = "tests/error_mapping.rs"]
+mod error_mapping_tests;

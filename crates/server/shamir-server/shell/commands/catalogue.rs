@@ -192,7 +192,12 @@ impl Catalogue {
                 keep(&mut fields, &["repos"])?;
                 require_str_list(&fields, "repos")?;
             }
-            Catalogue::DescribeRepo { repo } => project_repo(&mut fields, repo, db)?,
+            Catalogue::DescribeRepo { repo } => {
+                let budgets = project_repo(&mut fields, repo, db)?;
+                let mut json = value(&QueryValue::Map(fields))?;
+                write_budget_numbers(&mut json, budgets);
+                return Ok(json);
+            }
             Catalogue::Tables { .. } => {
                 keep(&mut fields, &["tables", "repo"])?;
                 require_str_list(&fields, "tables")?;
@@ -260,7 +265,7 @@ fn project_repo(
     fields: &mut TMap<String, QueryValue>,
     repo: &str,
     db: &str,
-) -> Result<(), ShellError> {
+) -> Result<(Option<u64>, Option<u64>), ShellError> {
     keep(
         fields,
         &[
@@ -280,11 +285,11 @@ fn project_repo(
     {
         return Err(ShellError::Server);
     }
-    check_durability(fields, "durability", true)?;
-    check_durability(fields, "durability_override", false)?;
+    let durability_budget = check_durability(fields, "durability", true)?;
+    let override_budget = check_durability(fields, "durability_override", false)?;
     let db_label = fields.shift_remove("repo").ok_or(ShellError::Server)?;
     fields.insert("db".into(), db_label);
-    Ok(())
+    Ok((durability_budget, override_budget))
 }
 
 /// `effective_durability_record` and `durability_to_record` share the same
@@ -294,10 +299,10 @@ fn check_durability(
     fields: &mut TMap<String, QueryValue>,
     key: &str,
     effective: bool,
-) -> Result<(), ShellError> {
+) -> Result<Option<u64>, ShellError> {
     let policy = match fields.get_mut(key) {
         Some(QueryValue::Map(policy)) => policy,
-        Some(QueryValue::Null) if !effective => return Ok(()),
+        Some(QueryValue::Null) if !effective => return Ok(None),
         _ => return Err(ShellError::Server),
     };
     const MODES: [(&str, &[&str]); 3] = [
@@ -317,16 +322,51 @@ fn check_durability(
             _ => return Err(ShellError::Server),
         }
     }
-    if let Some(bytes) = policy.get(BUDGET) {
-        // The wire promotes u64 values beyond i64::MAX to Big; never narrow
-        // them or accept textual input. output::value renders both as decimal.
-        match bytes {
-            QueryValue::Int(n) if *n > 0 => {}
-            QueryValue::Big(n) if n.to_string().parse::<u64>().is_ok_and(|n| n > 0) => {}
-            _ => return Err(ShellError::Server),
+    match policy.get(BUDGET) {
+        None => Ok(None),
+        // Big budgets arrive as a decimal string (wire MessagePack of
+        // `Big`, decoded as `Str`); ASCII digits only, checked — zero and
+        // overflowing text keep the typed error. The single parsed result
+        // is emitted as a JSON number by write_budget_numbers.
+        Some(QueryValue::Int(n)) if *n > 0 => Ok(Some(*n as u64)),
+        Some(QueryValue::Big(n)) => match n.to_string().parse::<u64>() {
+            Ok(parsed) if parsed > 0 => Ok(Some(parsed)),
+            _ => Err(ShellError::Server),
+        },
+        Some(QueryValue::Str(text)) if is_ascii_decimal(text) => {
+            // Digits-only input can only fail here on overflow.
+            let parsed: u64 = text.parse().map_err(|_| ShellError::Server)?;
+            if parsed == 0 {
+                Err(ShellError::Server)
+            } else {
+                Ok(Some(parsed))
+            }
+        }
+        Some(_) => Err(ShellError::Server),
+    }
+}
+
+/// Non-empty ASCII digits only (`u64::from_str` would admit `+`).
+fn is_ascii_decimal(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Write ONLY the parsed `wal_retention_max_bytes` budgets — the only u64
+/// fields of the description — as JSON numbers over the generic rendering.
+fn write_budget_numbers(json: &mut Value, budgets: (Option<u64>, Option<u64>)) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    for (key, parsed) in [
+        ("durability", budgets.0),
+        ("durability_override", budgets.1),
+    ] {
+        if let Some(parsed) = parsed {
+            if let Some(policy) = obj.get_mut(key).and_then(Value::as_object_mut) {
+                policy.insert("wal_retention_max_bytes".into(), Value::from(parsed));
+            }
         }
     }
-    Ok(())
 }
 
 /// Response alias for the single-op batch.
@@ -483,3 +523,7 @@ fn principal(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/catalogue_budget_tests.rs"]
+mod catalogue_budget_tests;
