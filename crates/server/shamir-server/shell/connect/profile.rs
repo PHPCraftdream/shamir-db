@@ -1,14 +1,7 @@
-//! Connection profiles (design `admin-shell.md` §3.2 "Profiles", §7).
-//!
-//! A profile is a strict flat Ktav `.ktav` file in the operator's private
-//! profile directory holding ONLY allowlisted, non-secret fields. Loading
-//! fails closed: every path component is opened relative to the previous
-//! handle with symlink/reparse following disabled, the profile directory
-//! and leaf file must be owner-private and owned by the current OS
-//! account, with exactly one directory entry. Nothing is ever written or
-//! created here.
-//!
+//! Strict, non-secret Ktav profiles. Profile handles are walked without
+//! following links; the profile directory and leaf must be owner-private.
 
+use std::net::Ipv6Addr;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -48,66 +41,42 @@ use windows_sys::Win32::Storage::FileSystem::{
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// The verified connection profile (design §3.2: never a secret).
-///
-/// Deserialized strictly with `ktav::from_str`: unknown keys are refused
-/// (`deny_unknown_fields`), every field is a scalar string, and raw
-/// parser errors are collapsed into the fixed `InvalidProfile` refusal.
+/// Profile fields are allowlisted and never carry secrets.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::shell) struct Profile {
-    /// Required. `host:port` for `tls-tcp`, the pipe/socket path for `ipc`.
+    /// Required. `host:port` for a TLS transport, pipe/socket path for IPC.
     pub(in crate::shell) address: String,
-    /// Required. Exactly `tls-tcp` or `ipc` — everything else is a typed
-    /// §3.2 refusal at connect time (plaintext/token/WSS are not PR1).
+    /// Required. Transport and auth compatibility are checked before dialing.
     pub(in crate::shell) transport: String,
-    /// Required SCRAM user name, printable, separator-free.
-    pub(in crate::shell) username: String,
-    /// Optional captured `SHA256(server_pub_key)` hex pin. Absent is
-    /// allowed HERE (the design says the profile may be provisioned
-    /// without a pin yet); the connection layer refuses with
-    /// `ShellError::MissingPin` when it is absent at connect time.
+    /// Required for SCRAM only; printable and separator-free when present.
+    pub(in crate::shell) username: Option<String>,
+    /// Captured `SHA256(server_pub_key)` hex pin, required for SCRAM.
     pub(in crate::shell) pin: Option<String>,
     /// Optional TLS SNI override, hostname form.
     pub(in crate::shell) sni: Option<String>,
-    /// Optional CA PEM path (token transports, PR2+; parsed and bounded,
-    /// never used by PR1 SCRAM transports).
+    /// Optional CA PEM path, used only for token transports.
     pub(in crate::shell) ca_path: Option<PathBuf>,
     /// Optional routing database: plain, separator-free name — never a
     /// URL and never a header secret.
     pub(in crate::shell) database: Option<String>,
 }
 
-/// Profile files are strictly `NAME.ktav`.
 const PROFILE_SUFFIX: &str = ".ktav";
 
-/// Hard size bounds; a profile is a handful of short lines.
 const MAX_NAME_LEN: usize = 64;
 const MAX_ADDRESS_LEN: usize = 255;
 const MAX_HOST_LEN: usize = 255;
 const MAX_PATH_LEN: usize = 1024;
-/// Bounded read cap (§3.2 secret-reader convention, generous for a profile).
 const MAX_PROFILE_BYTES: usize = 16 * 1024;
 
-// ── Public entry points ──────────────────────────────────────────────
-
-/// Loads and verifies profile `name` (design §3.2, §4.1 `--profile`).
-///
-/// Fails closed on: an invalid profile name, a missing/unwritable
-/// profiles directory (never created or fixed up), any symlink/reparse
-/// component, wrong owner or mode/ACL, extra hardlinks, or a strict
-/// Ktav parse that is not exactly the allowlisted flat field set.
+/// Loads a profile by name from the verified default directory.
 pub(in crate::shell) fn load(name: &str) -> Result<Profile, ShellError> {
     let root = profiles_root()?;
     load_from(&root, name)
 }
 
-/// Loads and verifies profile `name` from an EXPLICIT profiles root
-/// (scripted-regression entry point: no reliance on process-global
-/// environment). Every precondition of [`load`] is preserved: the name is
-/// whitelisted and the root/leaf are verified by the same fail-closed
-/// handle-chain walk (`read_verified_profile`), then parsed strictly.
-/// The root is only read — never created or fixed up.
+/// Loads a profile from an explicit root with the same checks as [`load`].
 pub(in crate::shell) fn load_from(root: &Path, name: &str) -> Result<Profile, ShellError> {
     validate_profile_name(name)?;
     let bytes = read_verified_profile(root, name)?;
@@ -135,8 +104,6 @@ pub(in crate::shell) fn list() -> Result<Vec<String>, ShellError> {
     names.dedup();
     Ok(names)
 }
-
-// ── Profile-name whitelist (strict plain names) ─────────────────────
 
 /// Strict plain-name whitelist (also used for the routing-database
 /// field): ASCII letters/digits/`-`/`_`, 1..[`MAX_NAME_LEN`] chars, no
@@ -191,8 +158,6 @@ fn validate_database(name: &str) -> Result<(), ShellError> {
     validate_plain_name(name)
 }
 
-// ── Field validation (post-deserialize) ─────────────────────────────
-
 /// A scalar value must be nonempty, bounded, and free of control bytes:
 /// a file-supplied string must never smuggle line breaks or terminal
 /// escapes into output (design §6).
@@ -225,20 +190,18 @@ fn validate_hostname(value: &str) -> Result<(), ShellError> {
     Ok(())
 }
 
-/// Validates the deserialized [`Profile`] fields: required scalars are
-/// nonempty, bounded, control-free; `username` is separator-free; `sni`
-/// is strict hostname form; `ca_path`/`database` are bounded plain
-/// names. A missing `pin` is allowed here (refused at connect time).
+/// Validate the loaded fields without assuming an authentication mode.
 fn validate_fields(profile: &Profile) -> Result<(), ShellError> {
     validate_scalar(&profile.address, MAX_ADDRESS_LEN)?;
     validate_scalar(&profile.transport, MAX_NAME_LEN)?;
-    validate_scalar(&profile.username, MAX_NAME_LEN)?;
-    if profile
-        .username
-        .chars()
-        .any(|ch| matches!(ch, '/' | '\\' | ':' | '@' | '"' | '\'') || ch.is_whitespace())
-    {
-        return Err(ShellError::InvalidProfile);
+    if let Some(username) = profile.username.as_deref() {
+        validate_scalar(username, MAX_NAME_LEN)?;
+        if username
+            .chars()
+            .any(|ch| matches!(ch, '/' | '\\' | ':' | '@' | '"' | '\'') || ch.is_whitespace())
+        {
+            return Err(ShellError::InvalidProfile);
+        }
     }
     if let Some(sni) = profile.sni.as_deref() {
         validate_hostname(sni)?;
@@ -253,11 +216,61 @@ fn validate_fields(profile: &Profile) -> Result<(), ShellError> {
     Ok(())
 }
 
-// ── Strict Ktav parse ───────────────────────────────────────────────
+/// Transport classification shared by both authentication modes.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::shell::connect) enum Transport {
+    TlsTcp,
+    Ipc,
+    NativeWss,
+    TokenRest,
+    TokenWss,
+    Plaintext,
+}
 
-/// Deserializes verified bytes via strict `ktav::from_str` ([`Profile`],
-/// `deny_unknown_fields`); bytes stay in a [`Zeroizing`] buffer. Every
-/// parse failure collapses into the fixed `InvalidProfile` refusal.
+impl Profile {
+    pub(in crate::shell::connect) fn transport_kind(&self) -> Result<Transport, ShellError> {
+        let name = self.transport.trim().to_ascii_lowercase();
+        if name.contains("resume") {
+            return Err(ShellError::Resume);
+        }
+        match name.as_str() {
+            "plain" | "tcp-plain" | "http" | "ws" => Ok(Transport::Plaintext),
+            "browser" | "browser-ws" | "browser-wss" | "browser-token" | "token-browser"
+            | "http-login" => Err(ShellError::Deferred),
+            "tls" | "tls-tcp" | "tcp-tls" => Ok(Transport::TlsTcp),
+            "ipc" | "local" | "unix" | "pipe" => Ok(Transport::Ipc),
+            "wss" | "native-wss" => Ok(Transport::NativeWss),
+            "https" | "rest" | "token-rest" => Ok(Transport::TokenRest),
+            "token-wss" => Ok(Transport::TokenWss),
+            _ => Err(ShellError::Unsupported),
+        }
+    }
+    /// Strict authority only: no URLs, credentials, or unbracketed IPv6.
+    pub(in crate::shell::connect) fn tls_address(&self) -> Result<(String, u16), ShellError> {
+        let address = self.address.trim();
+        let (host, port) = if let Some(rest) = address.strip_prefix('[') {
+            let (host, after) = rest.split_once(']').ok_or(ShellError::InvalidProfile)?;
+            host.parse::<Ipv6Addr>()
+                .map_err(|_| ShellError::InvalidProfile)?;
+            (
+                host,
+                after.strip_prefix(':').ok_or(ShellError::InvalidProfile)?,
+            )
+        } else {
+            let (host, port) = address.rsplit_once(':').ok_or(ShellError::InvalidProfile)?;
+            validate_hostname(host)?;
+            (host, port)
+        };
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| ShellError::InvalidProfile)?;
+        if port == 0 {
+            return Err(ShellError::InvalidProfile);
+        }
+        Ok((host.to_owned(), port))
+    }
+}
+/// Parse verified bytes, collapsing parser failures without exposing input.
 fn parse_profile(bytes: Zeroizing<Vec<u8>>) -> Result<Profile, ShellError> {
     let text = std::str::from_utf8(&bytes).map_err(|_| ShellError::InvalidProfile)?;
     let profile: Profile = ktav::from_str(text).map_err(|_| ShellError::InvalidProfile)?;
@@ -265,9 +278,6 @@ fn parse_profile(bytes: Zeroizing<Vec<u8>>) -> Result<Profile, ShellError> {
     Ok(profile)
 }
 
-// ── Default directories (design §3.2; read-only, never created) ─────
-
-/// Resolves the profiles directory (fixed default location, fail-closed).
 #[cfg(unix)]
 fn profiles_root() -> Result<PathBuf, ShellError> {
     const RELATIVE: &str = "shamir-shell/profiles";
@@ -309,8 +319,6 @@ fn profile_file_name(name: &str) -> String {
     file
 }
 
-// ── Bounded read (shared by both platforms) ─────────────────────────
-
 /// Bounded whole-file read through std `File` with a hard
 /// [`MAX_PROFILE_BYTES`] cap.
 fn read_bounded(mut file: std::fs::File) -> Result<Zeroizing<Vec<u8>>, ShellError> {
@@ -332,8 +340,6 @@ fn read_bounded(mut file: std::fs::File) -> Result<Zeroizing<Vec<u8>>, ShellErro
     }
     Ok(bytes)
 }
-
-// ── Platform: verified open + bounded read (Unix) ───────────────────
 
 /// Strict fd-relative `Normal`-only component list of an absolute path.
 #[cfg(unix)]
