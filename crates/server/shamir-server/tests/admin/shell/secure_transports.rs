@@ -192,7 +192,11 @@ fn repo_description(run: &impl Fn(&[&str]) -> ShellRun) {
         !data.contains_key("repo"),
         "the wire repo field denotes the database"
     );
-    assert!(data["engine"].as_str() == Some("fjall"));
+    // An unbuffered Fjall repository is recorded in the catalogue as `fjall_raw`.
+    assert!(
+        matches!(data["engine"].as_str(), Some("fjall" | "fjall_raw")),
+        "repo describe must report the persistent engine"
+    );
     assert!(
         data["durability"].is_object(),
         "missing effective durability"
