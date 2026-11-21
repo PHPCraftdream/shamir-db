@@ -22,14 +22,17 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use parking_lot::Mutex;
-use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
+use shamir_connect::common::types::limits::MAX_FRAME_SIZE_DATA;
+use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry, AuditError};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+
+mod recovery;
 
 #[cfg(test)]
 #[path = "tests/audit_appender_tests_manifest.rs"]
@@ -43,6 +46,107 @@ const CHECKPOINT_DB_DIRNAME: &str = "audit_checkpoint";
 const CHECKPOINT_KEYSPACE: &str = "last_audit_hmac";
 /// Single key used inside the checkpoint keyspace.
 const CHECKPOINT_KEY: &[u8] = &[0u8];
+
+// Allow a full post-auth protocol frame of details (plus base64 expansion),
+// maximum escaped text lengths from canonical_bytes, and the fixed columns
+// (two decimal u64s, three base64 fields, ten tabs and LF/optional CR).
+const MAX_RECORD_BYTES: usize = MAX_FRAME_SIZE_DATA.div_ceil(3) * 4
+    + 2 * (u16::MAX as usize + 4 * u8::MAX as usize)
+    + 2 * 20
+    + 11
+    + 2 * 43
+    + 10
+    + 2;
+type Position = (u64, [u8; 32]);
+
+/// Fail-closed errors from opening and verifying a durable audit history.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AuditRecoveryError {
+    /// Filesystem operation failed.
+    #[error("audit I/O at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// Appender checkpoint database operation failed.
+    #[error("audit checkpoint store at {path}: {source}")]
+    CheckpointStore {
+        path: PathBuf,
+        #[source]
+        source: AppenderError,
+    },
+    /// The Fjall checkpoint row has the wrong size.
+    #[error("malformed audit checkpoint at {path}: expected 40 bytes, got {length}")]
+    MalformedCheckpoint { path: PathBuf, length: usize },
+    /// A checkpoint is not a valid chain position (zero or invalid genesis).
+    #[error("invalid audit checkpoint at next sequence {next_seq}")]
+    InvalidAnchor { next_seq: u64 },
+    /// The two trusted stores disagree at the same chain position.
+    #[error("audit checkpoints conflict at next sequence {next_seq}")]
+    ConflictingAnchors { next_seq: u64 },
+    /// A checkpoint disagrees with the authenticated history at its position.
+    #[error("audit checkpoint digest mismatch at next sequence {next_seq}")]
+    AnchorMismatch { next_seq: u64 },
+    /// A trusted checkpoint lies beyond the verified tail.
+    #[error("audit log truncation: checkpoint {next_seq} is past verified next sequence {verified_next_seq}")]
+    AnchorPastTail {
+        next_seq: u64,
+        verified_next_seq: u64,
+    },
+    /// Retention removed genesis and neither anchor authenticates the suffix.
+    #[error("retained audit history starts at {first_seq} without a usable checkpoint")]
+    UnanchoredSuffix { first_seq: u64 },
+    /// An audit log path is not a regular file (symlinks are not accepted).
+    #[error("audit log is not a regular file: {path}")]
+    NotRegularFile { path: PathBuf },
+    /// A name in the reserved audit.log.* namespace is not a rotation name.
+    #[error("invalid rotated audit log filename: {path}")]
+    InvalidRotationName { path: PathBuf },
+    /// A record exceeds the startup memory budget.
+    #[error("audit record at {path}:{offset} exceeds {} bytes", MAX_RECORD_BYTES)]
+    RecordTooLarge { path: PathBuf, offset: u64 },
+    /// A rotated file has an unterminated final record.
+    #[error("unterminated rotated audit record at {path}:{offset}")]
+    ArchivedFragment { path: PathBuf, offset: u64 },
+    /// An active record parses but lacks its final LF; recovery does not discard it.
+    #[error("parseable active audit record lacks LF at {path}:{offset}")]
+    UnterminatedActiveRecord { path: PathBuf, offset: u64 },
+    /// A newline-terminated record cannot be decoded.
+    #[error("malformed audit record at {path}:{offset}: {source}")]
+    MalformedRecord {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: AppenderError,
+    },
+    /// A record's canonical representation is invalid.
+    #[error("invalid canonical audit record at {path}:{offset}: {source}")]
+    InvalidCanonicalRecord {
+        path: PathBuf,
+        offset: u64,
+        #[source]
+        source: AuditError,
+    },
+    /// A record is missing, duplicated or out of order.
+    #[error("audit sequence gap at {path}:{offset}: expected {expected}, found {found}")]
+    SequenceGap {
+        path: PathBuf,
+        offset: u64,
+        expected: u64,
+        found: u64,
+    },
+    /// A record does not point to its verified predecessor.
+    #[error("audit chain link mismatch at {path}:{offset}")]
+    LinkMismatch { path: PathBuf, offset: u64 },
+    /// A record's HMAC does not verify.
+    #[error("audit HMAC mismatch at {path}:{offset}")]
+    HmacMismatch { path: PathBuf, offset: u64 },
+    /// The recovered position leaves no sequence available for the writer.
+    #[error("audit sequence exhausted at {path}:{offset}")]
+    SequenceExhausted { path: PathBuf, offset: u64 },
+}
 
 /// Errors raised by [`FjallAuditAppender`] open + flush operations.
 #[derive(Debug, thiserror::Error)]
@@ -69,29 +173,6 @@ fn escape_field(s: &str) -> String {
     out
 }
 
-/// Decode a free-text field that was produced by [`escape_field`].
-fn unescape_field(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some('t') => out.push('\t'),
-                Some('n') => out.push('\n'),
-                Some(c) => {
-                    out.push('\\');
-                    out.push(c);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 /// Serialise one [`AuditEntry`] to the fixed-format log line (without trailing `\n`).
 fn entry_to_line(entry: &AuditEntry) -> Vec<u8> {
     let line = format!(
@@ -109,82 +190,6 @@ fn entry_to_line(entry: &AuditEntry) -> Vec<u8> {
         URL_SAFE_NO_PAD.encode(entry.hmac),
     );
     line.into_bytes()
-}
-
-/// Parse one fixed-format log line back into an [`AuditEntry`].
-fn line_to_entry(line: &str) -> Result<AuditEntry, AppenderError> {
-    let invalid = |msg: &'static str| {
-        AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
-    };
-
-    let mut cols = line.splitn(11, '\t');
-    let seq: u64 = cols
-        .next()
-        .ok_or_else(|| invalid("missing seq"))?
-        .parse()
-        .map_err(|_| invalid("seq not u64"))?;
-    let ts_ns: u64 = cols
-        .next()
-        .ok_or_else(|| invalid("missing ts_ns"))?
-        .parse()
-        .map_err(|_| invalid("ts_ns not u64"))?;
-    let event = unescape_field(cols.next().ok_or_else(|| invalid("missing event"))?);
-    let transport = unescape_field(cols.next().ok_or_else(|| invalid("missing transport"))?);
-    let user = unescape_field(cols.next().ok_or_else(|| invalid("missing user"))?);
-    let ip_subnet = unescape_field(cols.next().ok_or_else(|| invalid("missing ip_subnet"))?);
-
-    let session_id_prefix_v = URL_SAFE_NO_PAD
-        .decode(
-            cols.next()
-                .ok_or_else(|| invalid("missing session_id_prefix"))?,
-        )
-        .map_err(|_| invalid("session_id_prefix: invalid base64url"))?;
-    if session_id_prefix_v.len() != 8 {
-        return Err(invalid("session_id_prefix not 8 bytes"));
-    }
-    let mut session_id_prefix = [0u8; 8];
-    session_id_prefix.copy_from_slice(&session_id_prefix_v);
-
-    let result = unescape_field(cols.next().ok_or_else(|| invalid("missing result"))?);
-
-    let details = URL_SAFE_NO_PAD
-        .decode(
-            cols.next()
-                .ok_or_else(|| invalid("missing details_canonical_msgpack"))?,
-        )
-        .map_err(|_| invalid("details_canonical_msgpack: invalid base64url"))?;
-
-    let prev_hmac_v = URL_SAFE_NO_PAD
-        .decode(cols.next().ok_or_else(|| invalid("missing prev_hmac"))?)
-        .map_err(|_| invalid("prev_hmac: invalid base64url"))?;
-    if prev_hmac_v.len() != 32 {
-        return Err(invalid("prev_hmac not 32 bytes"));
-    }
-    let mut prev_hmac = [0u8; 32];
-    prev_hmac.copy_from_slice(&prev_hmac_v);
-
-    let hmac_v = URL_SAFE_NO_PAD
-        .decode(cols.next().ok_or_else(|| invalid("missing hmac"))?)
-        .map_err(|_| invalid("hmac: invalid base64url"))?;
-    if hmac_v.len() != 32 {
-        return Err(invalid("hmac not 32 bytes"));
-    }
-    let mut hmac = [0u8; 32];
-    hmac.copy_from_slice(&hmac_v);
-
-    Ok(AuditEntry {
-        seq,
-        ts_ns,
-        event,
-        transport,
-        user,
-        ip_subnet,
-        session_id_prefix,
-        result,
-        details_canonical_msgpack: details,
-        prev_hmac,
-        hmac,
-    })
 }
 
 /// Durability mode of the appender.
@@ -340,7 +345,26 @@ impl FjallAuditAppender {
         let log_file = Self::open_log(&log_path)?;
         let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
         let (checkpoint_db, checkpoint_ks) = Self::open_db(&db_path)?;
+        Ok(Self::start_batched(
+            log_path,
+            log_file,
+            (checkpoint_db, checkpoint_ks),
+            flush_every,
+            max_size_bytes.map(|max_size_bytes| RotationPolicy {
+                max_size_bytes,
+                current_size: std::sync::atomic::AtomicU64::new(initial_size),
+                retention_days,
+            }),
+        ))
+    }
 
+    fn start_batched(
+        log_path: PathBuf,
+        log_file: File,
+        (checkpoint_db, checkpoint_ks): (Arc<Database>, Keyspace),
+        flush_every: Duration,
+        rotation: Option<RotationPolicy>,
+    ) -> Arc<Self> {
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let me = Arc::new(Self {
@@ -364,11 +388,7 @@ impl FjallAuditAppender {
             gate_contention_hook: Mutex::new(None),
             #[cfg(test)]
             gate_acquired_hook: Mutex::new(None),
-            rotation: max_size_bytes.map(|m| RotationPolicy {
-                max_size_bytes: m,
-                current_size: std::sync::atomic::AtomicU64::new(initial_size),
-                retention_days,
-            }),
+            rotation,
         });
 
         // Spawn the background flusher.
@@ -400,7 +420,39 @@ impl FjallAuditAppender {
         if let Durab::Batched { task: t, .. } = &me.mode {
             *t.lock() = Some(task);
         }
-        Ok(me)
+        me
+    }
+
+    /// Authenticate the retained history, then open the batched appender at
+    /// its verified tail. Does not update either checkpoint store.
+    ///
+    /// Hold the data-directory lock throughout recovery and subsequent use.
+    /// Call from a Tokio runtime with time enabled, as for `open_batched`.
+    /// Only an unparseable final active fragment within the size limit may
+    /// be discarded, and only after the complete prefix and both trusted
+    /// anchors agree. A parseable active record without LF is refused, even
+    /// if it could authenticate. Rotated fragments are never repaired.
+    /// Recovery rejects complete records larger than the base64-encoded
+    /// protocol data-frame ceiling plus fixed-column overhead. It does not
+    /// change the writer's limits; larger historical records require operator
+    /// intervention. Recovery verifies sequence continuity, predecessor links
+    /// and record HMACs before returning the next sequence and its predecessor.
+    pub fn open_recovered_batched(
+        data_dir: impl AsRef<Path>,
+        audit_chain_key: &[u8; 32],
+        legacy_checkpoint: Option<(u64, [u8; 32])>,
+        flush_every: Duration,
+        max_size_bytes: Option<u64>,
+        retention_days: u32,
+    ) -> Result<(Arc<Self>, Position), AuditRecoveryError> {
+        recovery::open_recovered_batched(
+            data_dir.as_ref(),
+            audit_chain_key,
+            legacy_checkpoint,
+            flush_every,
+            max_size_bytes,
+            retention_days,
+        )
     }
 
     /// Read the persisted checkpoint, if any.
@@ -418,64 +470,15 @@ impl FjallAuditAppender {
         let Some(value) = ks.get(CHECKPOINT_KEY)? else {
             return Ok(None);
         };
-        let bytes: &[u8] = value.as_ref();
-        if bytes.len() != 40 {
-            return Ok(None);
-        }
-        let mut seq = [0u8; 8];
-        let mut hmac = [0u8; 32];
-        seq.copy_from_slice(&bytes[..8]);
-        hmac.copy_from_slice(&bytes[8..]);
-        Ok(Some((u64::from_be_bytes(seq), hmac)))
+        Ok(recovery::decode_checkpoint(value.as_ref()))
     }
 
     /// Re-read the on-disk fixed-format log into [`AuditEntry`]s for
-    /// startup verification ([`AuditChain::verify_chain`]).
+    /// startup verification ([`shamir_connect::server::audit_chain::AuditChain::verify_chain`]).
     pub fn read_log_for_verify(
         data_dir: impl AsRef<Path>,
     ) -> Result<Vec<AuditEntry>, AppenderError> {
-        let (log_path, _db_path) = Self::paths(data_dir.as_ref());
-        let dir = data_dir.as_ref();
-        let active_name = log_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(AUDIT_LOG_FILENAME)
-            .to_string();
-        let prefix = format!("{active_name}.");
-
-        let mut rotated: Vec<PathBuf> = if dir.exists() {
-            std::fs::read_dir(dir)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with(&prefix))
-                        .unwrap_or(false)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        rotated.sort();
-
-        let mut all_paths = rotated;
-        if log_path.exists() {
-            all_paths.push(log_path);
-        }
-
-        let mut out = Vec::new();
-        for path in all_paths {
-            let f = File::open(&path)?;
-            let r = BufReader::new(f);
-            for line in r.lines() {
-                let line = line?;
-                if line.is_empty() {
-                    continue;
-                }
-                out.push(line_to_entry(&line)?);
-            }
-        }
-        Ok(out)
+        recovery::read_log_for_verify(data_dir.as_ref())
     }
 
     /// Force flush buffered entries (batched mode) and fsync.

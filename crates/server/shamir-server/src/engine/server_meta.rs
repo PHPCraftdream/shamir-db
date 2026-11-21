@@ -486,7 +486,10 @@ impl ServerMetaStore {
         let p: PersistedAuditChain = self
             .read_blob(KEY_AUDIT_CHAIN)?
             .ok_or(MetaError::NotInitialised(KEY_AUDIT_CHAIN))?;
-        Ok(bytes32(&p.audit_chain_key))
+        p.audit_chain_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| MetaError::Encoding("audit chain key must be exactly 32 bytes".into()))
     }
 
     /// Current ticket key plus optional previous key (during rotation overlap).
@@ -547,6 +550,17 @@ impl ServerMetaStore {
     pub fn audit_checkpoint(&self) -> Option<(u64, [u8; 32])> {
         let p: PersistedAuditCheckpoint = self.read_blob(KEY_AUDIT_CHECKPOINT).ok().flatten()?;
         Some((p.last_audit_seq, bytes32(&p.last_audit_hmac)))
+    }
+
+    /// Read the boot recovery anchor without treating corruption as absence.
+    pub(crate) fn audit_checkpoint_checked(&self) -> Result<Option<(u64, [u8; 32])>, MetaError> {
+        let Some(p) = self.read_blob::<PersistedAuditCheckpoint>(KEY_AUDIT_CHECKPOINT)? else {
+            return Ok(None);
+        };
+        let hmac = p.last_audit_hmac.as_slice().try_into().map_err(|_| {
+            MetaError::Encoding("audit checkpoint HMAC must be exactly 32 bytes".into())
+        })?;
+        Ok(Some((p.last_audit_seq, hmac)))
     }
 
     /// Server install time (set once on first init).
