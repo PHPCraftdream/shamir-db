@@ -219,6 +219,7 @@ fn shell_secure_native_wss_scram_catalogue() {
     let fixture = boot_secure("shell_secure_native_wss_scram_catalogue");
     let shell = &fixture.shell;
     seed_catalogue(shell);
+    let password = seed_shell_user(shell);
     let profile = write_secure_profile(shell, "wss", fixture.wss_addr, DB_NAME, None);
     let admin_run = |args: &[&str]| {
         let run = run_shell(shell, args);
@@ -230,28 +231,7 @@ fn shell_secure_native_wss_scram_catalogue() {
     shared_catalogue(&admin_run);
     repo_description(&admin_run);
 
-    // The real DescribeRepo handler includes the missing name in its error.
-    let missing = admin_run(&["repo", "describe", MISSING_REPO]);
-    error(&missing, "repo describe", 5, "server_error", SERVER_FAILURE);
-    assert!(
-        !missing.contains_canary(MISSING_REPO),
-        "opaque peer error reflected"
-    );
-    assert_human_reflection(&profile, &shell.canary);
-
     let profile_text = std::fs::read_to_string(&profile).expect("read pinned profile");
-    let bad_pin = profile_text.replacen(&shell.pin_hex(), &"00".repeat(32), 1);
-    assert!(bad_pin != profile_text, "change the enrolled pin");
-    overwrite_profile(shell, &bad_pin);
-    error(
-        &admin_run(&["connect"]),
-        "connect",
-        6,
-        "pin_mismatch",
-        "server identity pin does not match the verified pin in the profile",
-    );
-
-    let password = seed_shell_user(shell);
     let limited = profile_text.replace("username: admin", &format!("username: {SHELL_USER}"));
     assert!(limited != profile_text, "change the profile principal");
     overwrite_profile(shell, &limited);
@@ -273,6 +253,40 @@ fn shell_secure_native_wss_scram_catalogue() {
         4,
         "permission_denied",
         DENIED,
+    );
+}
+
+#[test]
+fn shell_secure_native_wss_scram_reflection_and_pin_refusal() {
+    let fixture = boot_secure("shell_secure_native_wss_scram_reflection_and_pin_refusal");
+    let shell = &fixture.shell;
+    seed_catalogue(shell);
+    let profile = write_secure_profile(shell, "wss", fixture.wss_addr, DB_NAME, None);
+    let admin_run = |args: &[&str]| {
+        let run = run_shell(shell, args);
+        assert_clean(&run, shell.canary.as_str());
+        run
+    };
+
+    // The real DescribeRepo handler includes the missing name in its error.
+    let missing = admin_run(&["repo", "describe", MISSING_REPO]);
+    error(&missing, "repo describe", 5, "server_error", SERVER_FAILURE);
+    assert!(
+        !missing.contains_canary(MISSING_REPO),
+        "opaque peer error reflected"
+    );
+    assert_human_reflection(&profile, &shell.canary);
+
+    let profile_text = std::fs::read_to_string(&profile).expect("read pinned profile");
+    let bad_pin = profile_text.replacen(&shell.pin_hex(), &"00".repeat(32), 1);
+    assert!(bad_pin != profile_text, "change the enrolled pin");
+    overwrite_profile(shell, &bad_pin);
+    error(
+        &admin_run(&["connect"]),
+        "connect",
+        6,
+        "pin_mismatch",
+        "server identity pin does not match the verified pin in the profile",
     );
 }
 
