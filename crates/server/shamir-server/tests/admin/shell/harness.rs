@@ -1,4 +1,4 @@
-//! Shared fixture and helpers for the `shell` integration tests (R5 PR1):
+//! Shared base fixture and helpers for the `shell` integration tests:
 //! one [`TestRuntime`], one real in-process [`ServerLauncher`] server (both
 //! TLS-TCP and IPC listeners, persistent store in a held TempDir), a
 //! per-test-unique zeroizing canary secret and an operator-shaped profile
@@ -8,6 +8,7 @@
 //! Handshakes, not sleeps: every await is hang-bounded and
 //! [`FlakeGuard::with_watchdog`] dumps the timeline.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -24,7 +25,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::windows::ffi::OsStrExt as _;
 #[cfg(windows)]
 use std::os::windows::io::FromRawHandle as _;
-use tokio::io::AsyncWriteExt;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation as win_foundation;
 #[cfg(windows)]
@@ -37,16 +37,21 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::BatchRequest;
 use shamir_query_types::hmac as canon;
+use shamir_server::config::Config;
 use shamir_server::config::ListenerConfig;
 use shamir_server::config::ListenerKind;
 use shamir_server::config::ProfileKind;
 use shamir_server::config::SecurityConfig;
+use shamir_server::server::BootError;
 use shamir_server::server::BootstrapMode;
 use shamir_server::server::ServerHandle;
 use shamir_server::server::ServerLauncher;
 use shamir_test_diag::FlakeGuard;
 
 use crate::common;
+
+#[path = "secure_fixture.rs"]
+pub(super) mod secure_fixture;
 
 // ── Named constants ──────────────────────────────────────────────────
 
@@ -107,7 +112,7 @@ pub struct TestRuntime {
 }
 
 impl TestRuntime {
-    /// Spawn the runtime thread. Exactly one per test.
+    /// Spawn the runtime thread.
     pub fn new() -> Self {
         let (job_tx, mut job_rx) = tokio::sync::mpsc::channel::<BoxFuture<'static, ()>>(64);
         let thread = std::thread::Builder::new()
@@ -242,7 +247,22 @@ impl Drop for ShellFixture {
 /// Boot the full fixture; the returned fixture owns everything and shuts
 /// down gracefully on drop.
 pub fn boot(name: &str) -> ShellFixture {
+    boot_with(name, false, |_| {}).0
+}
+
+/// Extend the PR1 listener configuration and return the actual bind slots
+/// (in configuration order) and the generated public certificate path.
+fn boot_with(
+    name: &str,
+    root_list: bool,
+    extend: impl FnOnce(&mut Config) + Send + 'static,
+) -> (ShellFixture, Vec<Option<SocketAddr>>, PathBuf) {
     let guard = FlakeGuard::with_watchdog(name, WATCHDOG_AFTER);
+    let data_dir = TempDir::new().expect("fixture tempdir");
+    if root_list {
+        guard.mark("seed: offline Root List ACL");
+        secure_fixture::seed_root_list(data_dir.path());
+    }
     let rt = TestRuntime::new();
     let canary = unique_canary();
 
@@ -251,22 +271,36 @@ pub fn boot(name: &str) -> ShellFixture {
     let boot_password = Zeroizing::new(canary.as_bytes().to_vec());
 
     guard.mark("boot: launch server");
-    let (server, data_dir, tls_addr, ipc_addr) = rt.run(bound(BOOT_BOUND, async move {
+    let (server, data_dir, tls_addr, ipc_addr, cert_path) = rt.run(bound(BOOT_BOUND, async move {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let data_dir = TempDir::new().expect("fixture tempdir");
-        let config = fixture_config(&data_dir);
-        let bootstrap = BootstrapMode::Password {
-            username: ADMIN.into(),
-            password: boot_password,
+        let mut config = fixture_config(&data_dir);
+        extend(&mut config);
+        let cert_path = config.tls.cert_path.clone();
+        let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let server = loop {
+            let launched = ServerLauncher {
+                config: config.clone(),
+                bootstrap: BootstrapMode::Password {
+                    username: ADMIN.into(),
+                    password: boot_password.clone(),
+                },
+                node_mode: Default::default(),
+            }
+            .launch()
+            .await;
+            match launched {
+                Ok(server) => break server,
+                // The offline Fjall engine may release its lock asynchronously.
+                Err(BootError::ShamirDbInit(ref text))
+                    if root_list
+                        && text.contains("FjallError: Locked")
+                        && tokio::time::Instant::now() < lock_deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("fixture server boot: {error}"),
+            }
         };
-        let server = ServerLauncher {
-            config,
-            bootstrap,
-            node_mode: Default::default(),
-        }
-        .launch()
-        .await
-        .expect("fixture server boot");
         let tls_addr = server
             .first_tls_exporter_addr()
             .expect("TLS listener bound");
@@ -274,7 +308,7 @@ pub fn boot(name: &str) -> ShellFixture {
             .first_ipc_path()
             .expect("IPC listener bound")
             .to_owned();
-        (server, data_dir, tls_addr, ipc_addr)
+        (server, data_dir, tls_addr, ipc_addr, cert_path)
     }));
     guard.note("tls_addr", tls_addr.to_string());
     guard.note("ipc_addr", ipc_addr.clone());
@@ -320,7 +354,8 @@ pub fn boot(name: &str) -> ShellFixture {
     // macOS: canonicalize so the env var carries the real /private/var
     // path, not the /var symlink.
     let profile_home = TempDir::new().expect("profile home tempdir");
-    ShellFixture {
+    let bound_addrs = server.bound_addrs.clone();
+    let fixture = ShellFixture {
         guard,
         rt,
         _data_dir: data_dir,
@@ -330,17 +365,18 @@ pub fn boot(name: &str) -> ShellFixture {
         pin,
         canary,
         profile_home,
-    }
+    };
+    (fixture, bound_addrs, cert_path)
 }
 
 /// Fixture config: persistent store, fast spec-floor KDF, Argon2 64,
 /// generous auth-init rate, and BOTH PR1 transports (TLS-TCP and IPC
 /// `plain`) bound by one launcher.
-fn fixture_config(data_dir: &TempDir) -> shamir_server::config::Config {
+fn fixture_config(data_dir: &TempDir) -> Config {
     let mut config = common::make_test_config(data_dir, "127.0.0.1:0");
     config.argon2_concurrent_max = FIXTURE_ARGON2_CONCURRENT_MAX;
     config.security = SecurityConfig {
-        auth_init_rate_per_second: 1000,
+        auth_init_rate_per_second: 64,
         ..Default::default()
     };
     config.listeners.push(ListenerConfig {
@@ -526,6 +562,7 @@ pub fn overwrite_profile(fixture: &ShellFixture, text: &str) -> PathBuf {
     if !dir.exists() {
         create_private_dir(&dir).expect("create private profiles dir");
     }
+    verify_private_dir(&dir);
     let path = dir.join(format!("{PROFILE_NAME}.ktav"));
     write_private_file(&path, text);
     path
@@ -636,13 +673,15 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 
 /// A child `Command` for [`SERVER_BIN`] with EVERY variable the production
 /// shell actually reads (audited `shell/` reads: `XDG_CONFIG_HOME`+`HOME`,
-/// `LOCALAPPDATA`, `SHAMIR_SHELL_PASSWORD`; plus `USERPROFILE` so a Windows
+/// `LOCALAPPDATA`, `SHAMIR_SHELL_PASSWORD`, `SHAMIR_SHELL_TOKEN`; plus
+/// `USERPROFILE` so a Windows
 /// caller's real home cannot survive a regression) stripped BEFORE the
 /// per-fixture overrides the callers apply.
 pub(super) fn server_command() -> tokio::process::Command {
     let mut command = tokio::process::Command::new(SERVER_BIN);
     for var in [
         "SHAMIR_SHELL_PASSWORD",
+        "SHAMIR_SHELL_TOKEN",
         "XDG_CONFIG_HOME",
         "HOME",
         "LOCALAPPDATA",
@@ -653,105 +692,9 @@ pub(super) fn server_command() -> tokio::process::Command {
     command
 }
 
-/// Run the REAL production binary exactly as an operator would
-/// (`shamir-server shell --profile fixture --secret-stdin -- <command…>`);
-/// `args` with a `--` delimiter is used AS SUPPLIED, otherwise `--` is
-/// inserted before the command. The secret travels stdin-only; the child's
-/// home is the fixture's isolated owner-only root; the run is bounded by
-/// `SHELL_BOUND`.
+/// Run a real shell subprocess with the bootstrap password on stdin.
 pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
-    fixture.guard.mark("shell: spawn");
-    let (env_key, env_value) = profile_env(fixture);
-    let mut argv: Vec<String> = vec![
-        "shell".into(),
-        "--profile".into(),
-        PROFILE_NAME.into(),
-        "--secret-stdin".into(),
-    ];
-    if args.contains(&"--") {
-        // Caller-supplied shape: use exactly as given, no inserted or
-        // duplicated delimiter.
-        argv.extend(args.iter().map(ToString::to_string));
-    } else if !args.is_empty() {
-        argv.push("--".into());
-        argv.extend(args.iter().map(ToString::to_string));
-    }
-    // An EMPTY `args` is a bare interactive probe: appending `--` there
-    // would flip the parser into command-consuming mode with nothing after it.
-    assert!(
-        !argv.iter().any(|arg| arg.contains(fixture.canary.as_str())),
-        "fixture canary leaked into the assembled argv",
-    );
-    let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
-    // The child's whole home is the isolated profile home: no state can
-    // land in the real user home even under a regression.
-    let home_dir = profile_home_path(fixture);
-
-    let outcome = fixture.rt.run(bound(SHELL_BOUND, async move {
-        let mut command = server_command();
-        command
-            .args(&argv)
-            .env(env_key, env_value)
-            .current_dir(&home_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.env("HOME", &home_dir);
-        #[cfg(windows)]
-        command.env("USERPROFILE", &home_dir);
-        let mut child = command.spawn().expect("spawn shell child");
-        // stdin-only; close the pipe for EOF. An early-exit refusal closes
-        // the pipe first, so only `BrokenPipe` is tolerated downstream.
-        if let Some(mut stdin) = child.stdin.take() {
-            write_secret_stdin(&mut stdin, password.as_slice()).await;
-            drop(stdin);
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .expect("shell child waits with output");
-        (
-            output.status.code().unwrap_or(-1),
-            output.stdout,
-            output.stderr,
-        )
-    }));
-    fixture.guard.note("shell exit", outcome.0.to_string());
-    ShellRun {
-        exit_code: outcome.0,
-        stdout: outcome.1,
-        stderr: outcome.2,
-    }
-}
-
-/// Write the canary line to the child's stdin, then flush+shutdown.
-/// `ErrorKind::BrokenPipe` is accepted (early-exit refusal); every other
-/// error is a fixture bug and panics. The line is `Zeroizing`-scrubbed.
-async fn write_secret_stdin(stdin: &mut tokio::process::ChildStdin, secret: &[u8]) {
-    // Preallocated (secret + LF), zeroized so the assembled line is
-    // scrubbed on drop.
-    let mut line = Zeroizing::new(Vec::with_capacity(secret.len() + 1));
-    line.extend_from_slice(secret);
-    line.push(b'\n');
-    if let Err(error) = stdin.write_all(line.as_slice()).await {
-        if error.kind() != std::io::ErrorKind::BrokenPipe {
-            panic!("write secret to shell stdin: {error}");
-        }
-        return; // child exited before reading the secret — fine for refusals
-    }
-    if let Err(error) = stdin.flush().await {
-        if error.kind() != std::io::ErrorKind::BrokenPipe {
-            panic!("flush secret to shell stdin: {error}");
-        }
-        return;
-    }
-    if let Err(error) = stdin.shutdown().await {
-        if error.kind() != std::io::ErrorKind::BrokenPipe {
-            panic!("close shell stdin: {error}");
-        }
-    }
+    secure_fixture::run_with_secret(fixture, fixture.canary.clone(), false, args)
 }
 
 /// [`run_shell`] plus a success assertion whose message carries ONLY the
