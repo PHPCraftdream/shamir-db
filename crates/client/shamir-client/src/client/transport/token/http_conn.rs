@@ -71,6 +71,7 @@ pub(crate) struct TokenTransport {
     request_timeout: Option<Duration>,
     pool: Bag<SendRequest<Full<Bytes>>>,
     idle: AtomicUsize,
+    single_connection: bool,
 }
 
 impl TokenTransport {
@@ -87,6 +88,25 @@ impl TokenTransport {
             connect_timeout,
             request_timeout,
         )?;
+        let sender = transport.dial_timed().await?;
+        transport.release(sender);
+        Ok(transport)
+    }
+
+    /// Dials exactly once. Requests may only use the initially dialed sender.
+    pub(crate) async fn connect_once(
+        endpoint: &TokenEndpoint,
+        authorization: HeaderValue,
+        connect_timeout: Option<Duration>,
+        request_timeout: Option<Duration>,
+    ) -> Result<Self, ClientError> {
+        let mut transport = Self::new(
+            endpoint,
+            Some(authorization),
+            connect_timeout,
+            request_timeout,
+        )?;
+        transport.single_connection = true;
         let sender = transport.dial_timed().await?;
         transport.release(sender);
         Ok(transport)
@@ -147,6 +167,7 @@ impl TokenTransport {
             request_timeout,
             pool: Bag::default(),
             idle: AtomicUsize::new(0),
+            single_connection: false,
         })
     }
 
@@ -174,6 +195,9 @@ impl TokenTransport {
         path: &'static str,
         body: Bytes,
     ) -> Result<TokenReply, ClientError> {
+        if self.single_connection {
+            return self.round_trip_once(method, path, body).await;
+        }
         let mut fresh = false;
         loop {
             let mut sender = if fresh {
@@ -203,6 +227,39 @@ impl TokenTransport {
                 }
                 Outcome::Failed(err) => return Err(err),
             }
+        }
+    }
+
+    /// cancel-safe: NO — dropping the future drops the sole sender, and the
+    /// peer may already have received the request. There is no retry path.
+    async fn round_trip_once(
+        &self,
+        method: Method,
+        path: &'static str,
+        body: Bytes,
+    ) -> Result<TokenReply, ClientError> {
+        let mut sender = self
+            .pool
+            .pop()
+            .ok_or(ClientError::ConnectionClosed(CloseCause::PeerEof))?;
+        self.idle.fetch_sub(1, Ordering::AcqRel);
+        let req = self.build(method, path, body);
+        let attempt = Self::attempt(&mut sender, req, MAX_RESPONSE_BODY);
+        let outcome = match self.request_timeout {
+            Some(limit) => tokio::time::timeout(limit, attempt)
+                .await
+                .map_err(|_| ClientError::RequestTimeout(limit))?,
+            None => attempt.await,
+        };
+        match outcome {
+            Outcome::Reply { reply, reusable } => {
+                if reusable {
+                    self.release(sender);
+                }
+                Ok(reply)
+            }
+            Outcome::NotWritten => Err(ClientError::ConnectionClosed(CloseCause::PeerEof)),
+            Outcome::Failed(err) => Err(err),
         }
     }
 

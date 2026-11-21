@@ -1,10 +1,13 @@
-//! Integration tests for the administrative shell (R5 PR1).
+//! Integration tests for the administrative shell (R5 PR1–PR2).
 //!
-//! Declarations ONLY (rust-guard structure gate): logic lives in the
-//! child files. `harness.rs` is the shared fixture and helpers,
-//! `output.rs` the offline/output-contract acceptance (design §5, §8
-//! PR1 rows), `transport.rs` the real transport scenarios.
+//! Declarations only: the harness owns shared fixtures, `output` covers the
+//! output contract, and `transport`, `secure_transports`, and `refusals` cover
+//! the live transport and refusal scenarios.
 
 mod harness;
 mod output;
+mod refusals;
+mod secure_transports;
 mod transport;
+
+use harness::secure_fixture;
