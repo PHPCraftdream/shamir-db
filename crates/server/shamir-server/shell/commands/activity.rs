@@ -48,6 +48,24 @@ const MAX_PAGES: usize = 10;
 /// Longest accepted `activity cancel` request id in decimal digits.
 const MAX_ID_DIGITS: usize = 20;
 
+/// Replacement for a free-text activity field that is not in the shape the
+/// server documents for it. One fixed, printable placeholder: a peer can
+/// never smuggle an arbitrary printable string (credential-like text, an
+/// escape sequence, an over-long blob) into the operator's terminal through
+/// `user`, `transport`, `db` or `op_kind`.
+const INVALID_FIELD: &str = "<invalid>";
+
+/// Longest accepted principal / database name in bytes. The engine's own
+/// rule for a name component is `[A-Za-z0-9_-]`; the cap only bounds what a
+/// listing cell has to render.
+const MAX_NAME_BYTES: usize = 64;
+
+/// Longest accepted `op_kind` in bytes (a wire `BatchOp` discriminant name).
+const MAX_OP_KIND_BYTES: usize = 32;
+
+/// Exactly the transports `transport_label` in the server emits.
+const TRANSPORTS: [&str; 3] = ["tcp", "ws", "ipc"];
+
 /// R5 step 4 activity commands.
 #[derive(Debug, Clone)]
 pub(in crate::shell) enum ActivityCommand {
@@ -117,25 +135,34 @@ impl ActivityCommand {
         let started = tokio::time::Instant::now();
         let payload = match self {
             ActivityCommand::Sessions { all, limit } => {
-                let (rows, truncated) =
-                    list_rows(client, routing_db, *all, ActivityKind::Sessions, *limit).await?;
-                project_page("sessions", *all, &rows, truncated, project_session)?
+                let listed =
+                    list_rows(client, routing_db, *all, ActivityKind::Sessions, *limit).await;
+                listed.and_then(|(rows, truncated)| {
+                    project_page("sessions", *all, &rows, truncated, project_session)
+                })
             }
             ActivityCommand::Requests { all, limit } => {
-                let (rows, truncated) =
-                    list_rows(client, routing_db, *all, ActivityKind::Requests, *limit).await?;
-                project_page("requests", *all, &rows, truncated, project_request)?
+                let listed =
+                    list_rows(client, routing_db, *all, ActivityKind::Requests, *limit).await;
+                listed.and_then(|(rows, truncated)| {
+                    project_page("requests", *all, &rows, truncated, project_request)
+                })
             }
             ActivityCommand::Cancel { request, .. } => {
                 // validate() already parsed this id; the parse is repeated
                 // here because `request` is owned text and validate borrows.
-                let id = RequestExecId(parse_exec_id(request)?);
-                let outcome = client.cancel_request(routing_db, id).await?;
-                json!({ "outcome": outcome_name(outcome) })
+                match parse_exec_id(request) {
+                    Err(error) => Err(error),
+                    Ok(raw) => {
+                        let outcome = client.cancel_request(routing_db, RequestExecId(raw)).await;
+                        outcome.map(|outcome| json!({ "outcome": outcome_name(outcome) }))
+                    }
+                }
             }
         };
-        client.check_catalogue_output(&payload)?;
-        output::deadline_check(started, Ok(payload))
+        output::finish_command(started, payload, |payload| {
+            client.check_catalogue_output(payload)
+        })
     }
 }
 
@@ -262,8 +289,8 @@ fn project_session(row: &ActivityRow) -> Result<Value, ShellError> {
         } => Ok(json!({
             "kind": "session",
             "session_handle": session_handle.to_string(),
-            "user": output::sanitize(user),
-            "transport": output::sanitize(transport),
+            "user": output::sanitize(&name_field(user)),
+            "transport": output::sanitize(&transport_field(transport)),
             "created_at_ns": created_at_ns.to_string(),
             "idle_ns": idle_ns.to_string(),
             "open_transactions": open_transactions.to_string(),
@@ -288,13 +315,56 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
             "kind": "request",
             "request_exec_id": request_exec_id.0.to_string(),
             "session_handle": (*session_handle).map(|handle| handle.to_string()),
-            "user": output::sanitize(user),
-            "db": output::sanitize(db),
-            "op_kind": output::sanitize(op_kind),
+            "user": output::sanitize(&name_field(user)),
+            "db": output::sanitize(&name_field(db)),
+            "op_kind": output::sanitize(&op_kind_field(op_kind)),
             "state": request_state_name(*state),
             "elapsed_ns": elapsed_ns.to_string(),
         })),
         _ => Err(ShellError::Server),
+    }
+}
+
+/// One free-text principal or database name, projected ONLY when it matches
+/// the engine's own name rule for such a component (`[A-Za-z0-9_-]`, at
+/// most [`MAX_NAME_BYTES`] bytes); anything else becomes the fixed
+/// [`INVALID_FIELD`] placeholder.
+fn name_field(raw: &str) -> String {
+    let allowed = !raw.is_empty()
+        && raw.len() <= MAX_NAME_BYTES
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    if allowed {
+        raw.to_owned()
+    } else {
+        INVALID_FIELD.to_owned()
+    }
+}
+
+/// One free-text session transport, projected ONLY from the closed set the
+/// server emits (`tcp`, `ws`, `ipc`).
+fn transport_field(raw: &str) -> String {
+    if TRANSPORTS.contains(&raw) {
+        raw.to_owned()
+    } else {
+        INVALID_FIELD.to_owned()
+    }
+}
+
+/// One free-text `op_kind`, projected ONLY when it is a wire operation
+/// discriminant name (`[a-z0-9_:]`, at most [`MAX_OP_KIND_BYTES`] bytes). The
+/// colon is part of the server's own labels (`admin:list_activity`).
+fn op_kind_field(raw: &str) -> String {
+    let allowed = !raw.is_empty()
+        && raw.len() <= MAX_OP_KIND_BYTES
+        && raw.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b':'
+        });
+    if allowed {
+        raw.to_owned()
+    } else {
+        INVALID_FIELD.to_owned()
     }
 }
 
@@ -310,6 +380,10 @@ fn request_state_name(state: ActivityRequestState) -> &'static str {
         ActivityRequestState::WaitingBudget => "waiting_budget",
     }
 }
+
+#[cfg(test)]
+#[path = "tests/activity_field_tests.rs"]
+mod activity_field_tests;
 
 /// The fixed lowercase name of one cancellation outcome.
 fn outcome_name(outcome: CancelOutcome) -> &'static str {

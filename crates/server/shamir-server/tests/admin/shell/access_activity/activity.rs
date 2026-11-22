@@ -14,6 +14,9 @@ use serde_json::Value;
 use shamir_query_builder::token_admin;
 use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 
+use shamir_client::{Client, ConnectOptions};
+use zeroize::Zeroizing;
+
 use super::harness::{
     overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellFixture, ADMIN, DB_NAME,
     SHELL_USER,
@@ -21,7 +24,7 @@ use super::harness::{
 use super::secure_fixture::{
     boot_secure, provision_token, run_token_shell, run_with_secret, write_secure_profile,
 };
-use super::state_data_common::{data, refusal, scram_profile, Relay, TOKEN_SUBSET};
+use super::state_data_common::{data, refusal, scram_profile, Relay, BOUND, TOKEN_SUBSET};
 
 // ── Local shape helpers ──────────────────────────────────────────────
 
@@ -352,11 +355,16 @@ fn token_session_refuses_activity_commands() {
     }
 }
 
-/// §3.3 for the activity commands: the token profile points at an address
-/// NOTHING listens on, so any dial would surface as `connection_failed`
-/// (exit 2); every command still exits 4 with the fixed subset message.
-/// Mutant: a command that re-entered the token allowlist would dial and fail
-/// with exit 2 instead.
+/// §3.3 for the activity commands, proven by the counting relay: the token
+/// profile points at a relay in front of the HTTPS listener, so ANY dial is
+/// counted (the relay reports `1` for a real token dial — see
+/// `state_data::token_subset::token_subset_zero_dial_proven_by_relay_counter`)
+/// and would also surface with a different outcome. Every command still
+/// exits 4 with the fixed subset message, and the relay observes ZERO
+/// accepted connections.
+///
+/// Mutants caught: a command that re-entered the token allowlist, and a
+/// refusal that dials first and discards the result.
 #[test]
 fn token_session_refuses_activity_commands_without_dialing() {
     let secure = boot_secure("token_session_refuses_activity_commands_without_dialing");
@@ -371,15 +379,11 @@ fn token_session_refuses_activity_commands_without_dialing() {
             .mode(ApiTokenMode::ReadOnly)
             .channels(ApiTokenChannels::Both),
     );
-    // Port 1 on loopback has no listener: a dial here is `connection_failed`
-    // (exit 2), so exit 4 proves the token gate refused BEFORE connecting.
-    write_secure_profile(
-        fixture,
-        "https",
-        std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
-        DB_NAME,
-        Some(&secure.ca_path),
-    );
+    // The counting relay in front of the HTTPS listener observes every
+    // accepted downstream connection: the token gate must refuse all three
+    // activity commands without accepting one.
+    let relay = Relay::start(fixture, secure.http_addr);
+    write_secure_profile(fixture, "https", relay.addr, DB_NAME, Some(&secure.ca_path));
     for (args, command_part) in [
         (&["activity", "sessions"][..], "sessions"),
         (&["activity", "requests"][..], "requests"),
@@ -394,4 +398,202 @@ fn token_session_refuses_activity_commands_without_dialing() {
             args.join(" ")
         );
     }
+    assert_eq!(
+        relay.finish(fixture),
+        0,
+        "a refused activity command must not open a downstream connection"
+    );
+}
+
+// ── Live rows: scope, actor isolation and the paging cap ─────────────
+
+/// Connect one REAL second session as `SHELL_USER` and keep it open, so a
+/// listing has a live row that is NOT the operator's own.
+fn open_shell_user_session(fixture: &ShellFixture, password: Zeroizing<String>) -> Client {
+    let addr = fixture.tls_addr;
+    let pin = fixture.pin;
+    fixture.rt.run(async move {
+        // `ConnectOptions` carries the password as bytes (zeroized on drop).
+        let password = Zeroizing::new(password.as_bytes().to_vec());
+        let options = ConnectOptions {
+            addr,
+            server_name: String::from("localhost"),
+            username: String::from(SHELL_USER),
+            password,
+            accept_new_host: false,
+            trusted_pin: Some(pin),
+            connect_timeout: Some(BOUND),
+            handshake_timeout: Some(BOUND),
+            request_timeout: Some(BOUND),
+        };
+        tokio::time::timeout(BOUND, Client::connect(options))
+            .await
+            .expect("second-session connect hang bound")
+            .expect("second-session verified TLS connect")
+    })
+}
+
+/// Close one live session under a hang bound (`close` awaits the transport
+/// shutdown).
+fn close_session(fixture: &ShellFixture, client: Client) {
+    fixture.rt.run(async move {
+        tokio::time::timeout(BOUND, client.close())
+            .await
+            .expect("second-session close hang bound");
+    });
+}
+
+/// The `user` values of one listing page, as a sorted set.
+fn users_of(payload: &Value) -> Vec<String> {
+    let mut users: Vec<String> = payload["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .map(|row| {
+            row["user"]
+                .as_str()
+                .expect("row `user` is a string")
+                .to_owned()
+        })
+        .collect();
+    users.sort_unstable();
+    users.dedup();
+    users
+}
+
+/// Another actor's LIVE session is invisible in the default (own) scope and
+/// visible in `--all`, with a server-minted handle of its own.
+///
+/// Mutants caught: a shell that sends the wrong scope (the own listing would
+/// then carry `SHELL_USER`), a server that ignores the scope filter (the own
+/// listing would too), and an own listing satisfied by an empty result (the
+/// operator's own row MUST be there, so the page is never empty).
+#[test]
+fn activity_all_lists_another_actors_session_and_own_scope_does_not() {
+    let secure = boot_secure("activity_all_lists_another_actors_session_and_own_scope_does_not");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    let user_password = seed_shell_user(fixture);
+    use_admin_profile(fixture);
+    let other = open_shell_user_session(fixture, user_password.clone());
+
+    fixture
+        .guard
+        .mark("activity: own scope with a foreign live session");
+    let own = data(&run_shell(fixture, &["activity", "sessions"]), "sessions");
+    assert_eq!(own["scope"], "own", "the default scope must be own");
+    let own_users = users_of(&own);
+    assert!(
+        own_users.iter().any(|user| user == ADMIN),
+        "the operator's own session must be listed: {own_users:?}"
+    );
+    assert!(
+        !own_users.iter().any(|user| user == SHELL_USER),
+        "the own scope must not list another actor's session: {own_users:?}"
+    );
+    assert_eq!(
+        own["rows"]
+            .as_array()
+            .expect("rows array")
+            .len()
+            .to_string(),
+        own["rows_returned"].as_str().unwrap_or_default(),
+        "`rows_returned` must be the exact row count"
+    );
+
+    fixture
+        .guard
+        .mark("activity: --all with the foreign live session");
+    let all = data(
+        &run_shell(fixture, &["activity", "sessions", "--all"]),
+        "sessions",
+    );
+    assert_eq!(all["scope"], "all", "`--all` must widen the scope");
+    let foreign: Vec<&Value> = all["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .filter(|row| row["user"] == SHELL_USER)
+        .collect();
+    assert_eq!(
+        foreign.len(),
+        1,
+        "`--all` must list exactly the foreign live session"
+    );
+    let handle = assert_decimal(&foreign[0]["session_handle"], "foreign session handle");
+    let handles: Vec<&str> = all["rows"]
+        .as_array()
+        .expect("rows array")
+        .iter()
+        .map(|row| row["session_handle"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        handles
+            .iter()
+            .filter(|candidate| **candidate == handle)
+            .count(),
+        1,
+        "the minted handle must be unique in the page"
+    );
+    assert_eq!(
+        all["rows_truncated"], false,
+        "a page with no continuation must not claim truncation"
+    );
+
+    close_session(fixture, other);
+}
+
+/// The paging on REAL rows: `--limit` is the WIRE PAGE SIZE, not a total cap,
+/// so the shell follows the server's continuation until the listing is
+/// exhausted. With two live sessions and `--limit 1` (one row per page) both
+/// rows must come back across two pages and the listing is complete.
+///
+/// Mutants caught: a shell that stops after the first page (it would return
+/// one row), a continuation that is not forwarded (the same row twice, so the
+/// foreign session is missing) and a marker hardcoded to `true` (the
+/// exhausted listing would claim truncation). The truncation marker itself
+/// is pinned against a fake listing in `commands/tests/access_deadline_tests.rs`.
+#[test]
+fn activity_sessions_paging_follows_the_server_continuation() {
+    let secure = boot_secure("activity_sessions_paging_follows_the_server_continuation");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    let user_password = seed_shell_user(fixture);
+    use_admin_profile(fixture);
+    let other = open_shell_user_session(fixture, user_password);
+
+    fixture.guard.mark("activity: one-row pages");
+    let paged = data(
+        &run_shell(fixture, &["activity", "sessions", "--all", "--limit", "1"]),
+        "sessions",
+    );
+    let returned = paged["rows_returned"]
+        .as_str()
+        .and_then(|text| text.parse::<usize>().ok())
+        .expect("decimal `rows_returned`");
+    assert_eq!(
+        paged["rows"].as_array().expect("rows array").len(),
+        returned,
+        "`rows_returned` is the number of rows listed"
+    );
+    assert!(
+        returned >= 2,
+        "one row per page must still list the operator's session and the foreign one"
+    );
+    assert_eq!(
+        paged["rows_truncated"], false,
+        "an exhausted listing must not report truncation"
+    );
+    let users = users_of(&paged);
+    assert_eq!(
+        users.iter().filter(|user| *user == SHELL_USER).count(),
+        1,
+        "the live foreign session is listed exactly once (no repeated page)"
+    );
+    assert!(
+        users.iter().any(|user| user == "admin"),
+        "the operator's own session is listed"
+    );
+
+    close_session(fixture, other);
 }

@@ -90,7 +90,9 @@ fn create_database(fixture: &ShellFixture, name: &str) {
             Some(name.as_str()),
             "create_db must echo the created database name"
         );
-        client.close().await;
+        timeout(BOUND, async move { client.close().await })
+            .await
+            .expect("client close hang bound");
     })
 }
 
@@ -141,7 +143,9 @@ fn create_catalogue_group(fixture: &ShellFixture, name: &str) -> u64 {
         let id = result.records[0]
             .get_value_u64("group_id")
             .expect("server-minted `group_id` on create_group");
-        client.close().await;
+        timeout(BOUND, async move { client.close().await })
+            .await
+            .expect("client close hang bound");
         id
     })
 }
@@ -200,7 +204,9 @@ fn add_catalogue_member(fixture: &ShellFixture, group_id: u64, user: u64) {
             Some(user),
             "add_group_member must echo the added principal id"
         );
-        client.close().await;
+        timeout(BOUND, async move { client.close().await })
+            .await
+            .expect("client close hang bound");
     })
 }
 

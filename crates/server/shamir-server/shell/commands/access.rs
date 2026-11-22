@@ -161,65 +161,91 @@ impl AccessCommand {
     ) -> Result<Value, ShellError> {
         let started = tokio::time::Instant::now();
         let db = routing_db.ok_or(ShellError::Usage)?;
-        let payload = match self {
+        // Every arm yields a `Result` instead of propagating with `?`: the
+        // deadline must be consulted AFTER the projection and the output
+        // check, so an elapsed budget wins over either refusal (the
+        // `data head` rule, `state.rs::head_tail`).
+        let payload: Result<Value, ShellError> = match self {
             AccessCommand::Users => {
-                let result = run_users(client, db).await?;
-                project_users(&result)?
+                async {
+                    let result = run_users(client, db).await?;
+                    project_users(&result)
+                }
+                .await
             }
             AccessCommand::GroupTree { db: filter } => {
-                let result = run_tree(client, db, filter.as_deref()).await?;
-                let qv = tree_value(single_direct_value(&result)?)?;
-                project_tree(qv, filter.as_deref())?
+                async {
+                    let result = run_tree(client, db, filter.as_deref()).await?;
+                    let qv = tree_value(single_direct_value(&result)?)?;
+                    project_tree(qv, filter.as_deref())
+                }
+                .await
             }
             AccessCommand::GroupMembers => {
-                let result = run_tree(client, db, None).await?;
-                let qv = tree_value(single_direct_value(&result)?)?;
-                project_members(qv)?
+                async {
+                    let result = run_tree(client, db, None).await?;
+                    let qv = tree_value(single_direct_value(&result)?)?;
+                    project_members(qv)
+                }
+                .await
             }
             AccessCommand::RightsShow { path } => {
-                let selector = parse_selector(path)?;
-                let result = run_tree(client, db, None).await?;
-                let qv = tree_value(single_direct_value(&result)?)?;
-                project_rights(qv, &selector)?
+                async {
+                    let selector = parse_selector(path)?;
+                    let result = run_tree(client, db, None).await?;
+                    let qv = tree_value(single_direct_value(&result)?)?;
+                    project_rights(qv, &selector)
+                }
+                .await
             }
             AccessCommand::Chmod { path, mode } => {
-                let selector = parse_selector(path)?;
-                let resource = mutation_resource(&selector)?;
-                let mode = parse_mode(mode)?;
-                client.chmod(db, resource, mode).await?;
-                json!({
-                    "path": output::sanitize(&normalized_path(&selector)),
-                    "mode": format!("{mode:04o}"),
-                })
+                async {
+                    let selector = parse_selector(path)?;
+                    let resource = mutation_resource(&selector)?;
+                    let mode = parse_mode(mode)?;
+                    client.chmod(db, resource, mode).await?;
+                    Ok(json!({
+                        "path": output::sanitize(&normalized_path(&selector)),
+                        "mode": format!("{mode:04o}"),
+                    }))
+                }
+                .await
             }
             AccessCommand::Chown { path, owner } => {
-                let selector = parse_selector(path)?;
-                let resource = mutation_resource(&selector)?;
-                let users = run_users(client, db).await?;
-                let owner_id = user_id(&users, owner)?;
-                client.chown(db, resource, owner_id).await?;
-                json!({
-                    "path": output::sanitize(&normalized_path(&selector)),
-                    "owner": output::sanitize(owner),
-                    "owner_id": owner_id.to_string(),
-                })
+                async {
+                    let selector = parse_selector(path)?;
+                    let resource = mutation_resource(&selector)?;
+                    let users = run_users(client, db).await?;
+                    let owner_id = user_id(&users, owner)?;
+                    client.chown(db, resource, owner_id).await?;
+                    Ok(json!({
+                        "path": output::sanitize(&normalized_path(&selector)),
+                        "owner": output::sanitize(owner),
+                        "owner_id": owner_id.to_string(),
+                    }))
+                }
+                .await
             }
             AccessCommand::Chgrp { path, group } => {
-                let selector = parse_selector(path)?;
-                let resource = mutation_resource(&selector)?;
-                let result = run_tree(client, db, None).await?;
-                let qv = tree_value(single_direct_value(&result)?)?;
-                let group_id = group_id(qv, group)?;
-                client.chgrp(db, resource, Some(group_id)).await?;
-                json!({
-                    "path": output::sanitize(&normalized_path(&selector)),
-                    "group": output::sanitize(group),
-                    "group_id": group_id.to_string(),
-                })
+                async {
+                    let selector = parse_selector(path)?;
+                    let resource = mutation_resource(&selector)?;
+                    let result = run_tree(client, db, None).await?;
+                    let qv = tree_value(single_direct_value(&result)?)?;
+                    let group_id = group_id(qv, group)?;
+                    client.chgrp(db, resource, Some(group_id)).await?;
+                    Ok(json!({
+                        "path": output::sanitize(&normalized_path(&selector)),
+                        "group": output::sanitize(group),
+                        "group_id": group_id.to_string(),
+                    }))
+                }
+                .await
             }
         };
-        client.check_catalogue_output(&payload)?;
-        output::deadline_check(started, Ok(payload))
+        output::finish_command(started, payload, |payload| {
+            client.check_catalogue_output(payload)
+        })
     }
 }
 

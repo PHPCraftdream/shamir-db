@@ -8,9 +8,11 @@
 
 use serde_json::Value;
 use shamir_client::Client;
+use shamir_client::ClientError as Wire;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::token_admin;
+use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac as canon;
 use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use tokio::time::timeout;
@@ -428,6 +430,220 @@ fn signed_chmod_over_the_wire_is_accepted_and_a_wrong_tag_is_refused() {
     );
 }
 
+/// The signing seam for the two NAME-based mutations over the REAL wire: a
+/// `sign()`ed `chown` and `chgrp` are accepted, a MISSING tag is refused by
+/// the server's own coarse gate (`hmac_required`), a WRONG tag by its tag
+/// verification (`hmac_mismatch`), and a correctly signed request for an
+/// UNKNOWN target by the target lookup (`unknown_db`) — and none of the
+/// three refusals changes the resource.
+///
+/// The operations are built by the TYPED builder and only the optional tag
+/// field is cleared for the missing-tag case (the shape
+/// `tests/admin/identity/permission_e2e/common.rs` uses), so this never
+/// hand-assembles a wire value.
+///
+/// Mutants caught: a client that strips or reuses a tag (the missing-tag
+/// send would then be accepted), a server path that skips tag verification
+/// for chown/chgrp, and a refusal that still applies the effect.
+#[test]
+fn signed_chown_and_chgrp_are_required_and_unknown_targets_are_refused() {
+    let secure = boot_secure("signed_chown_and_chgrp_are_required_and_unknown_targets_are_refused");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    use_admin_profile(fixture);
+    let path = table_path();
+    let group_id = create_catalogue_group(fixture, GROUP_NAME);
+    let directory = data(&run_shell(fixture, &["user", "list"]), "user");
+    let owner_id = directory["users"]
+        .as_array()
+        .expect("users array")
+        .iter()
+        .find(|entry| entry["name"] == SHELL_USER)
+        .and_then(|entry| leaf_u64(&entry["principal64"]))
+        .expect("the seeded shell user's principal id");
+    // The refused probes target DIFFERENT values than the accepted ones (another
+    // principal, no group), so an erroneously applied refused request changes
+    // what the final `rights show` reports instead of hiding behind a no-op.
+    let other_owner_id = directory["users"]
+        .as_array()
+        .expect("users array")
+        .iter()
+        .filter_map(|entry| leaf_u64(&entry["principal64"]))
+        .find(|id| *id != owner_id)
+        .expect("a second principal to probe with");
+
+    fixture.guard.mark("wire: chown/chgrp tag probes");
+    let tls_addr = fixture.tls_addr;
+    let pin = fixture.pin;
+    let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
+    let codes = fixture.rt.run(async move {
+        let client = timeout(BOUND, connect_tls_owned(tls_addr, pin, password))
+            .await
+            .expect("tag-probe connect hang bound")
+            .expect("tag-probe verified TLS connect");
+        let key = canon::derive_session_hmac_key(&client.session_id());
+        let resource = ddl::res::table(DB_NAME, REPO_NAME, PLAIN_TABLE);
+
+        // 1. correctly signed chown: accepted.
+        let signed_chown = ddl::chown(resource.clone(), owner_id)
+            .sign(&key, ROUTING_DB)
+            .expect("signed chown op");
+        let mut batch = Batch::new();
+        batch.id("wire_chown_signed");
+        batch.op("chown", signed_chown);
+        timeout(BOUND, client.execute(ROUTING_DB, batch.build()))
+            .await
+            .expect("signed chown hang bound")
+            .expect("the server must accept a correctly signed chown");
+
+        // 2. chown with the tag stripped: the coarse gate refuses it. The
+        // builder refuses to build without a tag, so a placeholder is attached
+        // and then cleared (the shape `permission_e2e/common.rs` uses).
+        let mut batch = Batch::new();
+        batch.id("wire_chown_no_tag");
+        batch.op(
+            "chown",
+            without_tag(
+                ddl::chown(resource.clone(), other_owner_id)
+                    .hmac("unused")
+                    .build()
+                    .expect("typed chown with a placeholder tag"),
+            ),
+        );
+        let chown_missing = execute_code(&client, batch.build()).await;
+
+        // 3. chown with a wrong tag: tag verification refuses it.
+        let mut batch = Batch::new();
+        batch.id("wire_chown_wrong_tag");
+        batch.op(
+            "chown",
+            ddl::chown(resource.clone(), other_owner_id)
+                .hmac("0".repeat(64))
+                .build()
+                .expect("typed chown with a placeholder tag"),
+        );
+        let chown_wrong = execute_code(&client, batch.build()).await;
+
+        // 4. correctly signed chown for an UNKNOWN target.
+        let mut batch = Batch::new();
+        batch.id("wire_chown_unknown_target");
+        batch.op(
+            "chown",
+            ddl::chown(
+                ddl::res::table("nosuchdb", "nosuchrepo", "nosuchtable"),
+                owner_id,
+            )
+            .sign(&key, ROUTING_DB)
+            .expect("signed chown op for an unknown target"),
+        );
+        let chown_unknown = execute_code(&client, batch.build()).await;
+
+        // 5. correctly signed chgrp: accepted.
+        let signed_chgrp = ddl::chgrp(resource.clone(), Some(group_id))
+            .sign(&key, ROUTING_DB)
+            .expect("signed chgrp op");
+        let mut batch = Batch::new();
+        batch.id("wire_chgrp_signed");
+        batch.op("chgrp", signed_chgrp);
+        timeout(BOUND, client.execute(ROUTING_DB, batch.build()))
+            .await
+            .expect("signed chgrp hang bound")
+            .expect("the server must accept a correctly signed chgrp");
+
+        // 6. chgrp with the tag stripped.
+        let mut batch = Batch::new();
+        batch.id("wire_chgrp_no_tag");
+        batch.op(
+            "chgrp",
+            without_tag(
+                ddl::chgrp(resource.clone(), None)
+                    .hmac("unused")
+                    .build()
+                    .expect("typed chgrp with a placeholder tag"),
+            ),
+        );
+        let chgrp_missing = execute_code(&client, batch.build()).await;
+
+        // 7. chgrp with a wrong tag.
+        let mut batch = Batch::new();
+        batch.id("wire_chgrp_wrong_tag");
+        batch.op(
+            "chgrp",
+            ddl::chgrp(resource, None)
+                .hmac("0".repeat(64))
+                .build()
+                .expect("typed chgrp with a placeholder tag"),
+        );
+        let chgrp_wrong = execute_code(&client, batch.build()).await;
+
+        // Bounded teardown: `close` awaits a write lock and the transport
+        // shutdown, so it carries the same hang bound as every other step.
+        timeout(BOUND, async move { client.close().await })
+            .await
+            .expect("tag-probe close hang bound");
+        (
+            chown_missing,
+            chown_wrong,
+            chown_unknown,
+            chgrp_missing,
+            chgrp_wrong,
+        )
+    });
+
+    let (chown_missing, chown_wrong, chown_unknown, chgrp_missing, chgrp_wrong) = codes;
+    assert_eq!(
+        chown_missing, "hmac_required",
+        "a chown without a tag must be refused by the server"
+    );
+    assert_eq!(
+        chown_wrong, "hmac_mismatch",
+        "a wrongly tagged chown must be refused by the server"
+    );
+    assert_eq!(
+        chown_unknown, "unknown_db",
+        "a signed chown for an unknown target must be refused by the server"
+    );
+    assert_eq!(
+        chgrp_missing, "hmac_required",
+        "a chgrp without a tag must be refused by the server"
+    );
+    assert_eq!(
+        chgrp_wrong, "hmac_mismatch",
+        "a wrongly tagged chgrp must be refused by the server"
+    );
+
+    // The two accepted requests applied (owner and group are the signed
+    // values) and the refused probes, which asked for a different owner and for
+    // no group, changed nothing on top of them.
+    let after = rights(fixture, &path);
+    assert_eq!(
+        after["owner_name"], SHELL_USER,
+        "a refused chown must not replace the signed owner"
+    );
+    assert_eq!(
+        leaf_u64(&after["group"]),
+        Some(group_id),
+        "a refused chgrp must not replace the signed group"
+    );
+}
+
+/// Clear ONLY the optional tag of a typed signing op, leaving every other
+/// field exactly as the builder produced it (no hand-built wire value).
+fn without_tag(op: BatchOp) -> BatchOp {
+    match op {
+        BatchOp::Chown(mut inner) => {
+            inner.hmac = None;
+            BatchOp::Chown(inner)
+        }
+        BatchOp::Chgrp(mut inner) => {
+            inner.hmac = None;
+            BatchOp::Chgrp(inner)
+        }
+        other => panic!("expected a signing op, got {other:?}"),
+    }
+}
+
 /// An unconfirmed `chmod`/`chown`/`chgrp` opens NO connection at all: the
 /// counting relay in front of the TLS listener observes zero downstream
 /// accepts. Mutant: moving the confirmation after `with_session` (the relay
@@ -487,15 +703,12 @@ fn token_session_refuses_mutations_without_dialing() {
             .mode(ApiTokenMode::ReadOnly)
             .channels(ApiTokenChannels::Both),
     );
-    // Port 1 of the loopback has no listener: a dial cannot be mistaken for
-    // the token refusal (it would be `connection_failed`, exit 2).
-    write_secure_profile(
-        fixture,
-        "https",
-        std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
-        DB_NAME,
-        Some(&secure.ca_path),
-    );
+    // The counting relay sits in front of the HTTPS listener: the token
+    // gate must refuse all seven commands without accepting a single
+    // downstream connection (the relay reports `1` for a real dial — see
+    // `state_data::token_subset::token_subset_zero_dial_proven_by_relay_counter`).
+    let relay = Relay::start(fixture, secure.http_addr);
+    write_secure_profile(fixture, "https", relay.addr, DB_NAME, Some(&secure.ca_path));
     let path = table_path();
 
     for (args, command_part) in [
@@ -515,6 +728,11 @@ fn token_session_refuses_mutations_without_dialing() {
             "wrong fixed token-subset message for `{command_part}`"
         );
     }
+    assert_eq!(
+        relay.finish(fixture),
+        0,
+        "a refused mutation must not open a downstream connection"
+    );
 }
 
 // ── Wire helpers ─────────────────────────────────────────────────────
@@ -535,7 +753,6 @@ async fn execute_code(client: &Client, request: shamir_query_types::batch::Batch
 /// keeps the server's own code, every other variant reports its NAME. Neither
 /// the server message nor any handshake text is carried onward.
 fn client_error_code(error: &shamir_client::ClientError) -> String {
-    use shamir_client::ClientError as Wire;
     match error {
         Wire::Db { code, .. } | Wire::Server { code } => code.clone(),
         Wire::Io(_) => String::from("io"),

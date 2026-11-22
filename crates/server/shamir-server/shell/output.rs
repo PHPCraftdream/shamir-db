@@ -238,7 +238,9 @@ impl ShellError {
             ShellError::HmacRequired => {
                 "the request carried no signature the server accepts for a destructive change"
             }
-            ShellError::UnknownDb => "the addressed database does not exist on this server",
+            ShellError::UnknownDb => {
+                "the addressed resource does not exist on this server"
+            }
         }
     }
 
@@ -439,9 +441,39 @@ pub(super) fn deadline_check<T>(
     outcome
 }
 
+/// The shared command tail: the projection outcome, then the synchronous
+/// output scan, then the deadline consulted ONE LAST TIME — the ordering of
+/// `data head` (`state.rs::head_tail`), so an already-elapsed budget is the
+/// typed timeout (exit 7) even when the projection was refused by an
+/// unrelated error or the scan came back clean (which would otherwise exit
+/// 0 or exit 5). The scan is not interruptible: this is ordering, not
+/// preemption.
+pub(super) fn finish_command<T>(
+    started: tokio::time::Instant,
+    projected: Result<T, ShellError>,
+    scan: impl FnOnce(&T) -> Result<(), ShellError>,
+) -> Result<T, ShellError> {
+    let payload = projected.map_err(|error| deadline_error(started, error))?;
+    deadline_check(started, scan(&payload))?;
+    Ok(payload)
+}
+
+/// A refusal on an elapsed budget keeps the deadline's typed outcome: the
+/// budget wins over any per-step error (mirrors `state.rs::head_error`).
+pub(super) fn deadline_error(started: tokio::time::Instant, error: ShellError) -> ShellError {
+    if started.elapsed() >= crate::shell::connect::REQUEST_TIMEOUT {
+        ShellError::Timeout
+    } else {
+        error
+    }
+}
+
 /// Fixed-width FIELD/VALUE table (or a single `value` row) for stderr; every
-/// cell sanitized before rendering, truncation after sanitization.
-pub(super) fn write_human_result(stderr: &mut dyn Write, command: &str, data: &Json) {
+/// cell sanitized before rendering, truncation after sanitization. A listing
+/// command's non-empty array of objects renders one row per LINE; every
+/// other command keeps the single-cell rendering.
+fn write_human_result(stderr: &mut dyn Write, command: &str, data: &Json) {
+    let expand_lists = matches!(command, "activity sessions" | "activity requests");
     let mut rows: Vec<(String, String)> = Vec::new();
     match data {
         Json::Object(fields) => {
@@ -453,7 +485,9 @@ pub(super) fn write_human_result(stderr: &mut dyn Write, command: &str, data: &J
                 // single-cell rendering.
                 match item {
                     Json::Array(items)
-                        if !items.is_empty() && items.iter().all(Json::is_object) =>
+                        if expand_lists
+                            && !items.is_empty()
+                            && items.iter().all(Json::is_object) =>
                     {
                         let label = display_cell(field, HUMAN_LABEL_MAX_CHARS);
                         for (index, element) in items.iter().enumerate() {

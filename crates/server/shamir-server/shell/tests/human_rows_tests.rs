@@ -59,6 +59,30 @@ fn request_rows_render_one_row_per_line() {
     }
 }
 
+/// A NON-listing command keeps the single-cell rendering: the expansion is
+/// scoped to the two activity listings, so `data head` / `status` human
+/// output is byte-identical to before (mutant: expanding every top-level
+/// array of objects changes unrelated commands' tables).
+#[test]
+fn non_listing_command_keeps_one_cell_per_field() {
+    let payload = json!({
+        "rows": [
+            { "n": "1" },
+            { "n": "2" },
+        ],
+        "rows_returned": "2",
+    });
+    let text = rendered("data head", &payload);
+    assert!(
+        text.contains("rows  ") && text.contains("rows_returned"),
+        "both top-level fields must render: {text}"
+    );
+    assert!(
+        !text.contains("rows[0]"),
+        "a non-listing command must not expand array entries: {text}"
+    );
+}
+
 /// A NON-array payload still renders as `field  value` rows.
 #[test]
 fn non_array_payload_renders_field_value_rows() {

@@ -14,7 +14,7 @@ use super::harness::{
 use super::secure_fixture::{
     boot_secure, provision_token, run_token_shell, run_with_secret, write_secure_profile,
 };
-use super::state_data_common::{data, leaf_u64, refusal, scram_profile, TOKEN_SUBSET};
+use super::state_data_common::{data, leaf_u64, refusal, scram_profile, Relay, TOKEN_SUBSET};
 
 // ── Local shape helpers ──────────────────────────────────────────────
 
@@ -311,7 +311,15 @@ fn rights_show_root_is_a_local_selector() {
 }
 
 /// §3.3: the rights commands are SCRAM only — every one of them is refused
-/// in a token session with the fixed subset message and exit 4.
+/// in a token session with the fixed subset message and exit 4, and the
+/// counting relay in front of the HTTPS listener observes ZERO accepted
+/// connections for the whole set.
+///
+/// Mutants caught: a rights command that re-entered the token allowlist (its
+/// dial is counted), and a refusal that dials first and discards the result
+/// (the same counter). The relay's positive control — it reports `1` for a
+/// real token dial — lives in
+/// `state_data::token_subset::token_subset_zero_dial_proven_by_relay_counter`.
 #[test]
 fn token_session_refuses_rights_commands() {
     let secure = boot_secure("token_session_refuses_rights_commands");
@@ -326,13 +334,8 @@ fn token_session_refuses_rights_commands() {
             .mode(ApiTokenMode::ReadOnly)
             .channels(ApiTokenChannels::Both),
     );
-    write_secure_profile(
-        fixture,
-        "https",
-        secure.http_addr,
-        DB_NAME,
-        Some(&secure.ca_path),
-    );
+    let relay = Relay::start(fixture, secure.http_addr);
+    write_secure_profile(fixture, "https", relay.addr, DB_NAME, Some(&secure.ca_path));
     for args in [
         &["user", "list"][..],
         &["group", "tree"][..],
@@ -353,4 +356,9 @@ fn token_session_refuses_rights_commands() {
             args.join(" ")
         );
     }
+    assert_eq!(
+        relay.finish(fixture),
+        0,
+        "a refused rights command must not open a downstream connection"
+    );
 }
