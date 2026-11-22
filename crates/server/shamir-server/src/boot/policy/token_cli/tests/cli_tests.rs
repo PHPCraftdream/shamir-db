@@ -134,9 +134,21 @@ async fn existing_secret_file_is_refused_before_data_open() {
         databases: vec![],
         out_file: Some(p.clone()),
     });
-    assert!(run_with_io(&c, a, &mut io).await.is_err());
+    let err = run_with_io(&c, a, &mut io)
+        .await
+        .expect_err("an occupied output path must be refused");
+    assert!(
+        format!("{err:#}").contains("exclusively create"),
+        "the refusal must be the exclusive-create error: {err:#}"
+    );
     assert_eq!(std::fs::read(p).expect("file"), b"untouched");
-    assert!(!c.data_dir.exists());
+    // Lock-first: the fresh data directory holds only its lock file; no
+    // store, stamp or audit file was created before the refusal.
+    let names: Vec<_> = std::fs::read_dir(&c.data_dir)
+        .expect("data dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from(".shamir.lock")]);
 }
 #[test]
 fn secret_file_is_exclusive_and_unix_mode_0600() {
