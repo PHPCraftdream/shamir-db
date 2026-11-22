@@ -1,0 +1,228 @@
+//! Regression for the tagged-export restore path (finding 4, R2d-FIX-C
+//! review): a scheduled snapshot exported by plain `cp` keeps its
+//! timestamp-named directory and its `backup.meta.json` owner-tag sidecar,
+//! but its NEW parent has no lease marker. `restore` must still succeed:
+//! the snapshot is classified as an UNMANAGED export and read lock-free
+//! (no shared lock, no marker creation — readers NEVER create the marker),
+//! and the marker must not appear in the export parent afterwards. The
+//! Unix-only variant makes the parent READ-ONLY (like read-only export
+//! media), which is exactly the case a marker-creating or write-requiring
+//! reader would fail on; the fixture is a real V1 snapshot whose manifest
+//! LISTS the syntactically valid sidecar as a regular file (v1 refuses
+//! unmanifested entries; only v2 exempts the sidecar), and the restore
+//! genuinely succeeds into a fresh, writable target in a DIFFERENT parent
+//! directory. Restore only ever READS the export (all writes go to the
+//! staging dir next to the target), so read-only payload files are never
+//! written. The Unix permission change is guarded by an RAII handle that
+//! restores the original mode BEFORE the `TempDir` drops, so cleanup never
+//! runs against a read-only parent. Pure file APIs, no runtime.
+
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::Path;
+
+use tempfile::TempDir;
+
+use crate::sync::durability::backup::offline::{
+    verify_manifest, Manifest, ManifestFileEntry, SNAPSHOT_LEASE_FILE_NAME,
+};
+use crate::sync::durability::backup::online::copy_engine::hash_file;
+use crate::sync::durability::backup::online::manifest::BackupKind;
+use crate::sync::durability::backup::online::manifest::BACKUP_META_FILE_NAME;
+use crate::sync::durability::backup::restore::restore_with_probe;
+
+const LISTED_PAYLOAD: &str = "payload/keeper.bin";
+const TIMESTAMPED_NAME: &str = "20200101_000001";
+/// Multi-line literal per repo convention: JSON layout is free-form (the
+/// consumers parse it; the sidecar is a listed payload file for restore).
+const OWNER_TAG_JSON: &str = r#"{
+  "scheduled_retention": {
+    "version": 1,
+    "owner": "sched-owner"
+  }
+}"#;
+const PAYLOAD_BYTES: &[u8] = b"exported-kept-bytes";
+
+/// A VALID v1 offline snapshot under a TIMESTAMPED directory name with a
+/// syntactically valid owner-tag sidecar, in a parent WITHOUT the lease
+/// marker (an exported copy). The manifest lists exactly the payload and
+/// the sidecar — the v1 verifier refuses any unmanifested file, so the
+/// sidecar must be a listed entry (v2 exempts it; v1 does not).
+fn build_v1_tagged_export() -> TempDir {
+    let parent = TempDir::new().expect("export parent temp dir");
+    let snapshot = parent.path().join(TIMESTAMPED_NAME);
+    // The payload lives under `payload/`, NOT `users/`: restore ALWAYS
+    // opens `FjallUserDirectory::open(staged/users)` after the copy, and
+    // whether a `users` directory holding a plain (non-Fjall) file opens
+    // depends on Fjall's nonempty-directory init semantics. `payload/` is
+    // never opened as a store, so the fixture makes no such assumption; a
+    // missing `users` store is the documented path (restore materializes
+    // an empty one — `open_and_invalidate_users`).
+    fs::create_dir_all(snapshot.join("payload")).expect("snapshot payload dir");
+    fs::write(snapshot.join(LISTED_PAYLOAD), PAYLOAD_BYTES).expect("write payload");
+    fs::write(snapshot.join(BACKUP_META_FILE_NAME), OWNER_TAG_JSON).expect("write sidecar");
+
+    let mut files = Vec::new();
+    for rel in [LISTED_PAYLOAD, BACKUP_META_FILE_NAME] {
+        let (sha256, size_bytes) = hash_file(&snapshot.join(rel)).expect("hash listed file");
+        files.push(ManifestFileEntry {
+            path: rel.to_string(),
+            sha256,
+            size_bytes,
+        });
+    }
+    let manifest = Manifest {
+        format_version: 1,
+        created_at_unix_ns: 1_700_000_000_000,
+        files,
+    };
+    let json = serde_json::to_vec_pretty(&manifest).expect("encode manifest");
+    fs::write(snapshot.join("manifest.json"), json).expect("write manifest");
+    parent
+}
+
+/// Unix-only RAII guard: hold a directory read-only (0o555) for the test
+/// body and restore the ORIGINAL mode on drop — BEFORE the enclosing
+/// `TempDir` drops, so temp cleanup never hits a read-only parent. The
+/// original mode is captured, never hard-coded: the guard restores whatever
+/// the filesystem created, not an assumption about it.
+#[cfg(unix)]
+struct ReadOnlyDir<'a> {
+    path: &'a Path,
+    original: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl ReadOnlyDir<'_> {
+    fn make_read_only(path: &Path) -> std::io::Result<ReadOnlyDir<'_>> {
+        let original = fs::metadata(path)?.permissions();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o555))?;
+        Ok(ReadOnlyDir { path, original })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnlyDir<'_> {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(self.path, self.original.clone());
+    }
+}
+
+/// A tagged export (timestamped name + valid owner tag, NO marker in the
+/// parent) must restore successfully, read lock-free: the export parent
+/// gains NO lease marker (readers never create it) and the target parent is
+/// left without any restore scratch sibling. Cross-platform: this is the
+/// no-marker half of the read-only-media regression — on a reader that
+/// classified the tagged export as managed and created the marker, the
+/// final marker assertion fails.
+#[test]
+fn tagged_export_without_marker_restores_and_never_creates_the_marker() {
+    let export = build_v1_tagged_export();
+    let export_parent = export.path();
+    let target_parent = TempDir::new().expect("target parent temp dir");
+    // The target lives under a DIFFERENT parent than the export: the swap
+    // staging dir must never be created beside the export.
+    let data_dir = target_parent.path().join("data_dir");
+
+    let snapshot_dir = export_parent.join(TIMESTAMPED_NAME);
+    // The STANDALONE verifier (the same entry `restore`'s customers use
+    // without a full restore) must accept the tagged export read-only: an
+    // unmanaged export never takes a lease nor writes the marker.
+    let verify = verify_manifest(&snapshot_dir).expect("standalone verify_manifest");
+    assert!(
+        matches!(verify.kind, BackupKind::Offline),
+        "a v1 tagged export verifies as offline, got {:?}",
+        verify.kind
+    );
+    // Immediately — BEFORE the restore runs — the export parent must hold
+    // no marker: verification itself must not have created one.
+    assert!(
+        !export_parent.join(SNAPSHOT_LEASE_FILE_NAME).exists(),
+        "standalone verify_manifest must NOT create the lease marker"
+    );
+
+    let report = restore_with_probe(&snapshot_dir, &data_dir, false, |_data_dir| Ok(()))
+        .expect("a tagged export without a marker must restore as an unmanaged copy");
+
+    // The copy walked the source tree: manifest, listed payload and listed
+    // sidecar all landed in the restored target.
+    assert_eq!(report.files_restored, 3, "manifest + payload + sidecar");
+    assert_eq!(
+        fs::read(data_dir.join(LISTED_PAYLOAD)).expect("read restored payload"),
+        PAYLOAD_BYTES,
+        "the restored payload must be the exported bytes"
+    );
+    assert_eq!(
+        fs::read_to_string(data_dir.join(BACKUP_META_FILE_NAME)).expect("read restored sidecar"),
+        OWNER_TAG_JSON,
+        "the restored sidecar must be the exported owner tag"
+    );
+
+    // Readers never create the marker: the export parent must still hold
+    // only the timestamped snapshot directory.
+    assert!(
+        !export_parent.join(SNAPSHOT_LEASE_FILE_NAME).exists(),
+        "restore must NOT create the lease marker in the export parent"
+    );
+    let target_siblings: Vec<String> = fs::read_dir(target_parent.path())
+        .expect("read target parent")
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        target_siblings
+            .iter()
+            .all(|name| !name.contains("restore_tmp") && !name.contains("pre_restore_backup")),
+        "a successful fresh-target restore leaves no scratch sibling, found: {target_siblings:?}"
+    );
+}
+
+/// The same tagged export in a READ-ONLY parent (Unix export media) must
+/// restore successfully: the reader takes no lease and never needs write
+/// access to the export parent. Without the read-only-marker fix the
+/// restore fails with an I/O refusal from a marker open/create before
+/// reading anything.
+#[cfg(unix)]
+#[test]
+fn tagged_export_in_read_only_parent_restores() {
+    let export = build_v1_tagged_export();
+    let export_parent = export.path();
+    let _read_only = ReadOnlyDir::make_read_only(export_parent).expect("chmod export parent");
+    let target_parent = TempDir::new().expect("target parent temp dir");
+    let data_dir = target_parent.path().join("data_dir");
+
+    let snapshot_dir = export_parent.join(TIMESTAMPED_NAME);
+    let verify = verify_manifest(&snapshot_dir)
+        .expect("standalone verify_manifest on a read-only tagged export");
+    assert_eq!(
+        verify.files_checked, 2,
+        "manifest lists the payload and the sidecar"
+    );
+    assert!(
+        !export_parent.join(SNAPSHOT_LEASE_FILE_NAME).exists(),
+        "verification must not create the marker in the read-only parent"
+    );
+
+    let report = restore_with_probe(&snapshot_dir, &data_dir, false, |_data_dir| Ok(()))
+        .expect("a tagged export in a read-only parent must restore lock-free");
+
+    assert_eq!(report.files_restored, 3, "manifest + payload + sidecar");
+    assert_eq!(
+        fs::read(data_dir.join(LISTED_PAYLOAD)).expect("read restored payload"),
+        PAYLOAD_BYTES,
+        "the restored payload must be the exported bytes"
+    );
+    // The guard's Drop restored 0o755 before `export` drops; nothing was
+    // ever written into the export parent — not even the marker.
+    assert!(
+        !export_parent.join(SNAPSHOT_LEASE_FILE_NAME).exists(),
+        "restore must NOT create the lease marker in the read-only export parent"
+    );
+}

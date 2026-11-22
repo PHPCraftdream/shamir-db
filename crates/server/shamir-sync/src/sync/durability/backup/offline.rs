@@ -31,8 +31,8 @@
 //! offline CLI, which has no access to any live handle). Not done here
 //! because it requires a wire-protocol change.
 
-use std::fs;
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,15 +44,26 @@ use shamir_collections::new_fx_set_wc;
 
 use super::online::manifest::{self as online_manifest, BackupKind, ManifestV2};
 use super::restore::fsync_dir;
+use super::snapshot_lease;
 use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation, StampError};
 
 mod source_lock;
+#[cfg(test)]
+mod tests;
 mod v2_verify;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
 /// through — chosen so a large fjall SST/journal file is hashed without
 /// ever materializing the whole file in RAM at once.
 const HASH_STREAM_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Reserved lease-file name at the ROOT of a managed backup root (outside
+/// every deletable `<timestamp>` snapshot child). Readers take a shared
+/// advisory lock on it, retention takes a non-blocking exclusive one before
+/// deleting a candidate. Defined here so the SERVER-facing re-export stays
+/// inside an existing public file; the private `snapshot_lease` module
+/// imports it inward.
+pub const SNAPSHOT_LEASE_FILE_NAME: &str = ".shamir-snapshot.lock";
 
 /// Stream `path`'s full contents through a fixed-size buffer into a running
 /// SHA-256 hasher, returning `(digest, size_bytes)`. Produces a
@@ -121,6 +132,16 @@ pub enum BackupError {
     /// file outside the snapshot directory.
     #[error("unsafe manifest entry path (absolute or contains '..'): {0}")]
     UnsafeManifestPath(String),
+    /// `verify_exported_manifest`: the snapshot is a MANAGED scheduled
+    /// child (a lease marker already exists in its canonical parent), so
+    /// the no-lock exported-snapshot verifier refuses it instead of taking
+    /// a lease it promises not to take. Managed snapshots verify through
+    /// [`verify_manifest`], which holds the shared read lease.
+    #[error(
+        "snapshot {0} is a managed scheduled child (lease marker present); \
+         verify_exported_manifest refuses to verify it without a lease"
+    )]
+    ManagedSnapshotNotExported(PathBuf),
     /// `verify_manifest`: a manifest lists a path inside the private cache subtree.
     #[error("snapshot manifest must not contain cache paths: {0}")]
     CacheManifestPath(String),
@@ -308,6 +329,27 @@ pub struct ManifestVerifyReport {
     /// v2 only: the captured consistency section (per-repo `wal_position`
     /// / `store_dir` / `schema_version`, system-store version).
     pub consistency: Option<online_manifest::ConsistencySection>,
+}
+
+/// The exact decoded manifest a successful verification already produced,
+/// handed to the caller without a second parse of `manifest.json`.
+/// `pub(super)` — restore.rs is the intended consumer.
+#[derive(Debug)]
+pub(super) enum VerifiedManifest {
+    /// A v1 (offline stop-and-copy) manifest.
+    V1(Manifest),
+    /// A v2 (online) manifest.
+    V2(ManifestV2),
+}
+
+impl VerifiedManifest {
+    /// The manifest's file list, verbatim as verified.
+    pub(super) fn files(&self) -> &[ManifestFileEntry] {
+        match self {
+            VerifiedManifest::V1(manifest) => &manifest.files,
+            VerifiedManifest::V2(manifest) => &manifest.files,
+        }
+    }
 }
 
 /// Recursively copy `from` → `to/<timestamp>/`. The timestamp is
@@ -544,43 +586,184 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Read `snapshot_dir/manifest.json`, re-hash every listed file, and
-/// confirm no extra unmanifested file is physically present. A checksum /
-/// size mismatch, a missing manifest, an unparseable manifest, or an extra
-/// unmanifested file are all hard errors — a corrupted or tampered snapshot
-/// must never be silently accepted.
+/// Verify `snapshot_dir` against its `manifest.json`, holding a shared
+/// read lease on the managed root (when it is one) for the duration so
+/// retention cannot delete mid-verify. Snapshot paths outside a managed
+/// root verify lock-free. The online backup writer self-verifies through
+/// the module-private `verify_writer_snapshot` instead: it must not lease
+/// the snapshot it is still publishing, and the old thread-scoped bypass
+/// that unleased EVERY direct child of the root on the writer's thread is
+/// gone — an older sibling verified on that thread stays leased. The
+/// single canonical-source decision happens at the start
+/// (`snapshot_lease::read_snapshot`) and every subsequent read consumes
+/// only the resolved canonical path. A snapshot that is ABSENT at that
+/// decision refuses with `BackupError::ManifestMissing` — a child that
+/// appears afterwards is never read unleased by opening the original
+/// pathname. Readers never create or write the lease marker.
 pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
-    verify_manifest_impl(snapshot_dir).map(|(report, _)| report)
+    verify_manifest_with_lookup(snapshot_dir, |path| fs::canonicalize(path))
 }
 
-/// Internal full verify that ALSO returns the exact decoded v2 manifest, so
-/// restore can consume the already-verified manifest without parsing
-/// `manifest.json` a second time. `Some` only for a v2 manifest that fully
-/// verified; `None` for every v1 manifest (restore's v1 path needs nothing
-/// beyond the report). `pub(crate)` — restore.rs is the intended caller.
-pub(crate) fn verify_manifest_for_restore(
+/// Private test seam behind [`verify_manifest`]: the initial canonicalizing
+/// lookup goes through `lookup`, so a test can make the snapshot
+/// deterministically absent at the decision point while creating the
+/// complete snapshot INSIDE the seam — before any manifest open. Production
+/// passes the real `fs::canonicalize`.
+pub(super) fn verify_manifest_with_lookup(
     snapshot_dir: &Path,
-) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
+    lookup: impl FnOnce(&Path) -> io::Result<PathBuf>,
+) -> Result<ManifestVerifyReport, BackupError> {
+    match snapshot_lease::read_snapshot_with_lookup(snapshot_dir, lookup)
+        .map_err(BackupError::Io)?
+    {
+        snapshot_lease::SourceSnapshot::Missing => Err(BackupError::ManifestMissing(
+            snapshot_dir.join(MANIFEST_FILE_NAME),
+        )),
+        snapshot_lease::SourceSnapshot::Unmanaged { canonical } => {
+            verify_manifest_impl(&canonical).map(|(report, _)| report)
+        }
+        snapshot_lease::SourceSnapshot::Managed { canonical, lease } => {
+            let _source_lease = lease;
+            verify_manifest_impl(&canonical).map(|(report, _)| report)
+        }
+    }
+}
+
+/// Verify an EXPORTED snapshot WITHOUT taking any lease and WITHOUT
+/// creating or writing anything: the single canonical-source decision
+/// classifies the path once, then a MANAGED child (lease marker already
+/// present in its canonical parent) is refused as
+/// [`BackupError::ManagedSnapshotNotExported`] rather than locked, a
+/// missing path refuses as [`BackupError::ManifestMissing`], and only a
+/// genuine unmanaged export (timestamped child without a marker, or a
+/// non-timestamped directory) verifies — against its resolved canonical
+/// path. For the server's no-lock `--plan --from-backup` gate; managed
+/// snapshots verify through [`verify_manifest`], which holds the lease.
+pub fn verify_exported_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
+    match snapshot_lease::resolve_source(snapshot_dir).map_err(BackupError::Io)? {
+        snapshot_lease::Resolution::Missing => Err(BackupError::ManifestMissing(
+            snapshot_dir.join(MANIFEST_FILE_NAME),
+        )),
+        snapshot_lease::Resolution::Managed(canonical) => {
+            Err(BackupError::ManagedSnapshotNotExported(canonical))
+        }
+        snapshot_lease::Resolution::Unmanaged(canonical) => {
+            verify_manifest_impl(&canonical).map(|(report, _)| report)
+        }
+    }
+}
+
+/// Internal full verify for restore: also returns the exact decoded
+/// manifest so restore need not re-parse `manifest.json`. `pub(super)`.
+/// Takes NO read lease: the caller holds the shared lease through the last
+/// source read (a second handle would be a distinct lease; see history).
+/// Verify-only callers should use [`verify_manifest`].
+pub(super) fn verify_manifest_for_restore(
+    snapshot_dir: &Path,
+) -> Result<(ManifestVerifyReport, VerifiedManifest), BackupError> {
     verify_manifest_impl(snapshot_dir)
 }
 
-/// Shared implementation behind the two wrappers. Dispatches on the cheap
+/// Retention preflight: run the v2 verifier core over a candidate
+/// snapshot WITHOUT taking the blocking shared read lease (retention runs
+/// on a native scheduler worker and must never block) and WITHOUT the v1
+/// fallback: scheduled retention only manages v2 online copies, and its
+/// classification refuses anything else before this call. `raw` is the
+/// candidate's `manifest.json` exactly as the caller already read and
+/// size-bounded it — the verifier verifies against those bytes and never
+/// re-reads the file, so a candidate whose manifest swaps between the two
+/// reads is judged on the bytes the classification decision used. THE
+/// CALLER'S MANIFEST SIZE CAP IS A PRECONDITION of this function and is
+/// not re-checked here. An ONLINE-kind match is required FIRST, on the
+/// same bytes and BEFORE any payload I/O: a v2 manifest whose `kind` is
+/// offline refuses without walking or hashing the tree; the original v2
+/// format-version check and error are kept. The exclusive delete lease is
+/// taken separately, immediately before deletion. Not used by any reader
+/// path; the unit return carries no report fields the preflight needs.
+pub fn verify_retention_candidate(dir: &Path, raw: &[u8]) -> Result<(), BackupError> {
+    // Kind FIRST: decode and classify the bounded bytes without touching
+    // the tree (`decode_manifest_v2` keeps the original v2 format-version
+    // check — v1 and unknown refuse typed, no v1 fallback for retention).
+    let decoded = v2_verify::decode_manifest_v2(raw)?;
+    // A v2 manifest whose `kind` is offline is not a retention candidate:
+    // refused BEFORE the tree walk, hash or any other payload I/O.
+    if !matches!(decoded.kind, BackupKind::Online) {
+        return Err(BackupError::ManifestInvalid(
+            "retention candidate manifest kind is not online".to_owned(),
+        ));
+    }
+    // Online-kind only: the payload half verifies the ALREADY-decoded
+    // manifest — one parse, no re-read.
+    v2_verify::verify_decoded_manifest_v2(dir, decoded)?;
+    Ok(())
+}
+
+/// Crate-private unleased verify of the EXACT snapshot the online writer
+/// just published (the protocol's `self_verify` of the child it wrote).
+/// The writer cannot lease the child it is still writing; this entry
+/// takes that one path, so the self-check never waits behind retention's
+/// exclusive lease and can never unlease an older sibling — any other
+/// verify stays on the leased [`verify_manifest`]. Not exported past the
+/// backup module: only `run_online_backup` may call it. Unit return — the
+/// protocol only needs the refusal, never the report.
+pub(super) fn verify_writer_snapshot(snapshot_dir: &Path) -> Result<(), BackupError> {
+    verify_manifest_impl(snapshot_dir).map(drop)
+}
+
+/// Provision the lease marker ([`SNAPSHOT_LEASE_FILE_NAME`]) at the root of
+/// a managed backup root, owner-private, without locking it. Idempotent;
+/// called when scheduled retention is enabled. Precondition: `root` is a
+/// private managed backup root the caller has already validated
+/// (`open_or_create` re-checks only the leaf).
+pub fn provision_snapshot_lease(root: &Path) -> io::Result<()> {
+    snapshot_lease::provision(root)
+}
+
+/// Non-blocking EXCLUSIVE delete lease. `Ok(Some(handle))` means retention
+/// may delete; `Ok(None)` means a read or delete lease is held — skip this
+/// pass. Dropping the handle releases the lease. Never blocks, never holds
+/// any registry permit.
+pub fn try_snapshot_delete_lease(root: &Path) -> io::Result<Option<File>> {
+    snapshot_lease::try_exclusive(root)
+}
+
+/// Shared implementation behind the entry points. Dispatches on the cheap
 /// format-version peek: v2 snapshots route to the child module's
 /// [`v2_verify::verify_manifest_v2`], the v1 path stays byte-identical.
+/// Lease policy lives entirely in the callers ([`verify_manifest`] leases;
+/// [`verify_manifest_for_restore`], [`verify_writer_snapshot`] and
+/// [`verify_retention_candidate`] do not).
 fn verify_manifest_impl(
     snapshot_dir: &Path,
-) -> Result<(ManifestVerifyReport, Option<ManifestV2>), BackupError> {
+) -> Result<(ManifestVerifyReport, VerifiedManifest), BackupError> {
     let manifest_path = snapshot_dir.join(MANIFEST_FILE_NAME);
     if !manifest_path.exists() {
         return Err(BackupError::ManifestMissing(manifest_path));
     }
     let raw = fs::read(&manifest_path)?;
-    if peek_manifest_format_version(&raw) == Some(online_manifest::MANIFEST_FORMAT_VERSION_V2) {
-        let (report, manifest) = v2_verify::verify_manifest_v2(snapshot_dir, &raw)?;
-        return Ok((report, Some(manifest)));
+    verify_manifest_raw(snapshot_dir, &raw)
+}
+
+/// The verifier core over already-read manifest bytes; [`verify_manifest`]
+/// and [`verify_writer_snapshot`] read the bytes themselves,
+/// [`verify_retention_candidate`] receives them from the caller. Dispatches
+/// on the cheap format-version peek: v2 snapshots route to the child
+/// module's [`v2_verify::verify_manifest_v2`], the v1 path stays
+/// byte-identical.
+fn verify_manifest_raw(
+    snapshot_dir: &Path,
+    raw: &[u8],
+) -> Result<(ManifestVerifyReport, VerifiedManifest), BackupError> {
+    tracing::trace!(target: "shamir_sync::snapshot_verify", "snapshot manifest loaded");
+    if peek_manifest_format_version(raw) == Some(online_manifest::MANIFEST_FORMAT_VERSION_V2) {
+        let (report, manifest) = v2_verify::verify_manifest_v2(snapshot_dir, raw)?;
+        return Ok((report, VerifiedManifest::V2(manifest)));
     }
-    let manifest: Manifest = serde_json::from_slice(&raw).map_err(|e| {
-        BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
+    let manifest: Manifest = serde_json::from_slice(raw).map_err(|e| {
+        BackupError::ManifestInvalid(format!(
+            "decode {}: {e}",
+            snapshot_dir.join(MANIFEST_FILE_NAME).display()
+        ))
     })?;
 
     if manifest.format_version != MANIFEST_FORMAT_VERSION {
@@ -654,7 +837,7 @@ fn verify_manifest_impl(
             binary_version: None,
             consistency: None,
         },
-        None,
+        VerifiedManifest::V1(manifest),
     ))
 }
 
