@@ -24,6 +24,14 @@
 //! blocking thread. Teardown continues to the repository flush regardless:
 //! the refusal reply and the refusal's own audit append never depend on this
 //! stage.
+//!
+//! The one rule a deadline can break: the final close (final drain, anchor and
+//! server-metadata write) is submitted only when BOTH the scheduler and the
+//! flusher stopped inside the deadline. If either timed out, its task may still
+//! be inside the persistence gate, so a final close submitted now could run
+//! BEFORE it. In that case no close is submitted at all: the report says the
+//! buffered events and the anchor were not persisted by this shutdown, and the
+//! next start recovers the chain exactly as it does after a crash.
 
 #[cfg(test)]
 use std::future::Future;
@@ -49,12 +57,13 @@ pub(crate) const AUDIT_TEARDOWN_DEADLINE: Duration = Duration::from_secs(10);
 // grep for; each failure is reported once, at the moment it is observed, so a
 // later timeout can never swallow an earlier error and no caller has to
 // reinterpret a message.
-pub(crate) const ERR_AUDIT_TIMEOUT: &str = "audit teardown exceeded";
-pub(crate) const ERR_FLUSHER_JOIN: &str = "audit flusher task did not join cleanly";
-pub(crate) const ERR_FLUSH: &str = "audit flush failed at shutdown";
-pub(crate) const ERR_ANCHOR: &str = "audit anchor or metadata write failed at shutdown";
-pub(crate) const ERR_FLUSH_TASK: &str = "audit flush task did not complete";
-pub(crate) const ERR_SCHEDULER_STOP: &str = "scheduler did not stop within";
+const ERR_AUDIT_TIMEOUT: &str = "audit teardown exceeded";
+const ERR_FLUSHER_JOIN: &str = "audit flusher task did not join cleanly";
+const ERR_FLUSH: &str = "audit flush failed at shutdown";
+const ERR_ANCHOR: &str = "audit anchor or metadata write failed at shutdown";
+const ERR_FLUSH_TASK: &str = "audit flush task did not complete";
+const ERR_SCHEDULER_STOP: &str = "scheduler did not stop within";
+const ERR_FINAL_CLOSE_SKIPPED: &str = "audit final close not attempted";
 
 /// The three audit owners a shutdown must drain, in teardown order.
 pub(crate) struct AuditTeardown<'a> {
@@ -71,10 +80,13 @@ pub(crate) struct AuditTeardown<'a> {
 /// Close admission, drain, join the scheduler, join the flusher and flush the
 /// audit stage under one deadline.
 ///
-/// Returns `true` when the stage completed inside the deadline. Either way
-/// teardown is finished with the audit owners: the scheduler has been told to
-/// stop and joined (or abandoned), the appender's final flush has been
-/// attempted and every failure has been recorded in `report`.
+/// Returns `true` when the stage completed inside the deadline and its final
+/// close ran. Either way teardown is finished with the audit owners: the
+/// scheduler has been told to stop and joined (or abandoned), the flusher has
+/// been stopped and joined (or abandoned), and every failure has been recorded
+/// in `report` once, at the moment it was observed. The final close runs only
+/// after BOTH stoppers completed; if either timed out, [`ERR_FINAL_CLOSE_SKIPPED`]
+/// is reported instead and nothing is submitted.
 pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut ShutdownReport) -> bool {
     let deadline = tokio::time::Instant::now() + AUDIT_TEARDOWN_DEADLINE;
     parts.cancel_refusal_audit.close();
@@ -98,16 +110,21 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
     // Join the scheduler BEFORE the flusher join and the final flush: a
     // scheduled audit checkpoint checked in after `close()` could otherwise
     // interleave with the final log sync and the anchor write.
+    let mut scheduler_stopped = true;
     if tokio::time::timeout_at(deadline, parts.scheduler.join())
         .await
         .is_err()
     {
         report.add_error(format!("{ERR_SCHEDULER_STOP} {AUDIT_TEARDOWN_DEADLINE:?}"));
         complete = false;
+        scheduler_stopped = false;
     }
 
     parts.appender.request_flusher_stop();
+    let mut flusher_stopped = true;
     match tokio::time::timeout_at(deadline, parts.appender.join_flusher()).await {
+        // A join that returned an error still stopped the task, so the final
+        // close may run; its buffered entries are drained by that close.
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
             report.add_error(format!("{ERR_FLUSHER_JOIN}: {message}"));
@@ -118,7 +135,23 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
                 "{ERR_AUDIT_TIMEOUT} {AUDIT_TEARDOWN_DEADLINE:?} waiting for the audit flusher"
             ));
             complete = false;
+            flusher_stopped = false;
         }
+    }
+
+    // ONE rule: the final close is submitted only when both stoppers finished.
+    // A timed-out task can still be inside the persistence gate, so a close
+    // submitted now would run before it — the ordering this stage exists for
+    // would be inverted on exactly the path where it matters most.
+    if !(scheduler_stopped && flusher_stopped) {
+        report.add_error(format!(
+            "{ERR_FINAL_CLOSE_SKIPPED}: the scheduler or the audit flusher did not stop inside \
+             {AUDIT_TEARDOWN_DEADLINE:?}, so the final audit drain, the chain anchor write and the \
+             server-metadata write were not started; the last buffered audit events and the anchor \
+             are not persisted by this shutdown, and the next start recovers the chain exactly as \
+             it does after a crash"
+        ));
+        return complete;
     }
 
     // The final drain + anchor write is synchronous (gate + fsync), so it runs

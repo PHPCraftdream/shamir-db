@@ -202,7 +202,7 @@ enum Durab {
         buffer: Mutex<Vec<AuditEntry>>,
         notify: Arc<Notify>,
         shutdown: Arc<std::sync::atomic::AtomicBool>,
-        task: Mutex<Option<JoinHandle<()>>>,
+        task: Mutex<Option<JoinHandle<Result<(), String>>>>,
     },
 }
 
@@ -255,6 +255,8 @@ pub struct FjallAuditAppender {
     gate_contention_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(any(test, feature = "test-hooks"))]
     gate_acquired_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    final_close_attempts: std::sync::atomic::AtomicUsize,
     /// Test seam replacing [`rotation::sync_parent`] at dir sync.
     #[cfg(test)]
     dir_sync_hook: Mutex<Option<DirSyncHook>>,
@@ -350,6 +352,8 @@ impl FjallAuditAppender {
             gate_contention_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-hooks"))]
             gate_acquired_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-hooks"))]
+            final_close_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
@@ -430,6 +434,8 @@ impl FjallAuditAppender {
             gate_contention_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-hooks"))]
             gate_acquired_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-hooks"))]
+            final_close_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
@@ -459,6 +465,9 @@ impl FjallAuditAppender {
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
+                // Kept out of the job: the job owns `strong` and the error
+                // branch must still reach the latch after the job panicked.
+                let latch = Arc::clone(&strong);
                 let result = tokio::task::spawn_blocking(move || {
                     let _guard = strong.acquire_persistence_gate();
                     strong.flush_buffer_locked()
@@ -467,16 +476,27 @@ impl FjallAuditAppender {
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
+                        // `flush_buffer_locked` latched this itself; the final
+                        // drain reports it through `join_flusher`'s caller.
                         tracing::error!(%error, "audit background flush failed; appender latched fail-closed");
                     }
                     Err(error) => {
+                        // The blocking job panicked or was cancelled after it
+                        // took the buffer: those entries are lost and the chain
+                        // may have a gap. Latch fail-closed AND return the
+                        // failure, so the final drain cannot succeed and the
+                        // shutdown report cannot miss the failed job.
+                        let message = format!("audit background flush job failed: {error}");
+                        *latch.failed.lock() = Some(message.clone());
                         tracing::error!(%error, "audit background flush job failed; appender latched fail-closed");
+                        return Err(message);
                     }
                 }
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
             }
+            Ok(())
         });
 
         if let Durab::Batched { task: t, .. } = &me.mode {

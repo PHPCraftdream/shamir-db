@@ -214,18 +214,6 @@ pub(crate) async fn drain_connections(
     joined
 }
 
-async fn join_backup_schedule(
-    schedule_task: Option<(DropGuard, JoinHandle<()>)>,
-    report: &mut ShutdownReport,
-) {
-    let Some((_guard, task)) = schedule_task else {
-        return;
-    };
-    if let Err(error) = task.await {
-        report.add_error(format!("backup schedule task failed: {error}"));
-    }
-}
-
 /// The shutdown state that must OUTLIVE the bounded shutdown wait.
 ///
 /// `runtime::serve` wraps the shutdown future in a deadline; on expiry that
@@ -234,25 +222,56 @@ async fn join_backup_schedule(
 /// writing under the data directory after its last cancellation checkpoint,
 /// and the single-instance lock must not be released while it does — an
 /// embedding process would otherwise see I/O and a free data dir that outlive
-/// `serve`. The deadline still marks the report unclean; it only bounds the
-/// audit/repository teardown.
+/// `serve`.
+///
+/// The owner is therefore extracted BEFORE the deadline and BORROWED into the
+/// shutdown future (`ServerHandle::shutdown_with_report` takes `&mut Self`
+/// here), never moved into it: on a normal shutdown the worker is awaited in
+/// place at its original teardown position (before the repository flush), and
+/// on expiry the dropped future leaves the worker and the lock intact for
+/// [`Self::drain`] to finish afterwards. The deadline still marks the report
+/// unclean; it only bounds the audit/repository teardown.
 pub(crate) struct ShutdownOwner {
     schedule_task: Option<(DropGuard, JoinHandle<()>)>,
     data_dir_lock: Option<std::fs::File>,
 }
 
 impl ShutdownOwner {
-    /// Await the scheduled worker, then release the instance lock by drop.
+    /// Await the scheduled worker in place and forget its handle.
+    ///
+    /// Called from INSIDE the bounded shutdown future with `&mut self`, so the
+    /// owner itself is never moved into — or dropped with — that future. This
+    /// keeps the original teardown position: the scheduled task and its
+    /// in-flight run are awaited BEFORE the repository flush, not after it.
     ///
     /// Deliberately unbounded: a run already past its last cooperative
-    /// cancellation checkpoint has to finish its own cleanup. Only an
-    /// embedding caller that never returns can wait here.
-    pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
-        if let Some((_guard, task)) = self.schedule_task.take() {
-            if let Err(error) = task.await {
-                report.add_error(format!("backup schedule task failed: {error}"));
-            }
+    /// cancellation checkpoint has to finish its own cleanup. The wait is a
+    /// COMPLETION signal (the runner's per-run channel), not a join of the
+    /// native runner thread.
+    async fn join_schedule(&mut self, report: &mut ShutdownReport) {
+        let Some((_, task)) = self.schedule_task.as_mut() else {
+            return;
+        };
+        // Awaited THROUGH `&mut`: while the wait is pending the handle and its
+        // drop guard stay in the owner, so the deadline dropping this future
+        // mid-wait leaves them for `drain` instead of detaching the worker.
+        let joined = task.await;
+        // Finished: forget the handle (the guard drops with it).
+        self.schedule_task = None;
+        if let Err(error) = joined {
+            report.add_error(format!("backup schedule task failed: {error}"));
         }
+    }
+
+    /// Await whatever the deadline left unawaited, then release the instance
+    /// lock by drop.
+    ///
+    /// On a normal shutdown [`Self::join_schedule`] already ran inside the
+    /// deadline, so this only releases the lock. On expiry the shutdown future
+    /// was dropped mid-teardown and the worker is still awaited here — the lock
+    /// is released afterwards, never before.
+    pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
+        self.join_schedule(report).await;
         // Released here, after the scheduled worker finished — never
         // explicitly unlocked (drop is the release).
         drop(self.data_dir_lock.take());
@@ -268,9 +287,10 @@ impl ServerHandle {
     /// Stop accepting new connections, then drain the scheduler + audit log.
     /// Returns repository-level checkpoint failures; ignored reports preserve
     /// the existing caller behaviour. Connection drain remains bounded.
-    pub async fn shutdown(self) -> ShutdownReport {
+    pub async fn shutdown(mut self) -> ShutdownReport {
         let mut report = self.pending_shutdown_report();
-        self.shutdown_with_report(&mut report).await;
+        let mut owner = self.take_shutdown_owner();
+        self.shutdown_with_report(&mut report, &mut owner).await;
         crate::observability::record_shutdown(&report);
         report
     }
@@ -295,8 +315,14 @@ impl ServerHandle {
     }
 
     /// cancel-safe: NO — joins and flushes may be incomplete; caller retains
-    /// repository outcomes and marks deadline expiry as unclean.
-    pub(crate) async fn shutdown_with_report(self, report: &mut ShutdownReport) {
+    /// repository outcomes and marks deadline expiry as unclean. `owner` is
+    /// borrowed, not taken: dropping this future must never drop the
+    /// scheduled worker or the instance lock.
+    pub(crate) async fn shutdown_with_report(
+        self,
+        report: &mut ShutdownReport,
+        owner: &mut ShutdownOwner,
+    ) {
         // 1. Tell all accept loops to stop. CancellationToken::cancel() is
         //    persistent: every existing `.cancelled().await` resolves on the
         //    next poll, and any new caller sees the cancelled state
@@ -366,8 +392,12 @@ impl ServerHandle {
             report,
         )
         .await;
-        // Do not abort: an in-flight copy or retention operation must finish cleanup.
-        join_backup_schedule(self.backup_schedule_task, report).await;
+        // Do not abort: an in-flight copy or retention operation must finish
+        // cleanup. This is the ORIGINAL position — before the repository flush
+        // — and it borrows the owner, so a deadline can abandon this teardown
+        // without abandoning the worker (`ShutdownOwner::drain` then awaits it
+        // after the deadline).
+        owner.join_schedule(report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new

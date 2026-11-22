@@ -9,8 +9,11 @@
 //! code the paging worker calls.
 //! `refusal_fairness_tests` — one principal cannot occupy the whole
 //! refusal-audit queue while another principal is still recorded.
+//! `refusal_close_race_tests` — a refusal that reserved a slot before
+//! `close()` is never spawned after the discard sweep.
 
 mod cancellation_tests;
 mod continuation_token_tests;
 mod paging_tests;
+mod refusal_close_race_tests;
 mod refusal_fairness_tests;

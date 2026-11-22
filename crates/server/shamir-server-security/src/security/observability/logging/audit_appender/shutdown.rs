@@ -19,9 +19,10 @@ use std::sync::Arc;
 /// not own a shutdown report keep discarding it exactly as before.
 #[derive(Clone, Debug, Default)]
 pub struct AuditShutdownOutcome {
-    /// The background flusher task could not be joined (panicked or
-    /// cancelled): its buffered entries were drained by the final flush,
-    /// but the task itself did not end cleanly.
+    /// The background flusher task could not be joined cleanly: it panicked,
+    /// was cancelled, or ended by reporting a failed blocking job (a panic
+    /// after it had taken the buffer — those entries are lost and the appender
+    /// is latched fail-closed).
     pub flusher_join_error: Option<String>,
     /// The final drain or its log sync failed. The appender is latched
     /// fail-closed either way.
@@ -77,6 +78,9 @@ impl FjallAuditAppender {
     /// Pure async join: it takes no gate and blocks no worker thread, so a
     /// flusher parked on the persistence gate is bounded by the caller's
     /// deadline rather than by the gate holder's I/O.
+    ///
+    /// Returns `Err` for both failure shapes: the task itself did not join
+    /// (panic/cancel) and the task ended by reporting a failed blocking job.
     pub async fn join_flusher(&self) -> Result<(), String> {
         let handle = match &self.mode {
             Durab::Batched { task, .. } => task.lock().take(),
@@ -85,7 +89,14 @@ impl FjallAuditAppender {
         let Some(handle) = handle else {
             return Ok(());
         };
-        handle.await.map_err(|error| error.to_string())
+        match handle.await {
+            Ok(Ok(())) => Ok(()),
+            // The flusher ended by reporting a failed blocking job (a panic
+            // after it had taken the buffer). Its buffered entries are gone and
+            // the appender is latched fail-closed, so the caller must see it.
+            Ok(Err(message)) => Err(message),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Final batched drain, anchor persistence and server-meta hook,
@@ -100,6 +111,8 @@ impl FjallAuditAppender {
     /// advance past lost log records; retention sweeps stay rotation-only.
     /// Either failure latches fail-closed.
     pub fn final_flush_blocking(&self) -> AuditFinalFlush {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.final_close_attempts.fetch_add(1, Ordering::SeqCst);
         if let Durab::Strict = &self.mode {
             return AuditFinalFlush::default();
         }
@@ -148,5 +161,14 @@ impl FjallAuditAppender {
     /// Make the next actual flush fail (fault injection).
     pub fn arm_fail_next_flush(&self) {
         self.fail_next_flush.store(true, Ordering::SeqCst);
+    }
+
+    /// How many final closes were SUBMITTED by this appender.
+    ///
+    /// The ordered-shutdown rule is that neither a stalled scheduler nor a
+    /// stalled flusher may be followed by a final close; this counter is the
+    /// observable for that rule (0 means the close was never started).
+    pub fn final_close_attempts(&self) -> usize {
+        self.final_close_attempts.load(Ordering::SeqCst)
     }
 }
