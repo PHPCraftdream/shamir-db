@@ -633,7 +633,10 @@ fn head_tail(
     projected: Result<Value, ShellError>,
     scan: impl FnOnce(&Value) -> Result<(), ShellError>,
 ) -> Result<Value, ShellError> {
-    let payload = projected?;
+    // A projection refusal keeps the deadline's typed outcome when the budget
+    // has elapsed by the time the tail runs (a runner descheduled between the
+    // row error and here must still report exit 7, not exit 5).
+    let payload = projected.map_err(|error| head_error(deadline, error))?;
     let scanned = scan(&payload);
     if tokio::time::Instant::now() >= deadline {
         return Err(ShellError::HeadWallTime);

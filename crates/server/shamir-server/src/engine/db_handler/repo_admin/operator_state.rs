@@ -188,6 +188,10 @@ fn final_lookup_error_response(
             Ok(_) => unknown_table_response(),
             Err(parent) => error_response(&parent),
         },
+        // The quarantine gate inside `get_table` carries the stored reason,
+        // which can name replication identities: the point read answers with
+        // the same fixed text as its early probe.
+        shamir_db::DbError::ResyncRequired(_) => quarantined_repo_response(),
         other => db_error_response(other),
     }
 }
@@ -356,9 +360,12 @@ impl ShamirDbHandler {
         // 8. Table acquisition goes through `ShamirDb::get_table` so its
         //    repository quarantine gate is re-checked AT ACQUISITION,
         //    closing the probe→lookup race. The table's own `get` preserves
-        //    the reopen fence. A typed `NotFound` here can only be the
-        //    missing table because parent resolution and `has_table` both
-        //    succeeded; no list-table scan is needed. No record scan, no
+        //    the reopen fence. A `NotFound` here is classified by
+        //    `final_lookup_error_response`, which re-probes the parents (a
+        //    parent that vanished reports its own typed code; a parent that
+        //    vanished and reappeared before the re-probe can still read as
+        //    `unknown_table`); no list-table scan is needed. A quarantine
+        //    refusal here uses the fixed point-read text. No record scan, no
         //    cursor.
         let table = match self.db.get_table(db_name, repo_name, table_name).await {
             Ok(table) => table,
