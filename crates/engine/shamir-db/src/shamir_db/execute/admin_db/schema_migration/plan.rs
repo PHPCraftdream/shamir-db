@@ -28,7 +28,7 @@ use shamir_types::types::common::new_map;
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
-use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, MigrationHistory};
+use crate::shamir_db::system_store::{DatabaseIdentity, MigrationHistory};
 use crate::types::value::QueryValue;
 
 use super::super::admin_dispatch::ShamirAdminExecutor;
@@ -82,22 +82,28 @@ pub(in crate::shamir_db::execute) async fn plan_application_schema(
         .read_schema_migration_history(serving)
         .await
         .map_err(map_store_error)?;
-    if let Some(event) = history.unresolved.last() {
-        // §4.2: a journal with only `started` durably holds no effect yet —
-        // an owned fence is reported in progress; once an operation intent
-        // exists the migration is inside the uncertain window and is
-        // reported in doubt.
-        let code = match event.kind {
-            JournalEventKind::Started => "schema_migration_in_progress",
-            _ => "schema_migration_in_doubt",
-        };
-        return Err(coded(
-            code,
-            format!(
+    // ONE shared classification with STATUS and APPLY (brief 87, item 4),
+    // using migration-only admission semantics so a foreign Lifecycle slot
+    // reports in progress; ordinary write/batch observers remain unchanged.
+    // Unresolved history (including a journal-only Started tail) and an Applied
+    // tail without FenceReleased are in doubt.
+    let fence_code = executor
+        .shamir
+        .schema_migration_admission_state_code(serving, &history);
+    if let Some(code) = fence_code {
+        // The unresolved metadata is optional: it names the interrupted
+        // migration when there is one; an `Applied` tail has none.
+        let reason = match history.unresolved.last() {
+            Some(event) => format!(
                 "migration {} (ordinal {}) is unresolved; no plan is issued",
                 event.migration.id, event.migration.ordinal
             ),
-        ));
+            None => format!(
+                "database '{}' still holds a migration fence; no plan is issued",
+                executor.db_name
+            ),
+        };
+        return Err(coded(code, reason));
     }
     let head = applied_head(&history);
     let predecessor = SchemaMigrationPredecessor {

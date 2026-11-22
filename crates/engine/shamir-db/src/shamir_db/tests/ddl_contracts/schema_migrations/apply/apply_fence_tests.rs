@@ -3,74 +3,97 @@
 //! dependence) and the maintenance fence refused to other sessions' writes,
 //! DDL and stored-procedure calls while reads stay available.
 
+use std::time::Duration;
+
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::write::{doc, insert};
 use shamir_query_builder::Query;
 
-use super::super::helpers::body;
+use super::super::helpers::{body, on_big_stack};
 use super::helpers::{
     apply_request, assert_code, empty_predecessor, identity, persistent_owner_db, run_apply,
     str_field, submission,
 };
 use crate::shamir_db::system_store::JournalEventKind;
 use shamir_query_types::filter::FilterValue;
+use shamir_test_diag::FlakeGuard;
 
-#[tokio::test]
-async fn concurrent_apply_of_the_same_ordinal_lets_exactly_one_migration_run() {
-    let (_dir, db) = persistent_owner_db().await;
-    let target = identity(&db).await;
-    let migration = body("alpha-001", 1);
+#[test]
+fn concurrent_apply_of_the_same_ordinal_lets_exactly_one_migration_run() {
+    on_big_stack(|| async {
+        let guard = FlakeGuard::with_watchdog(
+            "concurrent_apply_of_the_same_ordinal_lets_exactly_one_migration_run",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            let (_dir, db) = persistent_owner_db().await;
+            let target = identity(&db).await;
+            let migration = body("alpha-001", 1);
 
-    // Two deterministic tasks race for ordinal 1: whichever arrives second
-    // is refused by the in-process gate, the durable journal, or the fence
-    // CAS — all of which map to `schema_migration_in_progress` — or, if the
-    // first has already finished, sees the applied no-op. No outcome depends
-    // on timing.
-    let first = db.clone();
-    let second = db.clone();
-    let (left, right) = tokio::join!(
-        run_apply(
-            &first,
-            apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-        ),
-        run_apply(
-            &second,
-            apply_request(&target, empty_predecessor(), 0, submission(&migration)),
-        ),
-    );
+            // Two deterministic tasks race for ordinal 1: whichever arrives second
+            // is refused by the in-process gate, the durable journal, or the fence
+            // CAS — all of which map to `schema_migration_in_progress` — or, if the
+            // first has already finished, sees the applied no-op. No outcome depends
+            // on timing.
+            let start = tokio::sync::Barrier::new(2);
+            let apply = || async {
+                start.wait().await;
+                Box::pin(run_apply(
+                    &db,
+                    apply_request(&target, empty_predecessor(), 0, submission(&migration)),
+                ))
+                .await
+            };
+            let (left, right) = tokio::join!(apply(), apply());
 
-    let mut applied_results = 0;
-    for outcome in [left, right] {
-        match outcome {
-            Ok(value) => {
-                assert_eq!(str_field(&value, "status"), "applied");
-                applied_results += 1;
+            let mut applied_results = 0;
+            for outcome in [left, right] {
+                match outcome {
+                    Ok(value) => {
+                        assert_eq!(str_field(&value, "status"), "applied");
+                        applied_results += 1;
+                    }
+                    Err(error) => assert_code(error, "schema_migration_in_progress"),
+                }
             }
-            Err(error) => assert_code(error, "schema_migration_in_progress"),
-        }
-    }
-    assert!(
-        applied_results >= 1,
-        "at least one task must apply the migration"
-    );
+            assert!(
+                applied_results >= 1,
+                "at least one task must apply the migration"
+            );
 
-    // Exactly one runner: the journal holds ONE migration run (5 events for
-    // the single-operation body), applied once, fence released.
-    let history = db
-        .system_store()
-        .read_schema_migration_history(target)
-        .await
-        .unwrap();
-    assert_eq!(history.events.len(), 5, "exactly one runner: {history:?}");
-    assert_eq!(history.events[0].kind, JournalEventKind::Started);
-    assert_eq!(
-        history.events.last().unwrap().kind,
-        JournalEventKind::FenceReleased
-    );
-    assert_eq!(history.applied.len(), 1);
-    assert!(history.unresolved.is_empty());
-    assert!(db.schema_migration_gate_generation("testdb").is_none());
+            // Exactly one runner: the journal holds ONE migration run (5 events for
+            // the single-operation body), applied once, fence released.
+            let history = db
+                .system_store()
+                .read_schema_migration_history(target)
+                .await
+                .unwrap();
+            assert_eq!(
+                history
+                    .events
+                    .iter()
+                    .map(|event| event.kind)
+                    .collect::<Vec<_>>(),
+                [
+                    JournalEventKind::Started,
+                    JournalEventKind::OperationIntent,
+                    JournalEventKind::OperationComplete,
+                    JournalEventKind::Applied,
+                    JournalEventKind::FenceReleased,
+                ],
+            );
+            assert_eq!(history.applied.len(), 1);
+            assert!(history.unresolved.is_empty());
+            assert!(db.schema_migration_gate_generation("testdb").is_none());
+            assert!(!db.schema_migration_in_doubt("testdb"));
+            assert!(db.get_db("testdb").unwrap().has_table("main", "items_1"));
+        });
+        tokio::time::timeout(Duration::from_secs(300), scenario)
+            .await
+            .expect("two-applier race timed out");
+        guard.mark("durable release verified");
+    });
 }
 
 #[tokio::test]

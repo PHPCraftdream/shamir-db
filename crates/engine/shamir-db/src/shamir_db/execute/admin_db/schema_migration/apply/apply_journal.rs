@@ -9,6 +9,7 @@ use shamir_query_types::admin::types::schema_migration::SchemaMigrationMetadata;
 
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::shamir_db::shamir_db::ValidatorRenameMigration;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEvent, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
 };
@@ -27,6 +28,10 @@ pub(super) struct JournalRef<'a> {
     pub(super) checksum: [u8; 32],
     pub(super) generation: u64,
     pub(super) context: &'a SchemaMigrationContext,
+    /// Brief 84 item 3: the validator-rename migration capability (`None`
+    /// without RenameValidator), handed to the `RenameValidator` effect as
+    /// its gate-ownership proof.
+    pub(super) rename: Option<&'a ValidatorRenameMigration<'a>>,
 }
 
 /// Append one journal event under the owned fence (step-2a API: validates the
@@ -42,6 +47,7 @@ pub(super) async fn append_step(
         checksum,
         generation,
         context,
+        ..
     } = journal;
     executor
         .shamir

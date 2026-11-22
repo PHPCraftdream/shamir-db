@@ -40,7 +40,14 @@
 //!    dependencies and before the durable CAS;
 //! 10. the durable fence CAS with `expected_fence_generation` (recovery
 //!     takes over the OWNED fence at the journal's current generation)
-//!     plus the in-process per-database gate (§4.3).
+//!     plus the in-process per-database gate (§4.3). Under the same
+//!     replication-control scope, AFTER the serving-slot reservation (its
+//!     refusal keeps precedence), a body containing `RenameValidator`
+//!     preflights the binding holders of every DISTINCT source name
+//!     (brief 84 item 3): a foreign admission conflict is returned as the
+//!     foreign target's code before any Started/Intent journal event is
+//!     written (identity lookup has already synced), and the returned
+//!     capability guard is retained for the whole run.
 //!
 //! Any admission refusal writes nothing. Journal write/sync/read-back
 //! failures stop the run before the next effect and are reported in doubt —
@@ -54,6 +61,8 @@ use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationPredecessor,
 };
 
+use std::collections::BTreeSet;
+
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
@@ -62,6 +71,7 @@ use crate::shamir_db::system_store::{
 };
 
 use super::super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::fence::SchemaMigrationGateGuard;
 use super::super::function_family::admission::{
     authorize_family_operation, defer_bind, family_batch_op, is_function_family, preflight_checks,
     preflight_dependencies, validate_binding_scope,
@@ -72,6 +82,46 @@ use super::super::plan::{
 };
 use super::apply_journal::{applied_value, map_fence_error, plain};
 use super::apply_operations::{run_operations, FencedRun};
+
+/// Test-only finding-1 rendezvous: a test scopes this task-local around the
+/// retry task; apply parks the task after its identity read and before the
+/// history read, until the gate is released (deterministic publication
+/// ordering; the task-local keeps parallel tests independent).
+#[cfg(test)]
+pub(in crate::shamir_db) struct AppliedRetryPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl AppliedRetryPause {
+    pub(in crate::shamir_db) fn armed() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(in crate::shamir_db) async fn reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(in crate::shamir_db) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// The parked task signals the test it is parked, then waits for the
+    /// test's release.
+    pub(in crate::shamir_db) async fn park(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(in crate::shamir_db) static APPLIED_RETRY_PAUSE: std::sync::Arc<AppliedRetryPause>;
+}
 
 /// The apply entry point. Called from the dispatcher arm (already `Manage`-
 /// authorized) through `Box::pin` so the many DDL-handler awaits live on the
@@ -98,6 +148,16 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         .schema_migration_identity(&db)
         .await
         .map_err(map_store_error)?;
+
+    #[cfg(test)]
+    {
+        // Finding-1 rendezvous: a test scopes APPLIED_RETRY_PAUSE around the
+        // retry task and parks it here, after the identity read and before
+        // the history read, so ordering is deterministic.
+        if let Ok(pause) = APPLIED_RETRY_PAUSE.try_with(std::sync::Arc::clone) {
+            pause.park().await;
+        }
+    }
 
     // (3) Serving identity == request target.
     let target = DatabaseIdentity(request.target.database_identity);
@@ -131,14 +191,91 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         ));
     }
 
-    // (5) Already-applied ordinal: identical body → durable no-op result;
-    // changed body → refusal without any write.
+    // (5) Already-applied ordinal: identical body → stored result (after
+    // clearing a matching Applied-tail fence if necessary); changed body → refusal.
     if let Some(applied) = history
         .applied
         .iter()
         .find(|event| event.migration.ordinal == submission.metadata.ordinal)
     {
         if applied.migration == submission.metadata && applied.checksum == recomputed {
+            // The observed tail is either the `Applied` event (fence owned,
+            // release pending) or the `FenceReleased` event that released it.
+            // The retry must not acknowledge before the event it observed is
+            // DURABLE: the journal publishes the committed transaction before
+            // its explicit durability tail, so a visible event read while the
+            // original runner's gate still pins this generation is not proof.
+            // (i) One atomic slot snapshot refuses while that generation is
+            // pinned; (ii) a retained matching in-doubt marker with an
+            // Applied tail routes the retry through the real release; (iii)
+            // every other acknowledgement performs the journal partition's
+            // explicit durable tail itself — never a duplicate release just
+            // to harvest a CAS conflict, and never a marker clear on
+            // visibility alone.
+            let observed_tail = history
+                .events
+                .last()
+                .filter(|event| {
+                    event.migration == applied.migration
+                        && event.checksum == applied.checksum
+                        && ((event.kind == JournalEventKind::Applied
+                            && event.fence_generation == applied.fence_generation)
+                            || event.kind == JournalEventKind::FenceReleased)
+                })
+                .map(|event| event.kind);
+            if let Some(tail_kind) = observed_tail {
+                // One replication-control scope classifies the whole slot:
+                // identity revalidation, the pinning snapshot, and (Applied
+                // tails only) the atomic release reservation. The durable
+                // release and the tail run outside the lock.
+                let (pinned, gate) = Box::pin(classify_applied_tail(
+                    executor,
+                    &db,
+                    serving,
+                    applied.fence_generation,
+                    tail_kind == JournalEventKind::Applied,
+                ))
+                .await?;
+                if pinned {
+                    // The gate leaves `Live(generation)` only after the
+                    // run's last durable flush returned, so the observed
+                    // event is published but not proven durable.
+                    return Err(coded(
+                        "schema_migration_in_progress",
+                        format!(
+                            "migration {} (ordinal {}) is applied but its journal event \
+                             is not yet proven durable: the live runner still holds the \
+                             maintenance fence for database '{db}'",
+                            submission.metadata.id, submission.metadata.ordinal
+                        ),
+                    ));
+                }
+                if let Some(mut gate) = gate {
+                    gate.hold(applied.fence_generation);
+                    let context =
+                        SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+                    Box::pin(store.release_schema_migration_fence(
+                        serving,
+                        applied.fence_generation,
+                        applied.migration.clone(),
+                        applied.checksum,
+                        &context,
+                    ))
+                    .await
+                    .map_err(|error| super::apply_journal::durability_error(error, true))?;
+                    gate.mark_succeeded();
+                } else {
+                    // No release route ran: perform the journal partition's
+                    // explicit durable tail before acknowledging. A retained
+                    // in-doubt marker stays; reopen reconciles it.
+                    Box::pin(store.sync_schema_migration_journal_tail())
+                        .await
+                        .map_err(|error| super::apply_journal::durability_error(error, true))?;
+                }
+            }
+            // A visible FenceReleased is not proof its durability tail finished.
+            // Do not clear a retained in-doubt marker on this no-op; reopen
+            // reconciles it against the recovered journal.
             return Ok(applied_value(
                 request.protocol_version,
                 submission.metadata.id.clone(),
@@ -164,10 +301,14 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // mismatch is refused with the fresh-path stable codes, writing nothing.
     let mut resume = false;
     if let Some(event) = history.unresolved.last() {
+        // The SAME migration-only classification STATUS and PLAN use
+        // (brief 87, item 4): live runners and Lifecycle reservations yield
+        // `in_progress`, while a retained in-doubt marker falls through to
+        // the identity/checksum resume checks below.
         if executor
             .shamir
-            .schema_migration_gate_generation(&db)
-            .is_some()
+            .schema_migration_admission_state_code(serving, &history)
+            == Some("schema_migration_in_progress")
         {
             return Err(coded(
                 "schema_migration_in_progress",
@@ -340,20 +481,8 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     ))
     .await?;
 
-    // (10) In-process gate fast-fail, then the durable fence CAS. The
-    // acquire also re-validates id/ordinal/checksum against the journal and
-    // persists+syncs the `started` event WITH the complete checksum-verified
-    // body before any effect (§4.1 runner sequence).
-    let Some(gate) = executor.shamir.reserve_schema_migration_gate(&db) else {
-        return Err(coded(
-            "schema_migration_in_progress",
-            format!(
-                "an application-schema migration already holds the maintenance fence \
-                 for database '{db}'"
-            ),
-        ));
-    };
-    let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+    // Status/plan/fresh-apply classification is observational before atomic
+    // reservation. Resume and applied-tail retry preserve their special paths.
     // Recovery CASes the fence at the CURRENT durable generation, i.e. the
     // generation of the latest journal event (the control-record validation
     // pins control.generation to exactly that value).
@@ -365,20 +494,80 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     } else {
         request.expected_fence_generation
     };
-    let generation = store
-        .acquire_schema_migration_fence(
-            serving,
-            expected_generation,
-            submission.metadata.clone(),
-            body.clone(),
-            resume,
-            &context,
-        )
-        .await
-        .map_err(map_fence_error)?;
+    let (mut gate, rename_migration) = {
+        let _control = executor.shamir.lock_replication_control().await;
+        validate_serving_identity(executor, &db, serving)?;
+        // Fresh APPLY shares STATUS/PLAN classification; the atomic
+        // reservation remains decisive if an owner races afterward.
+        if !resume {
+            if let Some(code) = executor
+                .shamir
+                .schema_migration_admission_state_code(serving, &history)
+            {
+                return Err(coded(
+                    code,
+                    format!("database '{db}' has a migration state that prevents a fresh apply"),
+                ));
+            }
+        }
+        let gate = executor
+            .shamir
+            .reserve_schema_migration_run(serving, resume.then_some(expected_generation))
+            .map_err(|code| {
+                coded(
+                    code,
+                    format!(
+                        "an application-schema migration already holds the maintenance fence \
+                         for database '{db}'"
+                    ),
+                )
+            })?;
+        // Brief 84 item 3: a body containing RenameValidator reserves every
+        // foreign binding holder of its distinct rename sources under this
+        // replication-control scope, before the fence's first journal write;
+        // the guard is released with the run (`FencedRun::rename`).
+        let rename_migration = if body
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, SchemaMigrationOp::RenameValidator(_)))
+        {
+            let sources: Vec<String> = body
+                .operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    SchemaMigrationOp::RenameValidator(op) => Some(op.rename_validator.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(
+                Box::pin(executor.shamir.begin_validator_rename_migration(
+                    &sources,
+                    Some(serving),
+                    &_control,
+                ))
+                .await
+                .map_err(|error| error.into_batch_error(|e| plain(e.to_string())))?,
+            )
+        } else {
+            None
+        };
+        (gate, rename_migration)
+    };
+    let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
+    let generation = Box::pin(store.acquire_schema_migration_fence_tracked(
+        (serving, expected_generation),
+        submission.metadata.clone(),
+        body.clone(),
+        resume,
+        &context,
+        &mut |generation| gate.observe_acquire_commit(generation),
+    ))
+    .await
+    .map_err(map_fence_error)?;
 
-    // Fence owned durably: the runner holds the in-process gate under an
-    // RAII guard so EVERY exit path releases it.
+    // Fence owned durably: the runner promotes the reservation before its first await.
     Box::pin(run_operations(
         FencedRun {
             executor,
@@ -390,10 +579,54 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
             generation,
             resume,
             context: &context,
+            rename: rename_migration,
         },
         gate,
     ))
     .await
+}
+
+/// One replication-control scope for the applied-tail no-op: identity
+/// revalidation, the single atomic fence-slot snapshot, and (Applied tails
+/// only, never after a visible FenceReleased) the release reservation.
+/// The boolean pairs the pinning verdict with the optional reservation;
+/// the caller performs the durable release or the explicit journal tail
+/// OUTSIDE the lock, so the original runner never waits behind admission.
+async fn classify_applied_tail<'a>(
+    executor: &'a ShamirAdminExecutor,
+    db: &str,
+    serving: DatabaseIdentity,
+    generation: u64,
+    reserve: bool,
+) -> Result<(bool, Option<SchemaMigrationGateGuard<'a>>), BatchError> {
+    let _control = executor.shamir.lock_replication_control().await;
+    validate_serving_identity(executor, db, serving)?;
+    let pinned = executor
+        .shamir
+        .schema_migration_fence_pins(serving, generation);
+    let gate = if reserve && !pinned {
+        executor
+            .shamir
+            .reserve_applied_fence_release(serving, generation)
+    } else {
+        None
+    };
+    Ok((pinned, gate))
+}
+
+fn validate_serving_identity(
+    executor: &ShamirAdminExecutor,
+    db: &str,
+    serving: DatabaseIdentity,
+) -> Result<(), BatchError> {
+    if executor.shamir.database_identity_for_fence(db) == Some(serving) {
+        Ok(())
+    } else {
+        Err(coded(
+            "schema_migration_identity_mismatch",
+            format!("apply targets database identity {serving} but the serving database changed"),
+        ))
+    }
 }
 
 /// Convert an admitted migration operation to its `BatchOp` shape for the

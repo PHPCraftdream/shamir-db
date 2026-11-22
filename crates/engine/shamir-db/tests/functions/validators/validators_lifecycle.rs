@@ -166,17 +166,14 @@ async fn drop_validator_persists_removal() {
 
 #[tokio::test]
 async fn drop_validator_bound_refused() {
-    let db = ShamirDb::init_memory().await.unwrap();
+    let db = setup_with_table().await;
 
-    let id = db
-        .create_validator_from_wasm("v1", &echo_wasm(), false)
+    let id = db.validator_id("v1").unwrap();
+    db.bind_validator("testdb", "main", "users", "v1", vec![WriteOp::Insert], 1500)
         .await
         .unwrap();
 
-    // Simulate a binding (S2 will do this through DDL).
-    db.validators().add_binding(&id, "testdb/main/users");
-
-    // Drop must fail.
+    // Drop must fail for the table's persisted binding, not a synthetic reverse row.
     let err = db.drop_validator("v1").await.unwrap_err();
     match err {
         DbError::Validation(msg) => {

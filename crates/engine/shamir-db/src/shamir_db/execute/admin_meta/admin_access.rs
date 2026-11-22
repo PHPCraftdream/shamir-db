@@ -7,7 +7,7 @@ use crate::types::value::QueryValue;
 use shamir_types::access::OWNER_SYSTEM;
 use shamir_types::mpack;
 
-use super::admin_dispatch::ShamirAdminExecutor;
+use super::admin_dispatch::{resource_migration_target, ShamirAdminExecutor};
 use super::helpers::{admin_result, to_qv};
 
 /// Shared error code for every "target id does not resolve to a real
@@ -64,10 +64,13 @@ impl ShamirAdminExecutor {
             .chmod
             .to_path()
             .ok_or_else(|| err("invalid resource reference".to_string()))?;
-        self.shamir
-            .authorize_access(&self.actor, &path, Action::Manage)
-            .await
-            .map_err(err_access)?;
+        let _reservation = self
+            .authorize_admin_target_write(
+                resource_migration_target(&op.chmod),
+                &path,
+                Action::Manage,
+            )
+            .await?;
         if let ResourcePath::Function { name } = &path {
             let mode = op.mode;
             self.shamir
@@ -126,10 +129,13 @@ impl ShamirAdminExecutor {
             .chown
             .to_path()
             .ok_or_else(|| err("invalid resource reference".to_string()))?;
-        self.shamir
-            .authorize_access(&self.actor, &path, Action::Manage)
-            .await
-            .map_err(err_access)?;
+        let _reservation = self
+            .authorize_admin_target_write(
+                resource_migration_target(&op.chown),
+                &path,
+                Action::Manage,
+            )
+            .await?;
 
         // Forbid handing a resource to OWNER_SYSTEM unless the actor already
         // bypasses the gate (System, or a real superuser session — Admin) —
@@ -229,10 +235,13 @@ impl ShamirAdminExecutor {
             .chgrp
             .to_path()
             .ok_or_else(|| err("invalid resource reference".to_string()))?;
-        self.shamir
-            .authorize_access(&self.actor, &path, Action::Manage)
-            .await
-            .map_err(err_access)?;
+        let _reservation = self
+            .authorize_admin_target_write(
+                resource_migration_target(&op.chgrp),
+                &path,
+                Action::Manage,
+            )
+            .await?;
 
         // Task #561: when `op.group` is `Some(gid)`, require the group to
         // actually exist via the already-existing `group_id_exists` point

@@ -308,6 +308,43 @@ pub struct TableManager {
         Arc<arc_swap::ArcSwap<Vec<shamir_engine_validator::validator::ValidatorBinding>>>,
     /// DDL-only contention across clones; held across persist awaits, never on writes.
     pub(super) bindings_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Round 6 — shared "this table's persisted validator binding record is
+    /// IN DOUBT" flag. Raised for the whole save → flush → publish window of
+    /// `add_validator_binding` / `remove_validator_binding`, cleared when the
+    /// durable record and the live snapshot agree again, and left SET when a
+    /// failed binding write could not be rolled back and flushed. It is also
+    /// raised when the forward `set` fails and when the future is dropped at
+    /// the forward `set`, at the forward flush or at a compensation step:
+    /// cancellation is itself a source of doubt. There is no suspension point
+    /// between a successful flush result and the publication that follows it,
+    /// so a completed flush cannot be cancelled before the live snapshot
+    /// catches up; the cancellable case is a backing flush that took effect
+    /// while the future was still pending.
+    ///
+    /// It expresses UNCERTAINTY, not guaranteed exclusion. While set: bind and
+    /// unbind on this table, the admitted validator replace/rename/drop of a
+    /// validator whose scanned databases include this table's, schema
+    /// activation on this table and a rename of this table all refuse with the
+    /// fixed in-doubt error; DROP of the table keeps its ordinary holder
+    /// refusal; reads and writes are NOT gated. A restart creates a fresh
+    /// manager with a CLEAR flag and re-reads the surviving envelope — it
+    /// resets the flag, it does not repair the records. Two residual record
+    /// states can survive a DOUBLE fault (the flush failed AND the
+    /// compensation could not be made durable) and only operator action
+    /// repairs them: (a) a declarative `SET TABLE SCHEMA` whose forward
+    /// envelope survived reopens an orphan binding to an artifact that was
+    /// removed — the table's validated writes fail resolving it, and retrying
+    /// the schema DDL mints a new id and appends it instead of replacing the
+    /// orphan; (b) a migration UNBIND whose empty envelope survived leaves
+    /// live and stored bindings agreeing on absence while the registry and
+    /// catalogue still carry the old reverse reference, so migration resume
+    /// refuses that mismatch. The operations guide names the supported repair
+    /// for each case. Read only by binding DDL, the holder
+    /// scan and the facade refusals: the write path pays no flag load, though
+    /// cloning a manager does clone the `Arc` that carries it. Shared across
+    /// clones (`Arc<AtomicBool>` inside), same rationale as the sibling barrier
+    /// fields.
+    pub(super) bindings_in_doubt: Arc<std::sync::atomic::AtomicBool>,
     /// Handle to the global validator registry (S3). `None` for system
     /// tables / tests that don't need validation. The S3 write path
     /// reads this to resolve `ValidatorBinding.validator_id` to a
@@ -537,6 +574,7 @@ impl Clone for TableManager {
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
             bindings_lock: Arc::clone(&self.bindings_lock),
+            bindings_in_doubt: Arc::clone(&self.bindings_in_doubt),
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
             scalar_resolver: Arc::clone(&self.scalar_resolver),
@@ -710,6 +748,7 @@ impl TableManager {
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bindings_in_doubt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
