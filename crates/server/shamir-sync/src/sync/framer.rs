@@ -33,10 +33,10 @@
 //!
 //! Every method is `async`; the underlying TCP and WS implementations are
 //! tokio-driven futures. There is no blocking I/O on the runtime worker.
-//! Argon2id (the only CPU-bound step in the post-handshake hot path) is
-//! gated by `Argon2Semaphore::try_acquire` and runs inside
-//! `tokio::task::block_in_place` from `db_handler`, both of which keep the
-//! runtime responsive to other connections.
+//! The framer itself runs no KDF: CPU-bound Argon2id work lives outside
+//! this layer (server account creation goes through the boot gate in
+//! `spawn_blocking`; SCRAM proof verification uses no Argon2), so
+//! framing stays cheap and keeps the runtime responsive.
 
 use futures_util::{
     stream::{SplitSink, SplitStream},

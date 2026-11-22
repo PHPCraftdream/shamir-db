@@ -22,23 +22,12 @@ host — use it directly or trim it when you want to see every knob):
 
 | Profile | Target RAM | When to pick |
 |---------|-----------|--------------|
-| `server.small.example.ktav` | 1–2 GiB (sized for ~1.5 GiB) | Single-tenant / dev / small VPS. Argon2 auth-RAM ceiling ≈ 384 MiB. |
-| `server.medium.example.ktav` | 4–8 GiB (sized for ~6 GiB) | Small-to-medium production. Argon2 auth-RAM ceiling ≈ 1.5 GiB. |
-| `server.example.ktav` | 2–4 GiB (sized for ~3 GiB) | General-purpose safe default AND every-field-shown reference — copy & trim. Argon2 auth-RAM ceiling ≈ 768 MiB. |
-| `server.large.example.ktav` | ≥32 GiB | High-capacity opt-in: 10 000 conns, 1 GiB results. Argon2 auth-RAM ceiling ≈ 8 GiB. |
+| `server.small.example.ktav` | 1–2 GiB (sized for ~1.5 GiB) | Single-tenant / dev / small VPS. Approximate base Argon2 matrix memory ≈ 384 MiB before overhead. |
+| `server.medium.example.ktav` | 4–8 GiB (sized for ~6 GiB) | Small-to-medium production. Approximate base Argon2 matrix memory ≈ 1.5 GiB before overhead. |
+| `server.example.ktav` | 2–4 GiB (sized for ~3 GiB) | General-purpose safe default AND every-field-shown reference — copy & trim. Approximate base Argon2 matrix memory ≈ 768 MiB before overhead. |
+| `server.large.example.ktav` | ≥32 GiB | High-capacity opt-in: 10 000 conns, 1 GiB results. Approximate base Argon2 matrix memory ≈ 8 GiB before overhead. |
 
-**Argon2 sizing formula** (also embedded as a comment at the top of each
-profile):
-
-```
-argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
-container/host RAM (KiB).
-```
-
-Example: a 4 GiB container → ~1 GiB budget → `memory_kb = 131072` (128 MiB)
-allows `argon2_concurrent_max` up to ~8. Each profile above pins
-`argon2_concurrent_max` to ~25% of its stated budget; if your budget
-differs, derive your own pair from the formula and update both fields together.
+Base Argon2 matrix memory estimate before implementation overhead: `argon2_concurrent_max × kdf_defaults.memory_kb` KiB. Reserve additional memory for implementation overhead, other process memory, admitted tasks waiting for permits (including passwords and task state), waiter thread stacks, bootstrap and bootstrap-token rotation, follower outbound SCRAM, and SQL `argon2id`. The estimates vary with configured KDF parameters and are not an exact process-memory ceiling.
 
 ## Quick start (systemd)
 

@@ -62,7 +62,7 @@ flowchart TB
         RateLimit["Rate Limit<br/>per-subnet sliding window<br/>(warmup /4 first 60s)"]
         Backoff["Backoff<br/>per (subnet, user_hash)<br/>100ms × 2^N, cap 30s"]
         Lockout["Lockout<br/>persisted, batched 5s<br/>50 fails/hour threshold"]
-        Semaphore["Argon2id Semaphore<br/>derived from RAM"]
+        Semaphore["Argon2 Semaphore<br/>capacity = argon2_concurrent_max<br/>(gates user-creation KDF only)"]
         Latency["Latency Padding<br/>50ms floor + jitter"]
     end
     
@@ -91,8 +91,8 @@ flowchart TB
     SCRAM --> RateLimit
     SCRAM --> Backoff
     SCRAM --> Lockout
-    SCRAM --> Semaphore
-    
+    AdminCmds --> Semaphore
+
     Sessions --> AuditLog
     Bootstrap --> AuditLog
     AdminCmds --> AuditLog
@@ -152,6 +152,6 @@ flowchart LR
 | A7 Supply chain | — | Out of scope |
 | A8 Spectre/cache | — | Out of scope (acknowledged) |
 | A9 Hardware tamper | — | Out of scope |
-| A10 DoS | Multi-layer (rate-limit, backoff, lockout, semaphore, padding) | — |
+| A10 DoS | Multi-layer (rate-limit, backoff, lockout, semaphore for user-creation KDF, padding) | — |
 | A11 Single-process RCE | mitigations only (mlock, etc) | Documented (§4.13) |
 | A12 Compromised origin (browser) | Limited (embedded pin защищает narrow case) | Documented (§4.9) |

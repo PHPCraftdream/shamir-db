@@ -38,6 +38,7 @@ use crate::server::bootstrap_mode::BootstrapMode;
 use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
 use crate::server::server_handle::ServerHandle;
 use crate::tables_registry::TablesRegistry;
+use crate::user_directory::ScramDerivationGate;
 
 use super::helpers::{boot_now_ns, default_node_id, REPL_RECONCILE_INTERVAL};
 use super::http::BootGuard;
@@ -187,6 +188,7 @@ impl ServerLauncher {
             config.security.auth_init_rate_per_second,
         ));
         let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
+        let derivation_gate = Arc::new(ScramDerivationGate::new(Arc::clone(&argon2_sem)));
         let session_store = Arc::new(SessionStore::new());
 
         // Spawn the periodic meta-snapshot task. One 60s tick persists
@@ -251,7 +253,8 @@ impl ServerLauncher {
         // ShamirDb in Arc. The builder methods consume Self and return
         // Self, so this must happen on the owned value.
         let (port, resolver) =
-            DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap).into_trait_objects();
+            DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap, derivation_gate.clone())
+                .into_trait_objects();
         let shamir = Arc::new(
             ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta_path), durability)
                 .await
@@ -409,6 +412,7 @@ impl ServerLauncher {
                     user_dir: user_dir.clone(),
                     kdf: kdf_for_bootstrap,
                     tables_registry: Some(tables_registry.clone()),
+                    derivation_gate: derivation_gate.clone(),
                 },
             )
             .with_audit_writer(audit_writer.clone())
@@ -629,6 +633,7 @@ impl ServerLauncher {
                 conn_limiter,
                 &session_store,
                 token_service.counters(),
+                &derivation_gate,
             );
             // Record what the data-path bound to — `/info` surfaces this.
             state.set_bound_addrs(bound_addrs.iter().filter_map(|a| *a).collect());
@@ -802,6 +807,7 @@ impl ServerLauncher {
                     session_store: session_store.clone(),
                     audit_chain: audit_chain.clone(),
                     observability_bound_addr: obs.bound_addr,
+                    argon2_sem: argon2_sem.clone(),
                 }
             }),
             observability,

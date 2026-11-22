@@ -17,6 +17,7 @@
 //!      below already do.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
@@ -407,12 +408,14 @@ impl UserAdminPort for FailingRolePort {
     async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
         Err(match self.kind {
             PortErrorKind::UserNotFound => PortError::user_not_found(self.message.clone()),
+            PortErrorKind::ServerBusy => PortError::server_busy(self.message.clone()),
             PortErrorKind::Other => PortError::other(self.message.clone()),
         })
     }
     async fn revoke_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
         Err(match self.kind {
             PortErrorKind::UserNotFound => PortError::user_not_found(self.message.clone()),
+            PortErrorKind::ServerBusy => PortError::server_busy(self.message.clone()),
             PortErrorKind::Other => PortError::other(self.message.clone()),
         })
     }
@@ -562,6 +565,73 @@ async fn revoke_role_other_error_maps_to_query_code() {
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err(), "expected an error: {resp:?}");
     assert_eq!(resp.unwrap_err().code(), Some("query"));
+}
+
+/// A `UserAdminPort` whose `create_user` fails with the caller-supplied
+/// message. `drop_user`/`grant_role`/`revoke_role`/`set_superuser` are
+/// unused by these tests and just succeed trivially.
+struct FailingCreateUserPort {
+    message: String,
+    kind: PortErrorKind,
+}
+
+#[async_trait]
+impl UserAdminPort for FailingCreateUserPort {
+    async fn create_user(
+        &self,
+        _name: &str,
+        _password: &str,
+        _roles: Vec<String>,
+        _database: Option<String>,
+    ) -> Result<[u8; 16], PortError> {
+        Err(match self.kind {
+            PortErrorKind::UserNotFound => PortError::user_not_found(self.message.clone()),
+            PortErrorKind::ServerBusy => PortError::server_busy(self.message.clone()),
+            PortErrorKind::Other => PortError::other(self.message.clone()),
+        })
+    }
+    async fn drop_user(&self, _name: &str) -> Result<bool, PortError> {
+        Ok(false)
+    }
+    async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+    async fn revoke_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+    async fn set_superuser(&self, _user: &str, _on: bool) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+/// A `ServerBusy` failure from the port's `create_user` must propagate out
+/// of `execute` as an error carrying the port's message (the engine maps
+/// port errors on the create path to the `server_busy` code).
+#[tokio::test]
+async fn create_user_server_busy_error_propagates_from_port() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingCreateUserPort {
+        message: "directory is temporarily saturated".to_string(),
+        kind: PortErrorKind::ServerBusy,
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+
+    let req = one_op(
+        (ddl::create_user("impatient", "pw"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
+    let err = tokio::time::timeout(Duration::from_secs(120), shamir.execute("testdb", &req))
+        .await
+        .expect("execute must not hang")
+        .expect_err("ServerBusy port failure must propagate as an error");
+    assert_eq!(err.code(), Some("server_busy"));
+    assert!(
+        err.to_string()
+            .contains("directory is temporarily saturated"),
+        "the port's message must be preserved in the propagated error: {err}"
+    );
 }
 
 // ===========================================================================

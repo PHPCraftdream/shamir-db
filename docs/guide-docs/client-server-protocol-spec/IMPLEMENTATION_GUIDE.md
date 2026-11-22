@@ -138,9 +138,9 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 
 Помимо `PER_SESSION_MEM = 64 MB` (AUTH §7.4):
 
-- `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — глобальный cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). Превышение → новые sessions из subnet rejected с `server_busy`.
-- Backpressure policy: при достижении 75% от cap — server отклоняет non-critical operations (admin commands proceed) и шлёт `Retry-After` header.
-- `MAX_CONCURRENT_ARGON2` рекомендуется derive from RAM: `floor(available_ram_mb / (kdf.memory_kb / 1024 × 2.5))`. Hard cap 64. Защищает от OOM при memory_kb=128, server с 4GB RAM.
+- `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — здесь описан **проектный** cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). В коде его нет: ни настройки, ни учёта памяти по подсетям, ни native-обработчика, который отклонял бы новые sessions из подсети с `server_busy`. Не рассчитывайте на этот путь.
+- Backpressure policy «при 75% от cap отклонять non-critical operations и слать `Retry-After` header» также **не реализована**: такого живого поведения нет ни на одном listener.
+- `argon2_concurrent_max` (semaphore capacity) рекомендуется derive from RAM: `floor(available_ram_mb / (kdf_defaults.memory_kb / 1024 × 2.5))`. Valid range 1..=1024, default 64 (configured, not a hardcoded auth cap). Он ограничивает **только server-side SCRAM derivations при user creation** — login proof-verify не берёт permit.
 
 ### 1.6. known_hosts.bin fallback encryption (NORMATIVE для headless deploy)
 
@@ -156,7 +156,12 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 
 ### 2.1. Listeners [NORMATIVE listener_policy_mapping]
 
+Эскиз ниже — **для чтения**, а не deployable конфиг: сервер читает формат KTAV, и ни имена ключей (например `[limits]`), ни набор секций здесь с файлом сервера не совпадают. Действующая конфигурация — `deploy/server.example.ktav` и профили `deploy/server.{small,medium,large}.example.ktav`; сверяйтесь с ними, а не с этим блоком.
+
 ```toml
+# Эскиз: реальный deploy — KTAV (deploy/server*.example.ktav), не TOML.
+argon2_concurrent_max = 32
+
 [server]
 data_dir = "./data"
 
@@ -165,15 +170,16 @@ bootstrap_token_output = "tty"          # tty | file:<path> | command:<cmd>
 bootstrap_token_ttl_ns = 3_600_000_000_000     # default 1 час (60·60·1e9 nanos), min 300s=3e11, max 24h=8.64e13
 
 # Argon2id defaults (must satisfy floor §3.7.2 AUTH)
-[kdf]
+[kdf_defaults]
 memory_kb = 131072
 time = 4
 parallelism = 1
-# MAX_CONCURRENT_ARGON2 — RECOMMENDED derive from RAM:
-#   floor(available_ram_mb / (memory_kb / 1024 * 2.5))
-# Hard cap 64 (защита от runaway).
-# Без autodetect — fixed:
-max_concurrent_argon2 = 32              # для server с 8 GB RAM
+
+# Recommended RAM sizing uses the configured KDF defaults:
+#   floor(available_ram_mb / (kdf_defaults.memory_kb / 1024 * 2.5))
+# Valid 1..=1024; gates server-side user-creation KDF only (login takes no permit).
+# Actual deploy configuration is KTAV; deploy/server.example.ktav is the
+# production example and has the top-level key argon2_concurrent_max: 6.
 
 # Strict mode hardening (defaults для backward compat, для prod рекомендуется true)
 [strict]
@@ -276,7 +282,7 @@ TypeScript clients) is a materially larger follow-up feature, tracked
 separately — not part of the bootstrap-token-lifecycle work that landed
 the `file:<path>` improvements above.
 
-**MUST:** profile→binding_mode mapping enforced server-side. Server rejects auth_init с `binding_mode` не в listener policy **до** Argon2id (DoS-amp защита; см. AUTH §4.3).
+**MUST:** profile→binding_mode mapping enforced server-side. Server rejects auth_init с `binding_mode` не в listener policy до challenge (см. AUTH §4.3); login proof verification не выполняет server-side password KDF.
 
 ### 2.2. Plain TCP listener constraints [NORMATIVE]
 
@@ -621,7 +627,6 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 - `shamir_auth_complete_total{result, transport}`
 - `shamir_lockouts_total`
 - `shamir_bootstrap_attempts_total{result}`
-- `shamir_argon2id_total`
 - `shamir_session_created_total{transport}`
 - `shamir_session_evicted_total{reason, transport}` (logout|idle|max_age|kicked|max_sessions_lru|disconnect)
   - **Note:** `disconnect` reason — после 5s grace окна без resumption (AUTH §7.7)
@@ -630,11 +635,11 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 - `shamir_admin_command_total{command, result}`
 - `shamir_audit_chain_verify_failures_total`
 - `shamir_token_auth_total{channel, result}` (`channel`: `rest`|`ws`; `result`: ok|invalid|expired|revoked|owner_invalid|channel_denied|plaintext_denied|rate_limited; `invalid` объединяет malformed, unknown id и неверный MAC). Меток с токеном или владельцем нет.
+- `shamir_argon2_busy_refusals_total` — **counter** (не gauge): по одному отказу user-creation derivation на admission сверх `2 × capacity`, истечение permit-wait deadline (3 s от admission), сбой чтения часов или невозможность вычислить deadline при admission (fail closed). Счётчик отмечает отказ, даже если клиент не получил ответ.
 
 ### 6.2. Histograms
 
 - `shamir_auth_duration_seconds{transport}`
-- `shamir_argon2id_duration_seconds`
 - `shamir_handshake_state_lifetime_seconds`
 - `shamir_resumption_fsync_latency_seconds` — alert если p99 > 100ms (recommend NVMe или WAL group-commit)
 - `shamir_audit_log_append_latency_seconds`
@@ -643,8 +648,8 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.3. Gauges
 
 - `shamir_active_sessions{transport}`
-- `shamir_inflight_handshakes`
-- `shamir_argon2id_semaphore_available`
+- `shamir_argon2_permits_available` — число свободных permits на момент scrape; значения могут кратковременно быть оценочными из-за optimistic acquire и клампинга. `capacity − available` — оценка числа работающих derivations, не точный holder count (optimistic decrement может временно скрыть свободный permit до восстановления инкрементом).
+- `shamir_argon2_permits_capacity` — configured `argon2_concurrent_max`
 - `shamir_auth_failures_tracked_keys`
 - `shamir_token_active_ws` — активные токен-сокеты
 - `shamir_token_listener_plaintext_remote` — 1, если есть токен-listener с `allow_plaintext_remote`
@@ -652,7 +657,7 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.4. Suggested Alerts
 
 - Lockout rate spike: `rate(shamir_lockouts_total[5m]) > baseline × 3`
-- Server busy: `shamir_inflight_handshakes / MAX_CONCURRENT_ARGON2 > 0.8`
+- Argon2 creation-gate refusals: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused by the admission cap, permit-wait deadline, clock read failure or deadline-calculation failure; **ordinary login (proof verification) takes no Argon2 permit at all** — it runs no server-side password KDF; only the first bootstrap-token login rotates the credential (`handshake.rs:580-589`), and that rotation is ungated. Post-auth per-session in-flight-slot `server_busy` is not counted)
 - Identity rotation: `increase(shamir_admin_command_total{command="rotateServerIdentity"}[1h]) > 0`
 - Bootstrap usage anomaly: `shamir_bootstrap_attempts_total > 1`
 - Resumption downgrade: `rate(shamir_resumption_used_total{result="downgrade_blocked"}[5m]) > 0`
@@ -797,8 +802,8 @@ individual entries exist as dedicated integration tests where applicable:
 - Identity rotation (broadcast, signed_by_old, transition_until, per-recipient signing)
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection
-- Argon2id semaphore exhaustion
-- Pre-Argon2id binding_mode rejection (DoS-amp)
+- Argon2id semaphore exhaustion at user creation (`derive_scram_record_gated` busy refusal — bounded admission or 3s permit wait measured from admission, at configured `argon2_concurrent_max`; login proof-verify is ungated)
+- `binding_mode` rejection before the challenge (ordered before the challenge; it is a listener-policy guard, not a KDF guard — an ordinary login whose proof matches still runs no server-side password KDF; the one exception is the first bootstrap-token login, which rotates the credential ungated (`handshake.rs:580-589`))
 - updateUser → ticket invalidation (всех families)
 - Restart warmup window
 - **Multi-device family isolation:** device A refresh не invalidates device B

@@ -59,12 +59,17 @@ async fn build_handler_and_store() -> (ShamirDbHandler, Arc<SessionStore>, Arc<F
     let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let session_store = Arc::new(SessionStore::new());
+    // ARGON2-GATE fixture: roomy pool (64) so normal fixtures never refuse.
+    let gate = Arc::new(crate::user_directory::ScramDerivationGate::new(Arc::new(
+        shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(64),
+    )));
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
         AdminGlue {
             user_dir: user_dir.clone(),
             kdf: fast_kdf(),
             tables_registry: None,
+            derivation_gate: gate,
         },
     )
     .with_session_store(session_store.clone());

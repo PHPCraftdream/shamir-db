@@ -76,6 +76,11 @@ pub(in crate::engine::server) struct ActivityGaugeTestSeam {
     /// The address the observability HTTP server ACTUALLY bound (config
     /// may say port 0; this is `ObservabilityHandle::bound_addr`).
     pub observability_bound_addr: std::net::SocketAddr,
+    /// ARGON2-GATE (test-only): the boot's Argon2 semaphore itself — a
+    /// fixture can pre-occupy the pool through it to force a typed busy
+    /// refusal in the `CreateScramUser` handler, and observe it free again
+    /// after. Shares the exact `Arc` the derivation gate wraps.
+    pub argon2_sem: Arc<shamir_connect::server::argon2_semaphore::Argon2Semaphore>,
 }
 
 /// Owner of the runtime state of a launched server.

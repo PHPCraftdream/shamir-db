@@ -12,11 +12,14 @@ use crate::byte_budget::ByteBudget;
 use crate::observability::{metrics_handler, AppState, LoadMetricsSnapshot, ObservabilityState};
 
 const DEADLINE: Duration = Duration::from_secs(120);
-const LOAD_SERIES: [(&str, &str); 4] = [
+const LOAD_SERIES: [(&str, &str); 7] = [
     ("shamir_connections_active", "gauge"),
     ("shamir_connections_limit", "gauge"),
     ("shamir_connections_rejected_total", "counter"),
     ("shamir_post_auth_rate_limit_rejected_total", "counter"),
+    ("shamir_argon2_permits_capacity", "gauge"),
+    ("shamir_argon2_permits_available", "gauge"),
+    ("shamir_argon2_busy_refusals_total", "counter"),
 ];
 
 async fn scrape(state: &AppState) -> String {
@@ -77,6 +80,9 @@ async fn scrape_samples_only_bound_load_and_live_budget() {
                 connections_limit: 5,
                 connections_rejected_total: u64::MAX,
                 post_auth_rejected_total: (1_u64 << 53) + 1,
+                argon2_permits_capacity: 7,
+                argon2_permits_available: 0,
+                argon2_busy_refusals_total: 9,
             }
         }
     }));
@@ -93,7 +99,7 @@ async fn scrape_samples_only_bound_load_and_live_budget() {
         .await
         .expect("reserve response bytes by deadline");
     let body = scrape(&app).await;
-    let values = [2, 5, u64::MAX, (1_u64 << 53) + 1];
+    let values = [2, 5, u64::MAX, (1_u64 << 53) + 1, 7, 0, 9];
     for ((name, kind), value) in LOAD_SERIES.into_iter().zip(values) {
         assert_series(&body, name, kind, value);
     }
