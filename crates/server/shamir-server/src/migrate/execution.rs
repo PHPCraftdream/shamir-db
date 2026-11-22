@@ -10,10 +10,12 @@ use shamir_sync::format_stamp::migration::{
 };
 use shamir_sync::format_stamp::EpochPolicy;
 
-use super::backup_gate::assess_backup;
+use super::backup_gate::{assess_backup, VerifySnapshot};
 use super::cli::FormatMigrateArgs;
 use super::integrity::check_wire_tables_registry;
 use super::plan::{configured_log_name, inspect_preflight, render_plan, Preflight};
+
+use crate::backup::{verify_exported_manifest, verify_manifest};
 
 /// Run the production format-migration command against a validated server configuration.
 pub fn run(config: &crate::config::Config, args: &FormatMigrateArgs) -> Result<()> {
@@ -68,7 +70,10 @@ pub(crate) fn run_with<W: Write + Send + 'static>(
     }
 
     if !args.yes || args.plan {
-        let backup_verdict = backup_verdict(data_dir, args, &initial, log_name);
+        // The plan gate must take no lock and write nothing (review finding
+        // 4): a managed timestamped source refuses instead of being locked.
+        let backup_verdict =
+            backup_verdict(data_dir, args, &initial, log_name, verify_exported_manifest);
         if args.i_have_a_backup {
             writeln!(stderr, "WARNING: --i-have-a-backup bypasses manifest, identity, and freshness verification; proceed only after independently confirming a usable pre-migration backup.")?;
         }
@@ -119,7 +124,8 @@ pub(crate) fn run_with<W: Write + Send + 'static>(
         writeln!(stderr, "WARNING: the locked directory is now stampless and treated as base epoch {}; its final stamp will record this binary, not an adoption.", policy.base)?;
     }
 
-    let locked_backup_verdict = backup_verdict(data_dir, args, &locked_preflight, log_name);
+    let locked_backup_verdict =
+        backup_verdict(data_dir, args, &locked_preflight, log_name, verify_manifest);
     if !locked_backup_verdict.starts_with("PASS:")
         && !locked_backup_verdict.starts_with("OVERRIDE:")
     {
@@ -176,6 +182,7 @@ fn backup_verdict(
     args: &FormatMigrateArgs,
     preflight: &Preflight,
     log_name: Option<&OsStr>,
+    verify: VerifySnapshot,
 ) -> String {
     if args.i_have_a_backup {
         return "OVERRIDE: operator assertion (--i-have-a-backup); not independently verified"
@@ -190,6 +197,7 @@ fn backup_verdict(
         preflight.stamp.as_ref(),
         args.max_backup_age_hours,
         log_name.map(Path::new),
+        verify,
     ) {
         Ok(evidence) => format!(
             "PASS: verified {} manifest file(s), fresh and matching pre-migration stamp",

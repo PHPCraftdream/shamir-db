@@ -57,7 +57,7 @@ type Events = Mutex<Vec<String>>;
 /// Port over plain directories; capture/seal hooks inject mid-protocol
 /// mutations and cancellations. Pin acquire/release are counted; seal and
 /// end_seal calls are recorded in order.
-struct TestPort {
+pub(super) struct TestPort {
     repos: Vec<RepoSource>,
     pins_held: AtomicUsize,
     pins_released: AtomicUsize,
@@ -68,7 +68,7 @@ struct TestPort {
 }
 
 impl TestPort {
-    fn single_repo(source: &Path) -> Self {
+    pub(super) fn single_repo(source: &Path) -> Self {
         Self::with_repos(source, &["alpha"])
     }
 
@@ -120,7 +120,7 @@ impl TestPort {
         self
     }
 
-    fn source_with_data(source: &Path) {
+    pub(super) fn source_with_data(source: &Path) {
         for name in ["alpha", "beta"] {
             write_file(
                 &source.join(format!("repos/{name}/store.bin")),
@@ -193,7 +193,7 @@ impl OnlineBackupPort for TestPort {
     }
 }
 
-fn run(
+pub(super) fn run(
     port: &TestPort,
     source: &Path,
     to: &Path,

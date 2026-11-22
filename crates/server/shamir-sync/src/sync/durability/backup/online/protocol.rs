@@ -17,13 +17,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use super::super::offline::verify_writer_snapshot;
 #[cfg(test)]
 use super::copy_engine::test_seams;
 use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult, SealGate};
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
 use super::progress::{BackupProgress, BackupStage, CancelFlag};
 use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
-use crate::sync::durability::backup::{utc_timestamp, verify_manifest, ManifestFileEntry};
+use crate::sync::durability::backup::{utc_timestamp, ManifestFileEntry};
 
 /// One in-process backup permit (design 4.4 / D9): a second concurrent
 /// online backup is refused.
@@ -292,7 +293,10 @@ fn self_verify(dest_dir: &Path, raw: &str) -> Result<(), OnlineBackupFailure> {
     }
     // The same verifier `verify` runs on a finished snapshot (WAL listing,
     // unmanifested files), so a snapshot that reports success also verifies.
-    verify_manifest(dest_dir).map_err(|error| OnlineBackupFailure::Verify(error.to_string()))?;
+    // Unleased and path-exact: the writer cannot lease the child it is
+    // still publishing, and no sibling of it is unleased here.
+    verify_writer_snapshot(dest_dir)
+        .map_err(|error| OnlineBackupFailure::Verify(error.to_string()))?;
     Ok(())
 }
 

@@ -5,16 +5,26 @@ use std::path::Path;
 use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, BACKUP_META_FILE_NAME, MANIFEST_FORMAT_VERSION_V2,
 };
-use crate::sync::durability::backup::{verify_manifest, BackupError, MANIFEST_FILE_NAME};
+use crate::sync::durability::backup::{
+    verify_retention_candidate, BackupError, MANIFEST_FILE_NAME,
+};
 use crate::sync::format_stamp::STAMP_FILE_NAME;
 
+use super::super::retention_pass::{manifest_digest_hex, MAX_MANIFEST};
 use super::budget::{metadata, plain_on_root, Budget, Refusal};
 
 const MAX_DEPTH: usize = 32;
-const MAX_MANIFEST: u64 = 16 << 20;
 // A stamp frame has a 64 KiB maximum body plus header and digest.
 const MAX_STAMP: u64 = (64 << 10) + 50;
 
+/// Verified manifest creation time at `dir`, plus — only when
+/// `want_digest` is set — the SHA-256 (lowercase hex, via the retention-pass
+/// `manifest_digest_hex` helper) of the raw manifest bytes this verification
+/// read. Adoption compares the captured creation time and manifest digest
+/// against the scan and late reread; this does not bind payload bytes or
+/// directory identity, which rely on the single-writer-root contract.
+/// Digest computation is skipped for names without a pending record, so a
+/// normal pass pays no hashing overhead.
 /// Match exact paths from the actual directory listing before allowing the
 /// verifier to resolve names. This also excludes filesystem aliases that
 /// aren't listed (e.g. Windows short names or case aliases).
@@ -22,7 +32,8 @@ pub(super) fn verified_time(
     dir: &Path,
     root_meta: &Metadata,
     budget: &mut Budget<'_>,
-) -> Result<u128, Refusal> {
+    want_digest: bool,
+) -> Result<(u128, Option<String>), Refusal> {
     let raw = budget.read(&dir.join(MANIFEST_FILE_NAME), root_meta, MAX_MANIFEST)?;
     let text = std::str::from_utf8(&raw).map_err(|_| Refusal::Unverifiable)?;
     let decoded = manifest::decode(text).map_err(|_| Refusal::Unverifiable)?;
@@ -42,7 +53,7 @@ pub(super) fn verified_time(
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
-    // Account for reads in verify_manifest in addition to our own reads.
+    // Account for verifier reads in addition to our own reads.
     budget.bytes(raw.len() as u64)?;
     match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
@@ -112,13 +123,20 @@ pub(super) fn verified_time(
     }
 
     budget.checkpoint()?;
-    let verified = verify_manifest(dir);
+    // The verifier checks the bounded manifest bytes `raw` without a
+    // second manifest read. This preserves manifest consistency for this
+    // check, but does not prove directory identity or prevent later payload
+    // changes under the single-writer-root contract.
+    let verified = verify_retention_candidate(dir, &raw);
     budget.checkpoint()?;
     verified.map_err(|error| match error {
         BackupError::Io(_) => Refusal::Incomplete,
         _ => Refusal::Unverifiable,
     })?;
-    Ok(decoded.created_at_unix_ns)
+    // Digest the same manifest bytes checked above; this binds the manifest
+    // contents only, not the payload tree or directory identity.
+    let digest = want_digest.then(|| manifest_digest_hex(&raw));
+    Ok((decoded.created_at_unix_ns, digest))
 }
 
 fn file_size(tree: &BTreeMap<String, Option<u64>>, path: &str) -> Result<u64, Refusal> {
