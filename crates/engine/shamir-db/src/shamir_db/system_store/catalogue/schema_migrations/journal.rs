@@ -309,13 +309,11 @@ impl SystemStore {
                 actual_generation,
             ));
         }
-        let fence_owned = control
-            .as_ref()
-            .is_some_and(|control| control.state == "owned");
+        let fence_owned = control.as_ref().is_some_and(|c| c.state == "owned");
         let already_applied = history
             .applied
             .iter()
-            .any(|event| event.migration.id == metadata.id);
+            .any(|e| e.migration.id == metadata.id);
         // An owned fence is taken over only by explicit recovery of an unapplied migration.
         if fence_owned && (!recovery || already_applied) {
             return Err(DbError::Validation(format!(
@@ -596,10 +594,9 @@ impl SystemStore {
             .filter(|event| event.kind != JournalEventKind::FenceReleased)
             .map(|event| event.fence_generation))
     }
+    /// The journal partition's explicit durable tail; also the retry's pre-ack tail (finding 1).
     async fn flush_journal_tail(&self) -> DbResult<()> {
-        let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
-        self.persist_table_interner(&table, None).await?;
-        self.flush_system_repo_durable(&table).await
+        self.sync_schema_migration_journal_tail().await
     }
 
     async fn load_control(&self, identity: DatabaseIdentity) -> DbResult<Option<ControlRecord>> {

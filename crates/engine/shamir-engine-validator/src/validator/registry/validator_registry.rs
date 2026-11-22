@@ -269,6 +269,42 @@ impl ValidatorRegistry {
         self.state.store(Arc::new(next));
     }
 
+    /// Re-key the database component of every bound table ref on a database
+    /// rename (`from/...` → `to/...`), in one publication. Durable `bound_in`
+    /// snapshots are re-keyed separately by the caller (including pending
+    /// rows that have no live registry entry).
+    pub fn rename_database_bindings(&self, from: &str, to: &str) {
+        let old_prefix = format!("{from}/");
+        let new_prefix = format!("{to}/");
+        let _writer = self.lock_writer();
+        let mut next = (**self.state.load()).clone();
+        let rekey = |set: &BTreeSet<String>| -> Option<BTreeSet<String>> {
+            if set.iter().any(|table| table.starts_with(&old_prefix)) {
+                Some(
+                    set.iter()
+                        .map(|table| match table.strip_prefix(&old_prefix) {
+                            Some(rest) => format!("{new_prefix}{rest}"),
+                            None => table.clone(),
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        };
+        for entry in next.by_id.values_mut() {
+            if let Some(rekeyed) = rekey(&entry.bound_in) {
+                entry.bound_in = rekeyed;
+            }
+        }
+        for set in next.pending_bindings.values_mut() {
+            if let Some(rekeyed) = rekey(set) {
+                *set = rekeyed;
+            }
+        }
+        self.state.store(Arc::new(next));
+    }
+
     /// Remove a binding between a validator and a table.
     pub fn remove_binding(&self, id: &RecordId, table: &str) {
         let _writer = self.lock_writer();

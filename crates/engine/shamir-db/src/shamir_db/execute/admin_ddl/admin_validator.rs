@@ -5,6 +5,9 @@ use base64::Engine;
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::shamir_db::shamir_db::{
+    FunctionSource, ValidatorRegistrationError, ValidatorTargetAdmission,
+};
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
@@ -12,9 +15,24 @@ use super::admin_dispatch::{explicit_migration_target, ShamirAdminExecutor};
 use super::helpers::admin_result;
 
 impl ShamirAdminExecutor {
+    /// Migration-owned entry (review finding 3): the apply runner already
+    /// holds the migration fence of its OWN database, so the admitted
+    /// commit reserves every binding holder EXCEPT that identity — a
+    /// foreign fenced holder is still refused. Ordinary wire dispatch goes
+    /// through `dispatch_validator_registration` (no exemption).
     pub(super) async fn handle_create_validator(
         &self,
         batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let exempt = self.shamir.database_identity_for_fence(&self.db_name);
+        self.create_validator(batch_op, ValidatorTargetAdmission::FenceExcept(exempt))
+            .await
+    }
+
+    pub(super) async fn create_validator(
+        &self,
+        batch_op: &BatchOp,
+        admission: ValidatorTargetAdmission,
     ) -> Result<QueryResult, BatchError> {
         let BatchOp::CreateValidator(op) = batch_op else {
             unreachable!("handle_create_validator called with non-CreateValidator op");
@@ -41,29 +59,39 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+        // Review finding 3: an ordinary replace that swaps the artifact
+        // under an ID with bindings changes the validation behavior of
+        // every bound table. The admitted commit (inside ShamirDb) compiles
+        // the candidate first, then holds ONE replication-control
+        // acquisition across the authoritative binding snapshot, the
+        // target reservations and the persist + registry swap — no
+        // per-target ACL is invented; the registration ACL above precedes
+        // admission.
         let id = if let Some(ref source) = op.source {
             self.shamir
-                .create_validator_from_source_as(
+                .create_validator_admitted(
                     &op.create_validator,
-                    source,
+                    FunctionSource::Source(source),
                     op.replace,
                     self.actor.clone(),
+                    admission,
                 )
                 .await
-                .map_err(|e| err(e.to_string()))?
+                .map_err(|e| e.into_batch_error(|e| err(e.to_string())))?
         } else if let Some(ref wasm_b64) = op.wasm {
             let wasm_bytes = base64::engine::general_purpose::STANDARD
                 .decode(wasm_b64)
                 .map_err(|e| err(format!("invalid base64 wasm: {}", e)))?;
             self.shamir
-                .create_validator_from_wasm_as(
+                .create_validator_admitted(
                     &op.create_validator,
-                    &wasm_bytes,
+                    FunctionSource::Wasm(&wasm_bytes),
                     op.replace,
                     self.actor.clone(),
+                    admission,
                 )
                 .await
-                .map_err(|e| err(e.to_string()))?
+                .map_err(|e| e.into_batch_error(|e| err(e.to_string())))?
         } else {
             return Err(err(
                 "create_validator requires either 'source' or 'wasm'".to_string()
@@ -136,9 +164,21 @@ impl ShamirAdminExecutor {
         })))
     }
 
+    /// Migration-owned entry: see `handle_create_validator` — same own-
+    /// identity exemption for the rename's durable re-key admission.
     pub(super) async fn handle_rename_validator(
         &self,
         batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let exempt = self.shamir.database_identity_for_fence(&self.db_name);
+        self.rename_validator(batch_op, ValidatorTargetAdmission::FenceExcept(exempt))
+            .await
+    }
+
+    pub(super) async fn rename_validator(
+        &self,
+        batch_op: &BatchOp,
+        admission: ValidatorTargetAdmission,
     ) -> Result<QueryResult, BatchError> {
         let BatchOp::RenameValidator(op) = batch_op else {
             unreachable!("handle_rename_validator called with non-RenameValidator op");
@@ -161,10 +201,14 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::Write)
             .await
             .map_err(err_access)?;
+        // Review finding 3: rename re-keys the durable catalogue record of
+        // the ID the bound tables invoke, so bound databases are consulted
+        // the same way as for replace — under the same single exclusion
+        // domain inside the admitted commit.
         self.shamir
-            .rename_validator_as(&op.rename_validator, &op.to, self.actor.clone())
+            .rename_validator_admitted(&op.rename_validator, &op.to, admission)
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(|e: ValidatorRegistrationError| e.into_batch_error(|e| err(e.to_string())))?;
         Ok(admin_result(mpack!({
             "renamed_validator": @(QueryValue::Str(op.rename_validator.clone())),
             "to": @(QueryValue::Str(op.to.clone())),

@@ -539,19 +539,28 @@ fn resume_races_same_target_rename_and_cascade_drop() {
                     )
                 };
 
-                db.system_store().arm_durability_tail_faults_after(2, 1);
+                const BEFORE_ACQUIRE_TAIL: usize = 2;
+                db.system_store()
+                    .arm_durability_tail_faults_after(BEFORE_ACQUIRE_TAIL, 1);
                 let error = Box::pin(resume(0)).await.unwrap_err();
                 assert_eq!(
                     error.code(),
                     Some("schema_migration_durability_unavailable")
                 );
                 assert!(db.schema_migration_in_doubt("alpha"));
-                guard.mark("Started persisted; racing recovery and lifecycle");
+                guard.mark("Started visible; racing recovery and lifecycle");
 
-                // Fail the first intent again, this time after RecoveryAcquired.
-                // There is no legal free interval anywhere in the race, even if
-                // lifecycle runs before recovery begins or after it returns.
-                db.system_store().arm_durability_tail_faults_after(2, 1);
+                // Fail the durability tail of the acquire/takeover step: with
+                // `skip = BEFORE_ACQUIRE_TAIL` the two earlier durable tails pass and tick 3 is
+                // the post-commit tail of the `RecoveryAcquired` takeover
+                // itself, so the fault fires after the takeover journal entry
+                // is visible but BEFORE any operation intent is attempted
+                // (the first intent is never the tick that fails here).
+                // Nevertheless there is no legal free interval anywhere in
+                // the race, even if lifecycle runs before recovery begins or
+                // after it returns.
+                db.system_store()
+                    .arm_durability_tail_faults_after(BEFORE_ACQUIRE_TAIL, 1);
                 let start = tokio::sync::Barrier::new(2);
                 let (recovery, lifecycle) = tokio::join!(
                     async {
@@ -563,7 +572,7 @@ fn resume_races_same_target_rename_and_cascade_drop() {
                         Box::pin(run_admin_op(&db, "beta", alias, op.clone())).await
                     },
                 );
-                let error = recovery.expect_err("the recovery intent fault must fire");
+                let error = recovery.expect_err("the acquire/takeover durability fault must fire");
                 assert_eq!(
                     error.code(),
                     Some("schema_migration_durability_unavailable")

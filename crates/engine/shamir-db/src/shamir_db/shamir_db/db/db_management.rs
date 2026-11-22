@@ -461,6 +461,16 @@ impl ShamirDb {
                 .await?;
         }
 
+        // ── (4) validator binding re-key ─────────────────────────────
+        // Validator `bound_in` tracking is `db/repo/table` strings keyed
+        // by the database name (review finding 3 follow-up). Re-key the
+        // live registry under the same replication-control lock so no
+        // target-admission pass can observe a half-renamed binding set,
+        // then re-key the durable snapshots in the validator catalogue
+        // (live and pending rows alike — see validator_management).
+        self.validators().rename_database_bindings(from, to);
+        self.rekey_validator_bound_in_catalogue(from, to).await?;
+
         Ok(())
     }
 

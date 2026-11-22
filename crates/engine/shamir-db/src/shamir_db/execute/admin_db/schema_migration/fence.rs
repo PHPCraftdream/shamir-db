@@ -236,6 +236,29 @@ impl ShamirDb {
         }
     }
 
+    /// One atomic slot snapshot: true while the fence pins `generation` for
+    /// a runner that has not finished the durability tail of the event it
+    /// will acknowledge — a live gate at that generation, or a release
+    /// reservation restored from that generation's retained in-doubt marker.
+    /// The gate leaves `Live(generation)` only AFTER the run's last durable
+    /// flush returned, so a visible `Applied`/`FenceReleased` journal event
+    /// read while this holds is published but not yet proven durable. The
+    /// single snapshot is the whole classification: callers never re-read
+    /// the slot after a failed reservation.
+    pub(in crate::shamir_db) fn schema_migration_fence_pins(
+        &self,
+        id: DatabaseIdentity,
+        generation: u64,
+    ) -> bool {
+        match self.fence_state(id) {
+            Some(FenceState::Live(state)) => state == generation,
+            Some(FenceState::Reserved { previous_in_doubt }) => {
+                previous_in_doubt == Some(generation)
+            }
+            _ => false,
+        }
+    }
+
     pub(in crate::shamir_db) fn schema_migration_in_doubt(&self, db: &str) -> bool {
         self.in_doubt_generation(db).is_some()
     }
@@ -378,8 +401,10 @@ impl Drop for SchemaMigrationGateGuard<'_> {
 /// Synchronous batch-entry gate (design §4.3 "safe initial release default"):
 /// while the database's maintenance fence is held in-process, refuse the
 /// whole batch if a leaf targeting the serving database writes or calls a
-/// procedure. Dispatch handles explicit database mutators after target
-/// authorization. Reads and `ApplicationSchema` operations pass this check.
+/// procedure. An explicit target equal to the serving database is classified
+/// as serving and refused here before the first effect; foreign explicit
+/// targets are handled by dispatch after target authorization. Reads and
+/// `ApplicationSchema` operations pass this check.
 ///
 /// `#[inline(never)]` + sync: the whole tree walk lives in this plain stack
 /// frame so the async entry points only carry the one call (same
@@ -397,19 +422,21 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
     let code = shamir.schema_migration_refusal_code(id)?;
     for visit in BatchTreeVisitor::new(&request.queries) {
         let op = &visit.entry.op;
-        // Visit leaves only. Explicit target mutations (including same-DB
-        // targets) authorize and reserve in dispatch. CREATE only claims a
-        // namespace slot: keep the serving check for same-name CREATE, but
-        // never check a foreign CREATE against the existing target's fence.
+        // Visit leaves only. A leaf whose EXPLICIT target equals the serving
+        // database is classified as serving and refused here with the old
+        // batch-entry code, before the first effect of the batch (admin
+        // effects run independently, so a nontransactional batch must not
+        // leave earlier leaves applied behind a later same-target refusal).
+        // Only a FOREIGN explicit target defers to dispatch, which authorizes
+        // and reserves there — including a fresh foreign CREATE, which claims
+        // a namespace slot no fence can own.
         if matches!(
             op,
             BatchOp::ApplicationSchema(_) | BatchOp::Batch(_) | BatchOp::ForEach(_)
         ) {
             continue;
         }
-        if explicit_migration_target(op)
-            .is_some_and(|target| !matches!(op, BatchOp::CreateDb(_)) || target != db_name)
-        {
+        if explicit_migration_target(op).is_some_and(|target| target != db_name) {
             continue;
         }
         if op.is_write() || matches!(op, BatchOp::Call(_)) {

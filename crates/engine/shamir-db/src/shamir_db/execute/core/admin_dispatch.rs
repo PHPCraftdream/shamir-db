@@ -9,7 +9,7 @@ use crate::query::read::QueryResult;
 use crate::shamir_db::ports::RepoAdminObserver;
 use shamir_query_types::admin::{AlterRepoOp, ResourceRef};
 
-use super::super::shamir_db::{ShamirDb, SYSTEM_DB_NAME};
+use super::super::shamir_db::{ShamirDb, ValidatorTargetAdmission, SYSTEM_DB_NAME};
 use super::admin_db_schema_migration::SchemaMigrationLifecycleGuard;
 use super::helpers::admin_result;
 
@@ -124,10 +124,20 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::CreateFunctionFolder(_) => self.handle_create_function_folder(op).await,
             op @ BatchOp::RenameFunctionFolder(_) => self.handle_rename_function_folder(op).await,
 
-            // ── Validator DDL ──────────────────────────────────────────
-            op @ BatchOp::CreateValidator(_) => self.handle_create_validator(op).await,
+            // ── Validator DDL ──────────────────────────────────────
+            // Review finding 3: ordinary replace / rename of a validator
+            // with bindings takes the target admission of every binding
+            // holder inside the admitted commit; the migration-owned
+            // handlers reserve every holder EXCEPT their own database
+            // (its fence the runner already holds). Drop of a bound
+            // validator mutates nothing (the facade refuses while bound;
+            // an absent artifact is a no-op), so it stays unreserved.
+            // Global function DDL has no single target and deliberately
+            // does not participate.
+            op @ BatchOp::CreateValidator(_) | op @ BatchOp::RenameValidator(_) => {
+                Self::dispatch_validator_registration(self, op).await
+            }
             op @ BatchOp::DropValidator(_) => self.handle_drop_validator(op).await,
-            op @ BatchOp::RenameValidator(_) => self.handle_rename_validator(op).await,
 
             // ── Declarative schema DDL (Phase A) ──────────────────────
             BatchOp::SetTableSchema(op) => self.handle_set_table_schema(op).await,
@@ -270,6 +280,37 @@ impl ShamirAdminExecutor {
             return Err(missing());
         }
         Ok(Some(guard))
+    }
+
+    /// Review finding 3: ordinary wire dispatch for validator registration
+    /// replace and rename. The admitted commit inside ShamirDb compiles
+    /// first, then holds ONE replication-control acquisition across the
+    /// authoritative binding snapshot, the target reservations and the
+    /// persist + registry swap. The migration-owned handlers reserve every
+    /// holder EXCEPT their own database (see admin_validator.rs). Boxed for
+    /// the same Windows nested-Batch stack reason as `dispatch_target_admin`.
+    #[inline(never)]
+    pub(super) fn dispatch_validator_registration<'a>(
+        &'a self,
+        op: &'a BatchOp,
+    ) -> AdminDispatchFuture<'a> {
+        Box::pin(async move {
+            match op {
+                BatchOp::CreateValidator(_) => {
+                    self.create_validator(op, ValidatorTargetAdmission::Fence)
+                        .await
+                }
+                BatchOp::RenameValidator(_) => {
+                    self.rename_validator(op, ValidatorTargetAdmission::Fence)
+                        .await
+                }
+                _ => {
+                    unreachable!(
+                        "dispatch_validator_registration called with a non-registration op"
+                    )
+                }
+            }
+        })
     }
 
     /// Round-14: replication DDL dispatcher, kept OUT of `execute_admin`'s

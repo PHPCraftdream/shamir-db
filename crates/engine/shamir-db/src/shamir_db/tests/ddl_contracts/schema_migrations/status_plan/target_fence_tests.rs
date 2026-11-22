@@ -342,7 +342,12 @@ fn foreign_admin_mutations_refuse_reserved_live_and_in_doubt_targets() {
     });
 }
 
-async fn assert_foreign_effects(db: &ShamirDb, group: u64, serving_code: Option<&str>) {
+async fn assert_foreign_effects(
+    db: &ShamirDb,
+    group: u64,
+    serving_code: Option<&str>,
+    fresh: &str,
+) {
     let target_id = identity(db, TARGET).await;
     // Keep DDL and DML in a nested body to exercise the serving gate's full
     // tree walk. It must reject before even the foreign DDL takes effect.
@@ -373,6 +378,21 @@ async fn assert_foreign_effects(db: &ShamirDb, group: u64, serving_code: Option<
     assert!(unbound["validators"].as_array().unwrap().is_empty());
     admin(db, SERVING, bind(NEW_GUARD)).await.unwrap();
     assert_binding(db, SERVING, NEW_GUARD, OLD_GUARD).await;
+
+    // A fresh foreign CREATE through a fenced serving database claims only a
+    // namespace slot no fence can own; it must be admitted and durably
+    // catalogued (cheap addition to the free-target matrix).
+    let created = admin(db, SERVING, ddl::create_db(fresh).build())
+        .await
+        .unwrap();
+    assert_eq!(created["created"].as_bool(), Some(true));
+    assert!(db.has_db(fresh));
+    assert!(bounded(db.system_store().load_database(fresh))
+        .await
+        .unwrap()
+        .is_some());
+    admin(db, SERVING, drop_db(fresh, false)).await.unwrap();
+    assert_absent(db, fresh).await;
 
     // A read plus nested foreign-only DDL must not trip the serving fence.
     let mut inner = Batch::new();
@@ -467,16 +487,14 @@ fn foreign_admin_mutations_apply_to_free_targets_even_when_serving_is_fenced() {
 
         watchdog.mark("free serving database");
         prepare_target(&db, dir.path(), "free").await;
-        assert_foreign_effects(&db, group, None).await;
+        assert_foreign_effects(&db, group, None, "fresh_free").await;
         watchdog.mark("reserved serving database");
         prepare_target(&db, dir.path(), "reserved").await;
         let mut serving = db.reserve_schema_migration_gate(SERVING).unwrap();
-        assert_foreign_effects(&db, group, Some(IN_PROGRESS)).await;
-
-        watchdog.mark("live serving database");
+        assert_foreign_effects(&db, group, Some(IN_PROGRESS), "fresh_reserved").await;
         prepare_target(&db, dir.path(), "live").await;
         serving.hold(3);
-        assert_foreign_effects(&db, group, Some(IN_PROGRESS)).await;
+        assert_foreign_effects(&db, group, Some(IN_PROGRESS), "fresh_live").await;
         serving.mark_succeeded();
         drop(serving);
         assert!(db.schema_migration_gate_generation(SERVING).is_none());
@@ -493,6 +511,100 @@ fn foreign_admin_mutations_apply_to_free_targets_even_when_serving_is_fenced() {
             db.schema_migration_gate_in_doubt_generation(SERVING),
             Some(4)
         );
-        assert_foreign_effects(&db, group, Some(IN_DOUBT)).await;
+        assert_foreign_effects(&db, group, Some(IN_DOUBT), "fresh_in_doubt").await;
+    });
+}
+
+#[test]
+fn same_target_explicit_ddl_refuses_whole_batch_before_first_effect() {
+    on_big_stack(|| async {
+        let watchdog = FlakeGuard::with_watchdog(
+            "same_target_explicit_ddl_refuses_whole_batch_before_first_effect",
+            Duration::from_secs(600),
+        );
+        let (dir, db) = bounded(persistent_db()).await;
+        create_with_sentinel(&db, dir.path(), SERVING, "fixture").await;
+
+        for (suffix, code) in [
+            ("reserved", IN_PROGRESS),
+            ("live", IN_PROGRESS),
+            ("in-doubt", IN_DOUBT),
+        ] {
+            watchdog.mark(suffix);
+            let fresh = format!("fresh_{suffix}");
+            let renamed = format!("renamed_{suffix}");
+            let mut serving = Some(db.reserve_schema_migration_gate(SERVING).unwrap());
+            if suffix == "live" || suffix == "in-doubt" {
+                serving.as_mut().unwrap().hold(7);
+            }
+            if suffix == "in-doubt" {
+                // An interrupted live runner leaves the in-doubt marker.
+                drop(serving.take());
+                assert_eq!(
+                    db.schema_migration_gate_in_doubt_generation(SERVING),
+                    Some(7)
+                );
+            }
+
+            // Standalone rename/drop of the fenced SERVING database are
+            // batch-entry refusals with the serving-state code, NOT the
+            // dispatch lifecycle code (`schema_migration_in_doubt`).
+            assert_refused(
+                admin(&db, SERVING, ddl::rename_db(SERVING, &renamed).build()).await,
+                code,
+                &format!("standalone rename ({suffix})"),
+            );
+            assert_absent(&db, &renamed).await;
+            assert_refused(
+                admin(&db, SERVING, drop_db(SERVING, false)).await,
+                code,
+                &format!("standalone plain drop ({suffix})"),
+            );
+            assert!(db.has_db(SERVING));
+
+            // Nontransactional batches: a fresh foreign CREATE first, then
+            // ONE same-target leaf each, so every whole-batch oracle reaches
+            // its intended leaf. The whole batch must be refused at entry,
+            // before the first effect: no C in the live database set or the
+            // persisted catalogue, and the fence state is unchanged.
+            for (alias, op, case) in [
+                (
+                    "chmod_b",
+                    ddl::chmod(ddl::res::database(SERVING), 0o750)
+                        .hmac(HMAC)
+                        .build()
+                        .unwrap(),
+                    "same-target CHMOD",
+                ),
+                ("drop_b", drop_db(SERVING, false), "same-target DROP"),
+            ] {
+                let mut batch = Batch::new();
+                batch.op("create_c", ddl::create_db(&fresh).build());
+                batch.op(alias, op);
+                let error = match execute(&db, SERVING, &batch).await {
+                    Ok(_) => panic!("{case} ({suffix}): unexpectedly admitted"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.code(), Some(code), "{case} ({suffix}): {error}");
+                assert!(
+                    matches!(&error, BatchError::QueryError { alias: a, .. } if a == alias),
+                    "{case}: {error}"
+                );
+                assert_absent(&db, &fresh).await;
+                assert_sentinel(&db, SERVING, SERVING).await;
+            }
+
+            if let Some(guard) = serving.as_mut() {
+                if suffix == "live" {
+                    guard.mark_succeeded();
+                }
+            }
+            drop(serving);
+            assert!(db.schema_migration_gate_generation(SERVING).is_none());
+            assert_eq!(
+                db.schema_migration_gate_in_doubt_generation(SERVING),
+                if suffix == "in-doubt" { Some(7) } else { None }
+            );
+        }
     });
 }

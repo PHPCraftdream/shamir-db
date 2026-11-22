@@ -764,7 +764,11 @@ async fn replay_v2_entry_admitted_inner(
         replay_v2_op_admitted(op, repo, permit, strict)
             .await
             .map_err(|e| match e {
-                error @ DbError::UniqueIndexCreationFailed(..) => error,
+                // Structured rebuild/open failures keep their identity (a
+                // typed per-table rebuild refusal must survive cold replay
+                // for the system store's per-table damage classification).
+                error @ (DbError::UniqueIndexCreationFailed(..)
+                | DbError::IndexRebuildFailed { .. }) => error,
                 e => DbError::Internal(format!("replay tx {} op failed: {}", entry.txn_id, e)),
             })?;
     }

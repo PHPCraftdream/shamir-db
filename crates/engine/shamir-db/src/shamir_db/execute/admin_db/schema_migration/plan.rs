@@ -99,6 +99,25 @@ pub(in crate::shamir_db::execute) async fn plan_application_schema(
             ),
         ));
     }
+    // A journal tail of `Applied` without `FenceReleased` still holds the
+    // durable fence: the applied migration owns it until release.
+    let applied_tail = history
+        .events
+        .last()
+        .is_some_and(|event| event.kind == JournalEventKind::Applied);
+    let fence_code = executor
+        .shamir
+        .schema_migration_refusal_code(serving)
+        .or(applied_tail.then_some("schema_migration_in_doubt"));
+    if let Some(code) = fence_code {
+        return Err(coded(
+            code,
+            format!(
+                "database '{}' still holds a migration fence; no plan is issued",
+                executor.db_name
+            ),
+        ));
+    }
     let head = applied_head(&history);
     let predecessor = SchemaMigrationPredecessor {
         migration_id: head.map(|(id, _, _)| id.to_string()),

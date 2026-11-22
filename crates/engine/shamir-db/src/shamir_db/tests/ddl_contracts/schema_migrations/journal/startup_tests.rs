@@ -8,8 +8,8 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use super::helpers::{
-    body, checksum, context, find_journal_row, journal_table, on_big_stack, persistent_db,
-    predecessor, prepare_database, run_apply, run_status, str_field, submission,
+    body, checksum, context, field, find_journal_row, journal_table, on_big_stack, persistent_db,
+    predecessor, prepare_database, rows, run_apply, run_plan, run_status, str_field, submission,
     wal_patch_journal_row,
 };
 use crate::engine::table::record_cow::RecordCow;
@@ -159,6 +159,120 @@ async fn malformed_event_reopen(trailing: bool) {
 }
 
 #[test]
+fn corrupt_journal_record_during_open_rebuild_is_typed() {
+    on_big_stack(|| async {
+        tokio::time::timeout(
+            Duration::from_secs(300),
+            Box::pin(async {
+                let (dir, db, _) = started().await;
+                let table = journal_table(&db).await;
+                // Undecodable raw MVCC row: a valid record-id key whose value
+                // bytes are not a record (msgpack 0xc1 is never valid). The
+                // open-time rebuild scan must classify this as journal damage
+                // through the typed table context, not as a bare Codec.
+                table
+                    .mvcc_store_for_test()
+                    .unwrap()
+                    .set_versioned(
+                        RecordKey::from_slice(&RecordId::new().to_bytes()),
+                        bytes::Bytes::from_static(&[0xc1, 0x00]),
+                    )
+                    .await
+                    .unwrap();
+                shamir_index::persistence::clear_identity_markers(&table.info_store_for_test())
+                    .await
+                    .unwrap();
+                db.system_store()
+                    .flush_system_repo_durable(&table)
+                    .await
+                    .unwrap();
+                drop(table);
+                close(db).await;
+                assert_open_damage(dir.path(), &["could not be decoded"]).await;
+            }),
+        )
+        .await
+        .expect("corrupt journal record scenario timed out");
+    });
+}
+
+#[test]
+fn unrelated_system_table_duplicate_rebuild_keeps_its_own_error() {
+    on_big_stack(|| async {
+        tokio::time::timeout(
+            Duration::from_secs(300),
+            Box::pin(async {
+                let (dir, db, _) = started().await;
+                // A trusted embedder installs a unique index on a NON-journal
+                // system table and a duplicate row slips in. Its rebuild
+                // failure must keep its own diagnostics: never journal damage.
+                let table = db
+                    .system_store()
+                    .system_repo()
+                    .expect("system repo is open")
+                    .get_table("databases")
+                    .await
+                    .expect("databases table opens");
+                table
+                    .create_unique_index("databases_name_key", &["name"])
+                    .await
+                    .expect("unique index on a duplicate-free table is created");
+                let raw = {
+                    let mut stream = Box::pin(table.list_stream(16));
+                    let mut batch = stream.next().await.unwrap().unwrap();
+                    let (_, RecordCow::Borrowed(raw)) = batch.pop().unwrap() else {
+                        panic!("databases MVCC scan must yield raw record bytes");
+                    };
+                    raw
+                };
+                table
+                    .mvcc_store_for_test()
+                    .unwrap()
+                    .set_versioned(RecordKey::from_slice(&RecordId::new().to_bytes()), raw)
+                    .await
+                    .unwrap();
+                // Pre-close control: exactly the original row plus the raw
+                // duplicate (created by `db.create_db("alpha")`, whose retained
+                // WAL entry opens this table inside cold replay).
+                assert_eq!(rows(&table).await.len(), 2);
+                shamir_index::persistence::clear_identity_markers(&table.info_store_for_test())
+                    .await
+                    .unwrap();
+                db.system_store()
+                    .flush_system_repo_durable(&table)
+                    .await
+                    .unwrap();
+                drop(table);
+                close(db).await;
+                let Err(error) = reopen(dir.path()).await else {
+                    panic!("duplicate rebuild must still fail the open");
+                };
+                assert_ne!(
+                    error.code(),
+                    Some("schema_migration_durability_unavailable"),
+                    "a non-journal rebuild failure must not be journal damage: {error}"
+                );
+                // The typed rebuild context names the failing table and keeps
+                // the original diagnostics.
+                let DbError::IndexRebuildFailed { table, source } = &error else {
+                    panic!("unexpected startup error: {error:?}");
+                };
+                assert_eq!(
+                    table, "databases",
+                    "rebuild context names the failing table"
+                );
+                assert!(
+                    matches!(source.as_ref(), DbError::UniqueIndexCreationFailed(..)),
+                    "the original diagnostics must be preserved: {source}"
+                );
+            }),
+        )
+        .await
+        .expect("unrelated-table rebuild scenario timed out");
+    });
+}
+
+#[test]
 fn truncated_event_after_foreign_identity_fails_whole_open() {
     on_big_stack(|| async {
         tokio::time::timeout(
@@ -246,6 +360,24 @@ fn applied_tail_seeds_fence_without_entering_operation_recovery() {
                     Some(1)
                 );
 
+                // Finding 7: while the Applied tail still owns the fence, a
+                // DIRECT PLAN for the next ordinal must refuse with the same
+                // code as STATUS and APPLY — before any retry.
+                let plan_error = run_plan(
+                    &db,
+                    "alpha",
+                    predecessor(Some("alpha-001"), 1, digest),
+                    vec![submission(&body("alpha-002", 2))],
+                    &identity,
+                )
+                .await
+                .expect_err("PLAN must refuse while the Applied tail owns the fence");
+                assert_eq!(
+                    plan_error.code(),
+                    Some("schema_migration_in_doubt"),
+                    "PLAN must refuse in doubt: {plan_error}"
+                );
+
                 let result = run_apply(
                     &db,
                     "alpha",
@@ -268,6 +400,34 @@ fn applied_tail_seeds_fence_without_entering_operation_recovery() {
                 let release = released.events.last().unwrap();
                 assert_eq!(release.kind, JournalEventKind::FenceReleased);
                 assert_eq!(release.fence_generation, 2);
+                // Positive control: the same direct PLAN now succeeds.
+                let next = body("alpha-002", 2);
+                let planned = run_plan(
+                    &db,
+                    "alpha",
+                    predecessor(Some("alpha-001"), 1, digest),
+                    vec![submission(&next)],
+                    &identity,
+                )
+                .await
+                .expect("PLAN succeeds after the durable FenceReleased");
+                let planned_migration = field(&planned, "migration");
+                assert_eq!(str_field(planned_migration, "id"), "alpha-002");
+                assert_eq!(field(planned_migration, "ordinal").as_i64(), Some(2));
+                assert_eq!(
+                    field(&planned, "checksum"),
+                    &QueryValue::Bin(checksum(&next).to_vec())
+                );
+                assert_eq!(
+                    field(&planned, "predecessor"),
+                    &QueryValue::Map({
+                        let mut m = new_map();
+                        m.insert("migration_id".into(), QueryValue::Str("alpha-001".into()));
+                        m.insert("ordinal".into(), QueryValue::Int(1));
+                        m.insert("checksum".into(), QueryValue::Bin(digest.to_vec()));
+                        m
+                    })
+                );
                 close(db).await;
                 let db = reopen(dir.path()).await.unwrap();
                 let history = db

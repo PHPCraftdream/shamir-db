@@ -62,6 +62,7 @@ use crate::shamir_db::system_store::{
 };
 
 use super::super::super::admin_dispatch::ShamirAdminExecutor;
+use super::super::fence::SchemaMigrationGateGuard;
 use super::super::function_family::admission::{
     authorize_family_operation, defer_bind, family_batch_op, is_function_family, preflight_checks,
     preflight_dependencies, validate_binding_scope,
@@ -72,6 +73,46 @@ use super::super::plan::{
 };
 use super::apply_journal::{applied_value, map_fence_error, plain};
 use super::apply_operations::{run_operations, FencedRun};
+
+/// Test-only finding-1 rendezvous: a test scopes this task-local around the
+/// retry task; apply parks the task after its identity read and before the
+/// history read, until the gate is released (deterministic publication
+/// ordering; the task-local keeps parallel tests independent).
+#[cfg(test)]
+pub(in crate::shamir_db) struct AppliedRetryPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl AppliedRetryPause {
+    pub(in crate::shamir_db) fn armed() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(in crate::shamir_db) async fn reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(in crate::shamir_db) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// The parked task signals the test it is parked, then waits for the
+    /// test's release.
+    pub(in crate::shamir_db) async fn park(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(in crate::shamir_db) static APPLIED_RETRY_PAUSE: std::sync::Arc<AppliedRetryPause>;
+}
 
 /// The apply entry point. Called from the dispatcher arm (already `Manage`-
 /// authorized) through `Box::pin` so the many DDL-handler awaits live on the
@@ -98,6 +139,16 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         .schema_migration_identity(&db)
         .await
         .map_err(map_store_error)?;
+
+    #[cfg(test)]
+    {
+        // Finding-1 rendezvous: a test scopes APPLIED_RETRY_PAUSE around the
+        // retry task and parks it here, after the identity read and before
+        // the history read, so ordering is deterministic.
+        if let Ok(pause) = APPLIED_RETRY_PAUSE.try_with(std::sync::Arc::clone) {
+            pause.park().await;
+        }
+    }
 
     // (3) Serving identity == request target.
     let target = DatabaseIdentity(request.target.database_identity);
@@ -139,19 +190,57 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         .find(|event| event.migration.ordinal == submission.metadata.ordinal)
     {
         if applied.migration == submission.metadata && applied.checksum == recomputed {
-            if history.events.last().is_some_and(|event| {
-                event.kind == JournalEventKind::Applied
-                    && event.fence_generation == applied.fence_generation
-                    && event.migration == applied.migration
-                    && event.checksum == applied.checksum
-            }) {
-                let gate = {
-                    let _control = executor.shamir.lock_replication_control().await;
-                    validate_serving_identity(executor, &db, serving)?;
-                    executor
-                        .shamir
-                        .reserve_applied_fence_release(serving, applied.fence_generation)
-                };
+            // The observed tail is either the `Applied` event (fence owned,
+            // release pending) or the `FenceReleased` event that released it.
+            // The retry must not acknowledge before the event it observed is
+            // DURABLE: the journal publishes the committed transaction before
+            // its explicit durability tail, so a visible event read while the
+            // original runner's gate still pins this generation is not proof.
+            // (i) One atomic slot snapshot refuses while that generation is
+            // pinned; (ii) a retained matching in-doubt marker with an
+            // Applied tail routes the retry through the real release; (iii)
+            // every other acknowledgement performs the journal partition's
+            // explicit durable tail itself — never a duplicate release just
+            // to harvest a CAS conflict, and never a marker clear on
+            // visibility alone.
+            let observed_tail = history
+                .events
+                .last()
+                .filter(|event| {
+                    event.migration == applied.migration
+                        && event.checksum == applied.checksum
+                        && ((event.kind == JournalEventKind::Applied
+                            && event.fence_generation == applied.fence_generation)
+                            || event.kind == JournalEventKind::FenceReleased)
+                })
+                .map(|event| event.kind);
+            if let Some(tail_kind) = observed_tail {
+                // One replication-control scope classifies the whole slot:
+                // identity revalidation, the pinning snapshot, and (Applied
+                // tails only) the atomic release reservation. The durable
+                // release and the tail run outside the lock.
+                let (pinned, gate) = Box::pin(classify_applied_tail(
+                    executor,
+                    &db,
+                    serving,
+                    applied.fence_generation,
+                    tail_kind == JournalEventKind::Applied,
+                ))
+                .await?;
+                if pinned {
+                    // The gate leaves `Live(generation)` only after the
+                    // run's last durable flush returned, so the observed
+                    // event is published but not proven durable.
+                    return Err(coded(
+                        "schema_migration_in_progress",
+                        format!(
+                            "migration {} (ordinal {}) is applied but its journal event \
+                             is not yet proven durable: the live runner still holds the \
+                             maintenance fence for database '{db}'",
+                            submission.metadata.id, submission.metadata.ordinal
+                        ),
+                    ));
+                }
                 if let Some(mut gate) = gate {
                     gate.hold(applied.fence_generation);
                     let context =
@@ -166,6 +255,13 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
                     .await
                     .map_err(|error| super::apply_journal::durability_error(error, true))?;
                     gate.mark_succeeded();
+                } else {
+                    // No release route ran: perform the journal partition's
+                    // explicit durable tail before acknowledging. A retained
+                    // in-doubt marker stays; reopen reconciles it.
+                    Box::pin(store.sync_schema_migration_journal_tail())
+                        .await
+                        .map_err(|error| super::apply_journal::durability_error(error, true))?;
                 }
             }
             // A visible FenceReleased is not proof its durability tail finished.
@@ -429,6 +525,34 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
         gate,
     ))
     .await
+}
+
+/// One replication-control scope for the applied-tail no-op: identity
+/// revalidation, the single atomic fence-slot snapshot, and (Applied tails
+/// only, never after a visible FenceReleased) the release reservation.
+/// The boolean pairs the pinning verdict with the optional reservation;
+/// the caller performs the durable release or the explicit journal tail
+/// OUTSIDE the lock, so the original runner never waits behind admission.
+async fn classify_applied_tail<'a>(
+    executor: &'a ShamirAdminExecutor,
+    db: &str,
+    serving: DatabaseIdentity,
+    generation: u64,
+    reserve: bool,
+) -> Result<(bool, Option<SchemaMigrationGateGuard<'a>>), BatchError> {
+    let _control = executor.shamir.lock_replication_control().await;
+    validate_serving_identity(executor, db, serving)?;
+    let pinned = executor
+        .shamir
+        .schema_migration_fence_pins(serving, generation);
+    let gate = if reserve && !pinned {
+        executor
+            .shamir
+            .reserve_applied_fence_release(serving, generation)
+    } else {
+        None
+    };
+    Ok((pinned, gate))
 }
 
 fn validate_serving_identity(

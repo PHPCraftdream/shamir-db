@@ -890,3 +890,79 @@ impl ShamirDb {
         repo.repo_interner().await
     }
 }
+
+impl ShamirDb {
+    /// Re-key the durable `bound_in` snapshots after a database rename —
+    /// caller holds replication control (review finding 3 follow-up).
+    /// Every catalogue validator row is scanned, so pending rows (native
+    /// artifacts no live registry entry names) are covered the same way as
+    /// live ones; names-only registry tracking is not the sole authority.
+    /// Affected rows are updated in place (same catalogue key) with their
+    /// resource meta preserved.
+    pub(in crate::shamir_db) async fn rekey_validator_bound_in_catalogue(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> DbResult<()> {
+        let old_prefix = format!("{from}/");
+        let new_prefix = format!("{to}/");
+        let validators = self.system_store.load_validators().await?;
+        for rec in validators {
+            let stale = rec
+                .get("bound_in")
+                .and_then(|v| v.as_array())
+                .map(|bound| {
+                    bound
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|table| table.starts_with(&old_prefix))
+                })
+                .unwrap_or(false);
+            if !stale {
+                continue;
+            }
+            let mut new_rec = rec.clone();
+            let rekeyed = if let shamir_types::types::value::QueryValue::Map(map) = &mut new_rec {
+                let list: Vec<shamir_types::types::value::QueryValue> = map
+                    .get("bound_in")
+                    .and_then(|v| v.as_array())
+                    .map(|bound| {
+                        bound
+                            .iter()
+                            .map(|v| match v.as_str() {
+                                Some(table) if table.starts_with(&old_prefix) => {
+                                    shamir_types::types::value::QueryValue::Str(format!(
+                                        "{}{}",
+                                        new_prefix,
+                                        &table[old_prefix.len()..]
+                                    ))
+                                }
+                                _ => v.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                map.insert(
+                    "bound_in".to_string(),
+                    shamir_types::types::value::QueryValue::List(list),
+                );
+                new_rec
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                log::warn!(
+                    "shamir_db::rekey_validator_bound_in_catalogue: validator record with \
+                     stale bound_in for '{from}/…' is not a map (skipping)"
+                );
+                None
+            };
+            let Some(name) = rekeyed else { continue };
+            let meta = crate::access::ResourceMeta::from_record(&rec);
+            self.system_store
+                .save_validator(&name, &new_rec, &meta)
+                .await?;
+        }
+        Ok(())
+    }
+}
