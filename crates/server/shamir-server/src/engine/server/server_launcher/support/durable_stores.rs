@@ -1,8 +1,13 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::runtime::{Handle, RuntimeFlavor};
+use zeroize::Zeroizing;
 
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChain};
 use shamir_connect::server::durable_counters::FjallConsumedCounters;
 use shamir_sync::format_stamp::{
     check_data_dir, inspect, EpochPolicy, IgnoreSet, StampError as FsStampError, StampMode,
@@ -31,6 +36,7 @@ pub(super) struct DurableStores {
     pub(super) user_dir: Arc<FjallUserDirectory>,
     pub(super) counters: Arc<FjallConsumedCounters>,
     pub(super) audit_appender: Arc<FjallAuditAppender>,
+    pub(super) audit_chain: Arc<AuditChain>,
     pub(super) kdf_for_bootstrap: KdfParams,
     /// Format epoch observed in the data directory after a successful
     /// Writer check (fail-closed classification below). Used by the boot
@@ -126,13 +132,53 @@ pub(super) async fn open(
     } else {
         Some(config.audit.max_file_size_mb.saturating_mul(1024 * 1024))
     };
-    let audit_appender = FjallAuditAppender::open_batched_with_rotation(
-        &config.data_dir,
-        std::time::Duration::from_secs(5),
-        audit_max_bytes,
-        config.audit.retention_days,
-    )
-    .map_err(|e| BootError::AuditAppender(e.to_string()))?;
+    // Keep recovery and both durable checkpoint writes within the data-dir
+    // lock's scope, even if boot is cancelled. Never detach this work.
+    let recover_audit = || {
+        let legacy_checkpoint = meta
+            .audit_checkpoint_checked()
+            .map_err(BootError::AuditCheckpointRead)?;
+        let key = Zeroizing::new(meta.audit_chain_key().map_err(BootError::AuditKeyRead)?);
+        // Rotation-boundary anchor (finding 1): persist the meta anchor at
+        // every rotation boundary AND the final batched shutdown, before
+        // retention can prune, so a legitimately pruned history always
+        // keeps a usable anchor. A MetaError becomes an io::Error that
+        // keeps it as its source.
+        let meta_anchor = Arc::clone(&meta);
+        let on_rotation_or_close = move |next_seq: u64, prev_hmac: [u8; 32]| {
+            meta_anchor
+                .store_audit_checkpoint(next_seq, prev_hmac)
+                .map_err(std::io::Error::other)
+        };
+        let (appender, (next_seq, prev_hmac)) =
+            FjallAuditAppender::open_recovered_batched_with_meta(
+                &config.data_dir,
+                &key,
+                legacy_checkpoint,
+                Duration::from_secs(5),
+                audit_max_bytes,
+                config.audit.retention_days,
+                on_rotation_or_close,
+            )
+            .map_err(BootError::AuditRecovery)?;
+
+        // Recovery has made the verified tail durable. Refresh both anchors
+        // (including genesis), before any writer can append to the chain.
+        appender
+            .checkpoint(next_seq, &prev_hmac)
+            .map_err(BootError::AuditAppenderCheckpoint)?;
+        meta.store_audit_checkpoint(next_seq, prev_hmac)
+            .map_err(BootError::AuditMetaCheckpoint)?;
+        let chain = Arc::new(AuditChain::from_checkpoint(*key, next_seq, prev_hmac));
+        Ok::<_, BootError>((appender, chain))
+    };
+    let (audit_appender, audit_chain) = if Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(recover_audit)
+    } else {
+        recover_audit()
+    }?;
 
     // Hoisted from step 2 below (CR-A6): the TTL sweep now also needs
     // `kdf_for_bootstrap` to rotate an expired-and-unused token's SCRAM
@@ -259,6 +305,7 @@ pub(super) async fn open(
         user_dir,
         counters,
         audit_appender,
+        audit_chain,
         kdf_for_bootstrap,
         observed_format_epoch,
     })
