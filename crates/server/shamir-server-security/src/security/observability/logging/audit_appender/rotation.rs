@@ -285,13 +285,15 @@ pub(super) fn rotate_locked(
 /// An archive written while the clock was ahead carries a future
 /// modification time. It is not eligible and, by the contiguous-prefix
 /// rule, it and every strictly later archive stay until it ages out; the
-/// sweep therefore clamps that modification time to the present once
-/// ([`clamp_future_mtime`], metadata only: the HMAC chain and both anchors
-/// do not depend on it), so the delay is `retention_days` from the first
-/// sweep that sees it, not the size of the clock error. This preserves
-/// contiguity (nothing younger than a retained archive is removed) and
-/// always removes the eligible prefix in front of the blocker, but is not
-/// a per-archive guarantee.
+/// sweep therefore clamps the modification time of EVERY future-dated
+/// archive it can see to the present ([`clamp_future_mtime`], metadata
+/// only: the HMAC chain and both anchors do not depend on it), so the delay
+/// is `retention_days` from that sweep, not the size of the clock error.
+/// A clamp that fails (no write access) only logs and repeats on the next
+/// rotation. Eligibility is reached by time; deletion happens only at a
+/// rotation. All of this preserves contiguity (nothing younger than a
+/// retained archive is removed) and always removes the eligible prefix in
+/// front of the blocker, but is not a per-archive guarantee.
 ///
 /// Directory reads, classification problems, unreadable candidates and
 /// unlink/sync failures log at `warn` and stop the sweep — retention is
@@ -317,7 +319,8 @@ fn sweep_retention(
         .filter_map(|suffix| archives.remove(suffix))
         .collect();
     order.extend(archives.into_values());
-    for path in order {
+    let mut order = order.into_iter();
+    for path in order.by_ref() {
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             tracing::warn!(
                 file = %path.display(),
@@ -379,6 +382,17 @@ fn sweep_retention(
                 );
                 break;
             }
+        }
+    }
+    // The sweep stopped at a blocker: every later archive that was also
+    // written under the skewed clock gets the same fresh window now, so the
+    // whole delay is `retention_days` from this sweep, not one window each.
+    for path in order {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_file() && metadata.modified().is_ok_and(|modified| modified > now) {
+            clamp_future_mtime(&path, now);
         }
     }
 }

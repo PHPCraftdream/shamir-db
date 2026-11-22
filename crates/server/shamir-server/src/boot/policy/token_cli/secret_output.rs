@@ -75,6 +75,15 @@ fn lexical_candidate(path: &Path) -> Result<PathBuf, OutputPathError> {
                 let skip = ancestor.components().count();
                 let mut candidate = canonical_ancestor;
                 for component in path.components().skip(skip) {
+                    // `PathBuf::push` re-parses a Windows component such as
+                    // `z:notes` as a drive prefix and replaces the base; a
+                    // ':' is also an NTFS stream separator. Refuse it there.
+                    if cfg!(windows) && component.as_os_str().to_string_lossy().contains(':') {
+                        return Err(OutputPathError::Unresolvable(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "a secret output path component must not contain ':' on Windows",
+                        )));
+                    }
                     candidate.push(component);
                 }
                 return Ok(candidate);

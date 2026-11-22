@@ -461,6 +461,22 @@ async fn create_with_out_file_delivers_the_secret_at_the_requested_path() {
     );
 }
 
+/// Windows only: a final component such as `z:notes` would be re-parsed as a
+/// drive prefix and replace the resolved parent (and ':' is an NTFS stream
+/// separator), so it is refused with the typed error and nothing is written.
+#[cfg(windows)]
+#[tokio::test]
+async fn create_refuses_a_windows_drive_like_final_component() {
+    let (tmp, c) = seeded_dir(&["one"]).await;
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let out = std::path::PathBuf::from(format!("{}\\z:notes", outside.display()));
+    let (result, o, _e) = run(&c, create_args_with_out("alice", "ads", &out), true).await;
+    let err = result.expect_err("a ':' component must be refused");
+    typed_output_error(&err, "create");
+    assert!(!String::from_utf8(o).expect("stdout").contains("shk1."));
+}
+
 /// Round-3 finding 3: with a REAL held maintenance lock, the refusal must
 /// come before any output creation. The strong oracle is the ALREADY
 /// EXISTING destination: `prepare` would fail it with an exclusive-create

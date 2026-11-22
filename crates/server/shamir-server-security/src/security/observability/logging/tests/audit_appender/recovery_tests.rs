@@ -852,10 +852,10 @@ async fn retention_enabled_no_prune_rotation_reads_no_archive_body() {
 /// Round-3 item 1 — physical rotate → retention → reopen: the sweep ages
 /// every archive by its mtime (std `FileTimes`), never by the far-future
 /// NAME, and a future-dated archive blocks only the contiguous suffix
-/// behind it (s1/s2 old, s3 future blocker, s4 old behind it). One append
+/// behind it (s1/s2 old, s3 future blocker, s4 future behind it). One append
 /// through the recovered rotating writer mints the newest archive and
-/// sweeps. Red: aging by name deletes nothing; without the clamp the
-/// blocker keeps its future mtime.
+/// sweeps. Red: aging by name deletes nothing; without the clamp both
+/// future-dated archives keep their future mtime.
 #[tokio::test(flavor = "current_thread")]
 async fn retention_ages_by_mtime_not_by_far_future_names() {
     let dir = TempDir::new().unwrap();
@@ -876,7 +876,7 @@ async fn retention_ages_by_mtime_not_by_far_future_names() {
         .map(|(offset, _)| offset + 1)
         .collect();
     let mut begin = 0usize;
-    for ((name, end), mtime) in names.iter().zip(&ends).zip([old, old, future, old]) {
+    for ((name, end), mtime) in names.iter().zip(&ends).zip([old, old, future, future]) {
         lay_archive(dir.path(), *name, &bytes[begin..*end], mtime);
         begin = *end;
     }
@@ -908,10 +908,13 @@ async fn retention_ages_by_mtime_not_by_far_future_names() {
     assert_eq!(kept.len(), 3);
     // The future-dated blocker was clamped to the present: its delay is
     // bounded by retention_days from now, not by the 30-day clock error.
-    let blocker = dir.path().join(format!("audit.log.{:020}", names[2]));
-    let clamped = fs::metadata(&blocker).unwrap().modified().unwrap();
-    assert!(clamped <= SystemTime::now());
-    assert!(clamped > old);
+    // Every future-dated archive of the sweep is clamped, not only the first.
+    for name in [names[2], names[3]] {
+        let path = dir.path().join(format!("audit.log.{name:020}"));
+        let clamped = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(clamped <= SystemTime::now());
+        assert!(clamped > old);
+    }
     let newest = kept[2];
     assert!(newest > names[3]);
     drop(appender);
