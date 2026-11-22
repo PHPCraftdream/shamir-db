@@ -4,6 +4,7 @@
 
 use super::helpers;
 
+#[path = "binding_scope_tests/binding_scope_tests.rs"]
 mod binding_scope_tests;
 mod catalogue_lifecycle_tests;
 mod fail_closed_tests;

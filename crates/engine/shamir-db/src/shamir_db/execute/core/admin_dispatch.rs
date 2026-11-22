@@ -230,7 +230,8 @@ impl ShamirAdminExecutor {
         })
     }
 
-    /// Bind the target identity before ACL under the existing rename/drop interlock.
+    /// Shared ACL-target admission filters the internal `__system__` store
+    /// by name; the lifecycle layer reserves that name for the internal store.
     /// The returned reservation holds no control lock: table metadata writes reacquire it.
     pub(super) async fn authorize_admin_target_write(
         &self,

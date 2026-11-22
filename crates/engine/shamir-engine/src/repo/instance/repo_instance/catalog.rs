@@ -158,9 +158,10 @@ impl RepoInstance {
     /// MVCC and can trigger index recovery. This read opens ONLY the mapped
     /// `__info__` store and decodes the one validators metadata key, so a
     /// cross-crate caller can derive persisted bindings without touching row
-    /// data or managers. `Ok(None)` for a table that is not configured in
-    /// this repo or has never saved bindings. Read-only: no admission, no
-    /// interner, no fence.
+    /// data or managers. Missing configured stores and tables that have never
+    /// saved bindings return `Ok(None)`. Existing-only store lookup is
+    /// read-only even for lazy tables and creates no keyspace. Read-only: no
+    /// admission, no interner, no fence.
     pub async fn table_validator_bindings_metadata(
         &self,
         table_name: &str,
@@ -168,7 +169,9 @@ impl RepoInstance {
         let Some((_data, info, _history)) = self.core.mapped_table_store_names(table_name) else {
             return Ok(None);
         };
-        let store = self.core.repo.store_get(info).await?;
+        let Some(store) = self.core.repo.store_get_existing(&info).await? else {
+            return Ok(None);
+        };
         crate::validator::persistence::load_validators_metadata(&store).await
     }
 

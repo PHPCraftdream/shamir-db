@@ -301,14 +301,14 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // mismatch is refused with the fresh-path stable codes, writing nothing.
     let mut resume = false;
     if let Some(event) = history.unresolved.last() {
-        // The SAME classification STATUS and PLAN use (brief 84, finding 6):
-        // only a LIVE in-process runner yields `in_progress`, so the
-        // takeover refusal here is unchanged — a retained in-doubt marker
-        // falls through to the identity/checksum resume checks below.
-        if super::super::schema_migration::schema_migration_state_code(
-            executor.shamir.schema_migration_refusal_code(serving),
-            &history,
-        ) == Some("schema_migration_in_progress")
+        // The SAME migration-only classification STATUS and PLAN use
+        // (brief 87, item 4): live runners and Lifecycle reservations yield
+        // `in_progress`, while a retained in-doubt marker falls through to
+        // the identity/checksum resume checks below.
+        if executor
+            .shamir
+            .schema_migration_admission_state_code(serving, &history)
+            == Some("schema_migration_in_progress")
         {
             return Err(coded(
                 "schema_migration_in_progress",
@@ -481,10 +481,8 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     ))
     .await?;
 
-    // (10) In-process gate fast-fail, then the durable fence CAS. The
-    // acquire also re-validates id/ordinal/checksum against the journal and
-    // persists+syncs the `started` event WITH the complete checksum-verified
-    // body before any effect (§4.1 runner sequence).
+    // Status/plan/fresh-apply classification is observational before atomic
+    // reservation. Resume and applied-tail retry preserve their special paths.
     // Recovery CASes the fence at the CURRENT durable generation, i.e. the
     // generation of the latest journal event (the control-record validation
     // pins control.generation to exactly that value).
@@ -499,6 +497,19 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     let (mut gate, rename_migration) = {
         let _control = executor.shamir.lock_replication_control().await;
         validate_serving_identity(executor, &db, serving)?;
+        // Fresh APPLY shares STATUS/PLAN classification; the atomic
+        // reservation remains decisive if an owner races afterward.
+        if !resume {
+            if let Some(code) = executor
+                .shamir
+                .schema_migration_admission_state_code(serving, &history)
+            {
+                return Err(coded(
+                    code,
+                    format!("database '{db}' has a migration state that prevents a fresh apply"),
+                ));
+            }
+        }
         let gate = executor
             .shamir
             .reserve_schema_migration_run(serving, resume.then_some(expected_generation))

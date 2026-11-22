@@ -333,6 +333,46 @@ fn applied_tail_seeds_fence_without_entering_operation_recovery() {
                         .await
                         .unwrap();
                 }
+                let store = db.system_store();
+                let history = store.read_schema_migration_history(identity).await.unwrap();
+                assert_eq!(history.applied.len(), 1);
+                assert_eq!(history.events.last(), history.applied.first());
+                assert!(history.unresolved.is_empty());
+                assert_eq!(db.schema_migration_refusal_code(identity), None);
+                let status = run_status(&db, "alpha", &identity).await.unwrap();
+                assert_eq!(str_field(&status, "last_applied_id"), "alpha-001");
+                assert_eq!(str_field(&status, "error"), "schema_migration_in_doubt");
+                let plan_error = run_plan(
+                    &db,
+                    "alpha",
+                    predecessor(Some("alpha-001"), 1, digest),
+                    vec![submission(&body("alpha-002", 2))],
+                    &identity,
+                )
+                .await
+                .expect_err("PLAN must refuse while the Applied tail owns the fence");
+                assert_eq!(plan_error.code(), Some("schema_migration_in_doubt"));
+                let next = body("alpha-002", 2);
+                let apply_error = run_apply(
+                    &db,
+                    "alpha",
+                    predecessor(Some("alpha-001"), 1, digest),
+                    1,
+                    submission(&next),
+                    &identity,
+                )
+                .await
+                .expect_err("fresh APPLY must agree with STATUS and PLAN on the Applied tail");
+                assert_eq!(
+                    apply_error.code(),
+                    Some("schema_migration_in_doubt"),
+                    "fresh APPLY must classify the owned Applied tail before reservation: {apply_error}"
+                );
+                assert_eq!(
+                    store.read_schema_migration_history(identity).await.unwrap(),
+                    history,
+                    "fresh APPLY refusal must append no journal event"
+                );
                 close(db).await;
                 let db = reopen(dir.path()).await.unwrap();
                 let store = db.system_store();

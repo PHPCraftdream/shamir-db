@@ -36,7 +36,6 @@ use super::super::helpers::admin_result;
 use super::function_family::admission::{
     is_function_family, preflight_checks, preflight_dependencies, validate_binding_scope,
 };
-use super::schema_migration::schema_migration_state_code;
 
 /// §5.2 authorization for the plan arm: `Manage` on the database through the
 /// normal `authorize_access` path — no bypass — before any journal byte is
@@ -83,22 +82,14 @@ pub(in crate::shamir_db::execute) async fn plan_application_schema(
         .read_schema_migration_history(serving)
         .await
         .map_err(map_store_error)?;
-    // ONE shared classification with STATUS and APPLY (brief 84, finding 6),
-    // called ONCE for the whole pending state. The process-local fence slot
-    // is sampled first and decides in progress vs in doubt over the journal
-    // tail — a failed post-commit `started` tail under a slot marker reports
-    // in doubt (STATUS and the marker agree) and a live runner past its last
-    // intent reports in progress (STATUS and APPLY agree). A vacant slot
-    // falls through to the durable journal rules: an interrupted (in-doubt)
-    // history reports in doubt — INCLUDING a journal-only `started` tail,
-    // where the plan arm's legacy §4.2 mapping said in progress; the shared
-    // code is the stricter refusal and agrees with STATUS, so nothing is
-    // weakened — and an `Applied` tail without `FenceReleased` reports in
-    // doubt because the completed migration still durably owns the fence.
-    let fence_code = schema_migration_state_code(
-        executor.shamir.schema_migration_refusal_code(serving),
-        &history,
-    );
+    // ONE shared classification with STATUS and APPLY (brief 87, item 4),
+    // using migration-only admission semantics so a foreign Lifecycle slot
+    // reports in progress; ordinary write/batch observers remain unchanged.
+    // Unresolved history (including a journal-only Started tail) and an Applied
+    // tail without FenceReleased are in doubt.
+    let fence_code = executor
+        .shamir
+        .schema_migration_admission_state_code(serving, &history);
     if let Some(code) = fence_code {
         // The unresolved metadata is optional: it names the interrupted
         // migration when there is one; an `Applied` tail has none.

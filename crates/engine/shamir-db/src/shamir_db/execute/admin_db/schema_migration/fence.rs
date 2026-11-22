@@ -74,6 +74,13 @@ impl FenceState {
             Self::Lifecycle => None,
         }
     }
+
+    fn migration_admission_code(self) -> Option<&'static str> {
+        match self {
+            Self::Lifecycle => Some(IN_PROGRESS),
+            state => state.refusal_code(),
+        }
+    }
 }
 
 impl ShamirDb {
@@ -106,6 +113,19 @@ impl ShamirDb {
         id: DatabaseIdentity,
     ) -> Option<&'static str> {
         self.fence_state(id)?.refusal_code()
+    }
+
+    /// Shared by STATUS, PLAN and APPLY; lifecycle is an in-progress migration
+    /// conflict here, but remains generic in the ordinary refusal accessor.
+    pub(super) fn schema_migration_admission_state_code(
+        &self,
+        id: DatabaseIdentity,
+        history: &crate::shamir_db::system_store::MigrationHistory,
+    ) -> Option<&'static str> {
+        let fence_code = self
+            .fence_state(id)
+            .and_then(FenceState::migration_admission_code);
+        super::schema_migration::schema_migration_state_code(fence_code, history)
     }
 
     /// Reserve a resolved identity for an explicit-target mutation. Classify
@@ -154,7 +174,7 @@ impl ShamirDb {
                     slot.insert(FenceState::Reserved { previous_in_doubt });
                     previous_in_doubt
                 }
-                state => return Err(state.refusal_code().unwrap_or(IN_PROGRESS)),
+                state => return Err(state.migration_admission_code().unwrap_or(IN_PROGRESS)),
             },
         };
         Ok(SchemaMigrationGateGuard {

@@ -7,7 +7,7 @@ use shamir_query_types::{batch::BatchOp, WriteOp};
 use shamir_test_diag::FlakeGuard;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath, OWNER_SYSTEM};
 
-use super::helpers::{on_big_stack, persistent_db, run_admin_op};
+use super::helpers::{init_waiting_for_locks, on_big_stack, persistent_db, run_admin_op};
 use crate::engine::repo::{repo_types::BoxRepoFactory, RepoConfig};
 use crate::query::batch::{BatchError, BatchResponse};
 use crate::shamir_db::system_store::DatabaseIdentity;
@@ -647,6 +647,7 @@ fn same_target_ddl_refuses_transactional_and_interactive_transactions_before_fir
             // state code; the earlier CREATE must not appear anywhere.
             let mut batch = Batch::new();
             batch.transactional();
+            batch.op("data_anchor", Query::from(TABLE));
             batch.op("create_c", ddl::create_db(&fresh).build());
             batch.op(
                 "chmod_b",
@@ -704,5 +705,69 @@ fn same_target_ddl_refuses_transactional_and_interactive_transactions_before_fir
             Some(9),
             "the in-doubt marker of the last round must survive the test"
         );
+    });
+}
+
+#[test]
+fn reserved_system_database_name_is_rejected_and_normal_restart_opens() {
+    on_big_stack(|| async {
+        let watchdog = FlakeGuard::with_watchdog(
+            "reserved_system_database_name_is_rejected_and_normal_restart_opens",
+            Duration::from_secs(600),
+        );
+        let (dir, db) = bounded(persistent_db()).await;
+        create_with_sentinel(&db, dir.path(), SERVING, "reserved-name").await;
+
+        watchdog.mark("embedded and wire create refuse the reserved name");
+        assert!(matches!(
+            db.create_db_as("__system__", Actor::System).await,
+            Err(crate::DbError::Validation(message)) if message.contains("reserved")
+        ));
+        let create_error = admin(
+            &db,
+            SERVING,
+            ddl::create_db("__system__").if_not_exists().build(),
+        )
+        .await
+        .expect_err("wire CREATE DATABASE must refuse the reserved name");
+        assert!(
+            matches!(&create_error, BatchError::QueryError { code: None, .. }),
+            "reserved-name CREATE should be a plain validation query error: {create_error}"
+        );
+        assert!(
+            create_error
+                .to_string()
+                .contains("database name '__system__' is reserved"),
+            "{create_error}"
+        );
+        assert!(!db.has_db("__system__"));
+        assert!(bounded(db.system_store().load_database("__system__"))
+            .await
+            .unwrap()
+            .is_none());
+
+        watchdog.mark("embedded and wire rename refuse the reserved destination");
+        assert!(matches!(
+            db.rename_db(SERVING, "__system__").await,
+            Err(crate::DbError::Validation(message)) if message.contains("reserved")
+        ));
+        let rename_error = admin(&db, SERVING, ddl::rename_db(SERVING, "__system__").build())
+            .await
+            .expect_err("wire RENAME DATABASE must refuse the reserved destination");
+        assert!(
+            rename_error.to_string().contains("reserved"),
+            "{rename_error}"
+        );
+        assert!(db.has_db(SERVING));
+        assert!(!db.has_db("__system__"));
+
+        watchdog.mark("an ordinary persisted database and repository reopen");
+        bounded(db.flush_all_waiting())
+            .await
+            .expect("clean shutdown before repository reopen");
+        drop(db);
+        let reopened = bounded(init_waiting_for_locks(dir.path().join("system"))).await;
+        assert!(reopened.has_db(SERVING));
+        assert_sentinel(&reopened, SERVING, SERVING).await;
     });
 }

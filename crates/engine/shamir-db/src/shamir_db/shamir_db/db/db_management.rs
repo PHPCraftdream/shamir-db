@@ -103,30 +103,21 @@ impl ShamirDb {
         self.create_db_as_checked(name, actor).await
     }
 
-    /// Catalogue-persist-fallible database creation (RV-DB-6540DC7B):
-    /// serialized against concurrent creators and the rename/drop
-    /// lifecycle via the replication-control lock; idempotent for an
-    /// already-live name (the original instance is returned with its
-    /// repo/scalar state and durable ownership untouched — no catalogue
-    /// write is attempted); for a NEW name the catalogue persist happens
-    /// BEFORE the live registration is published, so a save failure
-    /// propagates and leaves neither a live registration nor a
-    /// published-over-writer hazard. This contract makes NO claim that
-    /// an arbitrary failure leaves the durable row absent — a save that
-    /// commits and then fails at flush can leave the row behind while
-    /// still returning Err; the injected-fault tests exercise the
-    /// failure BEFORE the write (the prewrite catalogue gate).
+    /// Catalogue-persist-fallible database creation: serialized against
+    /// concurrent creation, rename and drop; existing live names are
+    /// idempotent, while a new row is persisted before live publication.
+    /// A save may commit before a later flush error; injected fault tests
+    /// cover failures before the write.
     pub async fn create_db_as_checked(&self, name: &str, actor: Actor) -> DbResult<DbInstance> {
-        // Round 2 (A6) lifecycle interlock: serialize the existence check,
-        // the catalogue persist, and the live publish against concurrent
-        // creators and the rename/drop lifecycle (which all take the same
-        // replication-control lock). Lock order is safe: the only place a
-        // guard is held while entering here is `handle_create_db`, which
-        // holds `db_create_lock` and acquires THIS lock after it
-        // (db_create_lock → replication_control); no code path takes the
-        // locks in the reverse order, so no inversion/deadlock.
+        // Serialize existence, catalogue persistence and publication against
+        // create/rename/drop. Lock order is db_create_lock then control.
         let _control = self.lock_replication_control().await;
 
+        if name == SYSTEM_DB_NAME {
+            return Err(DbError::Validation(
+                "database name '__system__' is reserved".into(),
+            ));
+        }
         // Idempotent duplicate: return the ORIGINAL live instance.
         // `get_db` clones the Arc out of the DashMap (no guard held across
         // the awaits below); the catalogue is deliberately NOT rewritten,
@@ -312,6 +303,11 @@ impl ShamirDb {
         let Some((identity, _lifecycle)) = reservation else {
             return Err(DbError::NotFound(format!("Database '{}' not found", from)).into());
         };
+        if to == SYSTEM_DB_NAME {
+            return Err(
+                DbError::Validation("database name '__system__' is reserved".into()).into(),
+            );
+        }
         // Destination must be free both in-memory and in the catalogue.
         if self.has_db(to) {
             return Err(DbError::Validation(format!(

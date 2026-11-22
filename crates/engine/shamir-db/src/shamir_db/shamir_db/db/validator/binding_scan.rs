@@ -1,29 +1,15 @@
 //! AUTHORITATIVE binding-holder derivation (round 3, review findings 1
 //! and 2): the set of databases that bind a validator is derived from the
-//! tables' OWN persisted bindings at admission/refusal time, never from
-//! the best-effort reverse index.
+//! tables' OWN persisted bindings at admission/refusal time.
 //!
-//! Why not the reverse index: `bind_validator_as` writes the table's own
-//! binding first and updates the registry's `bound_in` tracking (and the
-//! catalogue `bound_in` snapshot) best-effort; the database-rename re-key
-//! and plain table/repo renames can leave stale `old/...` entries or omit
-//! entries entirely; on reopen the registry restores its reverse
-//! references only from the validator catalogue. A stale or missing
-//! reverse row must neither admit a bound validator nor falsely refuse an
-//! unbound one, so NOTHING that decides admission or refusal reads it.
-//! The reverse index stays a restoration cache only (e.g.
-//! `validator_replacement_identity`).
-//!
-//! Cost: this is a rare DDL path. The scan walks every LIVE user
-//! `DbInstance` in `dbs` and reads each table's validators metadata
-//! envelope through `RepoInstance::table_validator_bindings_metadata` —
-//! ONLY the mapped `__info__` store is opened; no `TableManager` is
+//! The reverse cache is consulted only to fail closed when an existing
+//! table is missing its binding envelope; ghost references are ignored,
+//! and existing-table reads bypass wrapper-created stores. Existing metadata
+//! reads use only the mapped `__info__` store; no `TableManager` is
 //! constructed, no `__data__`/`__history__` store is touched, no index
-//! recovery runs, no row data is loaded. The internal system store is
-//! scanned the same way through `SystemStore::system_repo` (the
-//! identity/handle distinction — its `DbInstance` is never a key of
-//! `dbs`, so it is excluded from reservation by construction, not by
-//! name matching).
+//! recovery runs, no row data is loaded. This read-only scan never drains or
+//! syncs the backend; rare DDL binding writes do so through the storage
+//! wrapper. The internal store is read by its own handle.
 //!
 //! Exclusion domain / TOCTOU: the `ReplicationControlGuard` parameter
 //! proves the caller holds replication control for the whole derive →
@@ -90,6 +76,11 @@ impl ShamirDb {
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
+        let reverse_refs: BTreeSet<String> = self
+            .validators
+            .bound_tables(validator_id)
+            .into_iter()
+            .collect();
         let mut dbs = BTreeSet::new();
         let mut tables = Vec::new();
         for (db_name, instance) in instances {
@@ -104,8 +95,15 @@ impl ShamirDb {
                     )));
                 };
                 for table_name in instance.list_tables(&repo_name)? {
+                    let table_ref = Self::table_ref_str(&db_name, &repo_name, &table_name);
                     let bound = repo.table_validator_bindings_metadata(&table_name).await?;
                     let Some(bound) = bound else {
+                        if reverse_refs.contains(&table_ref) {
+                            return Err(DbError::Validation(format!(
+                                "cannot inspect validator bindings: metadata for existing table \
+                                 '{table_ref}' is missing"
+                            )));
+                        }
                         continue;
                     };
                     if bound
@@ -113,7 +111,7 @@ impl ShamirDb {
                         .iter()
                         .any(|binding| &binding.validator_id == validator_id)
                     {
-                        tables.push(Self::table_ref_str(&db_name, &repo_name, &table_name));
+                        tables.push(table_ref);
                         dbs.insert(db_name.clone());
                     }
                 }
@@ -122,11 +120,19 @@ impl ShamirDb {
         // The internal system store: scanned through its own handle, added
         // to the DROP refusal evidence but NEVER to the reservation set.
         let system_repo = self.system_store.system_repo()?;
-        for table_name in system_repo.list_table_names() {
+        let system_table_refs = system_repo.list_table_names();
+        for table_name in system_table_refs {
+            let table_ref = Self::table_ref_str(SYSTEM_DB_NAME, system_repo.name(), &table_name);
             let bound = system_repo
                 .table_validator_bindings_metadata(&table_name)
                 .await?;
             let Some(bound) = bound else {
+                if reverse_refs.contains(&table_ref) {
+                    return Err(DbError::Validation(format!(
+                        "cannot inspect validator bindings: metadata for existing table \
+                         '{table_ref}' is missing"
+                    )));
+                }
                 continue;
             };
             if bound
@@ -134,11 +140,7 @@ impl ShamirDb {
                 .iter()
                 .any(|binding| &binding.validator_id == validator_id)
             {
-                tables.push(Self::table_ref_str(
-                    SYSTEM_DB_NAME,
-                    system_repo.name(),
-                    &table_name,
-                ));
+                tables.push(table_ref);
             }
         }
         tables.sort();

@@ -574,7 +574,7 @@ impl ShamirDb {
     /// `pub(super)`: shared with `migration_admission.rs` (brief 84 item 3
     /// preflight) and `validator_drop.rs` — one reservation/error-mapping
     /// implementation, no drift.
-    pub(in crate::shamir_db) fn reserve_validator_target_identities_locked<'a>(
+    pub(super) fn reserve_validator_target_identities_locked<'a>(
         &'a self,
         dbs: &[String],
         exempt: Option<DatabaseIdentity>,

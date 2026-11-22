@@ -8,16 +8,18 @@
 use std::{future::Future, path::Path, time::Duration};
 
 use base64::Engine as _;
-use shamir_engine::validator::{ValidatorBinding, WriteOp as BindingWriteOp};
 use shamir_query_builder::{batch::Batch, ddl};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::WriteOp;
+use shamir_storage::types::Repo as _;
 use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
 
 use super::helpers::{init_waiting_for_locks, on_big_stack, persistent_db, run_admin_op};
 use crate::engine::repo::{repo_types::BoxRepoFactory, RepoConfig};
+use crate::engine::table::table_store_names;
 use crate::query::batch::BatchError;
+use crate::storage::storage_membuffer::MemBufferConfig;
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
 
@@ -80,12 +82,6 @@ fn replace_validator(name: &str) -> BatchOp {
     replace_validator_with(name, 3)
 }
 
-/// A distinct compiled artifact for a second replace of the same validator:
-/// the page count differs, so the swapped module hash is observable again.
-fn replace_validator_distinct(name: &str) -> BatchOp {
-    replace_validator_with(name, 4)
-}
-
 fn replace_validator_with(name: &str, pages: u32) -> BatchOp {
     ddl::create_validator(name)
         .wasm(wasm(pages))
@@ -116,6 +112,33 @@ async fn create_with_table(db: &ShamirDb, root: &Path, name: &str, suffix: &str)
     bounded(db.add_repo(name, RepoConfig::new(REPO, BoxRepoFactory::fjall(&path))))
         .await
         .unwrap();
+    let mut batch = Batch::new();
+    batch.op("table", ddl::create_table(TABLE).repo(REPO).build());
+    let request = batch.to_request_via_msgpack().unwrap();
+    bounded(db.execute(name, &request)).await.unwrap();
+}
+
+/// Buffered in-memory fixture; no background drain occurs during the test.
+async fn create_with_buffered_table(db: &ShamirDb, name: &str) {
+    bounded(db.create_db(name)).await.unwrap();
+    bounded(db.add_repo(
+        name,
+        RepoConfig::new(
+            REPO,
+            BoxRepoFactory::membuffer(
+                BoxRepoFactory::in_memory(),
+                MemBufferConfig {
+                    max_bytes: 1_000_000,
+                    max_entries: 10_000,
+                    ttl_ms: None,
+                    flush_interval_ms: 60_000,
+                    flush_batch_size: 256,
+                },
+            ),
+        ),
+    ))
+    .await
+    .unwrap();
     let mut batch = Batch::new();
     batch.op("table", ddl::create_table(TABLE).repo(REPO).build());
     let request = batch.to_request_via_msgpack().unwrap();
@@ -334,24 +357,7 @@ fn bound_validator_registration_refuses_fenced_binding_holders() {
         );
     });
 }
-// ---------------------------------------------------------------------------
-// Round 3 (84-fence-round3) items 1 and 2: the binding-holder set used for
-// validator target admission, rename and the DROP "still bound" refusal is
-// derived from the tables' own persisted bindings at admission time, never
-// from the best-effort reverse index. A stale, missing or omitted
-// `bound_in` catalogue row must neither admit an actually-bound validator
-// nor falsely refuse a free one, and the `__system__` exemption follows
-// the internal store's IDENTITY (excluded by handle), not the reserved
-// NAME — a user database may legally be named `__system__`.
-//
-// Disk state is crafted only through existing seams: the test-only
-// `arm_catalogue_write_fault` countdown (real production failures — the
-// swallowed reverse-save of bind, the 7th write of the database rename),
-// the public `TableManager::add_validator_binding` API for a REAL internal
-// binding on the system repo's `settings` table, and the same WAL-backed
-// implicit-tx row patch the journal fixtures use for the stale-ref states
-// no production writer can produce.
-// ---------------------------------------------------------------------------
+// Round 4 items 6(b), 3, and the buffered binding-scope regressions.
 
 const OLD: &str = "olddb";
 const NEW: &str = "newdb";
@@ -360,13 +366,8 @@ const TABLE2: &str = "sentinel2";
 const SETTINGS_TABLE: &str = "settings";
 const REAL: &str = "real_bound_guard";
 const STALE: &str = "stale_guard";
-const INTERNAL: &str = "internal_ref_guard";
-const SYSBOUND: &str = "sys_bound_guard";
-const SYS: &str = "__system__";
 const GHOST_REF: &str = "ghost/nonexistent/sentinel";
 const VALIDATORS_TABLE: &str = "validators";
-const INTERNAL_REF: &str = "__system__/system/settings";
-const INTERNAL_PRIORITY: u16 = 1000;
 
 fn drop_validator_op(name: &str) -> BatchOp {
     ddl::drop_validator(name).hmac(HMAC).build().unwrap()
@@ -569,7 +570,8 @@ fn bound_validator_admission_survives_a_missing_reverse_row() {
         );
         drop(gate);
 
-        watchdog.mark("unfenced but still bound: the still-bound refusal stays");
+        // The repository backing for this target is a buffered, in-memory
+        // backend; it has no pending binding writes after unbind returns.
         refused_still_bound(
             &db,
             SERVING,
@@ -831,161 +833,147 @@ fn stale_reverse_rows_neither_block_a_replace_nor_admit_a_bound_one() {
     });
 }
 
-/// Item 2: the `__system__` exemption follows the internal store's
-/// IDENTITY, not the reserved NAME. The internal part is exercised against
-/// a REAL internal binding: the validator is bound through the public
-/// `TableManager::add_validator_binding` API to the system repo's
-/// `settings` table, the binding is flushed durably and verified after the
-/// restart through the persisted metadata envelope the authoritative scan
-/// itself reads. The internal holder never enters the reservation set (the
-/// internal store is excluded by HANDLE), so the replace admits — including
-/// while a user database is fenced below. The user part shows a database
-/// legally NAMED `__system__`: its own identity is reservable and fences
-/// its own holder with its own refusal code.
+/// Item 6(b): an acknowledged bind/unbind remains visible to an independent
+/// reverse scan even when the user repository uses a write-back buffer. The
+/// replacement, rename and DROP refusals must be target-fence refusals, while
+/// unbind before DROP must not be mistaken for a surviving stale envelope.
 #[test]
-fn user_system_database_is_fenced_by_identity_and_internal_refs_stay_exempt() {
+fn buffered_bindings_are_visible_to_foreign_validator_admission() {
     on_big_stack(|| async {
         let watchdog = FlakeGuard::with_watchdog(
-            "user_system_database_is_fenced_by_identity_and_internal_refs_stay_exempt",
+            "buffered_bindings_are_visible_to_foreign_validator_admission",
             Duration::from_secs(600),
         );
         let (dir, db) = bounded(persistent_db()).await;
         create_with_table(&db, dir.path(), SERVING, "fixture").await;
-
-        watchdog.mark("a REAL internal binding on the settings table");
-        admin(&db, SERVING, create_validator(INTERNAL)).await;
-        let internal_id = db.validators().id_for_name(INTERNAL).unwrap();
-        let settings = db
-            .system_store()
-            .system_repo()
-            .expect("system repo")
-            .get_table(SETTINGS_TABLE)
+        let mut lazy = Batch::new();
+        lazy.op(
+            "lazy",
+            ddl::create_table("lazy_untouched").repo(REPO).build(),
+        );
+        bounded(db.execute(SERVING, &lazy.to_request_via_msgpack().unwrap()))
             .await
-            .expect("the settings table");
-        settings
-            .add_validator_binding(ValidatorBinding {
-                validator_id: internal_id,
-                ops: vec![BindingWriteOp::Insert].into(),
-                priority: INTERNAL_PRIORITY,
-            })
-            .await
-            .expect("the internal binding persists through the public API");
-        db.system_store()
-            .flush_system_repo_durable(&settings)
-            .await
-            .expect("the internal binding flushes durably");
-
-        // The TableManager handle must not live across the reopen, or Fjall
-        // stays Locked on Windows.
-        drop(settings);
-
-        watchdog.mark("restart and verify the persisted metadata envelope");
-        let db = reopen(dir.path(), db).await;
-        assert_eq!(db.validators().id_for_name(INTERNAL).unwrap(), internal_id);
-        let persisted = db
-            .system_store()
-            .system_repo()
-            .expect("system repo")
-            .table_validator_bindings_metadata(SETTINGS_TABLE)
-            .await
-            .expect("read the persisted validators envelope")
-            .expect("settings carries a persisted binding envelope");
+            .unwrap();
+        let serving = db.get_db(SERVING).unwrap();
+        let serving_repo = serving.get_repo(REPO).unwrap();
+        let backing = serving_repo.seed_backing_repo();
+        let lazy_config = serving_repo.table_config("lazy_untouched").unwrap();
+        let lazy_binding_name =
+            table_store_names("lazy_untouched", lazy_config.store_id.as_ref()).info;
         assert!(
-            persisted
-                .bindings
-                .iter()
-                .any(|binding| binding.validator_id == internal_id),
-            "the internal binding survives the restart in the metadata"
+            !backing
+                .stores_list()
+                .await
+                .unwrap()
+                .contains(&lazy_binding_name),
+            "metadata scan must not create the earlier lazy table's info store"
         );
 
-        watchdog.mark("internal exemption: the replace admits without reservations");
-        let internal_hash = module_hash(&db, INTERNAL).await;
-        let replaced = admin(&db, SERVING, replace_validator(INTERNAL)).await;
-        assert_eq!(replaced["created_validator"].as_str(), Some(INTERNAL));
-        assert_ne!(
-            module_hash(&db, INTERNAL).await,
-            internal_hash,
-            "the internal-store binding must stay exempt from reservation"
-        );
+        create_with_buffered_table(&db, TARGET).await;
+        let target_repo = db.get_db(TARGET).unwrap().get_repo(REPO).unwrap();
+        let target_backing = target_repo.seed_backing_repo();
+        let target_info = target_repo
+            .table_config(TABLE)
+            .map(|config| table_store_names(TABLE, config.store_id.as_ref()).info)
+            .unwrap();
 
-        watchdog.mark("internal still-bound evidence (unfenced, internal-only)");
-        refused_still_bound(
-            &db,
-            SERVING,
-            drop_validator_op(INTERNAL),
-            INTERNAL_REF,
-            "drop of the internally bound validator",
-        )
-        .await;
-
-        watchdog.mark("a legal user database named __system__ fences its holder");
-        create_with_table(&db, dir.path(), SYS, "fixture").await;
-        admin(&db, SERVING, create_validator(SYSBOUND)).await;
-        let sysbound_id = db.validators().id_for_name(SYSBOUND).unwrap();
-        bind(&db, SYS, SYSBOUND).await;
-        assert_table_binds(
-            &db,
-            SYS,
-            REPO,
-            TABLE,
-            sysbound_id,
-            "user __system__ binding",
-        )
-        .await;
-        let gate = db
-            .reserve_schema_migration_gate(SYS)
-            .expect("the user __system__ identity is reservable");
-        let sysbound_hash = module_hash(&db, SYSBOUND).await;
+        admin(&db, SERVING, create_validator(BOUND)).await;
+        let bound_id = db.validators().id_for_name(BOUND).unwrap();
+        bind(&db, TARGET, BOUND).await;
+        let mut gate = db.reserve_schema_migration_gate(TARGET).unwrap();
         refused(
             &db,
             SERVING,
-            replace_validator(SYSBOUND),
+            replace_validator(BOUND),
             IN_PROGRESS,
-            "replace under the user __system__ fence",
+            "buffered replace",
         )
         .await;
         refused(
             &db,
             SERVING,
-            rename_validator(SYSBOUND, "moved"),
+            rename_validator(BOUND, "buffered_moved"),
             IN_PROGRESS,
-            "rename under the user __system__ fence",
+            "buffered rename",
         )
         .await;
         refused(
             &db,
             SERVING,
-            drop_validator_op(SYSBOUND),
+            drop_validator_op(BOUND),
             IN_PROGRESS,
-            "drop under the user __system__ fence",
+            "buffered drop",
         )
         .await;
-        assert_eq!(db.validators().id_for_name(SYSBOUND), Some(sysbound_id));
+        let store_names_after_scan = target_backing.stores_list().await.unwrap();
+        assert!(store_names_after_scan.contains(&target_info));
+        assert!(!backing
+            .stores_list()
+            .await
+            .unwrap()
+            .contains(&lazy_binding_name));
         assert_eq!(
-            module_hash(&db, SYSBOUND).await,
-            sysbound_hash,
-            "no artifact swap under the user __system__ fence"
+            db.validators().id_for_name(BOUND),
+            Some(bound_id),
+            "authoritative holder scan refused before mutating the validator"
         );
-
-        watchdog.mark("the internal ref stays exempt under that fence");
-        let internal_hash = module_hash(&db, INTERNAL).await;
-        let replaced = admin(&db, SERVING, replace_validator_distinct(INTERNAL)).await;
-        assert_eq!(replaced["created_validator"].as_str(), Some(INTERNAL));
-        assert_ne!(
-            module_hash(&db, INTERNAL).await,
-            internal_hash,
-            "the internal ref must not be captured by the user db's fence"
-        );
+        gate.mark_succeeded();
         drop(gate);
 
-        watchdog.mark("after release the user __system__ replace goes through");
-        let replaced = admin(&db, SERVING, replace_validator(SYSBOUND)).await;
-        assert_eq!(replaced["created_validator"].as_str(), Some(SYSBOUND));
-        assert_eq!(db.validators().id_for_name(SYSBOUND), Some(sysbound_id));
-        assert_ne!(
-            module_hash(&db, SYSBOUND).await,
-            sysbound_hash,
-            "the released replace must actually swap the module"
+        watchdog.mark("rename TABLE while free, then fence the renamed binding");
+        admin(
+            &db,
+            TARGET,
+            ddl::rename_table(TABLE, TABLE2).repo(REPO).build(),
+        )
+        .await;
+        let renamed_info = target_repo
+            .table_config(TABLE2)
+            .map(|config| table_store_names(TABLE2, config.store_id.as_ref()).info)
+            .unwrap();
+        assert!(
+            target_backing
+                .stores_list()
+                .await
+                .unwrap()
+                .contains(&renamed_info),
+            "rename must flush the destination metadata envelope before unbind"
         );
+
+        let mut renamed_gate = db.reserve_schema_migration_gate(TARGET).unwrap();
+        refused(
+            &db,
+            SERVING,
+            replace_validator(BOUND),
+            IN_PROGRESS,
+            "renamed-table replace",
+        )
+        .await;
+        refused(
+            &db,
+            SERVING,
+            rename_validator(BOUND, "buffered_moved"),
+            IN_PROGRESS,
+            "renamed-table rename",
+        )
+        .await;
+        refused(
+            &db,
+            SERVING,
+            drop_validator_op(BOUND),
+            IN_PROGRESS,
+            "renamed-table drop",
+        )
+        .await;
+        renamed_gate.mark_succeeded();
+        drop(renamed_gate);
+
+        watchdog.mark("unbind the renamed table without a manual drain");
+        admin(&db, SERVING, unbind_op(TARGET, REPO, TABLE2, BOUND)).await;
+        admin(&db, SERVING, drop_validator_op(BOUND)).await;
+        assert_eq!(db.validators().id_for_name(BOUND), None);
     });
 }
+
+#[path = "internal_system_binding_tests.rs"]
+mod internal_system_binding_tests;

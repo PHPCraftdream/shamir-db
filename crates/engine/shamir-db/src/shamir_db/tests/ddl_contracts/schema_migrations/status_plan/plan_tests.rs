@@ -24,9 +24,12 @@ use shamir_query_types::admin::types::schema_migration::{
     SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
     SchemaMigrationSubmission, SchemaMigrationTarget,
 };
+use shamir_query_types::WriteOp;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 use super::helpers::{body, checksum, context, persistent_db};
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
 use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, SchemaMigrationStep};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
@@ -500,6 +503,129 @@ async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
         .await
         .expect_err("an in-doubt migration refuses plan");
     assert_code(error, "schema_migration_in_doubt");
+}
+
+#[tokio::test]
+async fn lifecycle_reserved_validator_holder_is_in_progress_for_status_plan_and_apply() {
+    let (_dir, db) = persistent_db().await;
+    db.create_db("serving").await.unwrap();
+    db.create_db("testdb").await.unwrap();
+    db.add_repo(
+        "testdb",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()),
+    )
+    .await
+    .unwrap();
+    let mut create_table = Batch::new();
+    create_table.op("table", ddl::create_table("sentinel").repo("main").build());
+    db.execute("testdb", &create_table.to_request_via_msgpack().unwrap())
+        .await
+        .unwrap();
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 2)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0)
+        )"#,
+    )
+    .unwrap();
+    db.create_validator_from_wasm("shared_guard", &wasm, false)
+        .await
+        .unwrap();
+    db.bind_validator(
+        "testdb",
+        "main",
+        "sentinel",
+        "shared_guard",
+        vec![WriteOp::Insert],
+        1500,
+    )
+    .await
+    .unwrap();
+    let serving = db
+        .system_store()
+        .schema_migration_identity("serving")
+        .await
+        .unwrap();
+    let identity = db
+        .system_store()
+        .schema_migration_identity("testdb")
+        .await
+        .unwrap();
+
+    // Mirror APPLY's real validator-rename preflight: hold replication
+    // control while deriving the real binding holder and keep the returned
+    // capability alive for every classification call below.
+    let control = db.lock_replication_control().await;
+    let rename = db
+        .begin_validator_rename_migration(&["shared_guard".to_string()], Some(serving), &control)
+        .await
+        .unwrap_or_else(|_| panic!("validator rename preflight must succeed"));
+    drop(control);
+    // Ordinary mutation observers retain Lifecycle's generic conflict code;
+    // the migration admission classifier observes its in-progress meaning.
+    assert_eq!(
+        db.schema_migration_refusal_code(identity),
+        None,
+        "ordinary write observers keep Lifecycle as a generic conflict"
+    );
+
+    let pristine = db
+        .system_store()
+        .read_schema_migration_history(identity)
+        .await
+        .unwrap();
+    let migration = SchemaMigration::new("alpha-001", 1, "fresh table migration")
+        .op(ddl::create_table("items_1").repo("main").build())
+        .expect("typed create-table operation is admitted")
+        .build()
+        .expect("test migration body is valid");
+
+    let status = run_status(&db, identity).await;
+    assert_eq!(str_field(&status, "error"), "schema_migration_in_progress");
+    let plan_error = run_plan(
+        &db,
+        plan_request(
+            &identity,
+            predecessor(None, 0, [0; 32]),
+            vec![submission(&migration)],
+        ),
+    )
+    .await
+    .expect_err("PLAN must classify the holder lifecycle reservation");
+    assert_code(plan_error, "schema_migration_in_progress");
+    let apply_error = run_apply(
+        &db,
+        SchemaMigrationApplyRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: identity.0,
+            },
+            expected_predecessor: predecessor(None, 0, [0; 32]),
+            expected_fence_generation: 0,
+            migration: submission(&migration),
+        },
+    )
+    .await
+    .expect_err("fresh APPLY must classify the holder lifecycle reservation");
+    assert_code(apply_error, "schema_migration_in_progress");
+
+    let after = db
+        .system_store()
+        .read_schema_migration_history(identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, pristine,
+        "the three refusals write no journal events"
+    );
+    assert!(!db.get_db("testdb").unwrap().has_table("main", "items_1"));
+    drop(rename);
+    assert_eq!(
+        db.schema_migration_refusal_code(identity),
+        None,
+        "the Lifecycle reservation is released after the capability drops"
+    );
 }
 
 #[test]

@@ -420,7 +420,7 @@ impl ShamirDb {
         if seed {
             shamir.check_seed_catalogue().await?;
         }
-        // Load existing databases from system store
+        // Load existing databases; `__system__` is reserved internally.
         let db_records = shamir.system_store.load_databases().await?;
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {

@@ -27,6 +27,11 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
+        let err_validation = |message: String| BatchError::QueryError {
+            alias: String::new(),
+            message,
+            code: None,
+        };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
@@ -44,7 +49,6 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &ResourcePath::Root, Action::Create)
             .await
             .map_err(err_access)?;
-
         // TOCTOU close (task #546): hold `db_create_lock` across the WHOLE
         // exists-check -> create sequence, so two concurrent
         // `CREATE DATABASE` (or `IF NOT EXISTS`) calls for the SAME name
@@ -72,11 +76,12 @@ impl ShamirAdminExecutor {
         self.shamir
             .create_db_as_checked(&op.create_db, self.actor.clone())
             .await
-            .map_err(|e| {
-                err_code(
+            .map_err(|error| match error {
+                crate::DbError::Validation(message) => err_validation(message),
+                other => err_code(
                     "persist_failed",
-                    format!("failed to persist database '{}': {}", op.create_db, e),
-                )
+                    format!("failed to persist database '{}': {}", op.create_db, other),
+                ),
             })?;
         Ok(admin_result(mpack!({
             "created": true,
@@ -629,7 +634,6 @@ impl ShamirAdminExecutor {
 
         validate_name_component(&op.rename_db, "db_name")?;
         validate_name_component(&op.to, "db_name")?;
-
         // Match direct RENAME's lock order and authorize the name that will
         // actually be re-keyed, not a previous registration of that name.
         let _create_guard = self.shamir.db_create_lock().lock().await;

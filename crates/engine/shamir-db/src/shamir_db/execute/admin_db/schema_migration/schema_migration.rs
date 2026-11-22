@@ -105,19 +105,13 @@ impl ShamirAdminExecutor {
             .read_schema_migration_history(serving)
             .await
             .map_err(map_store_error)?;
-        // ONE shared classification with the plan arm (brief 84, finding 6):
-        // the process-local fence slot is sampled first (a live/reserved
-        // runner: in progress; a retained in-doubt marker: in doubt), and a
-        // vacant slot falls through to the durable journal rule STATUS has
-        // always used: an unresolved (in-doubt) history reports in doubt —
-        // including a journal-only `started` tail, whose interrupted run
-        // durably holds no effect yet but which the LEGACY status mapping
-        // also reported as in doubt (preserved; the committed test
-        // `status_with_an_owned_fence_reports_the_in_flight_owner` pins it).
-        let error = match schema_migration_state_code(
-            self.shamir.schema_migration_refusal_code(serving),
-            &history,
-        ) {
+        // Migration admission classification shared with plan and apply: a
+        // live/reserved runner or foreign Lifecycle reservation reports
+        // in progress; a retained marker or owned journal tail reports doubt.
+        let error = match self
+            .shamir
+            .schema_migration_admission_state_code(serving, &history)
+        {
             Some("schema_migration_in_progress") => {
                 Some(SchemaMigrationErrorCode::SchemaMigrationInProgress)
             }
@@ -135,28 +129,15 @@ impl ShamirAdminExecutor {
     }
 }
 
-/// The ONE shared state classification of the PLAN, STATUS and APPLY arms
-/// (brief 84, finding 6 — one helper, not a third copy). The process-local
-/// fence slot is sampled FIRST and decides: a live or reserved runner
-/// reports `schema_migration_in_progress`, a retained in-doubt marker
-/// reports `schema_migration_in_doubt`, exactly the precedence STATUS has
-/// always used (and APPLY's unresolved branch consults the same helper
-/// before its resume path; APPLY's applied-tail acknowledgement keeps its
-/// own ATOMIC reserve-plus-classify — `classify_applied_tail` — because it
-/// must reserve the release, not merely classify). A vacant slot falls
-/// through to the DURABLE journal rules: (a) `MigrationHistory::in_doubt` —
-/// an active migration interrupted before its fence release, whatever its
-/// last unresolved event is (`started` included) — reports
-/// `schema_migration_in_doubt`; (b) a journal tail of `Applied` without
-/// `FenceReleased` still DURABLY OWNS the fence (the migration completed,
-/// only the release is pending) and reports `schema_migration_in_doubt`.
-/// (a) deliberately supersedes the plan arm's legacy §4.2 `started` →
-/// in-progress mapping for the vacant-slot case: the shared code is the
-/// STRICTER refusal, it agrees with STATUS, whose committed test
-/// `status_with_an_owned_fence_reports_the_in_flight_owner` pins the legacy
-/// in-doubt reading of a journal-only `started` tail, and no refusal is
-/// weakened. STATUS never reported (b) either; PLAN did, and the shared
-/// helper now covers it so the plan arm keeps ONE classification.
+/// The ONE shared state classification of STATUS, PLAN and fresh APPLY
+/// (brief 87, item 4). The migration-only process-local observer maps a
+/// live/reserved runner or foreign Lifecycle reservation to
+/// `schema_migration_in_progress`, a retained marker to
+/// `schema_migration_in_doubt`. A vacant slot falls through to durable
+/// history: unresolved events and an Applied tail without FenceReleased both
+/// report in doubt. A matching unresolved resume still gets the identity and
+/// checksum checks in APPLY, and a matching Applied-tail retry keeps its
+/// atomic reserve/release path.
 pub(super) fn schema_migration_state_code(
     fence_refusal: Option<&'static str>,
     history: &MigrationHistory,

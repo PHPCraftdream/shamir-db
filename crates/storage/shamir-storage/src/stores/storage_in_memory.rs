@@ -50,6 +50,13 @@ impl Repo for InMemoryRepo {
         Ok(entry.value().clone() as Arc<dyn Store>)
     }
 
+    async fn store_get_existing(&self, name: &str) -> DbResult<Option<Arc<dyn Store>>> {
+        Ok(self
+            .stores
+            .get(name)
+            .map(|entry| Arc::clone(entry.value()) as Arc<dyn Store>))
+    }
+
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
         let name = name.as_ref();
         Ok(self.stores.remove(name).is_some())

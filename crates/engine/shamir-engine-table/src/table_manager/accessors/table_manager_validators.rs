@@ -36,8 +36,12 @@ impl TableManager {
     /// Append (or replace if same `validator_id`) a validator binding,
     /// persist to the info-twin, and swap the in-memory snapshot.
     ///
-    /// Bind is idempotent: if a binding with the same `validator_id`
-    /// already exists, it is replaced (updated `ops` + `priority`).
+    /// Idempotent. Rare administrative metadata writes are flushed before
+    /// return so independently opened read handles observe the new binding.
+    ///
+    /// cancel-safe: NO — once a binding has been saved, cancellation while
+    /// flushing can leave the durable metadata ahead of the in-memory snapshot;
+    /// retry or repository reopen reconciles the committed envelope.
     pub async fn add_validator_binding(
         &self,
         binding: ValidatorBinding,
@@ -68,12 +72,23 @@ impl TableManager {
         }
         crate::validator_bound::persistence::save_validators_metadata(&bindings, &self.info_store)
             .await?;
+        // Validator admission scans may open the same info store through a
+        // different repository wrapper. Drain AND persist this rare DDL
+        // metadata write before publishing the live snapshot, so buffered
+        // wrappers cannot hide an acknowledged binding or expose a stale
+        // unbinding to that independent read handle.
+        self.info_store.flush().await?;
         self.validator_bindings.store(Arc::new(bindings));
         Ok(())
     }
 
     /// Remove a validator binding by `validator_id`. Persists and swaps
     /// the in-memory snapshot. Returns whether the binding existed.
+    ///
+    /// Once persistence succeeds, the live snapshot is swapped before the
+    /// flush. Cancellation or a flush error can therefore leave durable
+    /// metadata conservatively retaining the old binding, but cannot expose
+    /// its removal while the validator is still live in this manager.
     pub async fn remove_validator_binding(
         &self,
         validator_id: &RecordId,
@@ -104,6 +119,10 @@ impl TableManager {
             )
             .await?;
             self.validator_bindings.store(Arc::new(bindings));
+            // Keep independent existing-only readers coherent for this rare
+            // DDL write. Publish first so cancellation or a flush error cannot
+            // leave persisted metadata unbound while this manager runs it.
+            self.info_store.flush().await?;
         }
         Ok(removed)
     }
