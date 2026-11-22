@@ -10,9 +10,9 @@
 
 1.1. **Один auth flow**, один transport-agnostic протокол. Различия — только в конверте.
 
-1.2. **Plain password никогда не покидает клиент.** Регистрация/смена пароля — derived ключи.
+1.2. **При login и self-service смене пароля plain password не покидает клиент.** При login клиент отправляет proof; при смене пароля клиент локально выводит ключи для нового пароля и отправляет их вместе с proof старого пароля. Исключение: admin-создание пользователя — `createUser`/`CreateScramUser` (§12.1) передаёт серверу пароль-строку и HMAC-подтверждение; ключи выводит сервер.
 
-1.3. **Argon2id ровно в одном месте:** `password → salted_password` на клиенте.
+1.3. **При login Argon2id выполняет клиент** для получения ключей, из которых строится login proof (§5.1). При self-service смене пароля клиент выполняет derivation и для старого proof, и для новых ключей (§13.4). В bootstrap wire exchange (§11.3.5) клиент выводит начальные ключи локально. При прямом admin-создании пользователя (§12.1) клиент передаёт пароль, а сервер выполняет Argon2id; это не клиентская derivation.
 
 1.4. **Server identity** через Ed25519, независимо от транспортного TLS. Pinning по `SHA256(server_pub_key)`.
 
@@ -95,7 +95,7 @@ The positional MessagePack `auth_ok` keeps its original 8 fields when neither hi
 ```
 { "error": "authentication_failed" }                      // generic для auth/replay/lockout
 { "error": "rate_limited", "retry_after": u32 }
-{ "error": "server_busy", "retry_after": u32 }
+{ "error": "server_busy", "retry_after": u32 }   // только auth-фаза; post-auth DB-отказ см. §14.3
 { "error": "unsupported_version" }
 ```
 
@@ -105,12 +105,12 @@ The positional MessagePack `auth_ok` keeps its original 8 fields when neither hi
 
 3.1. Доступна только через `bootstrap` (§11) или `createUser` admin command (§12.1).
 
-3.2. **Password policy** проверяется клиентом (server не может verify через SCRAM by design):
+3.2. Политику пароля проверяет клиент при bootstrap wire exchange (§11.3.5); при прямом admin-создании (§12.1) пароль получает сервер.
 - `PASSWORD_MIN_LENGTH = 12 символов` UTF-8
 - `PASSWORD_MAX_LENGTH = 1024 символа`
 - Запрет: empty, only whitespace, single repeated char
 
-3.3. Клиент локально:
+3.3. В bootstrap wire exchange (§11.3.5) клиент локально выводит ключи из пароля и серверных параметров KDF:
 ```
 salt           = random(16)
 salted_password = Argon2id(password, salt, server_kdf_params)
@@ -119,8 +119,9 @@ stored_key     = SHA256(client_key)
 server_key     = HMAC-SHA256(salted_password, "Server Key")
 zeroize: password, salted_password, client_key
 ```
+Это описание bootstrap exchange, а не self-service смены пароля: при ней ключи выводятся локально из нового пароля с параметрами, возвращёнными в change-password challenge (§13.4).
 
-3.4. На сервер уходит `{salt, stored_key, server_key, kdf_params}`. **Plain password и `password_length` НЕ передаются.**
+3.4. В bootstrap wire exchange на сервер передаются `{salt, stored_key, server_key, kdf_params}`; plain password и `password_length` не передаются. Этот контракт не относится к прямому admin-созданию `createUser` (§12.1), где сервер получает пароль и сам выводит ключи. Self-service смена пароля использует отдельный challenge/verify flow (§13.4).
 
 3.5. Сервер сохраняет в `__system__/users/{user_id}`:
 ```
@@ -223,7 +224,7 @@ binding_mode == 0x02 → bytes(32) all zeros (browser; ослабленный р
 - WSS native listener: `binding_mode == 0x01`
 - WSS browser listener: `binding_mode == 0x02` (отдельный endpoint, см. TRANSPORT_WS.md)
 
-**MUST:** Server **обязан** rejектить `auth_init` где `binding_mode` не входит в listener policy **до** запуска Argon2id (защита от DoS amplification — иначе атакующий flood'ит mismatched binding_mode и forces 128 MB × time=4 на каждый запрос).
+**MUST:** Server **обязан** reject `auth_init` где `binding_mode` не входит в listener policy **до challenge**. Login proof-verify не выполняет server-side Argon2id; этот порядок проверок не является запуском или защитой от server-side login KDF.
 
 Reject = silent close без error message (анти-fingerprinting listener policy).
 
@@ -508,7 +509,7 @@ Cost: один `u64 <=` compare per request — тривиально.
 | `ARGON2_CONCURRENT_MAX` | configured `argon2_concurrent_max` (default 64, valid 1..=1024) — caps **server-side user-creation KDF** only; login handshakes take no permit |
 | `MAX_CONNECTIONS_PER_IP` | 100 |
 
-8.1. **Argon2id semaphore** (`argon2_concurrent_max`) НЕ применяется к login handshakes: proof-verify path не выполняет server-side Argon2id и не берёт permit (burst ограничен connection cap + per-subnet `auth_init` rate limit). Permit берут **только privileged server-side derivations** — SCRAM-запись при **user creation** (admin `createUser`), с fixed 3s busy deadline → busy refusal (metric `shamir_argon2_busy_refusals_total`). Bootstrap-создание superuser — exceptional: ungated derivation со случайным паролем. Pre-state до proof занимает 1KB слот, не permit.
+8.1. **Argon2id semaphore** (`argon2_concurrent_max`) не применяется к login handshakes: proof-verify не выполняет server-side Argon2id и не берёт permit (burst ограничен connection cap + per-subnet `auth_init` rate limit). Permit берут только privileged server-side derivations — SCRAM-запись при user creation (admin `createUser`/`CreateScramUser`). Gate admission происходит до blocking pool: допускается не более `2 × capacity` derivations одновременно (работающие или ожидающие permit); сверх этого запрос немедленно получает `server_busy`, и работа в blocking pool не отправляется. Допущенный запрос ждёт permit до 3 секунд с момента admission, включая время в очереди blocking pool; это deadline ожидания permit, не жёсткий срок ответа или запроса. Ошибка чтения часов или расчёта deadline приводит к отказу как при admission, так и при получении permit; истечение ожидания также даёт отказ. Каждый отказ увеличивает `shamir_argon2_busy_refusals_total` ровно один раз. Часы не описываются как монотонные. Bootstrap-создание superuser (explicit-password или random-token режим) и ротация bootstrap-token при первом token login — exceptional ungated derivations. Pre-state до proof занимает 1KB слот, не permit. Post-auth DB-отказ `server_busy` из-за занятого per-session in-flight slot — отдельный путь и Argon2 counter не трогает.
 
 8.2. **Pre-handshake state GC** каждые 5 секунд: state без proof в течение `HANDSHAKE_TIMEOUT` (= `max(15s, kdf_time × 5)`) → drop.
 
@@ -581,6 +582,8 @@ Mitigation для этих случаев = generic errors + generic latency + �
 Защита от silent re-bootstrap при corrupted backup: после первого успешного bootstrap флаг `superuser_ever_existed = true` навсегда (даже после deletion всех юзеров).
 
 ### 11.2. Token issuance
+
+11.2.0. Режимы первого администратора: кроме random-token режима ниже существует **explicit-password boot** — оператор передаёт пароль при первом запуске (`ensure_superuser`, server-side ungated derivation, §8.1). Повторный boot с тем же паролем — no-op; с другим — существующую запись **не** ротирует (ротация пароля — отдельный flow).
 
 11.2.1. `bootstrap_token = random(32)`, prefix `shbst1_` для git-secret-scanners.
 11.2.2. Сервер сохраняет атомарно: `bootstrap_token_hash = SHA256(token)`, `bootstrap_token_expires_at_ns = now_ns + bootstrap_token_ttl_ns`.
@@ -679,26 +682,17 @@ Lost admin → `shamir-server --regen-bootstrap --confirm` (требует stop 
 
 Все выполняются внутри активной auth-сессии. Authorization — `is_superuser` в `SessionPermissions`. Audit event на каждое выполнение.
 
-### 12.1. `createUser`
+### 12.1. `createUser` (`create_scram_user`)
+
+Top-level `DbRequest` (не `BatchOp`), отправляется внутри активной auth-сессии superuser'а. Клиент шлёт **пароль-строку**; сервер сам выполняет Argon2id (gated, §8.1) и пишет запись в user directory:
 
 ```
-Request:  { "createUser": {
-              "name": String,
-              "salt": bytes(16),
-              "stored_key": bytes(32),
-              "server_key": bytes(32),
-              "memory_kb": u32,
-              "time": u32,
-              "parallelism": u32,
-              "argon2_version": u8,
-              "roles": Vec<String>
-           }}
-Response: { "ok": { "user_id": bytes(16) } }
+Request:  { "op": "create_scram_user", "name": String, "password": String, "roles": Vec<String> (default []), "hmac": String (required hex HMAC-SHA256) }
+Response: { "kind": "user_created", "name": String, "user_id": bytes(16) }   // name — normalized
+Busy:     { "kind": "error", "code": "server_busy", "message": "password derivation is busy; retry later" }
 ```
-Server validates:
-- `kdf_params == server_defaults` (anti-enumeration invariant)
-- `kdf_params >= floor` (§3.7.2)
-- Username unique (PRECIS + NFC normalized для lookup)
+
+HMAC key берётся из текущего session id (`derive_session_hmac_key`); клиент вычисляет tag для канонических байтов запроса. `canonical_db_request` — источник канонического кодирования: для `CreateScramUser` это префикс `shamir-db hmac canonical v2\0`, tag `0x0019` в big-endian, затем `name` и список `roles` с длинами в big-endian. Password и сам `hmac` в канонические байты не входят. HMAC аутентифицирует запрос, но не шифрует его: при передаче по сети используйте TLS. Сервер выбирает свежую соль и `kdf_defaults`, выводит ключи и сохраняет запись. Порядок проверок сервером: superuser permission → HMAC tag (`hmac_required` / `hmac_mismatch`) → normalization → gated derivation (`server_busy`, без мутации) → insert (`user_exists` при коллизии). Старый контракт «клиент шлёт prederived `salt`/`stored_key`/`server_key`» не существует.
 
 ### 12.2. `rotateServerIdentity`
 
@@ -796,7 +790,7 @@ Response: { "ok": { "changes_applied": bool } }
 - (b) **Sessions созданные между step 2 и step 4** (resume concurrent): покрываются **per-request session validity check** (§7.5) — на следующем request session detected as invalidated и kicked
 - Step 4 = best-effort eager eviction для immediate kill TCP connection. Без §7.5 step 4 был бы insufficient race window.
 
-(Self-service смена пароля удалена в v1: admin пересоздаёт юзера через CLI delete + `createUser` (§12.1). Self-service password rotation — кандидат на v1.1.)
+(Self-service смена пароля **существует** в v1: `ChangePasswordChallenge` / `ChangePasswordVerify` arms. Клиент выводит ключи из старого и нового паролей; сервер проверяет старый proof и сохраняет новые ключи. Подробности — §13.4.)
 
 ### 12.5.1. `setSuperuser` (admin)
 
@@ -870,15 +864,11 @@ access.
 
 13.1. KDF params хранятся per-user в user record (§3.5).
 
-13.2. Глобальный server config — `kdf_params_current` — для новых регистраций и migration target. Должен соответствовать floor (§3.7.2).
+13.2. Параметры KDF хранятся в записи пользователя и возвращаются в change-password challenge. `kdf_defaults` — параметры для создания новых пользователей; соответствующая запись получает выбранные сервером при создании параметры.
 
-13.3. При login сервер использует stored kdf_params для verify.
+13.3. При login proof проверяется по сохранённым `stored_key` и `server_key`; сервер не выводит парольные ключи и не запускает KDF. В challenge смены пароля сервер возвращает сохранённый набор `kdf_params`.
 
-13.4. Если `user.kdf_params != kdf_params_current` AND все params strictly_weaker (memory_kb/time/parallelism все ≤ current):
-- В `auth_ok` сервер шлёт `"kdf_upgrade_required": true` как **информационный hint** для клиента/operator audit.
-- В v1 self-service KDF upgrade **отсутствует** (вместе с self-service password rotation — удалена в v1). Migration выполняется admin-driven: пересоздание юзера через `createUser` (§12.1) с current `kdf_params_current`.
-- Audit event `kdf_params_upgrade_required` (server-side hint).
-- v1.1 ROADMAP: dedicated `kdfUpgrade` endpoint, который re-derive'ит `stored_key`/`server_key` под current params без kill sessions.
+13.4. При `ChangePasswordVerify` клиент уже вывел новые ключи из нового пароля и передаёт их с proof старого пароля. Сервер проверяет старый proof и записывает новые ключи в ту же запись вместе с неизменённым `record.kdf_params` из challenge. Это обычная смена пароля, не миграция KDF: сервер не выполняет ни одну из derivations и self-service KDF upgrade не происходит. `kdf_upgrade_required`, если присутствует, является информационным hint, а не обещанием автоматической миграции. Для обычной смены пароля удалять и заново создавать пользователя не требуется.
 
 13.5. Anti-enumeration: для unknown user сервер возвращает **current** kdf_params. Старые юзеры с устаревшими params видны атакующему — known trade-off.
 
@@ -896,8 +886,8 @@ access.
 - `known_hosts_integrity_failed` — MAC файла не сошёлся
 
 14.3. Server-side прочие:
-- `rate_limited` (с retry_after)
-- `server_busy` (с retry_after)
+- `rate_limited` (с retry_after) — auth-фаза
+- `server_busy` — два разных контекста: (a) auth-фаза с `retry_after`; (b) post-auth DB-отказ с кодом и сообщением, без `retry_after`: gate при создании пользователя (§8.1) или отказ в получении per-session in-flight slot. Эти DB-отказы не являются auth-ответом; in-flight slot отказ не увеличивает Argon2 counter.
 - `unsupported_version`
 - `bootstrap_failed`
 

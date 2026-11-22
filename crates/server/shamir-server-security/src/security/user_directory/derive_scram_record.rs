@@ -49,18 +49,20 @@ pub async fn derive_scram_record(password: String, kdf: KdfParams) -> Result<Use
 }
 
 /// Gated derivation of a SCRAM `UserRecord` (Argon2id) from a plaintext
-/// password under the given KDF params, holding an `Argon2Semaphore`
-/// permit around the Argon2id KDF only (via `ScramDerivationGate::run`),
-/// inside a `spawn_blocking` task.
+/// password under the given KDF params. Admission and its absolute three-second
+/// permit deadline are fixed before submitting to `spawn_blocking`; an admitted
+/// job retains its RAII admission ticket through salt generation, KDF, record
+/// assembly, and password-buffer zeroization.
 ///
-/// The plaintext is consumed into a `Zeroizing` buffer synchronously,
-/// before the future exists, so a never-polled and dropped future
-/// retains no unzeroized password bytes.
+/// The plaintext is consumed into a `Zeroizing` buffer synchronously, before
+/// the future exists, so a never-polled and dropped future retains no
+/// unzeroized password bytes.
 ///
-/// cancel-safe: yes — if the caller drops the future before it
-/// resolves, the detached blocking task may still finish, but it holds
-/// and reclaims its own permit and persists no result anywhere; the
-/// synchronous zeroization above has already happened before any polling.
+/// cancel-safe: yes — dropping this future after submission detaches the
+/// blocking job, whose admission ticket is retained until the job and its
+/// zeroizing password buffer finish; if dropped before polling, no job or
+/// admission is created and the synchronously-created password buffer is
+/// zeroized when the future is dropped.
 pub fn derive_scram_record_gated(
     password: String,
     kdf: KdfParams,
@@ -69,11 +71,19 @@ pub fn derive_scram_record_gated(
     let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
 
     async move {
+        // Admission and deadline are fixed before the blocking pool can queue
+        // this job. A full gate returns Busy without submitting any work.
+        let ticket = gate.admit()?;
+        let deadline_ns = ticket.deadline_ns;
         let join_result = tokio::task::spawn_blocking(move || {
+            // Locals drop in reverse declaration order: the zeroizing password
+            // buffer is cleared before the admission ticket releases capacity.
+            let _ticket = ticket;
+            let pw_buf = pw_buf;
             let salt =
                 try_random_array().map_err(|e| ScramDerivationError::Failed(e.to_string()))?;
             let derived = gate
-                .run(|| DerivedKeys::derive(&pw_buf, &salt, &kdf))?
+                .run(deadline_ns, || DerivedKeys::derive(&pw_buf, &salt, &kdf))?
                 .map_err(|e| ScramDerivationError::Failed(format!("argon2id: {e}")))?;
             Ok(user_record(derived, salt, kdf))
         })

@@ -2,7 +2,8 @@
 ## (≈6 GiB effective budget). Copy to /etc/shamir/server.ktav and adjust
 ## paths/ports for your deployment.
 ##
-## Sizing formula for this profile's Argon2 auth-RAM ceiling:
+## Base formula for Argon2id matrix memory (before implementation overhead;
+## approximate and variable with the configured KDF parameters):
 ##   argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
 ##   container/host RAM (KiB).
 ## Example: a 4 GiB container → ~1 GiB budget → memory_kb=131072 (128 MiB)
@@ -37,9 +38,10 @@ logging: {
     slow_query_threshold_ms: 1000
 }
 
-## Argon2id KDF for new users. Spec §3.7.2 floor is 19_456 / 2 / 1; the
-## values below are 4× memory and roughly match OWASP's "Argon2id 7 MB,
-## t=2, p=1, take ~50 ms". Tune to match your auth-rate budget.
+## Argon2id KDF for new users. Spec §3.7.2 floor is 19_456 / 2 / 1.
+## These values set client login cost and server provisioning workload.
+## Argon2 matrix memory is allocated only by running KDFs and varies with
+## configured parameters; the base estimate above excludes implementation overhead.
 kdf_defaults: {
     ## 128 MiB (spec §3.7.2 default).
     memory_kb: 131072
@@ -49,9 +51,10 @@ kdf_defaults: {
     argon2_version: 19
 }
 
-## Server-wide cap on concurrent Argon2id verifies. Each verify holds
-## `memory_kb` of RAM for a few hundred ms, so this directly bounds peak
-## auth-RAM. 12 × 128 MiB = 1536 MiB worst case (~25% of a 6 GiB budget).
+## Server-wide limit on concurrently running Argon2id KDFs for user creation, not logins.
+## Up to 2 × this setting are admitted before the blocking pool; excess work is
+## refused immediately. Only running KDFs allocate the Argon2 matrix memory.
+## 12 × 128 MiB gives an approximate 1536 MiB matrix working set at these parameters.
 argon2_concurrent_max: 12
 
 ## Network endpoints. Multiple listeners can run concurrently — each

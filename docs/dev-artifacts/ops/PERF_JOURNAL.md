@@ -282,7 +282,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | MemBuffer dirty SipHash → FxHash | #24, reverted | Mixed bench (/2 +12%, /8 −7%). RecordKey hash не на критическом пути той же природы что fixed-size auth keys. |
 | OrderBy DSU precompute | #35, reverted | pdqsort comparator уже эффективен; saved BTreeMap lookups cancel с indirection через perm[] + bookkeeping. |
 | Slot enum tagged-pointer (MemBuffer) | #46 closed | `Option<Bytes>` тот же 40 bytes (нет niche optim — `Bytes::ptr` raw `*const`). Tagged-pointer unsafe не оправдан. |
-| UnixNanos::now() × 3 в handshake | #47 closed | 300 ns vs 3 сек Argon2 = 0.00001%. Argon2 ограничен семафором ~10/sec. |
+| UnixNanos::now() × 3 в handshake | #47 closed | 300 ns vs client-side Argon2id derivation latency; server proof verification performs no KDF and acquires no permit. |
 | Filter compile cache LRU | #48 closed | compile_filter ~1-10 µs / query — не доминирует. Cache invalidation при interner state change — complex. |
 | RecordKey Bytes inline (Arc<[u8;16]>) | #49 closed | `Bytes` crate не поддерживает inline storage для 16-byte buffers — always heap. RecordId-as-Bytes — big refactor, ломает Copy. |
 | bincode 1.x → 2.x | пропущен в разведке | Используется только для index metadata (admin path), не query hot path. ROI низкий. |

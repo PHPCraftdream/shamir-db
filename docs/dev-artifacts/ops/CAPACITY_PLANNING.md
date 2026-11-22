@@ -13,37 +13,32 @@ metrics from `/metrics` for your specific deployment.
 | Idle process | ~50 MB | tokio multi-thread runtime + redb mmap regions for the open databases |
 | Active session | ~2 KB | `Session` struct (32 KB user_id, 16 KB username, ~96 KB permission cache, parking-lot mutex slot, channel binding) |
 | Active connection | ~8 KB | tokio task stack (~4 KB) + per-connection scratch buffers (`frame_buf` 4 KB, `write_scratch` 4 KB, RAII guard for `ConnLimiter`) |
-| Argon2id verify (peak) | ~`memory_kb` × 1.05 | Held for ~50–500 ms per verify depending on cost params; capped concurrent by `argon2_concurrent_max` |
+| Argon2id working memory | ~`kdf_defaults.memory_kb × 1.05` KiB | Per running user-creation KDF; `argon2_concurrent_max` caps concurrency. |
 | Audit chain in-memory | ~1 KB | `AuditChain` HMAC state + last seq |
 | Audit batched buffer | up to ~20 KB | Drained every 5 s in `Durab::Batched` mode |
 | `RedbConsumedCounters` | ~16 bytes per (user × family) entry | GC'd by scheduler |
 | Lockout entries | ~80 bytes per (subnet × user) pair | GC'd every 5 min |
 | Rate-limiter buckets | ~24 bytes per subnet | GC'd every 5 min |
 
-**Worst-case auth-time RAM** = `argon2_concurrent_max × kdf_defaults.memory_kb`.
-With the defaults `64 × 128 MB = 8 GB`. Lower the cap if peak RAM is the
-binding constraint; lower `kdf_defaults.memory_kb` only if you're
-willing to weaken password security.
+**Gated KDF working memory** ≈ `argon2_concurrent_max × kdf_defaults.memory_kb × 1.05` KiB, not peak process RAM. Queued blocking jobs retain passwords and task state, and permit waiters use thread stacks. Bootstrap, bootstrap-token rotation, follower outbound SCRAM, and SQL `argon2id` use memory independently.
 
 **Steady-state RAM** ≈ `idle + (active_sessions × 2 KB) + (active_connections × 8 KB)`.
 For 10 000 concurrent sessions × 8 000 connections that's roughly
-`50 MB + 20 MB + 64 MB = 134 MB` in addition to whatever Argon2 is
-doing right now.
+`50 MB + 20 MB + 64 MB = 134 MB`, before the Argon2 matrix memory and other
+independently consumed memory described above.
 
 ## CPU
 
 | Operation | Cost | Notes |
 |-----------|------|-------|
-| Argon2id verify | ~50 ms (defaults) | Linear in `memory_kb × time × parallelism`. Bound by `argon2_concurrent_max` |
+| Argon2id derivation (server, user creation) | Depends on `kdf_defaults` and hardware | Admission caps submitted jobs, not blocking-pool isolation; login proof verification runs no server-side KDF |
 | TLS 1.3 handshake | ~5 ms | rustls + aws-lc-rs; one-off per connection |
 | Post-auth request | ~20 µs | RequestEnvelope decode → dispatch → ShamirDb query (fast path) |
 | Batch query (cold) | ~1 ms / query | Filter compile + index lookup + serde encode |
 | `/metrics` poller | ~30-50 µs every 5 s | `metrics-process` reads `/proc/self/*` (~0.001 % CPU) |
 | Scheduler tasks | ~100 µs per tick | counter_gc / lockout_gc / etc. |
 
-**Auth-handshake throughput** ≈ `argon2_concurrent_max × (1000 ms / kdf_time_ms)`.
-Defaults: `64 × (1000 / 50) ≈ 1280 successful auths/sec`. Lockout +
-rate-limit bound a single attacker to far fewer attempts.
+Actual user-creation performance depends on KDF parameters, workload, runtime, and hardware. Measure it separately; the exported metrics measure gate load and refusals, not successful creation throughput. Ordinary login proof verification runs no server-side KDF.
 
 **Post-auth request throughput** ≈ `cores × 50 000 req/sec` for fast-
 path queries (dominated by msgpack encode). Slow queries with index
@@ -166,7 +161,7 @@ your `/metrics` data after a week of production traffic.
 ### Small (developer / single-tenant pilot)
 
 - 2 vCPU, 2 GB RAM, 20 GB SSD
-- `argon2_concurrent_max: 16` (worst-case 2 GB Argon2 RAM at 128 MB cost)
+- `argon2_concurrent_max: 16` (≈2.1 GiB gated KDF working memory at 128 MiB cost)
 - `max_active_connections: 1000`
 - Up to ~100 concurrent users, ~10 RPS sustained
 
@@ -193,9 +188,13 @@ P2 feature — see `../roadmap/PRODUCTION_HARDENING_ROADMAP.md`.
 
 ## Things that will hurt you if you ignore them
 
-* **Argon2id RAM × concurrency = peak server RAM.** A KDF tuning that
-  looks great for security (`memory_kb: 512000`) combined with
-  `argon2_concurrent_max: 64` reserves 32 GB for KDF alone. Don't.
+* **Argon2id working memory × concurrency.** A KDF tuning that looks
+  great for security (`memory_kb: 512000`) combined with
+  `argon2_concurrent_max: 64` means ~32 GB of gated KDF working memory
+  alone. This estimates only the gated user-creation gate — queued
+  password/task state, waiter stacks, bootstrap/rotation, follower SCRAM
+  and SQL `argon2id` add memory on top. Don't assume it covers peak
+  process RAM.
 * **Audit log without rotation** fills the disk in days. We rotate by
   default (100 MB / 30 days); leave it on.
 * **Slow queries serialise on Tokio workers** (because `block_in_place`

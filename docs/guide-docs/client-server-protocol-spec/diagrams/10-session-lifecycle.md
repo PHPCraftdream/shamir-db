@@ -11,9 +11,9 @@ stateDiagram-v2
     
     state PreAuth {
         [*] --> AwaitInit
-        AwaitInit --> AwaitProof: auth_init received,<br/>handshake_state created,<br/>(pre-Argon2id binding_mode check)
+        AwaitInit --> AwaitProof: auth_init received,<br/>handshake_state created,<br/>binding_mode policy checked before challenge
         AwaitProof --> AwaitProof: challenge sent
-        AwaitInit --> AwaitInit: rate_limited / server_busy<br/>(stays in PreAuth)
+        AwaitInit --> [*]: per-subnet auth_init rate limit<br/>checked before reading auth_init;<br/>increment rate_limited metric, close connection
     }
     
     PreAuth --> [*]: HANDSHAKE_TIMEOUT (≥15s)<br/>handshake_state GC

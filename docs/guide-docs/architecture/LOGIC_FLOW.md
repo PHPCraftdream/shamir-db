@@ -85,10 +85,14 @@ Running alongside the main current:
 - **Argon2Semaphore** (capacity = configured `argon2_concurrent_max`) caps
   server-side Argon2id derivations triggered by privileged user-creation.
   SCRAM proof verification never runs Argon2id, so ordinary logins never
-  queue on the gate — but KDF can still occur on the login path for
-  privileged user-creation flows, which are gated. Bootstrap superuser
-  creation and bootstrap-token rotation (including the first login with a
-  bootstrap token) retain the existing ungated behavior.
+  queue on the gate. Gated user creation runs **after** authentication
+  (an authenticated superuser session calls `create_scram_user`) — it is
+  not part of the login path. The gate admits at most `2 × capacity`
+  derivations (running or waiting); further requests are refused at once.
+  Bootstrap superuser creation and bootstrap-token rotation (including
+  the first login with a bootstrap token) retain the existing **ungated**
+  behavior — that first token login is the one login-path flow that can
+  run a KDF, and it does not touch the gate or its metrics.
 - **RateLimit / Backoff / Lockout** — three layers of brute-force
   defence: per-subnet sliding window, per-`(subnet, user_hash)`
   exponential backoff, durable lockout after 50 failures per hour.

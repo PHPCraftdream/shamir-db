@@ -18,11 +18,10 @@
 //! Argon2 semaphore stays bounded.
 
 use crate::common::error::EnvironmentError;
-use crate::common::time::{ns, UnixNanos};
+use crate::common::time::UnixNanos;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Condvar;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// Spec §8 table: 64 concurrent Argon2id permits.
 pub const MAX_CONCURRENT_ARGON2: u32 = 64;
@@ -98,24 +97,107 @@ impl Argon2Semaphore {
         deadline_ns: u64,
         now: impl Fn() -> Result<UnixNanos, EnvironmentError>,
     ) -> Option<Argon2Permit<'_>> {
-        if let Some(p) = self.try_acquire() {
-            return Some(p);
-        }
+        let started = Instant::now();
+        self.acquire_until_with_sources(
+            deadline_ns,
+            now,
+            || started.elapsed(),
+            || self.try_acquire(),
+            |guard, _lock, cvar, wait_dur| {
+                cvar.wait_timeout(guard, wait_dur)
+                    .map(|(guard, _)| guard)
+                    .map_err(|_| ())
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_until_with_test_sources<'a, N, E, A, W>(
+        &'a self,
+        deadline_ns: u64,
+        now: N,
+        elapsed: E,
+        attempt: A,
+        wait: W,
+    ) -> Option<Argon2Permit<'a>>
+    where
+        N: FnMut() -> Result<UnixNanos, EnvironmentError>,
+        E: FnMut() -> Duration,
+        A: FnMut() -> Option<Argon2Permit<'a>>,
+        W: FnMut(
+            MutexGuard<'a, ()>,
+            &'a Mutex<()>,
+            &'a Condvar,
+            Duration,
+        ) -> Result<MutexGuard<'a, ()>, ()>,
+    {
+        self.acquire_until_with_sources(deadline_ns, now, elapsed, attempt, wait)
+    }
+
+    fn acquire_until_with_sources<'a, N, E, A, W>(
+        &'a self,
+        deadline_ns: u64,
+        mut now: N,
+        mut elapsed: E,
+        mut attempt: A,
+        mut wait: W,
+    ) -> Option<Argon2Permit<'a>>
+    where
+        N: FnMut() -> Result<UnixNanos, EnvironmentError>,
+        E: FnMut() -> Duration,
+        A: FnMut() -> Option<Argon2Permit<'a>>,
+        W: FnMut(
+            MutexGuard<'a, ()>,
+            &'a Mutex<()>,
+            &'a Condvar,
+            Duration,
+        ) -> Result<MutexGuard<'a, ()>, ()>,
+    {
+        // Project the wall-clock budget at entry onto a monotonic elapsed time.
+        // `u64::MAX` remains the existing explicit indefinite-wait sentinel.
+        let monotonic_origin = elapsed();
+        let entry_ns = now().ok()?.as_u64();
+        let projected_budget = if deadline_ns == u64::MAX {
+            Duration::MAX
+        } else {
+            if entry_ns >= deadline_ns {
+                return None;
+            }
+            Duration::from_nanos(deadline_ns - entry_ns)
+        };
 
         let (lock, cvar) = &self.notify;
         let mut guard = lock.lock().ok()?;
         loop {
-            if let Some(p) = self.try_acquire() {
-                return Some(p);
-            }
+            // Check wall and monotonic budgets before each attempt, including
+            // the first free-permit attempt and every wake from the Condvar.
             let now_ns = now().ok()?.as_u64();
-            if now_ns >= deadline_ns {
+            let monotonic_elapsed = elapsed().saturating_sub(monotonic_origin);
+            let remaining =
+                remaining_budget(deadline_ns, projected_budget, monotonic_elapsed, now_ns)?;
+
+            // Serialize timed acquisitions with releases. The production timed
+            // path holds the waiter mutex around the optimistic attempt.
+            if let Some(permit) = attempt() {
+                let post_acquire = now().ok().and_then(|time| {
+                    remaining_budget(
+                        deadline_ns,
+                        projected_budget,
+                        elapsed().saturating_sub(monotonic_origin),
+                        time.as_u64(),
+                    )
+                });
+                if post_acquire.is_some() {
+                    drop(guard);
+                    return Some(permit);
+                }
+                drop(guard);
+                drop(permit);
                 return None;
             }
-            let remaining_ns = deadline_ns - now_ns;
-            let wait_dur = Duration::from_nanos(remaining_ns.min(ns::SECOND));
-            let (g, _) = cvar.wait_timeout(guard, wait_dur).ok()?;
-            guard = g;
+
+            let wait_dur = remaining.min(Duration::from_secs(1));
+            guard = wait(guard, lock, cvar, wait_dur).ok()?;
         }
     }
 
@@ -127,10 +209,39 @@ impl Argon2Semaphore {
 
     /// Release one permit (called automatically by `Argon2Permit::drop`).
     fn release(&self) {
-        self.available.fetch_add(1, Ordering::Release);
-        let (_lock, cvar) = &self.notify;
-        cvar.notify_one();
+        self.release_with_notify(|_, cvar| cvar.notify_one());
     }
+
+    fn release_with_notify(&self, notify: impl FnOnce(&Mutex<()>, &Condvar)) {
+        let (lock, cvar) = &self.notify;
+        // The permit increment and notification stay under the waiters mutex.
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.available.fetch_add(1, Ordering::Release);
+        notify(lock, cvar);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_with_test_notify(&self, notify: impl FnOnce(&Mutex<()>, &Condvar)) {
+        self.release_with_notify(notify);
+    }
+}
+
+fn remaining_budget(
+    deadline_ns: u64,
+    projected_budget: Duration,
+    elapsed: Duration,
+    now_ns: u64,
+) -> Option<Duration> {
+    if deadline_ns == u64::MAX {
+        return Some(Duration::MAX);
+    }
+    if now_ns >= deadline_ns || elapsed >= projected_budget {
+        return None;
+    }
+    let wall_remaining = Duration::from_nanos(deadline_ns - now_ns);
+    Some(wall_remaining.min(projected_budget - elapsed))
 }
 
 impl core::fmt::Debug for Argon2Semaphore {

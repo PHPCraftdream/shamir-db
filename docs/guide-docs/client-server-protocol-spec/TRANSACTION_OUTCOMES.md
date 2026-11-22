@@ -312,7 +312,7 @@ allowlist of every operation-specific DDL/query code.
 | `validation` | `CircularDependency`, `UnknownAlias`, `AfterPathIgnored`, `InvalidWhenFilter`, `InvalidCondCondition` |
 | `timeout` | `Timeout` (distinct from the cooperative execution deadline) |
 | `lock_timeout` | `LockTimeout` |
-| `server_busy` | Argon2-KDF permit gate refused a user-administration write (e.g. SCRAM user creation) before it executed; the refused creation itself made no change. Safe to retry with backoff (this is not a promise that other operations in a surrounding batch did not mutate state; `shamir_argon2_busy_refusals_total` counts these refusals). |
+| `server_busy` | Server refused this operation. Examples (not exhaustive): bounded admission above `2 × argon2_concurrent_max`, permit-wait deadline expiry, or clock read/calculation failure; clock failure can also cause a refusal during permit acquisition. The Argon2 refusal counter counts these refusals. Post-auth per-session in-flight-slot refusal also uses `server_busy` but does not increment the Argon2 counter. The refused operation itself made no change; this does not establish that other operations in a mixed batch did not execute or mutate state. Retry only a known-refused, plain top-level `CreateScramUser` with backoff; a generic `query` error does not prove a busy refusal. |
 | `unknown_db` | Untagged `QueryError` with empty alias and message containing `not found` (legacy heuristic, can include repository lookup failures) |
 | `access_denied` | Untagged `QueryError` beginning `access denied:`; also forwarded when explicitly coded |
 | `query` | Other untagged `QueryError` |
