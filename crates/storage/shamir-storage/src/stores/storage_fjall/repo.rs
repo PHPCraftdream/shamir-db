@@ -153,6 +153,37 @@ impl Repo for FjallRepo {
         }))
     }
 
+    async fn store_get_existing(&self, name: &str) -> DbResult<Option<Arc<dyn Store>>> {
+        validate_store_name(name)?;
+        let db = self.db.clone();
+        let name = name.to_string();
+        // Fjall 3.1.13 exposes `keyspace_exists`, but its `keyspace` open
+        // is still create-or-open and the two calls aren't atomic. Callers in
+        // the Shamir binding catalogue hold the replication-control lifecycle
+        // interlock, which excludes normal Shamir create/delete for this store.
+        // External writers using this Fjall database directly remain outside
+        // that exclusion domain (TOCTOU caveat).
+        let keyspace = task::spawn_blocking(move || -> DbResult<Option<Keyspace>> {
+            if !db.keyspace_exists(&name) {
+                return Ok(None);
+            }
+            db.keyspace(&name, KeyspaceCreateOptions::default)
+                .map(Some)
+                .map_err(|error| DbError::Storage(error.to_string()))
+        })
+        .await
+        .map_err(|error| DbError::Internal(error.to_string()))??;
+        Ok(keyspace.map(|keyspace| {
+            Arc::new(FjallStore {
+                keyspace,
+                db: self.db.clone(),
+                worker: std::sync::OnceLock::new(),
+                #[cfg(test)]
+                spawn_worker: None,
+            }) as Arc<dyn Store>
+        }))
+    }
+
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
         validate_store_name(name.as_ref())?;
         let db = self.db.clone();

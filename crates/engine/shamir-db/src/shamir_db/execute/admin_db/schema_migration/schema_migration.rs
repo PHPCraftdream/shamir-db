@@ -105,18 +105,55 @@ impl ShamirAdminExecutor {
             .read_schema_migration_history(serving)
             .await
             .map_err(map_store_error)?;
+        // Migration admission classification shared with plan and apply: a
+        // live/reserved runner or foreign Lifecycle reservation reports
+        // in progress; a retained marker or owned journal tail reports doubt.
+        let error = match self
+            .shamir
+            .schema_migration_admission_state_code(serving, &history)
+        {
+            Some("schema_migration_in_progress") => {
+                Some(SchemaMigrationErrorCode::SchemaMigrationInProgress)
+            }
+            Some(_) => Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt),
+            None => None,
+        };
         let outcome = StatusOutcome {
             protocol_version: request.protocol_version,
             identity: serving,
             history: Some(&history),
             checksum_validation: validate_last_applied_checksum(&history),
-            error: if history.in_doubt {
-                Some(SchemaMigrationErrorCode::SchemaMigrationInDoubt)
-            } else {
-                None
-            },
+            error,
         };
         Ok(admin_result(status_value(&outcome)))
+    }
+}
+
+/// The ONE shared state classification of STATUS, PLAN and fresh APPLY
+/// (brief 87, item 4). The migration-only process-local observer maps a
+/// live/reserved runner or foreign Lifecycle reservation to
+/// `schema_migration_in_progress`, a retained marker to
+/// `schema_migration_in_doubt`. A vacant slot falls through to durable
+/// history: unresolved events and an Applied tail without FenceReleased both
+/// report in doubt. A matching unresolved resume still gets the identity and
+/// checksum checks in APPLY, and a matching Applied-tail retry keeps its
+/// atomic reserve/release path.
+pub(super) fn schema_migration_state_code(
+    fence_refusal: Option<&'static str>,
+    history: &MigrationHistory,
+) -> Option<&'static str> {
+    match fence_refusal {
+        Some(code @ ("schema_migration_in_progress" | "schema_migration_in_doubt")) => Some(code),
+        _ if history.in_doubt => Some("schema_migration_in_doubt"),
+        // An `Applied` tail without `FenceReleased` durably owns the fence.
+        // After a visible release the LAST event is `FenceReleased`, so the
+        // tail comparison cannot confuse the released case (unlike
+        // `current_status`, which stays `Applied` once anything was applied).
+        _ => history
+            .events
+            .last()
+            .is_some_and(|event| event.kind == JournalEventKind::Applied)
+            .then_some("schema_migration_in_doubt"),
     }
 }
 
@@ -171,7 +208,7 @@ fn status_value(outcome: &StatusOutcome<'_>) -> QueryValue {
     value.insert("target".to_string(), QueryValue::Map(target));
     let (last_applied_id, last_applied_ordinal, last_applied_checksum, in_flight) =
         match outcome.history {
-            Some(history) => applied_fields(history),
+            Some(history) => applied_fields(history, outcome.error.is_some()),
             None => (None, 0, None, None),
         };
     if let Some(id) = last_applied_id {
@@ -257,9 +294,19 @@ fn applied_entries(history: &MigrationHistory) -> Vec<QueryValue> {
 /// Derive last-applied and in-flight fields from the durable history.
 fn applied_fields(
     history: &MigrationHistory,
+    has_fence_error: bool,
 ) -> (Option<String>, u64, Option<[u8; 32]>, Option<QueryValue>) {
     let applied = history.applied.last();
-    let in_flight = history.unresolved.last().map(|event| {
+    // Applied stays in the prefix even if the fence is still owned. Only
+    // show it in flight if the journal tail hasn't reached FenceReleased
+    // and status still sees a fence; release may win between the two reads.
+    let pending = history.unresolved.last().or_else(|| {
+        history
+            .events
+            .last()
+            .filter(|event| has_fence_error && event.kind == JournalEventKind::Applied)
+    });
+    let in_flight = pending.map(|event| {
         let mut map = new_map();
         map.insert(
             "migration_id".to_string(),

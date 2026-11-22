@@ -613,6 +613,16 @@ pub trait Repo: Send + Sync {
     /// Lists all stores in the repository.
     async fn stores_list(&self) -> DbResult<Vec<String>>;
 
+    /// Open an existing store without creating one. The default fails closed;
+    /// repositories that can prove existence without an open-or-create race
+    /// should override it.
+    async fn store_get_existing(&self, name: &str) -> DbResult<Option<Arc<dyn Store>>> {
+        let _ = name;
+        Err(DbError::Storage(
+            "repository cannot safely distinguish lookup from creation".into(),
+        ))
+    }
+
     /// Copy every key/value from store `from` into store `to`.
     ///
     /// Used by `RENAME TABLE`: a table's physical data lives in three

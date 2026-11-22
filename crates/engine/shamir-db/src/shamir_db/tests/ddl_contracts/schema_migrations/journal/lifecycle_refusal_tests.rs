@@ -18,17 +18,21 @@ use std::time::Duration;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_query_types::admin::types::schema_migration::SchemaMigrationBody;
+use shamir_query_types::admin::types::schema_migration::{
+    SchemaMigrationApplyRequest, SchemaMigrationBody,
+};
 use shamir_test_diag::FlakeGuard;
 
 use super::super::helpers::on_big_stack;
 use super::super::helpers::{
     body, checksum, context, fence_generation_from_status, field, flush_and_reopen, journal_table,
     persistent_db, predecessor, prepare_database, run_admin_op, run_apply, run_plan, run_status,
-    str_field, submission, OWNER,
+    str_field, submission, target, OWNER,
 };
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
 use crate::query::batch::BatchError;
-use crate::shamir_db::system_store::DatabaseIdentity;
+use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind};
 use crate::ShamirDb;
 
 fn assert_in_doubt(error: BatchError, context: &str) {
@@ -475,5 +479,227 @@ fn rename_and_drop_of_an_in_doubt_database_are_refused_and_identity_and_journal_
             .await
             .expect("lifecycle refusal scenario exceeded its 300 s bound");
         guard.mark("scenario done");
+    });
+}
+
+#[test]
+fn resume_races_same_target_rename_and_cascade_drop() {
+    on_big_stack(|| async {
+        let guard = FlakeGuard::with_watchdog(
+            "resume_races_same_target_rename_and_cascade_drop",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            for (alias, op) in [
+                ("rename", ddl::rename_db("alpha", "alpha2").build()),
+                (
+                    "drop",
+                    ddl::drop_db("alpha")
+                        .hmac("test-hmac")
+                        .cascade()
+                        .build()
+                        .unwrap(),
+                ),
+            ] {
+                let (dir, db) = persistent_db().await;
+                db.create_db("alpha").await.unwrap();
+                db.create_db("beta").await.unwrap();
+                db.add_repo(
+                    "alpha",
+                    RepoConfig::new("main", BoxRepoFactory::fjall(dir.path().join("alpha-main"))),
+                )
+                .await
+                .unwrap();
+                // Lifecycle requires a root principal; use the same principal for
+                // the migration so this fixture needs no synthetic grants.
+                let alpha = db.database_identity_for_fence("alpha").unwrap();
+                run_admin_op(
+                    &db,
+                    "alpha",
+                    "sentinel",
+                    ddl::create_table("sentinel_items").repo("main").build(),
+                )
+                .await
+                .unwrap();
+                let migration = body("alpha-001", 1);
+                let resume = |generation| {
+                    run_admin_op(
+                        &db,
+                        "alpha",
+                        "apply",
+                        shamir_query_builder::apply_application_schema_migration(
+                            SchemaMigrationApplyRequest {
+                                protocol_version: 1,
+                                target: target(&alpha),
+                                expected_predecessor: predecessor(None, 0, [0; 32]),
+                                expected_fence_generation: generation,
+                                migration: submission(&migration),
+                            },
+                        ),
+                    )
+                };
+
+                const BEFORE_ACQUIRE_TAIL: usize = 2;
+                db.system_store()
+                    .arm_durability_tail_faults_after(BEFORE_ACQUIRE_TAIL, 1);
+                let error = Box::pin(resume(0)).await.unwrap_err();
+                assert_eq!(
+                    error.code(),
+                    Some("schema_migration_durability_unavailable")
+                );
+                assert!(db.schema_migration_in_doubt("alpha"));
+                guard.mark("Started visible; racing recovery and lifecycle");
+
+                // Fail the durability tail of the acquire/takeover step: with
+                // `skip = BEFORE_ACQUIRE_TAIL` the two earlier durable tails pass and tick 3 is
+                // the post-commit tail of the `RecoveryAcquired` takeover
+                // itself, so the fault fires after the takeover journal entry
+                // is visible but BEFORE any operation intent is attempted
+                // (the first intent is never the tick that fails here).
+                // Nevertheless there is no legal free interval anywhere in
+                // the race, even if lifecycle runs before recovery begins or
+                // after it returns.
+                db.system_store()
+                    .arm_durability_tail_faults_after(BEFORE_ACQUIRE_TAIL, 1);
+                let start = tokio::sync::Barrier::new(2);
+                let (recovery, lifecycle) = tokio::join!(
+                    async {
+                        start.wait().await;
+                        Box::pin(resume(1)).await
+                    },
+                    async {
+                        start.wait().await;
+                        Box::pin(run_admin_op(&db, "beta", alias, op.clone())).await
+                    },
+                );
+                let error = recovery.expect_err("the acquire/takeover durability fault must fire");
+                assert_eq!(
+                    error.code(),
+                    Some("schema_migration_durability_unavailable")
+                );
+                assert_in_doubt(lifecycle.expect_err("there was no durable release"), alias);
+                assert_alpha_target_intact(&db, &alpha, "alpha", alias).await;
+                assert!(!db.has_db("alpha2"));
+                assert!(db.schema_migration_in_doubt("alpha"));
+                let history = db
+                    .system_store()
+                    .read_schema_migration_history(alpha)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    history
+                        .events
+                        .iter()
+                        .map(|event| event.kind)
+                        .collect::<Vec<_>>(),
+                    [
+                        JournalEventKind::Started,
+                        JournalEventKind::RecoveryAcquired
+                    ],
+                );
+                assert_eq!(history.unresolved.len(), 1);
+
+                let applied = Box::pin(resume(2)).await.unwrap();
+                assert_eq!(str_field(&applied, "status"), "applied");
+                let history = db
+                    .system_store()
+                    .read_schema_migration_history(alpha)
+                    .await
+                    .unwrap();
+                assert_eq!(history.applied.len(), 1);
+                assert!(history.unresolved.is_empty());
+                assert_eq!(
+                    history.events.last().unwrap().kind,
+                    JournalEventKind::FenceReleased,
+                );
+                assert!(!db.schema_migration_in_doubt("alpha"));
+                Box::pin(run_admin_op(&db, "beta", alias, op))
+                    .await
+                    .expect("lifecycle is admitted after the verified durable release");
+                assert!(!db.has_db("alpha"));
+                if alias == "rename" {
+                    assert_alpha_target_intact(&db, &alpha, "alpha2", alias).await;
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(300), scenario)
+            .await
+            .expect("resume versus lifecycle race timed out");
+        guard.mark("both lifecycle operations checked");
+    });
+}
+
+#[test]
+fn migration_and_lifecycle_cannot_both_reserve_the_same_identity() {
+    on_big_stack(|| async {
+        let guard = FlakeGuard::with_watchdog(
+            "migration_and_lifecycle_cannot_both_reserve_the_same_identity",
+            Duration::from_secs(150),
+        );
+        let scenario = Box::pin(async {
+            let (_dir, db) = persistent_db().await;
+            db.create_db("alpha").await.unwrap();
+            let id = db.database_identity_for_fence("alpha").unwrap();
+
+            // Compete on distinct worker threads. Keep both results alive until
+            // both CAS attempts finish so a sequential release cannot give two wins.
+            let start = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let attempted = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let contender = |migration: bool| {
+                let db = db.clone();
+                let start = start.clone();
+                let attempted = attempted.clone();
+                let runtime = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    runtime.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(120), start.wait())
+                            .await
+                            .expect("both contenders reached the start barrier");
+                        let migration_gate = migration
+                            .then(|| db.reserve_schema_migration_gate("alpha"))
+                            .flatten();
+                        let lifecycle_gate = (!migration)
+                            .then(|| db.reserve_schema_migration_lifecycle(id))
+                            .flatten();
+                        tokio::time::timeout(Duration::from_secs(120), attempted.wait())
+                            .await
+                            .expect("both contenders attempted their CAS");
+                        migration_gate.is_some() || lifecycle_gate.is_some()
+                    })
+                })
+            };
+            let (migration, lifecycle) = tokio::join!(contender(true), contender(false));
+            assert_ne!(
+                migration.unwrap(),
+                lifecycle.unwrap(),
+                "exactly one CAS wins",
+            );
+
+            // Exercise both directions regardless of which contender won.
+            let lifecycle = db.reserve_schema_migration_lifecycle(id).unwrap();
+            assert!(db.reserve_schema_migration_gate("alpha").is_none());
+            drop(lifecycle);
+            let mut migration = db.reserve_schema_migration_gate("alpha").unwrap();
+            assert!(db.reserve_schema_migration_lifecycle(id).is_none());
+            migration.hold(1);
+            assert!(db.reserve_schema_migration_lifecycle(id).is_none());
+            migration.mark_succeeded();
+            drop(migration);
+            assert!(db.reserve_schema_migration_lifecycle(id).is_some());
+            assert!(!db.schema_migration_in_doubt("alpha"));
+            let history = db
+                .system_store()
+                .read_schema_migration_history(id)
+                .await
+                .unwrap();
+            assert!(
+                history.events.is_empty(),
+                "in-process CAS cannot write journal rows",
+            );
+        });
+        tokio::time::timeout(Duration::from_secs(300), scenario)
+            .await
+            .expect("reservation race timed out");
+        guard.mark("exclusive admission and RAII cleanup verified");
     });
 }

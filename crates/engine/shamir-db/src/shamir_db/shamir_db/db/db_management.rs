@@ -6,6 +6,11 @@ use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use crate::engine::repo::RepoConfig;
+use crate::query::batch::BatchError;
+use crate::shamir_db::execute::admin_db_schema_migration::{
+    schema_migration_lifecycle_code, schema_migration_lifecycle_refusal_message,
+    SchemaMigrationLifecycleGuard,
+};
 use crate::shamir_db::repo_durability::durability_from_record;
 use crate::shamir_db::shamir_db::ReplicationControlGuard;
 use crate::shamir_db::system_store::DatabaseIdentity;
@@ -23,6 +28,47 @@ use super::super::{ShamirDb, ShutdownReport};
 /// the server's shutdown budget: a slow fsync on a loaded runner must not turn
 /// a healthy flush into an unclean report.
 const COMMIT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub(in crate::shamir_db) type DatabaseLifecycleReservation<'a> =
+    Option<(DatabaseIdentity, SchemaMigrationLifecycleGuard<'a>)>;
+
+pub(in crate::shamir_db) enum DatabaseLifecycleError {
+    MigrationFence,
+    Database(DbError),
+}
+
+impl From<DbError> for DatabaseLifecycleError {
+    fn from(error: DbError) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl DatabaseLifecycleError {
+    pub(in crate::shamir_db) fn into_batch_error(
+        self,
+        op: &str,
+        name: &str,
+        map_db_error: fn(DbError) -> BatchError,
+    ) -> BatchError {
+        match self {
+            Self::MigrationFence => BatchError::query_coded(
+                "",
+                schema_migration_lifecycle_code(),
+                schema_migration_lifecycle_refusal_message(op, name),
+            ),
+            Self::Database(error) => map_db_error(error),
+        }
+    }
+
+    fn into_db_error(self, op: &str, name: &str) -> DbError {
+        match self {
+            Self::MigrationFence => {
+                DbError::Validation(schema_migration_lifecycle_refusal_message(op, name))
+            }
+            Self::Database(error) => error,
+        }
+    }
+}
 
 impl ShamirDb {
     /// System-actor convenience wrapper around
@@ -57,30 +103,21 @@ impl ShamirDb {
         self.create_db_as_checked(name, actor).await
     }
 
-    /// Catalogue-persist-fallible database creation (RV-DB-6540DC7B):
-    /// serialized against concurrent creators and the rename/drop
-    /// lifecycle via the replication-control lock; idempotent for an
-    /// already-live name (the original instance is returned with its
-    /// repo/scalar state and durable ownership untouched — no catalogue
-    /// write is attempted); for a NEW name the catalogue persist happens
-    /// BEFORE the live registration is published, so a save failure
-    /// propagates and leaves neither a live registration nor a
-    /// published-over-writer hazard. This contract makes NO claim that
-    /// an arbitrary failure leaves the durable row absent — a save that
-    /// commits and then fails at flush can leave the row behind while
-    /// still returning Err; the injected-fault tests exercise the
-    /// failure BEFORE the write (the prewrite catalogue gate).
+    /// Catalogue-persist-fallible database creation: serialized against
+    /// concurrent creation, rename and drop; existing live names are
+    /// idempotent, while a new row is persisted before live publication.
+    /// A save may commit before a later flush error; injected fault tests
+    /// cover failures before the write.
     pub async fn create_db_as_checked(&self, name: &str, actor: Actor) -> DbResult<DbInstance> {
-        // Round 2 (A6) lifecycle interlock: serialize the existence check,
-        // the catalogue persist, and the live publish against concurrent
-        // creators and the rename/drop lifecycle (which all take the same
-        // replication-control lock). Lock order is safe: the only place a
-        // guard is held while entering here is `handle_create_db`, which
-        // holds `db_create_lock` and acquires THIS lock after it
-        // (db_create_lock → replication_control); no code path takes the
-        // locks in the reverse order, so no inversion/deadlock.
+        // Serialize existence, catalogue persistence and publication against
+        // create/rename/drop. Lock order is db_create_lock then control.
         let _control = self.lock_replication_control().await;
 
+        if name == SYSTEM_DB_NAME {
+            return Err(DbError::Validation(
+                "database name '__system__' is reserved".into(),
+            ));
+        }
         // Idempotent duplicate: return the ORIGINAL live instance.
         // `get_db` clones the Arc out of the DashMap (no guard held across
         // the awaits below); the catalogue is deliberately NOT rewritten,
@@ -90,6 +127,7 @@ impl ShamirDb {
         }
 
         let db = DbInstance::new();
+        let identity = DatabaseIdentity::new();
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -101,7 +139,7 @@ impl ShamirDb {
         );
         m.insert(
             "identity".to_string(),
-            QueryValue::Str(DatabaseIdentity::new().to_string()),
+            QueryValue::Str(identity.to_string()),
         );
         m.insert(
             "created_at".to_string(),
@@ -115,6 +153,7 @@ impl ShamirDb {
         self.system_store
             .save_database(name, &record, &ResourceMeta::owned_enforced(actor))
             .await?;
+        self.database_identities.insert(name.to_string(), identity);
         self.dbs.insert(name.to_string(), db.clone());
         Ok(db)
     }
@@ -124,39 +163,65 @@ impl ShamirDb {
         // subscription catalogue writers, taken here so every existing
         // caller keeps the interlock without changes.
         let _create_guard = self.db_create_lock().lock().await;
-        let _control = self.lock_replication_control().await;
-        self.remove_db_locked(name, &_control).await
+        let control = self.lock_replication_control().await;
+        let reservation = self
+            .reserve_database_lifecycle(name, &control)
+            .map_err(|error| error.into_db_error("drop", name))?;
+        self.remove_db_locked(name, &control, reservation).await
     }
 
-    /// Lock-free variant of [`Self::remove_db`].
-    ///
-    /// The `_control` guard parameter ENFORCES that the caller holds the
-    /// replication control lock (non-reentrant — never acquired here).
-    pub(crate) async fn remove_db_locked(
+    /// Resolve the current name under replication control and atomically claim
+    /// its identity. The caller keeps replication control through publication.
+    pub(in crate::shamir_db) fn reserve_database_lifecycle<'a>(
+        &'a self,
+        name: &str,
+        _control: &ReplicationControlGuard<'_>,
+    ) -> Result<DatabaseLifecycleReservation<'a>, DatabaseLifecycleError> {
+        let Some(identity) = self.database_identity_for_fence(name) else {
+            if name != SYSTEM_DB_NAME && self.has_db(name) {
+                return Err(DbError::Internal(format!(
+                    "live database '{name}' has no cached identity"
+                ))
+                .into());
+            }
+            return Ok(None);
+        };
+        let guard = self
+            .reserve_admin_migration_target(identity)
+            .map_err(|code| match code {
+                Some(_) => DatabaseLifecycleError::MigrationFence,
+                None => DbError::Validation(format!(
+                    "another database operation is in progress for '{name}'"
+                ))
+                .into(),
+            })?;
+        Ok(Some((identity, guard)))
+    }
+
+    /// Complete DROP under replication control, carrying the existing
+    /// reservation through catalogue removal without acquiring it again.
+    pub(in crate::shamir_db) async fn remove_db_locked(
         &self,
         name: &str,
         _control: &ReplicationControlGuard<'_>,
+        reservation: DatabaseLifecycleReservation<'_>,
     ) -> DbResult<bool> {
         if name == SYSTEM_DB_NAME {
             return Ok(false);
-        }
-
-        // R1c-4 FINAL follow-up 3, decision 2: ANY live fence state (gate
-        // map or marker) refuses the drop before the CASCADE teardown can
-        // destroy the fenced database; the wire code stays
-        // `schema_migration_in_doubt`.
-        if self.schema_migration_lifecycle_blocked(name) {
-            return Err(DbError::Validation(
-                crate::shamir_db::execute::admin_db_schema_migration
-                    ::schema_migration_lifecycle_refusal_message("drop", name),
-            ));
         }
 
         // S5c-X PR8b-2: refuse DROP of a destination referenced by a durable
         // subscription binding BEFORE any live or durable mutation.
         self.ensure_destinations_unbound(name, None, "DROP").await?;
 
+        let Some((identity, _lifecycle)) = reservation else {
+            return Ok(false);
+        };
+        if self.database_identity_for_fence(name) != Some(identity) {
+            return Err(DbError::NotFound(format!("Database '{}' not found", name)));
+        }
         let removed = self.dbs.remove(name).is_some();
+        self.database_identities.remove(name);
 
         if removed {
             // RV-DB-6540DC7B: a failed catalogue removal must surface — returning
@@ -202,25 +267,26 @@ impl ShamirDb {
     ///
     /// Guards (refuse with a typed [`DbError`]):
     /// - `from` must not be `SYSTEM_DB_NAME`.
-    /// - The source database must exist (in-memory OR persisted).
+    /// - The source database must be registered in memory.
     /// - The destination must NOT exist (in-memory AND persisted).
     /// - The source must not carry a live application-schema fence state
-    ///   (gate or marker; R1c-4 FINAL follow-up 3, decision 2 — the re-key
-    ///   would strand the name-keyed state away from the identity-keyed
-    ///   journal).
+    ///   (reserved, live, or in doubt).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
         // Hold database-create admission through namespace publication.
         let _create_guard = self.db_create_lock().lock().await;
-        let _control = self.lock_replication_control().await;
-        // R1c-4 FINAL follow-up 3, decision 2: ANY live fence state refuses
-        // the rename before the re-key strands the name-keyed state; the
-        // wire code stays `schema_migration_in_doubt`.
-        if self.schema_migration_lifecycle_blocked(from) {
-            return Err(DbError::Validation(
-                crate::shamir_db::execute::admin_db_schema_migration
-                    ::schema_migration_lifecycle_refusal_message("rename", from),
-            ));
-        }
+        let control = self.lock_replication_control().await;
+        self.rename_db_locked(from, to, &control)
+            .await
+            .map_err(|error| error.into_db_error("rename", from))
+    }
+
+    pub(in crate::shamir_db) async fn rename_db_locked(
+        &self,
+        from: &str,
+        to: &str,
+        control: &ReplicationControlGuard<'_>,
+    ) -> Result<(), DatabaseLifecycleError> {
+        let reservation = self.reserve_database_lifecycle(from, control)?;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
         // (repo: None — the whole database is the destination set).
@@ -230,24 +296,32 @@ impl ShamirDb {
             return Err(DbError::Validation(format!(
                 "cannot rename the system database '{}'",
                 SYSTEM_DB_NAME
-            )));
+            ))
+            .into());
         }
-        // Source must exist in-memory (live registration).
-        if !self.has_db(from) {
-            return Err(DbError::NotFound(format!("Database '{}' not found", from)));
+        // Source must have a live identity, reserved through the whole re-key.
+        let Some((identity, _lifecycle)) = reservation else {
+            return Err(DbError::NotFound(format!("Database '{}' not found", from)).into());
+        };
+        if to == SYSTEM_DB_NAME {
+            return Err(
+                DbError::Validation("database name '__system__' is reserved".into()).into(),
+            );
         }
         // Destination must be free both in-memory and in the catalogue.
         if self.has_db(to) {
             return Err(DbError::Validation(format!(
                 "cannot rename database '{}' to '{}': destination already exists",
                 from, to
-            )));
+            ))
+            .into());
         }
         if self.system_store.load_database(to).await?.is_some() {
             return Err(DbError::Validation(format!(
                 "cannot rename database '{}' to '{}': a persisted database record already exists",
                 from, to
-            )));
+            ))
+            .into());
         }
 
         // ── (1) In-memory re-key ──────────────────────────────────────
@@ -259,6 +333,8 @@ impl ShamirDb {
             .remove(from)
             .map(|(_, v)| v)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", from)))?;
+        self.database_identities.remove(from);
+        self.database_identities.insert(to.to_string(), identity);
         self.dbs.insert(to.to_string(), inst);
 
         // ── (2) databases-registry re-key (write-before-remove) ───────
@@ -380,6 +456,16 @@ impl ShamirDb {
                 .remove_table(from, &repo_name, &table_name)
                 .await?;
         }
+
+        // ── (4) validator binding re-key ─────────────────────────────
+        // Validator `bound_in` tracking is `db/repo/table` strings keyed
+        // by the database name (review finding 3 follow-up). Re-key the
+        // live registry under the same replication-control lock so no
+        // target-admission pass can observe a half-renamed binding set,
+        // then re-key the durable snapshots in the validator catalogue
+        // (live and pending rows alike — see validator_management).
+        self.validators().rename_database_bindings(from, to);
+        self.rekey_validator_bound_in_catalogue(from, to).await?;
 
         Ok(())
     }

@@ -239,6 +239,8 @@ impl TableManager {
             mvcc_store: mvcc,
             validator_bindings,
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
+            // Round 6: a freshly opened manager has no binding doubt state.
+            bindings_in_doubt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
