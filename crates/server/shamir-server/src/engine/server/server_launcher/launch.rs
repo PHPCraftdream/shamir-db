@@ -6,7 +6,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
-use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChainWriter};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::lockout::{
     InMemoryLockoutStore, LockoutSnapshotSink, PairDropReason, PairStoreObserver,
@@ -137,6 +137,7 @@ impl ServerLauncher {
             user_dir,
             counters,
             audit_appender,
+            audit_chain,
             kdf_for_bootstrap,
         } = durable_stores::open(&config, &bootstrap).await?;
 
@@ -223,24 +224,8 @@ impl ServerLauncher {
             });
         }
 
-        // 4. Audit chain — load from checkpoint if present.
-        //
-        // CRITICAL: the writer (used by every connection task to emit
-        // audit events) and the scheduler (which periodically persists
-        // the truncation-defence checkpoint) MUST share a single chain
-        // state. Constructing two independent `AuditChain` instances
-        // here produces a split-brain — appends advance one chain while
-        // the checkpoint snapshots the other (empty) one, so audit.log
-        // restarts at seq=1 on every reboot. See
-        // `audit_writer_and_checkpoint_share_chain_state` for the
-        // regression test.
-        let ack = meta
-            .audit_chain_key()
-            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
-        let audit_chain = match meta.audit_checkpoint() {
-            Some((seq, hmac)) => Arc::new(AuditChain::from_checkpoint(ack, seq, hmac)),
-            None => Arc::new(AuditChain::new(ack)),
-        };
+        // 4. Share the recovered chain between the writer and the scheduler
+        // so periodic checkpoints track the same state that appends advance.
         let audit_writer = Arc::new(AuditChainWriter::new_with_shared(
             audit_chain.clone(),
             audit_appender.clone() as Arc<dyn AuditAppender>,
