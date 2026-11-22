@@ -10,6 +10,31 @@
 //! protocol's `CancelFlag`, whose cleanup removes the destination and
 //! releases pins/seals (R4).
 //!
+//! Snapshot lease (R2d-FIX-C): the protocol's private self-check uses the
+//! crate-private unleased entry (`verify_writer_snapshot`) only for the
+//! fresh child it just created; it takes no lease and cannot unlease an
+//! older sibling. There is NO thread-scoped bypass anymore. Scheduled runs
+//! provision the lease marker BEFORE publishing the snapshot. A provisioning
+//! failure is a retention failure with the same outcome and metric as a
+//! failed prune, independent of copy outcome. A successful copy from such a
+//! run is recorded as bounded IN-MEMORY provenance only if the post-protocol
+//! bounded manifest capture succeeds and decodes (root + owner + name +
+//! creation time + manifest-byte digest). The capture happens after protocol
+//! return: it records the manifest bytes observed then, not proof of the
+//! protocol's original payload tree or directory identity. Adoption requires
+//! those manifest bytes/time to remain unchanged at capture, scan and late
+//! check; an untagged copy is tagged, and a copy already bearing this owner's
+//! tag is reported as adopted without a rewrite. Payload/directory
+//! replacement under unchanged manifest bytes is not detected, so the root is
+//! single-writer by contract.
+//! A refused/failed capture records nothing. A process restart loses the
+//! bounded 64-record list; outage copies whose records are lost remain
+//! untouched by selection. A cancellation observed after protocol success and
+//! before tagging starts, with a healthy marker, skips retention and leaves
+//! the completed copy untagged and unrecorded; the operator must verify and
+//! manually move or retire it. A cancellation after tagging began leaves the
+//! fresh copy tagged and without an adoption record.
+//!
 //! Destination handling (§4.2 A): the operator `to` must be absolute and is
 //! validated exactly like the offline backup — canonicalize the nearest
 //! existing ancestor and refuse anything inside (or equal to) the source
@@ -66,15 +91,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::copy_engine::CopyOptions;
-use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
-    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, OnlineBackupFailure,
-    SealRecopyCap,
+    run_online_backup, BackupPermit, OnlineBackupError, SealRecopyCap,
 };
 
 use super::adapter::{EngineBackupPort, PortRunState};
 use super::metrics as backup_metrics;
+use super::progress_attribution::{final_per_repo_progress, final_per_repo_progress_bytes};
+use super::schedule::destination::{scheduled_preflight, validate_destination};
+use super::schedule::retention_pass::{
+    bounded_manifest_bytes, manifest_capture, scheduled_retention_pass, MarkerProvisioning,
+    PendingAdoptions,
+};
 #[cfg(test)]
 use shamir_db::engine::repo::RepoInstance;
 
@@ -153,6 +182,10 @@ struct RunRecord {
     started_at_unix_ns: u128,
     repos_created_during: usize,
     last_error: Option<String>,
+    /// Bounded in-memory adoption provenance (module doc). Carried across
+    /// replacement runs via `start_inner`; lost on process restart by
+    /// design (documented limitation).
+    pending_adoptions: PendingAdoptions,
 }
 
 /// Registry over the shared engine handle. Chunk 4 wires the admin ops to
@@ -182,12 +215,26 @@ pub struct OnlineBackupRegistry {
     /// per-thread state; no process-global arming.
     #[cfg(test)]
     pending_step_callback: Mutex<Option<TestStepCallback>>,
+    /// Test-only (R2d-FIX-C): a one-shot post-run callback the NEXT
+    /// `start` moves onto its runner thread, invoked once after a
+    /// SUCCESSFUL protocol return and before the guard stamp, the
+    /// completion capture and the retention pass — fixture surgery (e.g.
+    /// renaming the published child to a fixed name) with no production
+    /// seam.
+    #[cfg(test)]
+    pending_post_run_callback: Mutex<Option<TestPostRunCallback>>,
 }
 
 /// Test-only step callback: invoked by the engine's barrier-step hook
 /// with the step name, on the armed runner thread.
 #[cfg(test)]
 type TestStepCallback = Box<dyn Fn(&'static str) + Send>;
+
+/// Test-only post-run callback: given the protocol's published snapshot
+/// directory, returns its (possibly renamed) location — `None` leaves the
+/// report untouched.
+#[cfg(test)]
+type TestPostRunCallback = Box<dyn Fn(&Path) -> Option<PathBuf> + Send>;
 
 impl OnlineBackupRegistry {
     /// Build the registry. `runtime` must be the server's runtime handle
@@ -230,6 +277,8 @@ impl OnlineBackupRegistry {
             shutdown,
             #[cfg(test)]
             pending_step_callback: Mutex::new(None),
+            #[cfg(test)]
+            pending_post_run_callback: Mutex::new(None),
         }
     }
 
@@ -244,6 +293,7 @@ impl OnlineBackupRegistry {
             started_at_unix_ns: 0,
             repos_created_during: 0,
             last_error: None,
+            pending_adoptions: PendingAdoptions::default(),
         }
     }
 
@@ -312,6 +362,8 @@ impl OnlineBackupRegistry {
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
+            // Provenance outlives the single-run record slot.
+            let pending_adoptions = std::mem::take(&mut record.pending_adoptions);
             *record = RunRecord {
                 running: true,
                 cancel: cancel.clone(),
@@ -322,13 +374,17 @@ impl OnlineBackupRegistry {
                 started_at_unix_ns,
                 repos_created_during: 0,
                 last_error: None,
+                pending_adoptions,
             };
             *self.backup_id.lock() = Some(backup_id.clone());
         };
         // Test-only: take a pending per-run step callback (see
-        // `arm_runner_step_callback`) onto this run's job.
+        // `arm_runner_step_callback`) onto this run's job, along with the
+        // one-shot post-run fixture callback (see `arm_post_run_callback`).
         #[cfg(test)]
         let step_callback = self.pending_step_callback.lock().take();
+        #[cfg(test)]
+        let post_run_callback = self.pending_post_run_callback.lock().take();
         let job = RunJob {
             db,
             data_dir: self.data_dir.clone(),
@@ -341,6 +397,8 @@ impl OnlineBackupRegistry {
             record: Arc::clone(&self.record),
             #[cfg(test)]
             step_callback,
+            #[cfg(test)]
+            post_run_callback,
         };
         // §4.8 metrics hook: the run counts as started once registration
         // succeeded; a failed spawn is published as a preparing-stage
@@ -437,6 +495,10 @@ struct RunJob {
     /// Test-only: armed on the runner thread before the protocol runs.
     #[cfg(test)]
     step_callback: Option<TestStepCallback>,
+    /// Test-only: invoked after a successful protocol return, before the
+    /// guard stamp and the completion capture.
+    #[cfg(test)]
+    post_run_callback: Option<TestPostRunCallback>,
 }
 
 impl RunJob {
@@ -459,6 +521,8 @@ impl RunJob {
             record,
             #[cfg(test)]
             step_callback,
+            #[cfg(test)]
+            post_run_callback,
         } = self;
         // Test-only: arm this runner thread with the run's one-shot step
         // callback (the shared engine hook consults the per-thread slot;
@@ -495,9 +559,32 @@ impl RunJob {
             Ok(())
         };
         let preflight_failed = preflight.is_err();
+        // Publication-window guard (R2d-FIX-C): provision the marker BEFORE
+        // A later pass may adopt the markerless copy only if bounded capture
+        // succeeds and the manifest still matches; this records no payload or
+        // directory identity. Refused capture leaves no provenance.
+        let marker_provisioning = if preflight_failed || scheduled.is_none() {
+            MarkerProvisioning::NotAttempted
+        } else {
+            match crate::sync::durability::backup::provision_snapshot_lease(&to) {
+                Ok(()) => MarkerProvisioning::Provisioned,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %to.display(),
+                        %error,
+                        "snapshot lease marker unavailable; retention fails for this run \
+                         until the marker is repaired"
+                    );
+                    MarkerProvisioning::Failed
+                }
+            }
+        };
         let outcome = preflight
             .inspect_err(|error| progress.record_failure(error.stage(), error))
             .and_then(|()| {
+                // The protocol self-check uses its crate-private unleased
+                // entry only for the exact fresh child it created. Ordinary
+                // verification of a managed path still takes the shared lease.
                 run_online_backup(
                     &port,
                     &data_dir,
@@ -512,28 +599,125 @@ impl RunJob {
         // Stamp the guard with the verified snapshot BEFORE any
         // panic-prone post-processing: from this point a runner panic
         // must leave the completed snapshot recorded, never deleted.
+        // Release the BackupPermit BEFORE retention (R2d-FIX-C): prune needs
+        // no writer admission. `record.running` stays `true` until the
+        // publication below, so admission and cancel semantics are
+        // unchanged; as a local dropped before the `guard` parameter, the
+        // unwind order (permit, then failure publication) is preserved.
+        drop(permit_guard);
+        // Test-only fixture surgery: rename the published child (fixed
+        // name, fixed manifest creation time) BEFORE the guard stamps it,
+        // so the guarded snapshot and the completion capture below see the
+        // final output location and bytes. `Option::zip` keeps this
+        // edition-2021-compatible without nested collapsible `if let`s.
+        #[cfg(test)]
+        let mut outcome = outcome;
+        #[cfg(test)]
+        if let Some((report, callback)) = outcome.as_mut().ok().zip(post_run_callback.as_ref()) {
+            if let Some(renamed) = callback(&report.dest_dir) {
+                report.dest_dir = renamed;
+            }
+        }
         if let Ok(report) = &outcome {
             guard.completed_dir = Some(report.dest_dir.clone());
             backup_metrics::note_success(report.total_bytes, copy_duration);
-            if let Some(scheduled) = scheduled.filter(|_| !cancel.is_cancelled()) {
-                let result = super::schedule::retention::prune(
-                    &to,
-                    &report.dest_dir,
-                    &scheduled.owner,
-                    &scheduled.policy,
-                    &cancel,
-                );
-                backup_metrics::note_retention(result.deleted, result.failed, result.untouched);
+        }
+        // Capture is attempted only for a completed run with failed marker
+        // provisioning. The outer option distinguishes not attempted from an
+        // attempted read; the inner result distinguishes success from refusal.
+        let capture_outcome = match (&outcome, &marker_provisioning) {
+            (Ok(report), MarkerProvisioning::Failed) => {
+                Some(bounded_manifest_bytes(&report.dest_dir).ok_or(()))
+            }
+            _ => None,
+        };
+        let captured = capture_outcome
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|raw| manifest_capture(raw));
+        // Scheduled retention reports marker-provisioning failures with the
+        // same outcome and metric as failed pruning, independent of the copy.
+        // Provenance is snapshotted and updated under the existing record
+        // lock; filesystem capture happened before locking. Marker failure
+        // observed before late cancellation still reaches the failure metric,
+        // and successful capture records provenance. A cancellation observed
+        // before tagging starts, with a healthy marker, skips prune, leaving
+        // the copy untagged and unrecorded for operator verification/retirement.
+        if let Some(scheduled) = scheduled {
+            let recorded = record
+                .lock()
+                .pending_adoptions
+                .recorded_for(&to, &scheduled.owner);
+            let retention = scheduled_retention_pass(
+                &to,
+                &scheduled.owner,
+                &scheduled.policy,
+                &cancel,
+                &outcome,
+                &marker_provisioning,
+                &recorded,
+            );
+            match marker_provisioning {
+                MarkerProvisioning::Failed => {
+                    if let Ok(report) = &outcome {
+                        match (
+                            captured,
+                            report.dest_dir.file_name().and_then(|n| n.to_str()),
+                        ) {
+                            (Some((created_at_unix_ns, manifest_digest)), Some(name)) => {
+                                record.lock().pending_adoptions.record(
+                                    &to,
+                                    &scheduled.owner,
+                                    name,
+                                    created_at_unix_ns,
+                                    manifest_digest,
+                                );
+                            }
+                            (None, _) => {
+                                // Capture or decode refusal stores no
+                                // provenance; manifest equality is not proof
+                                // of payload/directory identity, and refused
+                                // capture skips fallback attribution reads.
+                                tracing::warn!(
+                                    dest_dir = %report.dest_dir.display(),
+                                    "bounded manifest capture or decode was refused; no adoption \
+                                     provenance was stored and the copy stays untouched by selection"
+                                );
+                            }
+                            (Some(_), None) => tracing::warn!(
+                                "fresh snapshot name was not valid Unicode; retention cannot \
+                                 adopt it"
+                            ),
+                        }
+                    }
+                }
+                MarkerProvisioning::Provisioned => {
+                    record.lock().pending_adoptions.retire_adopted(
+                        &to,
+                        &scheduled.owner,
+                        &retention.adopted,
+                    );
+                }
+                MarkerProvisioning::NotAttempted => {}
             }
         }
-        // Owner-side final progress: the protocol only notes zeroed
-        // per-repo entries (step B) and exposes no progress callback, so
-        // the run's hashed bytes/files would otherwise stay invisible in
-        // `status()` after `Done`. Attribute the snapshot (which the
-        // manifest describes per repo); recorded under a short lock below.
-        if let Ok(report) = &outcome {
-            for (repo, bytes_hashed, files_hashed) in final_per_repo_progress(report) {
-                progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+        // Owner-side final progress: the protocol notes zeroed per-repo
+        // entries and exposes no progress callback. Successful bounded
+        // capture supplies attribution; a refused capture leaves zero/unknown
+        // fields and deliberately skips the ordinary unbounded fallback read.
+        match &capture_outcome {
+            Some(Ok(raw)) => {
+                for (repo, bytes_hashed, files_hashed) in final_per_repo_progress_bytes(raw) {
+                    progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+                }
+            }
+            Some(Err(())) => {}
+            None => {
+                if let Ok(report) = &outcome {
+                    for (repo, bytes_hashed, files_hashed) in final_per_repo_progress(report) {
+                        progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+                    }
+                }
             }
         }
         let snapshot_count = run_state.snapshot_count();
@@ -547,9 +731,6 @@ impl RunJob {
         };
         drop(port);
         drop(db);
-        // Release the permit before publishing idle, or a new run can be
-        // refused.
-        drop(permit_guard);
         // §4.8 metrics hook values, prepared BEFORE the record lock: run
         // counters, copied bytes (the protocol's hashed-byte counters)
         // and the last run duration; the failure stage is where the
@@ -747,6 +928,23 @@ impl OnlineBackupRegistry {
     pub(crate) fn arm_runner_step_callback(&self, callback: TestStepCallback) {
         *self.pending_step_callback.lock() = Some(callback);
     }
+
+    #[cfg(test)]
+    pub(super) fn pending_adoption_count_for_test(&self, root: &Path, owner: &str) -> usize {
+        self.record
+            .lock()
+            .pending_adoptions
+            .recorded_for(root, owner)
+            .len()
+    }
+
+    /// Arm a one-shot post-run callback for this registry's NEXT `start`:
+    /// after the protocol returns `Ok` on the runner thread and before the
+    /// guard stamp, completion capture and retention pass, it may rename the
+    /// published child (`None` keeps the report path). Per-registry opt-in.
+    pub(super) fn arm_post_run_callback(&self, callback: TestPostRunCallback) {
+        *self.pending_post_run_callback.lock() = Some(callback);
+    }
 }
 
 /// Best-effort live catalogue row count; a failed read reports 0 (the
@@ -757,56 +955,6 @@ fn live_repo_count(db: &ShamirDb, runtime: &Handle) -> usize {
         .block_on(Box::pin(stores.load_repositories()))
         .map(|records| records.len())
         .unwrap_or(0)
-}
-
-/// Final per-repo hashed `(repo, bytes, files)` for a finished run,
-/// derived owner-side from the snapshot manifest the protocol just wrote:
-/// each captured repo is attributed the snapshot files under its store
-/// dir and its WAL dir. Files outside every repo's subtree (residual
-/// pass, system store) stay unattributed. Best-effort: on any read or
-/// decode gap an empty result is returned and the repos keep the zeroed
-/// entries the protocol noted in step B.
-fn final_per_repo_progress(report: &BackupReport) -> Vec<(String, u64, u64)> {
-    let parsed = std::fs::read_to_string(report.dest_dir.join("manifest.json"))
-        .ok()
-        .and_then(|raw| manifest::decode(&raw).ok());
-    let Some(manifest_data) = parsed else {
-        return Vec::new();
-    };
-    let Some(consistency) = manifest_data.consistency.as_ref() else {
-        return Vec::new();
-    };
-    // WAL destination dirs -> owning repo (the manifest's WAL section
-    // already records that attribution).
-    let wal_repo = |path: &str| -> Option<&str> {
-        manifest_data
-            .wal
-            .as_ref()?
-            .dirs
-            .iter()
-            .find(|dir| path.starts_with(&format!("{}/", dir.dir)))
-            .map(|dir| dir.repo.as_str())
-    };
-    let mut totals: Vec<(String, u64, u64)> = consistency
-        .per_repo
-        .keys()
-        .map(|repo| (repo.clone(), 0, 0))
-        .collect();
-    for file in &manifest_data.files {
-        let repo = consistency
-            .per_repo
-            .iter()
-            .find(|(_, entry)| file.path.starts_with(&format!("{}/", entry.store_dir)))
-            .map(|(repo, _)| repo.as_str())
-            .or_else(|| wal_repo(&file.path));
-        if let Some(repo) = repo {
-            if let Some(entry) = totals.iter_mut().find(|(name, _, _)| name == repo) {
-                entry.1 += file.size_bytes;
-                entry.2 += 1;
-            }
-        }
-    }
-    totals
 }
 
 fn unix_nanos() -> u128 {
@@ -830,113 +978,4 @@ fn full_error_chain(error: &OnlineBackupError) -> String {
         source = link.source();
     }
     text
-}
-
-/// Revalidate the boot-canonical root without creating or repairing it.
-/// Check cancellation before blocking preflight and again before handing
-/// off to the protocol (which mkdirs the timestamp child before its first
-/// cancellation check). Once I/O starts, cancellation is cooperative.
-/// Like retention, this assumes trusted operators do not replace the root
-/// or its parents concurrently with the run.
-fn scheduled_preflight(
-    to: &Path,
-    data_dir: &Path,
-    cancel: &CancelFlag,
-) -> Result<(), OnlineBackupError> {
-    let check_cancel = || {
-        if cancel.is_cancelled() {
-            Err(OnlineBackupError::Cancelled {
-                stage: BackupStage::Preparing,
-            })
-        } else {
-            Ok(())
-        }
-    };
-    let invalid = |error| OnlineBackupError::Failed {
-        stage: BackupStage::Preparing,
-        source: OnlineBackupFailure::Io(error),
-    };
-    check_cancel()?;
-    let canonical = to.canonicalize().map_err(invalid)?;
-    if canonical != to {
-        return Err(invalid(io::Error::other(
-            "scheduled backup destination no longer matches its boot-canonical path",
-        )));
-    }
-    check_cancel()?;
-    validate_canonical_destination(to, &canonical, data_dir, true)
-        .map_err(|error| invalid(io::Error::other(error)))?;
-    check_cancel()?;
-    shamir_private_dir::verify_private_dir(to).map_err(invalid)?;
-    check_cancel()
-}
-
-/// Offline-backup-equivalent destination validation: absolute, and its
-/// nearest existing canonical ancestor must not be inside (or equal to) the
-/// source data dir.
-fn validate_destination(to: &Path, data_dir: &Path) -> Result<(), StartBackupError> {
-    if !to.is_absolute() {
-        return Err(StartBackupError::InvalidDestination(format!(
-            "destination must be absolute: {}",
-            to.display()
-        )));
-    }
-    let to_canonical = canonicalize_nearest_existing_ancestor(to)?;
-    validate_canonical_destination(to, &to_canonical, data_dir, false)
-}
-
-fn validate_canonical_destination(
-    to: &Path,
-    to_canonical: &Path,
-    data_dir: &Path,
-    reject_ancestor: bool,
-) -> Result<(), StartBackupError> {
-    let source_canonical = data_dir.canonicalize().map_err(|error| {
-        StartBackupError::InvalidDestination(format!(
-            "canonicalize source {}: {error}",
-            data_dir.display()
-        ))
-    })?;
-    if to_canonical.starts_with(&source_canonical) {
-        return Err(StartBackupError::InvalidDestination(format!(
-            "destination is inside (or equal to) the source data dir: {}",
-            to.display()
-        )));
-    }
-    if reject_ancestor && source_canonical.starts_with(to_canonical) {
-        return Err(StartBackupError::InvalidDestination(format!(
-            "scheduled destination is an ancestor of the source data dir: {}",
-            to.display()
-        )));
-    }
-    Ok(())
-}
-
-/// Canonicalize `path` if it exists, else walk up to the nearest existing
-/// ancestor and append the non-canonical suffix (offline precedent).
-fn canonicalize_nearest_existing_ancestor(path: &Path) -> Result<PathBuf, StartBackupError> {
-    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-    let mut current = path;
-    loop {
-        if current.exists() {
-            let mut canonical = current.canonicalize().map_err(|error| {
-                StartBackupError::InvalidDestination(format!(
-                    "canonicalize {}: {error}",
-                    current.display()
-                ))
-            })?;
-            for component in suffix.iter().rev() {
-                canonical.push(component);
-            }
-            return Ok(canonical);
-        }
-        let Some(parent) = current.parent() else {
-            return Err(StartBackupError::InvalidDestination(format!(
-                "no existing ancestor for {}",
-                path.display()
-            )));
-        };
-        suffix.push(current.file_name().unwrap_or_default().to_os_string());
-        current = parent;
-    }
 }
