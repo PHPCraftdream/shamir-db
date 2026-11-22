@@ -1,16 +1,57 @@
-use std::fs::Metadata;
+use std::ffi::OsStr;
+use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
-use tempfile::NamedTempFile;
+use tempfile::Builder;
 
 use crate::sync::durability::backup::online::manifest::BACKUP_META_FILE_NAME;
 
-use super::budget::{Budget, Refusal};
+use super::budget::{plain_on_root, Budget, Refusal};
 
 const TAG: &str = "scheduled_retention";
 const MAX_SIDECAR: u64 = 64 << 10;
+
+/// Recognizable fixed prefix of the staged sidecar file (R2d-FIX-C round
+/// 3, reviewer P2): a crash between staging and the atomic replace leaves
+/// plain regular root entry. One runner owns the root, so any such file
+/// at the start of a later pass is debris of an earlier crash; prune
+/// removes it during the initial scan discovery (a successfully removed
+/// entry neither consumes a visit-cap slot nor counts), while a cleanup
+/// failure leaves it as a normal counted entry.
+pub(super) const STAGED_PREFIX: &str = ".shamir-retention-staged-";
+
+/// Best-effort removal of ONE leftover staged sidecar debris entry: a
+/// direct root entry whose name starts with [`STAGED_PREFIX`], a plain
+/// REGULAR file only (nonfollowing metadata plus the same reparse/mount
+/// exclusion as the scan, so directories, symlinks and junctions are
+/// never removed). Returns true only when the entry was actually
+/// removed. Every failure is logged and the entry is left in place as a
+/// normal counted root entry; cleanup never fails a pass.
+pub(super) fn remove_staged_debris_entry(name: &OsStr, path: &Path, root_meta: &Metadata) -> bool {
+    if !name.to_string_lossy().starts_with(STAGED_PREFIX) {
+        return false;
+    }
+    // Nonfollowing: a symlink (or reparse point) with the prefix is
+    // NOT ours to remove.
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || !plain_on_root(&meta, root_meta) {
+        return false;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(
+                kind = ?error.kind(),
+                "leftover staged sidecar could not be removed; it stays a normal counted entry"
+            );
+            false
+        }
+    }
+}
 
 pub(super) fn read_sidecar(
     dir: &Path,
@@ -90,7 +131,10 @@ fn tag_fresh_impl(
     // old or the new sidecar, never a partially written one, and ordinary
     // reader contention cannot strand a permanently untagged copy because
     // tagging takes no lease at all.
-    let mut staged = NamedTempFile::new_in(root).map_err(|_| Refusal::Incomplete)?;
+    let mut staged = Builder::new()
+        .prefix(STAGED_PREFIX)
+        .tempfile_in(root)
+        .map_err(|_| Refusal::Incomplete)?;
     staged.write_all(&bytes).map_err(|_| Refusal::Incomplete)?;
     staged
         .as_file()

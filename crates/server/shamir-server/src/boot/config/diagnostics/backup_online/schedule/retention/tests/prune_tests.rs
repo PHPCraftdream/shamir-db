@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -18,7 +20,7 @@ use tracing_subscriber::Layer;
 
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::manifest::{
-    build_v2, encode, write_backup_meta, write_manifest, ConsistencySection, RepoConsistency,
+    self, build_v2, encode, write_backup_meta, write_manifest, ConsistencySection, RepoConsistency,
     WalDirEntry, WalSection, WalSegmentEntry, BACKUP_META_FILE_NAME,
 };
 use crate::sync::durability::backup::online::progress::CancelFlag;
@@ -27,8 +29,9 @@ use crate::sync::durability::backup::{
     SNAPSHOT_LEASE_FILE_NAME,
 };
 
+use super::super::super::retention_pass::manifest_digest_hex;
 use super::super::budget::{Budget, Refusal, ROOT_ENTRIES};
-use super::super::ownership::tag_fresh_with_seam;
+use super::super::ownership::{tag_fresh_with_seam, STAGED_PREFIX};
 use super::super::prune::prune_inner;
 use super::super::{prune, RetentionOutcome};
 
@@ -108,6 +111,12 @@ fn sidecar(dir: &Path) -> Value {
         .expect("decode sidecar")
 }
 
+/// SHA-256 (lowercase hex) of the exact manifest bytes of a fixture copy:
+/// what the registry would have captured for it at completion.
+fn manifest_digest(dir: &Path) -> String {
+    manifest_digest_hex(&fs::read(dir.join(MANIFEST_FILE_NAME)).expect("read manifest"))
+}
+
 fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
     retain_pending(root, fresh, keep_last, &[])
 }
@@ -123,9 +132,9 @@ fn retain_pending(
     root: &Path,
     fresh: &Path,
     keep_last: usize,
-    pending: &[(String, u128)],
+    pending: &[(String, u128, String)],
 ) -> RetentionOutcome {
-    let pending: BTreeSet<(String, u128)> = pending.iter().cloned().collect();
+    let pending: BTreeSet<(String, u128, String)> = pending.iter().cloned().collect();
 
     prune(
         root,
@@ -141,6 +150,25 @@ fn retain_pending(
 }
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct MutateManifestBeforeAdoption {
+    manifest: PathBuf,
+    changed: Arc<AtomicBool>,
+}
+
+impl<S: Subscriber> Layer<S> for MutateManifestBeforeAdoption {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() == "shamir_server::retention_before_adoption" {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&self.manifest)
+                .expect("open scanned manifest")
+                .write_all(b"\n")
+                .expect("mutate manifest after scan");
+            self.changed.store(true, Ordering::SeqCst);
+        }
+    }
+}
 
 struct PauseAfterManifest {
     loaded: mpsc::SyncSender<()>,
@@ -456,11 +484,12 @@ fn broken_marker_fails_the_pass_and_records_provenance_for_repair() {
     let tracked = copy(&root, "20200101_000001", 1, None);
     let foreign = copy(&root, "20200101_000002", 2, None);
     let fresh = copy(&root, "20200101_000003", 3, None);
+    let record = (tracked_name(&tracked), 1, manifest_digest(&tracked));
     // A DIRECTORY at the marker path: provisioning fails for the pass.
     let obstruction = root.join(SNAPSHOT_LEASE_FILE_NAME);
     fs::create_dir(&obstruction).expect("obstruction directory");
 
-    let outcome = retain_pending(&root, &fresh, 1, &[(tracked_name(&tracked), 1)]);
+    let outcome = retain_pending(&root, &fresh, 1, std::slice::from_ref(&record));
     assert_eq!(
         (outcome.deleted, outcome.failed, outcome.skipped_in_use),
         (0, 1, 0),
@@ -477,7 +506,7 @@ fn broken_marker_fails_the_pass_and_records_provenance_for_repair() {
     // exact tracked output (tags it, deletes it under the unchanged
     // keep_last selection) and never touches the foreign untagged copy.
     fs::remove_dir_all(&obstruction).expect("remove obstruction");
-    let repaired = retain_pending(&root, &fresh, 1, &[(tracked_name(&tracked), 1)]);
+    let repaired = retain_pending(&root, &fresh, 1, std::slice::from_ref(&record));
     assert_eq!(
         (repaired.deleted, repaired.failed, repaired.untouched),
         (1, 0, Some(1)),
@@ -485,8 +514,8 @@ fn broken_marker_fails_the_pass_and_records_provenance_for_repair() {
     );
     assert_eq!(
         repaired.adopted,
-        [(tracked_name(&tracked), 1)],
-        "the exact recorded (name, creation time) pair is reported adopted"
+        [record],
+        "the exact recorded (name, creation time, digest) triple is reported adopted"
     );
     assert!(!tracked.exists());
     assert!(
@@ -529,7 +558,10 @@ fn stale_provenance_with_swapped_foreign_tag_is_never_adopted() {
         &root,
         &fresh,
         2,
-        &[(tracked_name(&tracked), 2), (tracked_name(&mismatch), 9)],
+        &[
+            (tracked_name(&tracked), 2, manifest_digest(&tracked)),
+            (tracked_name(&mismatch), 9, manifest_digest(&mismatch)),
+        ],
     );
     assert_eq!(
         (outcome.deleted, outcome.failed, outcome.untouched),
@@ -564,12 +596,17 @@ fn already_tagged_provenance_match_reports_adopted_without_retagging() {
     let original = fs::read(tracked.join(BACKUP_META_FILE_NAME)).expect("read tag");
     let fresh = copy(&root, "20200101_000002", 2, None);
 
-    let outcome = retain_pending(&root, &fresh, 2, &[(tracked_name(&tracked), 1)]);
+    let outcome = retain_pending(
+        &root,
+        &fresh,
+        2,
+        &[(tracked_name(&tracked), 1, manifest_digest(&tracked))],
+    );
     assert_eq!((outcome.deleted, outcome.failed), (0, 0));
     assert_eq!(
         outcome.adopted,
-        [(tracked_name(&tracked), 1)],
-        "the exact recorded (name, creation time) pair is reported adopted"
+        [(tracked_name(&tracked), 1, manifest_digest(&tracked))],
+        "the exact recorded (name, creation time, digest) triple is reported adopted"
     );
     assert_eq!(
         fs::read(tracked.join(BACKUP_META_FILE_NAME)).expect("tag unchanged"),
@@ -637,6 +674,14 @@ fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
                 "staged in the ROOT, never inside the snapshot"
             );
             assert!(
+                staged
+                    .file_name()
+                    .expect("staged name")
+                    .to_string_lossy()
+                    .starts_with(STAGED_PREFIX),
+                "the staged name uses the actual tempfile prefix"
+            );
+            assert!(
                 !fresh
                     .join(staged.file_name().expect("staged name"))
                     .exists(),
@@ -669,4 +714,187 @@ fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
 
         reader.join().expect("verifier thread");
     });
+}
+
+/// Regression (reviewer P2, item 2 of the round-3 brief): a replacement
+/// tree under the SAME name with the SAME recorded creation time but
+/// DIFFERENT manifest bytes (a valid v2 online payload) must never be
+/// adopted. Before the recorded manifest digest existed, adoption matched
+/// only (pathname, creation time): the replacement acquired the
+/// scheduler's tag and was deleted (with keep_last=1 it sits behind the
+/// fresh winner, so the old behavior DELETES it). Without the digest
+/// binding this test reports the triple adopted, tags the replacement and
+/// deletes it.
+#[test]
+fn replaced_output_same_name_and_time_different_bytes_is_never_adopted() {
+    let (_temp, root) = private_root();
+    // The decoy supplies the recorded provenance bytes; the tree now
+    // occupying the recorded name is an ACTUAL VALID REPLACEMENT: the
+    // same decoded creation time with distinct (equally valid) manifest
+    // bytes — trailing whitespace the v2 JSON decoder ignores.
+    let decoy = copy(&root, "20200102_000001", 1, None);
+    let tracked = copy(&root, "20200101_000001", 1, None);
+    let fresh = copy(&root, "20200101_000002", 2, None);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(tracked.join(MANIFEST_FILE_NAME))
+        .expect("open manifest")
+        .write_all(b"\n")
+        .expect("append whitespace to the manifest");
+    let decoy_manifest = fs::read(decoy.join(MANIFEST_FILE_NAME)).expect("read decoy manifest");
+    let tracked_manifest = fs::read(tracked.join(MANIFEST_FILE_NAME)).expect("read replacement");
+    assert_ne!(
+        tracked_manifest, decoy_manifest,
+        "the replacement's raw manifest bytes differ from the recorded ones"
+    );
+    assert_ne!(
+        manifest_digest(&tracked),
+        manifest_digest(&decoy),
+        "the digests the registry would record differ"
+    );
+    let created_at = |bytes: &[u8]| {
+        manifest::decode(std::str::from_utf8(bytes).expect("utf8 manifest"))
+            .expect("decode manifest")
+            .created_at_unix_ns
+    };
+    assert_eq!(
+        created_at(&tracked_manifest),
+        created_at(&decoy_manifest),
+        "same decoded manifest creation time"
+    );
+    verify_manifest(&tracked).expect("the replacement fixture is a valid snapshot");
+    let record = (tracked_name(&tracked), 1, manifest_digest(&decoy));
+    // keep_last=1: if the replacement were (wrongly) adopted it would be
+    // the oldest owned copy and deleted by the unchanged selection.
+    let outcome = retain_pending(&root, &fresh, 1, &[record]);
+    assert_eq!(
+        (outcome.deleted, outcome.failed),
+        (0, 0),
+        "the replacement is never adopted, so nothing is deleted"
+    );
+    assert!(
+        outcome.adopted.is_empty(),
+        "a different output is never adopted, not even with the same name and time"
+    );
+    assert_eq!(
+        outcome.untouched,
+        Some(2),
+        "both unrecorded untagged copies"
+    );
+    assert!(tracked.exists());
+    assert!(decoy.exists());
+    assert!(
+        sidecar(&tracked).get("scheduled_retention").is_none(),
+        "the replacement is never tagged with the owner"
+    );
+    assert_eq!(
+        sidecar(&fresh).get("scheduled_retention"),
+        Some(&json!({"version": 1, "owner": OWNER}))
+    );
+}
+
+#[test]
+fn manifest_replaced_after_scan_is_not_adopted() {
+    let (_temp, root) = private_root();
+    let tracked = copy(&root, "20200101_000001", 1, None);
+    let fresh = copy(&root, "20200101_000002", 2, None);
+    let manifest = tracked.join(MANIFEST_FILE_NAME);
+    let original = fs::read(&manifest).expect("read scanned manifest");
+    let record = (tracked_name(&tracked), 1, manifest_digest(&tracked));
+    let changed = Arc::new(AtomicBool::new(false));
+    let subscriber = tracing_subscriber::registry().with(MutateManifestBeforeAdoption {
+        manifest: manifest.clone(),
+        changed: Arc::clone(&changed),
+    });
+
+    let outcome = tracing::subscriber::with_default(subscriber, || {
+        retain_pending(&root, &fresh, 1, std::slice::from_ref(&record))
+    });
+
+    let replacement = fs::read(&manifest).expect("read replacement manifest");
+    assert!(changed.load(Ordering::SeqCst), "the after-scan seam fired");
+    assert_ne!(
+        replacement, original,
+        "the manifest bytes changed after scan"
+    );
+    assert_ne!(
+        manifest_digest(&tracked),
+        record.2,
+        "the digest changed after scan"
+    );
+    assert_eq!((outcome.deleted, outcome.failed), (0, 0));
+    assert!(outcome.adopted.is_empty());
+    assert!(tracked.exists(), "the original output was not deleted");
+    assert!(
+        sidecar(&tracked).get("scheduled_retention").is_none(),
+        "the changed output remains untagged"
+    );
+    assert_eq!(
+        sidecar(&fresh).get("scheduled_retention"),
+        Some(&json!({"version": 1, "owner": OWNER}))
+    );
+}
+
+/// Regression (reviewer P2, item 3): a crash between staging and the
+/// atomic sidecar replace leaves a plain root entry with the recognizable
+/// staged prefix; the next pass removes it BEFORE charging entries, so the
+/// root cannot be wedged just over [`ROOT_ENTRIES`]. Without the cleanup
+/// this pass sees ROOT_ENTRIES + 1 entries and refuses with a budget
+/// error, failing the pass and leaving the debris (and the old copy)
+/// behind.
+#[test]
+fn leftover_staged_file_is_removed_and_not_counted_against_the_cap() {
+    let (_temp, root) = private_root();
+    let old = copy(&root, "20200101_000001", 1, Some(OWNER));
+    let fresh = copy(&root, "20200101_000002", 2, None);
+    // Exactly ROOT_ENTRIES counted entries (the marker is excluded):
+    // without the debris the pass succeeds at the cap.
+    for index in 0..ROOT_ENTRIES - 2 {
+        fs::write(root.join(format!("foreign-{index}")), []).expect("foreign entry");
+    }
+    let debris = root.join(format!("{STAGED_PREFIX}crash"));
+    fs::write(&debris, b"partial sidecar").expect("stage debris");
+    let outcome = retain(&root, &fresh, 1);
+    assert_eq!(
+        (outcome.deleted, outcome.failed),
+        (1, 0),
+        "the debris was cleaned up and did not wedge the pass"
+    );
+    assert!(!debris.exists(), "staged debris removed before the scan");
+    assert!(!old.exists());
+    assert!(fresh.is_dir());
+}
+
+/// The cleanup removes plain REGULAR root files only: a DIRECTORY (and on
+/// Unix a SYMLINK) with the staged prefix is never removed and still
+/// counts as a normal entry.
+#[test]
+fn staged_prefix_directories_and_links_are_never_removed() {
+    let (_temp, root) = private_root();
+    let fresh = copy(&root, "20200101_000001", 1, None);
+    let dir_debris = root.join(format!("{STAGED_PREFIX}dir"));
+    fs::create_dir(&dir_debris).expect("debris directory");
+    #[cfg(unix)]
+    let link_debris = root.join(format!("{STAGED_PREFIX}link"));
+    #[cfg(unix)]
+    symlink(&fresh, &link_debris).expect("debris symlink");
+    let outcome = retain(&root, &fresh, 1);
+    assert_eq!(
+        (outcome.deleted, outcome.failed),
+        (0, 0),
+        "neither debris entry blocks a pass below the cap"
+    );
+    let extra = if cfg!(unix) { 2 } else { 1 };
+    assert_eq!(outcome.untouched, Some(extra));
+    assert!(
+        dir_debris.exists(),
+        "a directory is never removed as debris"
+    );
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(&link_debris)
+            .expect("link remains")
+            .is_symlink(),
+        "a symlink is never removed or followed as debris"
+    );
 }

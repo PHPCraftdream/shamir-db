@@ -19,11 +19,14 @@
 //! `MarkerProvisioning` below). A provisioning failure is a retention failure with the same
 //! outcome and metric a failed prune produces, independent of the copy
 //! outcome, and a successful copy from such a run is recorded as bounded
-//! IN-MEMORY provenance (exact root + owner + name, `PendingAdoption`) so
-//! the first repaired pass adopts exactly that output; a process restart
-//! loses the list, and copies published during an outage that outlives the
-//! process then stay `untouched` by selection — the documented limitation,
-//! fail-safe: no arbitrary adoption ever.
+//! IN-MEMORY provenance (exact root + owner + name, plus that output's
+//! exact manifest creation time and a SHA-256 digest of its exact manifest
+//! bytes, `PendingAdoption` in `schedule::retention_pass`); a LATER
+//! COMPLETE retention pass may then adopt that output if and only if its
+//! exact (name, creation time, digest) triple still matches. A process
+//! restart loses the list, and copies published during an outage that
+//! outlives the process then stay `untouched` by selection — the
+//! documented limitation, fail-safe: no arbitrary adoption ever.
 //!
 //! Destination handling (§4.2 A): the operator `to` must be absolute and is
 //! validated exactly like the offline backup — canonicalize the nearest
@@ -68,7 +71,6 @@
 
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -84,14 +86,17 @@ use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::copy_engine::CopyOptions;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
-    run_online_backup, BackupPermit, BackupReport, OnlineBackupError, SealRecopyCap,
+    run_online_backup, BackupPermit, OnlineBackupError, SealRecopyCap,
 };
 
 use super::adapter::{EngineBackupPort, PortRunState};
 use super::metrics as backup_metrics;
-use super::progress_attribution::final_per_repo_progress;
+use super::progress_attribution::{final_per_repo_progress, final_per_repo_progress_bytes};
 use super::schedule::destination::{scheduled_preflight, validate_destination};
-use super::schedule::retention::RetentionOutcome;
+use super::schedule::retention_pass::{
+    bounded_manifest_bytes, manifest_capture, scheduled_retention_pass, MarkerProvisioning,
+    PendingAdoptions,
+};
 #[cfg(test)]
 use shamir_db::engine::repo::RepoInstance;
 
@@ -112,43 +117,6 @@ pub(crate) fn production_seal_cap() -> SealRecopyCap {
         max_bytes: None,
         max_seconds: Some(SEAL_RECOPY_MAX_SECONDS),
     }
-}
-
-/// Upper bound of the in-memory adoption provenance list (module doc).
-/// Dropping the OLDEST record on overflow keeps the bound without
-/// unbounding the newest outputs; a dropped record simply means that copy
-/// stays `untouched` by selection — never an adoption of something
-/// unrecorded.
-const MAX_PENDING_ADOPTIONS: usize = 64;
-
-/// Exact provenance of one successful, self-verified scheduled output that
-/// was published while the lease marker could not be provisioned (module
-/// doc): only the registry's own run — exact root, exact owner, exact
-/// timestamped directory name and that run's exact manifest creation time
-/// — never a discovery heuristic, so no arbitrary, foreign or historical
-/// untagged directory can be adopted, and a different output that later
-/// occupies the same name (same-second collision) is bound out by the
-/// creation time. Concurrent modification of an already-published child
-/// stays outside the documented stable-root contract; the fresh sidecar
-/// read at adoption catches concurrent tag swaps.
-#[derive(Debug, Clone)]
-struct PendingAdoption {
-    root: PathBuf,
-    owner: String,
-    name: String,
-    created_at_unix_ns: u128,
-}
-
-/// Outcome of the pre-publish marker provisioning.
-enum MarkerProvisioning {
-    /// Not a scheduled run, or the preflight already failed: retention is
-    /// not accounted at all for such a run (no metric increment).
-    NotAttempted,
-    Provisioned,
-    /// The pass counts as a retention failure (same outcome shape and
-    /// metric as a failed prune), independent of the copy outcome. The
-    /// error itself is logged at the provisioning site.
-    Failed,
 }
 
 /// Failure causes of a `start`.
@@ -210,7 +178,7 @@ struct RunRecord {
     /// Bounded in-memory adoption provenance (module doc). Carried across
     /// replacement runs via `start_inner`; lost on process restart by
     /// design (documented limitation).
-    pending_adoptions: Vec<PendingAdoption>,
+    pending_adoptions: PendingAdoptions,
 }
 
 /// Registry over the shared engine handle. Chunk 4 wires the admin ops to
@@ -240,12 +208,26 @@ pub struct OnlineBackupRegistry {
     /// per-thread state; no process-global arming.
     #[cfg(test)]
     pending_step_callback: Mutex<Option<TestStepCallback>>,
+    /// Test-only (R2d-FIX-C): a one-shot post-run callback the NEXT
+    /// `start` moves onto its runner thread, invoked once after a
+    /// SUCCESSFUL protocol return and before the guard stamp, the
+    /// completion capture and the retention pass — fixture surgery (e.g.
+    /// renaming the published child to a fixed name) with no production
+    /// seam.
+    #[cfg(test)]
+    pending_post_run_callback: Mutex<Option<TestPostRunCallback>>,
 }
 
 /// Test-only step callback: invoked by the engine's barrier-step hook
 /// with the step name, on the armed runner thread.
 #[cfg(test)]
 type TestStepCallback = Box<dyn Fn(&'static str) + Send>;
+
+/// Test-only post-run callback: given the protocol's published snapshot
+/// directory, returns its (possibly renamed) location — `None` leaves the
+/// report untouched.
+#[cfg(test)]
+type TestPostRunCallback = Box<dyn Fn(&Path) -> Option<PathBuf> + Send>;
 
 impl OnlineBackupRegistry {
     /// Build the registry. `runtime` must be the server's runtime handle
@@ -288,6 +270,8 @@ impl OnlineBackupRegistry {
             shutdown,
             #[cfg(test)]
             pending_step_callback: Mutex::new(None),
+            #[cfg(test)]
+            pending_post_run_callback: Mutex::new(None),
         }
     }
 
@@ -302,7 +286,7 @@ impl OnlineBackupRegistry {
             started_at_unix_ns: 0,
             repos_created_during: 0,
             last_error: None,
-            pending_adoptions: Vec::new(),
+            pending_adoptions: PendingAdoptions::default(),
         }
     }
 
@@ -388,9 +372,12 @@ impl OnlineBackupRegistry {
             *self.backup_id.lock() = Some(backup_id.clone());
         };
         // Test-only: take a pending per-run step callback (see
-        // `arm_runner_step_callback`) onto this run's job.
+        // `arm_runner_step_callback`) onto this run's job, along with the
+        // one-shot post-run fixture callback (see `arm_post_run_callback`).
         #[cfg(test)]
         let step_callback = self.pending_step_callback.lock().take();
+        #[cfg(test)]
+        let post_run_callback = self.pending_post_run_callback.lock().take();
         let job = RunJob {
             db,
             data_dir: self.data_dir.clone(),
@@ -403,6 +390,8 @@ impl OnlineBackupRegistry {
             record: Arc::clone(&self.record),
             #[cfg(test)]
             step_callback,
+            #[cfg(test)]
+            post_run_callback,
         };
         // §4.8 metrics hook: the run counts as started once registration
         // succeeded; a failed spawn is published as a preparing-stage
@@ -499,6 +488,10 @@ struct RunJob {
     /// Test-only: armed on the runner thread before the protocol runs.
     #[cfg(test)]
     step_callback: Option<TestStepCallback>,
+    /// Test-only: invoked after a successful protocol return, before the
+    /// guard stamp and the completion capture.
+    #[cfg(test)]
+    post_run_callback: Option<TestPostRunCallback>,
 }
 
 impl RunJob {
@@ -521,6 +514,8 @@ impl RunJob {
             record,
             #[cfg(test)]
             step_callback,
+            #[cfg(test)]
+            post_run_callback,
         } = self;
         // Test-only: arm this runner thread with the run's one-shot step
         // callback (the shared engine hook consults the per-thread slot;
@@ -606,38 +601,115 @@ impl RunJob {
         // unchanged; as a local dropped before the `guard` parameter, the
         // unwind order (permit, then failure publication) is preserved.
         drop(permit_guard);
+        // Test-only fixture surgery: rename the published child (fixed
+        // name, fixed manifest creation time) BEFORE the guard stamps it,
+        // so the guarded snapshot and the completion capture below see the
+        // final output location and bytes. `Option::zip` keeps this
+        // edition-2021-compatible without nested collapsible `if let`s.
+        #[cfg(test)]
+        let mut outcome = outcome;
+        #[cfg(test)]
+        if let Some((report, callback)) = outcome.as_mut().ok().zip(post_run_callback.as_ref()) {
+            if let Some(renamed) = callback(&report.dest_dir) {
+                report.dest_dir = renamed;
+            }
+        }
         if let Ok(report) = &outcome {
             guard.completed_dir = Some(report.dest_dir.clone());
             backup_metrics::note_success(report.total_bytes, copy_duration);
         }
+        // Completion capture (R2d-FIX-C, module doc): ONE bounded read of
+        // the published manifest — only a marker-broken run needs adoption
+        // provenance, and its captured bytes ALSO feed progress
+        // attribution (no second read). Ordinary runs keep the original
+        // unbounded attribution read.
+        let captured_raw =
+            if let (Ok(report), MarkerProvisioning::Failed) = (&outcome, &marker_provisioning) {
+                bounded_manifest_bytes(&report.dest_dir)
+            } else {
+                None
+            };
+        let captured = captured_raw.as_deref().and_then(manifest_capture);
         // Scheduled retention (marker-provisioning defect; module doc): a
         // marker error reports the same `RetentionOutcome` shape and metric
         // as a failed prune, INDEPENDENTLY of the copy outcome, fail-closed;
-        // an unattempted marker accounts nothing. A marker-broken run's
-        // successful copy is recorded as exact in-memory provenance
-        // (`PendingAdoption`) and adopted — through the unchanged scan — by
-        // the first repaired pass. The pass runs for EVERY scheduled run
-        // (never filtered on cancellation): a marker failure observed
-        // before a late cancellation must still reach the retention-failure
-        // metric and the provenance record; the prune itself checks the
-        // cancel flag instead (inside `scheduled_retention_pass`).
+        // an unattempted marker accounts nothing. The adoptable provenance
+        // set is snapshotted and the record/retire bookkeeping runs under
+        // the existing `RunRecord` lock — no filesystem I/O under it; the
+        // capture above happened before any lock. The pass runs for EVERY
+        // scheduled run (never filtered on cancellation): a marker failure
+        // observed before a late cancellation must still reach the
+        // retention-failure metric and the provenance record; the prune
+        // itself checks the cancel flag (inside `scheduled_retention_pass`).
         if let Some(scheduled) = scheduled {
-            scheduled_retention_pass(
-                &record,
+            let recorded = record
+                .lock()
+                .pending_adoptions
+                .recorded_for(&to, &scheduled.owner);
+            let retention = scheduled_retention_pass(
                 &to,
-                &scheduled,
+                &scheduled.owner,
+                &scheduled.policy,
                 &cancel,
                 &outcome,
                 &marker_provisioning,
-                progress.started_at_unix_ns,
+                &recorded,
             );
+            match marker_provisioning {
+                MarkerProvisioning::Failed => {
+                    if let Ok(report) = &outcome {
+                        match (
+                            captured,
+                            report.dest_dir.file_name().and_then(|n| n.to_str()),
+                        ) {
+                            (Some((created_at_unix_ns, manifest_digest)), Some(name)) => {
+                                record.lock().pending_adoptions.record(
+                                    &to,
+                                    &scheduled.owner,
+                                    name,
+                                    created_at_unix_ns,
+                                    manifest_digest,
+                                );
+                            }
+                            (None, _) => {
+                                // Fail closed: without the exact captured
+                                // output identity nothing is recorded, and
+                                // an unrecorded copy is never adopted by
+                                // selection.
+                                tracing::warn!(
+                                    dest_dir = %report.dest_dir.display(),
+                                    "cannot capture the published manifest for adoption \
+                                     provenance; the copy stays untouched by selection"
+                                );
+                            }
+                            (Some(_), None) => tracing::warn!(
+                                "fresh snapshot name was not valid Unicode; retention cannot \
+                                 adopt it"
+                            ),
+                        }
+                    }
+                }
+                MarkerProvisioning::Provisioned => {
+                    record.lock().pending_adoptions.retire_adopted(
+                        &to,
+                        &scheduled.owner,
+                        &retention.adopted,
+                    );
+                }
+                MarkerProvisioning::NotAttempted => {}
+            }
         }
         // Owner-side final progress: the protocol only notes zeroed
         // per-repo entries (step B) and exposes no progress callback, so
         // the run's hashed bytes/files would otherwise stay invisible in
         // `status()` after `Done`. Attribute the snapshot (which the
         // manifest describes per repo); recorded under a short lock below.
-        if let Ok(report) = &outcome {
+        // A marker-broken run reuses its captured bounded bytes.
+        if let Some(raw) = captured_raw.as_deref() {
+            for (repo, bytes_hashed, files_hashed) in final_per_repo_progress_bytes(raw) {
+                progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+            }
+        } else if let Ok(report) = &outcome {
             for (repo, bytes_hashed, files_hashed) in final_per_repo_progress(report) {
                 progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
             }
@@ -675,118 +747,6 @@ impl RunJob {
         record.running = false;
         drop(record);
         guard.finish(!failed);
-    }
-}
-
-/// One scheduled run's retention publication (module doc). Marker-error
-/// accounting, exact-provenance recording and adoption bookkeeping for a
-/// finished run — fail-closed under a broken marker, silent when the
-/// marker was never attempted.
-fn scheduled_retention_pass(
-    record: &Mutex<RunRecord>,
-    root: &Path,
-    scheduled: &ScheduledRun,
-    cancel: &CancelFlag,
-    outcome: &Result<BackupReport, OnlineBackupError>,
-    marker: &MarkerProvisioning,
-    created_at_unix_ns: u128,
-) {
-    let result = match (outcome, marker) {
-        (_, MarkerProvisioning::Failed) => RetentionOutcome {
-            failed: 1,
-            ..RetentionOutcome::default()
-        },
-        (Ok(report), MarkerProvisioning::Provisioned) => {
-            // A cancelled run publishes no prune: its marker was fine and
-            // its copy is already recorded in-memory; skipping the scan
-            // here loses nothing observable. (The cancel check lives in
-            // the helper, not at the call site, so a marker FAILURE is
-            // still accounted even when the run was cancelled mid-copy.)
-            if cancel.is_cancelled() {
-                RetentionOutcome::default()
-            } else {
-                // Only THIS root + THIS owner's exact recorded (name, creation
-                // time) pairs are adoptable: bounded in-memory provenance,
-                // never a discovery heuristic.
-                let recorded: BTreeSet<(String, u128)> = {
-                    let record = record.lock();
-                    record
-                        .pending_adoptions
-                        .iter()
-                        .filter(|item| item.root == root && item.owner == scheduled.owner)
-                        .map(|item| (item.name.clone(), item.created_at_unix_ns))
-                        .collect()
-                };
-                super::schedule::retention::prune(
-                    root,
-                    &report.dest_dir,
-                    &scheduled.owner,
-                    &scheduled.policy,
-                    cancel,
-                    &recorded,
-                )
-            }
-        }
-        // Not attempted (preflight failure, non-scheduled run), or nothing
-        // published: no retention accounting.
-        (_, MarkerProvisioning::NotAttempted) | (Err(_), MarkerProvisioning::Provisioned) => {
-            RetentionOutcome::default()
-        }
-    };
-    backup_metrics::note_retention(result.deleted, result.failed, result.untouched);
-    // Normal next-pass contention, not an error: debug only.
-    if result.skipped_in_use > 0 {
-        tracing::debug!(
-            skipped = result.skipped_in_use,
-            "scheduled retention skipped snapshots in use by readers"
-        );
-    }
-    match marker {
-        MarkerProvisioning::Failed => {
-            if let Ok(report) = outcome {
-                let mut record = record.lock();
-                match report.dest_dir.file_name().and_then(|name| name.to_str()) {
-                    Some(name) => {
-                        if record.pending_adoptions.len() >= MAX_PENDING_ADOPTIONS {
-                            let dropped = record.pending_adoptions.remove(0);
-                            tracing::warn!(
-                                name = %dropped.name,
-                                "adoption provenance is full; the oldest recorded copy stays \
-                                 untouched by selection"
-                            );
-                        }
-                        record.pending_adoptions.push(PendingAdoption {
-                            root: root.to_path_buf(),
-                            owner: scheduled.owner.clone(),
-                            name: name.to_owned(),
-                            created_at_unix_ns,
-                        });
-                    }
-                    None => tracing::warn!(
-                        "fresh snapshot name was not valid Unicode; retention cannot adopt it"
-                    ),
-                }
-            }
-        }
-        MarkerProvisioning::Provisioned => {
-            if !result.adopted.is_empty() {
-                // Drop exactly the reported (name, creation time) PAIRS the
-                // pass tagged (the ownership tag is durable by then,
-                // whatever the rest of the pass did). Matching the pair, not
-                // the bare name, keeps a different output that later
-                // occupies a recorded name (same-second collision) in the
-                // provenance list instead of silently retiring it.
-                let mut record = record.lock();
-                record.pending_adoptions.retain(|item| {
-                    !(item.root == root
-                        && item.owner == scheduled.owner
-                        && result
-                            .adopted
-                            .contains(&(item.name.clone(), item.created_at_unix_ns)))
-                });
-            }
-        }
-        MarkerProvisioning::NotAttempted => {}
     }
 }
 
@@ -961,6 +921,15 @@ impl OnlineBackupRegistry {
     /// registry instance or test observes it.
     pub(crate) fn arm_runner_step_callback(&self, callback: TestStepCallback) {
         *self.pending_step_callback.lock() = Some(callback);
+    }
+
+    /// Arm a one-shot post-run callback for this registry's NEXT `start`:
+    /// after the protocol returns `Ok` on that run's runner thread — and
+    /// before the guard stamp, the completion capture and the retention
+    /// pass — it may rename the published child and returns its new
+    /// location (`None` keeps the report as-is). Per-registry opt-in.
+    pub(super) fn arm_post_run_callback(&self, callback: TestPostRunCallback) {
+        *self.pending_post_run_callback.lock() = Some(callback);
     }
 }
 

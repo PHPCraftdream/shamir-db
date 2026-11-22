@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use crate::sync::durability::backup::online::manifest::{
 };
 use crate::sync::durability::backup::online::progress::BackupStage;
 use crate::sync::durability::backup::{
-    verify_manifest, ManifestFileEntry, SNAPSHOT_LEASE_FILE_NAME,
+    verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME, SNAPSHOT_LEASE_FILE_NAME,
 };
 
 use super::super::super::metrics::backup_metrics_snapshot;
@@ -28,6 +28,39 @@ use super::super::super::OnlineBackupRegistry;
 const OWNER: &str = "registry-test-owner";
 const WAIT: Duration = Duration::from_secs(120);
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// Fixed names/creation times the test-only post-run callbacks pin each
+/// run's output to: both are deterministically OLDER than any real run
+/// (real nanosecond timestamps are ~1e18) and ordered 1 < 2, so run 2's
+/// prune deletes exactly run 1's copy beyond `keep_last = 1` regardless of
+/// wall clock.
+const RUN1_NAME: &str = "20200101_000003";
+const RUN1_CREATED_AT: u128 = 1;
+const RUN2_NAME: &str = "20200101_000004";
+const RUN2_CREATED_AT: u128 = 2;
+
+/// Rename the just-published snapshot to `fixed_name` and rewrite its
+/// manifest creation time to `created_at` (`manifest::decode`/`encode`, so
+/// flattened unknown fields survive; the file already exists, so a direct
+/// `fs::write` replaces it — no temp/renamed replacement path). The
+/// registry captures the adoption digest AFTER this runs, so the recorded
+/// provenance binds to the final bytes at the final name.
+fn pin_fixture(published: &Path, fixed_name: &str, created_at: u128) -> Option<PathBuf> {
+    let fixed = published.parent()?.join(fixed_name);
+    fs::rename(published, &fixed)
+        .unwrap_or_else(|error| panic!("pin {published:?} to {fixed_name}: {error}"));
+    let mut decoded = manifest::decode(
+        &fs::read_to_string(fixed.join(MANIFEST_FILE_NAME))
+            .unwrap_or_else(|error| panic!("read pinned manifest: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("decode pinned manifest: {error}"));
+    decoded.created_at_unix_ns = created_at;
+    let encoded = manifest::encode(&decoded)
+        .unwrap_or_else(|error| panic!("encode pinned manifest: {error}"));
+    fs::write(fixed.join(MANIFEST_FILE_NAME), encoded)
+        .unwrap_or_else(|error| panic!("write pinned manifest: {error}"));
+    Some(fixed)
+}
 
 fn seed_owned_copy(root: &Path, name: &str, created_at: u128) {
     let dir = root.join(name);
@@ -178,11 +211,13 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
         .expect("destination listing")
         .map(|entry| entry.expect("destination entry").file_name())
         .collect();
-    // The reader lease marker (created lazily by the `verify_manifest`
-    // probes on the seeded copies) is expected alongside the snapshots; it
-    // must be a regular file, and retention never lists it.
+    // The reader lease marker is provisioned by the scheduled runner after
+    // scheduled preflight and before copying; it remains present even when
+    // a later verification failure prevents retention from running. Seed
+    // `verify_manifest` probes do not create it. It is expected alongside
+    // the snapshots, must be a regular file, and retention never lists it.
     let marker_meta = fs::symlink_metadata(to.join(SNAPSHOT_LEASE_FILE_NAME))
-        .expect("lease marker exists after the verify probes");
+        .expect("scheduled runner provisions the lease marker before copying");
     assert!(marker_meta.is_file(), "lease marker must be a regular file");
     assert_eq!(
         entries,
@@ -199,18 +234,18 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
     drop(db);
 }
 
-/// Marker-provisioning defect, real registry: a DIRECTORY at the marker
-/// path must keep the copy succeeding while retention reports the failure
-/// (+1 retention-failure metric, no deletions, no scan so the
-/// `untouched` gauge keeps its previous value) and the published copy stays
-/// untagged and intact. The repair/adoption half is exercised
-/// deterministically with fixed dates by the prune-level regression
-/// (`broken_marker_fails_the_pass_and_records_provenance_for_repair`),
-/// which feeds the exact recorded provenance pairs the registry
-/// publishes; the registry-level pending list itself is private state with
-/// no observation seam, and adding one (or a production clock seam to
-/// separate same-second run names) would widen the surface for no extra
-/// proof.
+/// Marker-provisioning defect, real registry, TWO successful runs on the
+/// SAME registry and root: run 1 publishes under a DIRECTORY parked at the
+/// marker path — the copy succeeds while retention reports the failure
+/// (+1 retention-failure metric, no deletions, no scan so the `untouched`
+/// gauge keeps its previous value) and the published copy stays untagged
+/// and intact. Run 2 repairs the marker (the obstruction is removed), so
+/// provisioning succeeds and the scan adopts EXACTLY run 1's recorded
+/// (name, creation time, manifest digest) triple, tags it, and prunes it
+/// as the only deletion beyond `keep_last = 1`. Fixed names and a fixed
+/// manifest creation time (pinned by the test-only post-run callback via
+/// `manifest::decode`/`encode`) make the ordering deterministic — no
+/// wall-clock or same-second dependency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
     let guard = FlakeGuard::with_watchdog(
@@ -251,9 +286,8 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
     );
     // A foreign untagged directory: never adopted, never deleted.
     fs::create_dir(to.join("foreign")).expect("foreign directory");
-    // The obstruction: a directory exactly at the marker path. It stays in
-    // place for the whole test: repair and adoption are covered at the
-    // prune level (see the test comment).
+    // The obstruction: a directory exactly at the marker path. It parks
+    // provisioning for run 1 only; run 2 repairs it by removal (below).
     let obstruction = to.join(SNAPSHOT_LEASE_FILE_NAME);
     fs::create_dir(&obstruction).expect("obstruction directory");
 
@@ -266,6 +300,13 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
         keep_last: 1,
         max_age_days: None,
     };
+    // Test-only fixture surgery: pin run 1's output to a fixed name and a
+    // fixed manifest creation time (see `pin_fixture`), so run 2's scan
+    // ordering and the recorded provenance are deterministic.
+    let run1_name = RUN1_NAME.to_owned();
+    registry.arm_post_run_callback(Box::new(move |published| {
+        pin_fixture(published, &run1_name, RUN1_CREATED_AT)
+    }));
     let completion = registry
         .start_scheduled(to.clone(), OWNER.to_owned(), policy())
         .expect("admit scheduled run");
@@ -291,7 +332,8 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
         before.retention_deleted_total
     );
     assert_eq!(after1.retention_untouched, before.retention_untouched);
-    assert!(dir1.is_dir());
+    assert!(dir1.is_dir(), "run 1's output is visible at its fixed name");
+    assert_eq!(dir1, to.join(RUN1_NAME), "the callback pinned the name");
     let sidecar1: Value =
         serde_json::from_slice(&fs::read(dir1.join(BACKUP_META_FILE_NAME)).expect("read sidecar"))
             .expect("decode sidecar");
@@ -300,8 +342,78 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
         "a copy published without a marker must stay untagged"
     );
     assert!(to.join("foreign").is_dir());
-    // The run's own provenance is in-memory registry state with no
-    // observation seam; the repair/adopt half of the defect is covered
-    // deterministically at the prune level (see the module comment above).
+
+    // --- Repair: remove the obstruction, pin run 2's output to its own
+    // fixed name/time, then run 2 provisions the marker successfully and
+    // the scan adopts run 1's recorded provenance.
+    fs::remove_dir(&obstruction).expect("marker path repaired");
+    let run2_name = RUN2_NAME.to_owned();
+    registry.arm_post_run_callback(Box::new(move |published| {
+        pin_fixture(published, &run2_name, RUN2_CREATED_AT)
+    }));
+    let completion2 = registry
+        .start_scheduled(to.clone(), OWNER.to_owned(), policy())
+        .expect("admit scheduled run 2");
+    guard.mark("run 2 admitted");
+    let completed2 = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()).min(WAIT),
+        completion2,
+    )
+    .await
+    .expect("run 2 within deadline")
+    .expect("run 2 reports completion");
+    assert!(completed2, "run 2's copy must succeed");
+    guard.mark("run 2 finished");
+    let status2 = registry.status();
+    assert!(!status2.running);
+    let dir2 = status2.dest_dir.clone().expect("run 2 published a copy");
+    assert!(dir2.is_dir());
+    assert_eq!(
+        dir2,
+        to.join(RUN2_NAME),
+        "run 2's copy is at its fixed name"
+    );
+    assert_ne!(dir2, dir1, "the two runs pinned distinct names");
+    let after2 = backup_metrics_snapshot();
+    // Run 1's marker failure is the only retention failure; run 2
+    // provisioned fine.
+    assert_eq!(
+        after2.retention_failed_total,
+        before.retention_failed_total + 1
+    );
+    // Exactly ONE deletion: run 1's adopted copy, the only entry beyond
+    // `keep_last = 1` (foreign is never a candidate).
+    assert_eq!(
+        after2.retention_deleted_total,
+        before.retention_deleted_total + 1
+    );
+    // The foreign untagged directory was counted untouched by run 2's
+    // complete scan (run 1 ran no scan under the broken marker).
+    assert_eq!(after2.retention_untouched, before.retention_untouched + 1);
+    // Run 1's real, previously untagged snapshot was adopted, tagged and
+    // then deleted by run 2's prune — exactly once, exactly by name.
+    assert!(!dir1.exists(), "run 1's adopted copy was pruned by run 2");
+    let sidecar2: Value =
+        serde_json::from_slice(&fs::read(dir2.join(BACKUP_META_FILE_NAME)).expect("read sidecar"))
+            .expect("decode sidecar");
+    assert_eq!(
+        sidecar2["scheduled_retention"]["owner"],
+        json!(OWNER),
+        "run 2's fresh copy was tagged by the provisioned marker"
+    );
+    let entries2: BTreeSet<_> = fs::read_dir(&to)
+        .expect("destination listing")
+        .map(|entry| entry.expect("destination entry").file_name())
+        .collect();
+    assert_eq!(
+        entries2,
+        BTreeSet::from([
+            OsString::from(SNAPSHOT_LEASE_FILE_NAME),
+            OsString::from("foreign"),
+            OsString::from(RUN2_NAME),
+        ]),
+        "foreign survives; run 1's copy is exactly deleted"
+    );
+    verify_manifest(&dir2).expect("run 2's copy remains verified");
     drop(db);
 }

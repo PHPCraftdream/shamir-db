@@ -48,6 +48,8 @@ use super::snapshot_lease;
 use crate::format_stamp::{observe_stamp_for_backup, BackupStampObservation, StampError};
 
 mod source_lock;
+#[cfg(test)]
+mod tests;
 mod v2_verify;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
@@ -670,24 +672,29 @@ pub(super) fn verify_manifest_for_restore(
 /// candidate's `manifest.json` exactly as the caller already read and
 /// size-bounded it — the verifier verifies against those bytes and never
 /// re-reads the file, so a candidate whose manifest swaps between the two
-/// reads is judged on the bytes the classification decision used. An
-/// ONLINE-kind match is required on the same bytes: a v2 manifest whose
-/// `kind` is offline refuses too. The exclusive delete lease is taken
-/// separately, immediately before deletion. Not used by any reader path;
-/// the unit return carries no report fields the preflight needs.
+/// reads is judged on the bytes the classification decision used. THE
+/// CALLER'S MANIFEST SIZE CAP IS A PRECONDITION of this function and is
+/// not re-checked here. An ONLINE-kind match is required FIRST, on the
+/// same bytes and BEFORE any payload I/O: a v2 manifest whose `kind` is
+/// offline refuses without walking or hashing the tree; the original v2
+/// format-version check and error are kept. The exclusive delete lease is
+/// taken separately, immediately before deletion. Not used by any reader
+/// path; the unit return carries no report fields the preflight needs.
 pub fn verify_retention_candidate(dir: &Path, raw: &[u8]) -> Result<(), BackupError> {
-    // The v2 verifier checks the format version itself (refusing v1 and
-    // anything unknown — there is no v1 fallback for retention), so no
-    // separate peek: the exact bounded bytes go straight to the core, one
-    // decode, no re-read.
-    let (report, _) = v2_verify::verify_manifest_v2(dir, raw)?;
-    // A v2 manifest whose `kind` is offline is not a retention candidate
-    // either: the kind match is on the SAME decoded bytes.
-    if !matches!(report.kind, BackupKind::Online) {
+    // Kind FIRST: decode and classify the bounded bytes without touching
+    // the tree (`decode_manifest_v2` keeps the original v2 format-version
+    // check — v1 and unknown refuse typed, no v1 fallback for retention).
+    let decoded = v2_verify::decode_manifest_v2(raw)?;
+    // A v2 manifest whose `kind` is offline is not a retention candidate:
+    // refused BEFORE the tree walk, hash or any other payload I/O.
+    if !matches!(decoded.kind, BackupKind::Online) {
         return Err(BackupError::ManifestInvalid(
             "retention candidate manifest kind is not online".to_owned(),
         ));
     }
+    // Online-kind only: the payload half verifies the ALREADY-decoded
+    // manifest — one parse, no re-read.
+    v2_verify::verify_decoded_manifest_v2(dir, decoded)?;
     Ok(())
 }
 

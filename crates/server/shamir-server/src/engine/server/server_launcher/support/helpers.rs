@@ -54,6 +54,14 @@ pub(super) fn resolve_backup(
     // repair-and-continue any more: a provisioning failure fails the pass
     // closed and counts as a retention failure (registry runner), so this
     // warning is best-effort boot pre-provisioning only.
+    //
+    // DOCUMENTED WINDOW (by design): a reader that started on this root
+    // while the marker was ABSENT is unleased for its WHOLE read, and this
+    // provisioning (first startup or marker repair) can make its in-flight
+    // copy deletion-eligible. Finish or postpone manual verify/restore
+    // before the first startup or repair; after the first successful
+    // scheduled pass the guarantee holds for later readers that hold the
+    // lease while the marker remains.
     if let Err(error) = provision_snapshot_lease(&resolved.destination) {
         tracing::warn!(
             root = %resolved.destination.display(),

@@ -119,6 +119,14 @@ fn resolve_source_with_lookup(
     // Readers never create it and never consult the snapshot sidecar: a
     // timestamped child tagged with an owner id but exported (copied) into
     // a parent without the marker is read lock-free.
+    //
+    // DOCUMENTED WINDOW (by design): only an ABSENT marker classifies the
+    // snapshot as an unleased export, and that absence alone is no
+    // protection — a reader that started before boot/repair provisioning
+    // stays unleased for its WHOLE read, and the copy can become
+    // deletion-eligible the moment the marker appears. Finish or postpone
+    // such reads (guide 07-operations); readers never create or repair
+    // the marker.
     let marker = root.join(SNAPSHOT_LEASE_FILE_NAME);
     if !marker_exists(&marker)? {
         return Ok(Resolution::Unmanaged(snapshot));

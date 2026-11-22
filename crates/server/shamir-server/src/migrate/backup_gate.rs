@@ -9,8 +9,9 @@ use shamir_sync::format_stamp::{decode, FormatStamp, STAMP_FILE_NAME};
 
 /// Typed verification mode of the backup gate: the no-lock `--plan` gate
 /// passes `verify_exported_manifest`, the actual execute passes
-/// `verify_manifest` — both share this signature.
-pub(crate) type VerifySnapshot = fn(&Path) -> Result<ManifestVerifyReport, BackupError>;
+/// `verify_manifest` — both share this signature. Only the sibling
+/// `migrate` modules consume it; `pub(super)` is as wide as it needs to be.
+pub(super) type VerifySnapshot = fn(&Path) -> Result<ManifestVerifyReport, BackupError>;
 
 /// Successful evidence from a verified, fresh, nonempty pre-migration backup.
 #[derive(Debug, Clone, PartialEq, Eq)]

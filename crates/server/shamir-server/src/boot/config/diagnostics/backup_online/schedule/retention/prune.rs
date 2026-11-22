@@ -8,11 +8,13 @@ use shamir_private_dir::verify_private_dir;
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::progress::CancelFlag;
 use crate::sync::durability::backup::{
-    provision_snapshot_lease, try_snapshot_delete_lease, SNAPSHOT_LEASE_FILE_NAME,
+    provision_snapshot_lease, try_snapshot_delete_lease, MANIFEST_FILE_NAME,
+    SNAPSHOT_LEASE_FILE_NAME,
 };
 
+use super::super::retention_pass::{manifest_digest_hex, MAX_MANIFEST};
 use super::budget::{metadata, plain_on_root, Budget, Refusal, ROOT_ENTRIES};
-use super::ownership::{has_tag, is_owned, read_sidecar, tag_fresh};
+use super::ownership::{has_tag, is_owned, read_sidecar, remove_staged_debris_entry, tag_fresh};
 use super::preflight::verified_time;
 use super::RetentionOutcome;
 
@@ -27,7 +29,7 @@ pub(in crate::boot::config::diagnostics::backup_online) fn prune(
     owner: &str,
     policy: &BackupRetentionConfig,
     cancel: &CancelFlag,
-    pending: &BTreeSet<(String, u128)>,
+    pending: &BTreeSet<(String, u128, String)>,
 ) -> RetentionOutcome {
     let mut outcome = RetentionOutcome::default();
     let mut budget = Budget::new(cancel);
@@ -53,7 +55,7 @@ pub(super) fn prune_inner(
     fresh_copy: &Path,
     owner: &str,
     policy: &BackupRetentionConfig,
-    pending: &BTreeSet<(String, u128)>,
+    pending: &BTreeSet<(String, u128, String)>,
     budget: &mut Budget<'_>,
     outcome: &mut RetentionOutcome,
 ) -> Result<(), Refusal> {
@@ -82,25 +84,27 @@ pub(super) fn prune_inner(
     let mut owned = Vec::new();
     let mut untouched = 0;
     let mut fresh = None;
-    // O(log n) provenance lookups: (name -> recorded manifest creation
-    // time), built once for the whole scan.
-    let pending_times: BTreeMap<String, u128> = pending.iter().cloned().collect();
-    // Exact provenance matches: (name, manifest creation time) pairs the
-    // registry itself published, verified and kept in THIS root under THIS
-    // owner while the lease marker was broken (bounded in-memory set,
-    // passed in). Nothing else untagged is ever adopted — a historical,
-    // foreign or operator timestamped directory stays `untouched` exactly
-    // as before (selection rules unchanged), and a different output that
-    // later occupies a recorded name is bound out by the creation time.
-    // Adoption happens only when the marker provisioning succeeded (it
-    // runs BEFORE the scan): under a broken marker the pass fails closed
-    // before any scan, tag or deletion, and the recorded pairs survive for
-    // the next pass. The
-    // unavoidable pre-marker transition (a reader may have resolved a copy
-    // while the marker was still absent and read it unleased) is NOT closed
-    // by this: it is covered only by the documented stable-marker /
-    // operator-quiescence contract.
-    let mut adopt: Vec<(u128, PathBuf)> = Vec::new();
+    // O(log n) provenance lookups: (name -> set of recorded (manifest
+    // creation time, manifest SHA-256 digest)), built once for the whole
+    // scan.
+    let mut pending_by_name: BTreeMap<String, BTreeSet<(u128, String)>> = BTreeMap::new();
+    for (name, time, digest) in pending {
+        pending_by_name
+            .entry(name.clone())
+            .or_default()
+            .insert((*time, digest.clone()));
+    }
+    // Exact provenance matches: (name, manifest creation time, manifest
+    // SHA-256 digest) triples the registry itself published, verified and
+    // kept in THIS root under THIS owner while the lease marker was
+    // broken. Nothing else untagged is ever adopted; a different output
+    // under a recorded name is bound out by the creation time AND digest.
+    // Adoption happens only when marker provisioning succeeded (it runs
+    // BEFORE the scan): a broken marker fails closed before any scan, tag
+    // or deletion. The unavoidable pre-marker transition (a reader may
+    // have resolved a copy while the marker was absent) is covered only
+    // by the documented stable-marker / operator-quiescence contract.
+    let mut adopt: Vec<(String, u128, PathBuf, String)> = Vec::new();
     let entries = fs::read_dir(&canonical).map_err(|_| Refusal::Incomplete)?;
     let mut index = 0usize;
     for entry in entries {
@@ -118,14 +122,24 @@ pub(super) fn prune_inner(
         if name == SNAPSHOT_LEASE_FILE_NAME {
             continue;
         }
+        // Crash-debris cleanup DURING the initial discovery (reviewer P2):
+        // a staged sidecar left by an earlier crashed pass is removed
+        // here, per entry, instead of a second full pre-scan directory
+        // listing. A successfully removed entry neither consumes a
+        // visit-cap slot nor counts; a failed cleanup stays a normal
+        // counted entry, so cleanup never bypasses the cap nor fails the
+        // pass. Cancellation is the loop's existing checkpoint.
+        if remove_staged_debris_entry(&name, &path, &root_meta) {
+            continue;
+        }
         if index >= ROOT_ENTRIES {
             return Err(Refusal::Budget);
         }
         index += 1;
         let is_fresh = name == fresh_name;
         let name_str = name.to_str();
-        let pending_time = name_str.and_then(|name| pending_times.get(name).copied());
-        let is_pending = pending_time.is_some();
+        let pending_records = name_str.and_then(|name| pending_by_name.get(name));
+        let is_pending = pending_records.is_some();
         let mut classify = || -> Result<_, Refusal> {
             if !timestamp_name(&name) {
                 return Err(Refusal::Unverifiable);
@@ -140,36 +154,45 @@ pub(super) fn prune_inner(
                     return Err(Refusal::Unverifiable);
                 }
             }
-            let time = verified_time(&path, &root_meta, budget)?;
-            Ok((time, sidecar))
+            // Digest only for pending names: normal passes pay no SHA.
+            let (time, digest) = verified_time(&path, &root_meta, budget, is_pending)?;
+            Ok((time, sidecar, digest))
         };
         match classify() {
-            Ok((time, sidecar)) if is_fresh => {
+            Ok((time, sidecar, _)) if is_fresh => {
                 fresh = Some((time, path, sidecar));
             }
             // The scan-time sidecar is only a cheap gate: the decision to
-            // tag is made on a FRESH sidecar read immediately below, which
-            // is what detects a concurrently swapped tag (unsupported
+            // tag is made on a FRESH sidecar read AND a FRESH manifest
+            // digest immediately below, which is what detects a
+            // concurrently swapped tag or a replaced manifest (unsupported
             // writers); the scan snapshot makes no such claim. A recorded
-            // NAME with a matching creation time is adoptable; a name match
-            // with a DIFFERENT creation time is a different output: it is
-            // adopted never — but if it is already owner-tagged it stays a
-            // normal selection candidate exactly as before (selection
-            // unchanged), otherwise untouched. The `untouched` metric is
-            // published only at the complete-scan point below.
-            Ok((time, sidecar)) if is_pending => {
-                // The map collapses duplicate recorded times for one name;
-                // membership in the adopt decision uses the exact set so
-                // every recorded (name, time) pair stays adoptable.
-                if name_str.is_some_and(|name| pending.contains(&(name.to_owned(), time))) {
-                    adopt.push((time, path));
+            // (name, creation time, MANIFEST DIGEST) triple is adoptable:
+            // the digest binds the record to the recorded OUTPUT's exact
+            // manifest bytes, so a replacement tree under the same name
+            // with the same creation time (but different bytes) is adopted
+            // never — but if it is already owner-tagged it stays a normal
+            // selection candidate exactly as before (selection unchanged),
+            // otherwise untouched. The `untouched` metric is published only
+            // at the complete-scan point below.
+            Ok((time, sidecar, digest)) if is_pending => {
+                let matched = pending_records.is_some_and(|records| {
+                    digest
+                        .as_ref()
+                        .is_some_and(|digest| records.contains(&(time, digest.clone())))
+                });
+                if matched {
+                    // A pending name always verifies with a digest here.
+                    let name = name_str.expect("pending name is valid Unicode");
+                    let digest = digest.expect("pending manifest digest computed");
+                    adopt.push((name.to_owned(), time, path, digest));
                 } else if is_owned(&sidecar, owner) {
                     owned.push((time, path));
                 } else {
                     untouched += 1;
                 }
             }
-            Ok((time, _)) => owned.push((time, path)),
+            Ok((time, _, _)) => owned.push((time, path)),
             Err(Refusal::Unverifiable) => untouched += 1,
             Err(error) => return Err(error),
         }
@@ -181,31 +204,49 @@ pub(super) fn prune_inner(
     check_child(&fresh_path, &root_meta)?;
     tag_fresh(&canonical, &fresh_path, sidecar, owner, budget)?;
 
+    #[cfg(test)]
+    tracing::trace!(
+        target: "shamir_server::retention_before_adoption",
+        "retention scan verified candidates"
+    );
+
     // Marker is fresh and verified: adopt exactly the provenance matches.
-    // Every child is revalidated immediately before tagging — same root
-    // (re-canonicalized, private) and the same plain-directory disposition
-    // the scan enforced — and the tag decision reads the sidecar FRESH, so
-    // a tag swapped since the scan is honored, not missed: a copy another
-    // writer tagged in the meantime is a normal candidate only if it is
-    // ours, otherwise it stays untouched; `tag_fresh` still refuses a
-    // foreign tag as last resort. The creation-time binding plus the
-    // documented stable-root contract (no cooperating process replaces a
-    // published child) is what ties the record to THIS run's output.
-    // Nothing is deleted before this loop.
-    for (time, path) in adopt {
+    // Every child is revalidated immediately before tagging — same root,
+    // same plain-directory disposition the scan enforced — and BOTH the
+    // sidecar and the manifest digest are re-checked FRESH, so a tag or
+    // manifest swapped since the scan is honored, not missed. Nothing is
+    // deleted before this loop.
+    for (name, time, path, digest) in adopt {
         budget.checkpoint()?;
         check_root(root, &canonical)?;
         check_child(&path, &root_meta)?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or(Refusal::Unverifiable)?;
         let sidecar = read_sidecar(&path, &root_meta, budget)?;
+        // Bounded re-read of the exact manifest bytes: same cap as the
+        // scan (MAX_MANIFEST) and the same Budget charging; a normal read
+        // refusal fails closed (untouched), never weakens the refusal.
+        let raw = match budget.read(&path.join(MANIFEST_FILE_NAME), &root_meta, MAX_MANIFEST) {
+            Ok(raw) => raw,
+            Err(Refusal::Unverifiable) => {
+                untouched += 1;
+                outcome.untouched = Some(untouched);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let digest_now = manifest_digest_hex(&raw);
+        // The scan enqueued this entry only on an exact (name, time,
+        // digest) record match, and the re-read digest above equals the
+        // scanned one — nothing else to check before tagging.
+        if digest_now != digest {
+            untouched += 1;
+            outcome.untouched = Some(untouched);
+            continue;
+        }
         if has_tag(&sidecar) {
             if is_owned(&sidecar, owner) {
                 // Already tagged by an earlier repaired pass: nothing left
                 // to adopt, but it is a normal selection candidate.
-                outcome.adopted.push((name, time));
+                outcome.adopted.push((name, time, digest_now));
                 owned.push((time, path));
             } else {
                 untouched += 1;
@@ -215,7 +256,7 @@ pub(super) fn prune_inner(
         }
         match tag_fresh(&canonical, &path, sidecar, owner, budget) {
             Ok(()) => {
-                outcome.adopted.push((name, time));
+                outcome.adopted.push((name, time, digest_now));
                 owned.push((time, path));
             }
             Err(Refusal::Unverifiable) => {
