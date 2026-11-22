@@ -75,9 +75,11 @@ const A2_MAX_LENGTH: u32 = 256;
 ///
 /// Bounds the number of `argon2id()` calls executing their `hash_password_into`
 /// work *concurrently* across ALL connections/queries/guest functions. Chosen
-/// **lower** than the auth path's 64 permits (`shamir-connect`'s
-/// `Argon2Semaphore`) because this path additionally permits a larger per-call
-/// memory profile (up to [`A2_MAX_MEMORY_KB`]):
+/// **lower** than the 64 permits of the server-side password-derivation gate
+/// (`shamir-connect`'s `Argon2Semaphore`, taken only for privileged SCRAM
+/// user creation; an ordinary login derives no server-side key and takes no
+/// permit) because this path additionally permits a larger per-call memory
+/// profile (up to [`A2_MAX_MEMORY_KB`]):
 /// - At the OWASP interactive default (19 MiB/call): 16 × 19 MiB ≈ 304 MiB.
 /// - At the per-call ceiling (64 MiB): 16 × 64 MiB = 1 GiB aggregate worst-case.
 ///

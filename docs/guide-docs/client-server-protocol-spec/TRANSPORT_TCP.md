@@ -79,17 +79,29 @@ TCP close ИЛИ logout ИЛИ idle timeout
 ```
 {
   "sid": bytes(32),               // session_id из auth_ok
-  "req": { ... }                  // request body
+  "req": bytes                    // MessagePack-БАЙТЫ тела запроса, НЕ map конверта
 }
 ```
 
-Response:
+Response — отдельный конверт, ветки `error` внутри `res` нет:
 ```
 {
   "rid": Optional<u32>,           // request id для correlation
-  "res": { ... } | "error": "..."
+  "res": bytes                    // MessagePack-БАЙТЫ тела ответа
 }
 ```
+
+Ошибка — третий, самостоятельный конверт:
+```
+{
+  "rid": Optional<u32>,
+  "error": String                 // generic строка, например "session_invalidated"
+}
+```
+
+Тело `CreateScramUser` (AUTH_PROTOCOL §12.1) кодируется ЦЕЛИКОМ в поле `req` как MessagePack-байты:
+его `op`/`kind`, строка пароля, тег подтверждения, а в ответе — `user_created` или busy-тело, — это поля
+внутреннего объекта, а не поля конверта. Аналогично `res` несёт только байты, а поля ответа лежат внутри них.
 
 ## 7. Connection String Examples
 

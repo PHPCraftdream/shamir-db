@@ -138,8 +138,8 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 
 Помимо `PER_SESSION_MEM = 64 MB` (AUTH §7.4):
 
-- `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — глобальный cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). Превышение → новые sessions из subnet rejected с `server_busy`.
-- Backpressure policy: при достижении 75% от cap — server отклоняет non-critical operations (admin commands proceed) и шлёт `Retry-After` header.
+- `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — здесь описан **проектный** cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). В коде его нет: ни настройки, ни учёта памяти по подсетям, ни native-обработчика, который отклонял бы новые sessions из подсети с `server_busy`. Не рассчитывайте на этот путь.
+- Backpressure policy «при 75% от cap отклонять non-critical operations и слать `Retry-After` header» также **не реализована**: такого живого поведения нет ни на одном listener.
 - `argon2_concurrent_max` (semaphore capacity) рекомендуется derive from RAM: `floor(available_ram_mb / (kdf_defaults.memory_kb / 1024 × 2.5))`. Valid range 1..=1024, default 64 (configured, not a hardcoded auth cap). Он ограничивает **только server-side SCRAM derivations при user creation** — login proof-verify не берёт permit.
 
 ### 1.6. known_hosts.bin fallback encryption (NORMATIVE для headless deploy)
@@ -156,8 +156,10 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 
 ### 2.1. Listeners [NORMATIVE listener_policy_mapping]
 
+Эскиз ниже — **для чтения**, а не deployable конфиг: сервер читает формат KTAV, и ни имена ключей (например `[limits]`), ни набор секций здесь с файлом сервера не совпадают. Действующая конфигурация — `deploy/server.example.ktav` и профили `deploy/server.{small,medium,large}.example.ktav`; сверяйтесь с ними, а не с этим блоком.
+
 ```toml
-# Top-level key goes before [server] in a TOML configuration sketch.
+# Эскиз: реальный deploy — KTAV (deploy/server*.example.ktav), не TOML.
 argon2_concurrent_max = 32
 
 [server]
@@ -655,7 +657,7 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.4. Suggested Alerts
 
 - Lockout rate spike: `rate(shamir_lockouts_total[5m]) > baseline × 3`
-- Argon2 creation-gate refusals: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused by the admission cap, permit-wait deadline, clock read failure or deadline-calculation failure; login is unaffected. Post-auth per-session in-flight-slot `server_busy` is not counted)
+- Argon2 creation-gate refusals: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused by the admission cap, permit-wait deadline, clock read failure or deadline-calculation failure; **login takes no Argon2 permit at all** — it runs no server-side password KDF. Post-auth per-session in-flight-slot `server_busy` is not counted)
 - Identity rotation: `increase(shamir_admin_command_total{command="rotateServerIdentity"}[1h]) > 0`
 - Bootstrap usage anomaly: `shamir_bootstrap_attempts_total > 1`
 - Resumption downgrade: `rate(shamir_resumption_used_total{result="downgrade_blocked"}[5m]) > 0`
@@ -801,7 +803,7 @@ individual entries exist as dedicated integration tests where applicable:
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection
 - Argon2id semaphore exhaustion at user creation (`derive_scram_record_gated` busy refusal — bounded admission or 3s permit wait measured from admission, at configured `argon2_concurrent_max`; login proof-verify is ungated)
-- Pre-Argon2id binding_mode rejection (DoS-amp)
+- `binding_mode` rejection before the challenge (ordered before the challenge; it is a listener-policy guard, not a KDF guard — a login whose proof matches still runs no server-side password KDF)
 - updateUser → ticket invalidation (всех families)
 - Restart warmup window
 - **Multi-device family isolation:** device A refresh не invalidates device B

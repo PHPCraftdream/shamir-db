@@ -49,10 +49,13 @@ pub async fn derive_scram_record(password: String, kdf: KdfParams) -> Result<Use
 }
 
 /// Gated derivation of a SCRAM `UserRecord` (Argon2id) from a plaintext
-/// password under the given KDF params. Admission and its absolute three-second
-/// permit deadline are fixed before submitting to `spawn_blocking`; an admitted
-/// job retains its RAII admission ticket through salt generation, KDF, record
-/// assembly, and password-buffer zeroization.
+/// password under the given KDF params. Admission and its three-second permit
+/// budget are fixed before submitting to `spawn_blocking`: the budget is a
+/// wall-clock deadline plus the monotonic instant of the same reading, so the
+/// job keeps paying for its blocking-pool queue time instead of restarting the
+/// budget at the semaphore. An admitted job retains its RAII admission ticket
+/// (and that budget) through salt generation, KDF, record assembly, and
+/// password-buffer zeroization.
 ///
 /// The plaintext is consumed into a `Zeroizing` buffer synchronously, before
 /// the future exists, so a never-polled and dropped future retains no
@@ -74,7 +77,7 @@ pub fn derive_scram_record_gated(
         // Admission and deadline are fixed before the blocking pool can queue
         // this job. A full gate returns Busy without submitting any work.
         let ticket = gate.admit()?;
-        let deadline_ns = ticket.deadline_ns;
+        let budget = ticket.budget;
         let join_result = tokio::task::spawn_blocking(move || {
             // Locals drop in reverse declaration order: the zeroizing password
             // buffer is cleared before the admission ticket releases capacity.
@@ -83,7 +86,7 @@ pub fn derive_scram_record_gated(
             let salt =
                 try_random_array().map_err(|e| ScramDerivationError::Failed(e.to_string()))?;
             let derived = gate
-                .run(deadline_ns, || DerivedKeys::derive(&pw_buf, &salt, &kdf))?
+                .run(budget, || DerivedKeys::derive(&pw_buf, &salt, &kdf))?
                 .map_err(|e| ScramDerivationError::Failed(format!("argon2id: {e}")))?;
             Ok(user_record(derived, salt, kdf))
         })

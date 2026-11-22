@@ -55,7 +55,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | Identity rotation event replay | A2 | Per-recipient `session_id` (32 байта) в подписи |
 | Identity rotation chain attack (stale pin) | A2 | `SHA256(old_pub)` в подписи |
 | KCI (Key Compromise Impersonation) | A3 | Ed25519 priv независим от пароля |
-| DoS — Argon2id flood | A10 | Login proof-verify выполняет NO server-side Argon2id (нет permit; burst ограничен connection cap + per-subnet rate limit + pre-Argon2id binding_mode check). Semaphore (`argon2_concurrent_max`, configured) применяется только к privileged user-creation derivation |
+| DoS — Argon2id flood | A10 | Login proof-verify выполняет NO server-side Argon2id (нет permit; burst ограничен connection cap + per-subnet rate limit). Проверка `binding_mode` идёт ДО challenge, но она не является защитой от password KDF: даже при совпавшем login сервер не запускает KDF. Semaphore (`argon2_concurrent_max`, configured) применяется только к privileged user-creation derivation |
 | DoS — slowloris pre-proof | A10 | Pre-state GC через 10s |
 | DoS — frame flood after auth | A10 | PER_SESSION_MEM=64 MB |
 | DoS — admin lockout | A10 | Lockout per (subnet, user). Emergency `--regen-bootstrap` |

@@ -214,15 +214,15 @@ fn admission_deadline_is_passed_unchanged_and_expiry_skips_kdf() {
         Argon2Semaphore::with_capacity(1),
     )));
 
-    // Inject a deterministic already-expired absolute deadline at admission;
-    // the permit is free, so only recomputing/replacing that deadline could
-    // enter the KDF closure.
+    // Inject a deterministic admission wall-clock reading of zero, so the
+    // three-second budget expired in 1970 while the permit stays free: only
+    // recomputing or replacing that budget could enter the KDF closure.
     let ticket = gate
         .admit_with_clock(|| Some(0))
-        .expect("admission clock seam supplies deadline");
-    let deadline_ns = ticket.deadline_ns;
+        .expect("admission clock seam supplies the wall reading");
+    let budget = ticket.budget;
     let kdf_called = std::sync::atomic::AtomicBool::new(false);
-    let result = gate.run(deadline_ns, || {
+    let result = gate.run(budget, || {
         kdf_called.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 
@@ -241,9 +241,7 @@ fn run_passes_kdf_outcome_through_untouched() {
     // The gate is generic over KDF outcome: injected errors come back inside
     // `Ok` exactly as the closure produced them.
     let ticket = gate.admit().expect("admission");
-    let outcome = gate.run(ticket.deadline_ns, || {
-        Err::<(), String>("kdf boom".to_string())
-    });
+    let outcome = gate.run(ticket.budget, || Err::<(), String>("kdf boom".to_string()));
     match outcome {
         Ok(Err(msg)) => assert_eq!(msg, "kdf boom"),
         other => panic!("expected Ok(Err(kdf boom)), got {other:?}"),
@@ -253,7 +251,7 @@ fn run_passes_kdf_outcome_through_untouched() {
     assert_eq!(gate.busy_refusals(), 0);
 
     let ticket = gate.admit().expect("admission");
-    let success = gate.run(ticket.deadline_ns, || 41u8 + 1);
+    let success = gate.run(ticket.budget, || 41u8 + 1);
     assert!(matches!(success, Ok(42u8)));
 }
 
@@ -264,20 +262,34 @@ fn permit_released_after_panicking_closure() {
     )));
 
     // Panic propagates out of run; both permit and admission ticket release on
-    // unwind. Catch it here to prove the subsequent run can acquire capacity.
+    // unwind. The ticket is owned by the panicking job, not by this test frame,
+    // so the assertions below observe a release that only unwind can perform.
     let ticket = gate.admit().expect("admission");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = gate.run(ticket.deadline_ns, || panic!("kdf panic injection"));
+        let job_ticket = ticket;
+        let _ = gate.run(job_ticket.budget, || panic!("kdf panic injection"));
     }));
     assert!(result.is_err(), "closure should have panicked");
-    drop(ticket);
     assert_eq!(gate.busy_refusals(), 0);
 
+    // Both admission slots of the capacity-one gate are free again, which only
+    // holds if the unwind released the ticket.
+    let first = gate.admit().expect("admission slot released on unwind");
+    let second = gate
+        .admit()
+        .expect("second admission slot released on unwind");
+    let before_refusal = gate.busy_refusals();
+    assert!(matches!(gate.admit(), Err(ScramDerivationError::Busy)));
+    assert_eq!(gate.busy_refusals(), before_refusal + 1);
+    drop(first);
+    drop(second);
+    assert_eq!(gate.semaphore().available(), 1);
+
     let ticket = gate.admit().expect("admission after unwind");
-    assert!(gate.run(ticket.deadline_ns, dummy_record).is_ok());
+    assert!(gate.run(ticket.budget, dummy_record).is_ok());
     drop(ticket);
     assert_eq!(gate.semaphore().available(), 1);
-    assert_eq!(gate.busy_refusals(), 0);
+    assert_eq!(gate.busy_refusals(), before_refusal + 1);
 }
 
 #[tokio::test]
@@ -310,4 +322,94 @@ fn busy_display_is_fixed_safe_text() {
         ScramDerivationError::Busy.to_string(),
         "password derivation is busy; retry later"
     );
+}
+
+/// A job that only reaches the semaphore after its admission budget is spent
+/// must be refused with the typed busy outcome, counted once, without running
+/// the KDF and without consuming the free permit. This drives the PUBLIC
+/// `derive_scram_record_gated` path, so it fails if that job recomputes a fresh
+/// budget instead of reusing the one fixed at admission.
+#[test]
+fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("build single-blocking-worker runtime");
+
+    runtime.block_on(async {
+        let gate = Arc::new(ScramDerivationGate::new(Arc::new(
+            Argon2Semaphore::with_capacity(1),
+        )));
+
+        // Occupy the only blocking worker so the gated job stays queued.
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx
+                .send(())
+                .expect("test observes the blocker start");
+            release_rx
+                .recv_timeout(WATCHDOG)
+                .expect("test releases the blocking worker");
+        });
+        started_rx
+            .recv_timeout(WATCHDOG)
+            .expect("blocking worker reserved by handshake");
+
+        let job = tokio::spawn(derive_scram_record_gated(
+            "queued past its admission budget".to_string(),
+            small_kdf(),
+            Arc::clone(&gate),
+        ));
+        // Wait, bounded, until the spawned job has admitted itself and
+        // queued: a capacity-one gate admits two jobs, so while the second
+        // admission still succeeds the spawned job has not admitted yet.
+        let mut admitted = false;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            match (gate.admit(), gate.admit()) {
+                (Ok(first), Err(ScramDerivationError::Busy)) => {
+                    drop(first);
+                    admitted = true;
+                    break;
+                }
+                (first, second) => {
+                    drop(first);
+                    drop(second);
+                }
+            }
+        }
+        assert!(admitted, "the spawned job must admit before it queues");
+        let before_refusals = gate.busy_refusals();
+
+        // Stay queued past the fixed three-second admission budget.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        release_tx.send(()).expect("blocking worker still waiting");
+        tokio::time::timeout(WATCHDOG, blocker)
+            .await
+            .expect("blocker watchdog")
+            .expect("blocker join");
+        let outcome = tokio::time::timeout(WATCHDOG, job)
+            .await
+            .expect("queued job watchdog")
+            .expect("queued job join");
+
+        assert!(
+            matches!(outcome, Err(ScramDerivationError::Busy)),
+            "a job resuming after its admission budget must be refused as busy"
+        );
+        assert_eq!(
+            gate.busy_refusals(),
+            before_refusals + 1,
+            "the queued refusal is counted exactly once"
+        );
+        assert_eq!(gate.semaphore().available(), 1, "no permit may be consumed");
+        // The ticket is released: both admission slots are free again.
+        let first = gate.admit().expect("queued job released its ticket");
+        let second = gate.admit().expect("queued job released its ticket");
+        drop(first);
+        drop(second);
+    });
 }

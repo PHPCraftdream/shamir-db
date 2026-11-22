@@ -12,7 +12,7 @@
 
 1.2. **При login и self-service смене пароля plain password не покидает клиент.** При login клиент отправляет proof; при смене пароля клиент локально выводит ключи для нового пароля и отправляет их вместе с proof старого пароля. Исключение: admin-создание пользователя — `createUser`/`CreateScramUser` (§12.1) передаёт серверу пароль-строку и HMAC-подтверждение; ключи выводит сервер.
 
-1.3. **При login Argon2id выполняет клиент** для получения ключей, из которых строится login proof (§5.1). При self-service смене пароля клиент выполняет derivation и для старого proof, и для новых ключей (§13.4). В bootstrap wire exchange (§11.3.5) клиент выводит начальные ключи локально. При прямом admin-создании пользователя (§12.1) клиент передаёт пароль, а сервер выполняет Argon2id; это не клиентская derivation.
+1.3. **При login Argon2id выполняет клиент** для получения ключей, из которых строится login proof (§5.1). При self-service смене пароля клиент выполняет derivation и для старого proof, и для новых ключей (§13.4). В bootstrap wire exchange (§11.3.5; библиотечный API, а не режим запущенного сервера — §11.3) клиент выводит начальные ключи локально. При прямом admin-создании пользователя (§12.1) клиент передаёт пароль, а сервер выполняет Argon2id; это не клиентская derivation.
 
 1.4. **Server identity** через Ed25519, независимо от транспортного TLS. Pinning по `SHA256(server_pub_key)`.
 
@@ -94,10 +94,12 @@ The positional MessagePack `auth_ok` keeps its original 8 fields when neither hi
 
 ```
 { "error": "authentication_failed" }                      // generic для auth/replay/lockout
-{ "error": "rate_limited", "retry_after": u32 }
-{ "error": "server_busy", "retry_after": u32 }   // только auth-фаза; post-auth DB-отказ см. §14.3
+{ "error": "rate_limited", "retry_after": u32 }           // wire-форма; живой native сервер её не отдаёт (см. §8)
+{ "error": "server_busy", "retry_after": u32 }            // wire-форма; у native auth-фазы нет источника (§14.3)
 { "error": "unsupported_version" }
 ```
+
+Живой native сервер не отдаёт в auth-фазе ни `rate_limited`, ни `server_busy`. Throttling `auth_init` по подсети записывает `auth_attempts_total{result="rate_limited"}` и закрывает соединение без тела ответа; в handshake-пути нет живого источника `server_busy`. Отказы HTTP login (429 + `Retry-After`, TOKEN_LOGIN_HTTP §4) и token-gate (TOKEN_API) описаны в своих документах и не являются ответами этого протокола.
 
 ---
 
@@ -105,12 +107,12 @@ The positional MessagePack `auth_ok` keeps its original 8 fields when neither hi
 
 3.1. Доступна только через `bootstrap` (§11) или `createUser` admin command (§12.1).
 
-3.2. Политику пароля проверяет клиент при bootstrap wire exchange (§11.3.5); при прямом admin-создании (§12.1) пароль получает сервер.
+3.2. Политику пароля проверяет клиент при bootstrap wire exchange (§11.3.5; библиотечный API, §11.3); при прямом admin-создании (§12.1) пароль получает сервер.
 - `PASSWORD_MIN_LENGTH = 12 символов` UTF-8
 - `PASSWORD_MAX_LENGTH = 1024 символа`
 - Запрет: empty, only whitespace, single repeated char
 
-3.3. В bootstrap wire exchange (§11.3.5) клиент локально выводит ключи из пароля и серверных параметров KDF:
+3.3. В bootstrap wire exchange (§11.3.5; библиотечный API, §11.3) клиент локально выводит ключи из пароля и серверных параметров KDF:
 ```
 salt           = random(16)
 salted_password = Argon2id(password, salt, server_kdf_params)
@@ -121,7 +123,7 @@ zeroize: password, salted_password, client_key
 ```
 Это описание bootstrap exchange, а не self-service смены пароля: при ней ключи выводятся локально из нового пароля с параметрами, возвращёнными в change-password challenge (§13.4).
 
-3.4. В bootstrap wire exchange на сервер передаются `{salt, stored_key, server_key, kdf_params}`; plain password и `password_length` не передаются. Этот контракт не относится к прямому admin-созданию `createUser` (§12.1), где сервер получает пароль и сам выводит ключи. Self-service смена пароля использует отдельный challenge/verify flow (§13.4).
+3.4. В bootstrap wire exchange (§11.3.5; библиотечный API, §11.3) на сервер передаются `{salt, stored_key, server_key, kdf_params}`; plain password и `password_length` не передаются. Этот контракт не относится к прямому admin-созданию `createUser` (§12.1), где сервер получает пароль и сам выводит ключи. Self-service смена пароля использует отдельный challenge/verify flow (§13.4).
 
 3.5. Сервер сохраняет в `__system__/users/{user_id}`:
 ```
@@ -143,7 +145,7 @@ zeroize: password, salted_password, client_key
 }
 ```
 
-**Username length validation:** длина в **байтах** (после NFC + UsernameCaseMapped) ≤ 255 проверяется **до** сериализации. Reject с `bootstrap_failed` / `createUser_failed` иначе. Soft recommendation: ≤ 64 байт для UX и audit log compactness.
+**Username length validation:** длина в **байтах** (после NFC + UsernameCaseMapped) ≤ 255 проверяется **до** сериализации. Отказ: прямой admin-путь `createUser` возвращает `invalid_username` (PRECIS-нормализация проверяет длину в байтах до записи), bootstrap-обмен — `bootstrap_failed`. Soft recommendation: ≤ 64 байт для UX и audit log compactness.
 
 3.6. Сервер **никогда** не хранит: `password`, `salted_password`, `client_key`.
 
@@ -509,7 +511,7 @@ Cost: один `u64 <=` compare per request — тривиально.
 | `ARGON2_CONCURRENT_MAX` | configured `argon2_concurrent_max` (default 64, valid 1..=1024) — caps **server-side user-creation KDF** only; login handshakes take no permit |
 | `MAX_CONNECTIONS_PER_IP` | 100 |
 
-8.1. **Argon2id semaphore** (`argon2_concurrent_max`) не применяется к login handshakes: proof-verify не выполняет server-side Argon2id и не берёт permit (burst ограничен connection cap + per-subnet `auth_init` rate limit). Permit берут только privileged server-side derivations — SCRAM-запись при user creation (admin `createUser`/`CreateScramUser`). Gate admission происходит до blocking pool: допускается не более `2 × capacity` derivations одновременно (работающие или ожидающие permit); сверх этого запрос немедленно получает `server_busy`, и работа в blocking pool не отправляется. Допущенный запрос ждёт permit до 3 секунд с момента admission, включая время в очереди blocking pool; это deadline ожидания permit, не жёсткий срок ответа или запроса. Ошибка чтения часов или расчёта deadline приводит к отказу как при admission, так и при получении permit; истечение ожидания также даёт отказ. Каждый отказ увеличивает `shamir_argon2_busy_refusals_total` ровно один раз. Часы не описываются как монотонные. Bootstrap-создание superuser (explicit-password или random-token режим) и ротация bootstrap-token при первом token login — exceptional ungated derivations. Pre-state до proof занимает 1KB слот, не permit. Post-auth DB-отказ `server_busy` из-за занятого per-session in-flight slot — отдельный путь и Argon2 counter не трогает.
+8.1. **Argon2id semaphore** (`argon2_concurrent_max`) не применяется к login handshakes: proof-verify не выполняет server-side Argon2id и не берёт permit (burst ограничен connection cap + per-subnet `auth_init` rate limit). Permit берут только privileged server-side derivations — SCRAM-запись при user creation (admin `createUser`/`CreateScramUser`). Gate admission происходит до blocking pool: допускается не более `2 × capacity` derivations одновременно (работающие или ожидающие permit); сверх этого запрос немедленно получает `server_busy`, и работа в blocking pool не отправляется. Допущенный запрос ждёт permit до 3 секунд с момента admission, включая время в очереди blocking pool; это deadline ожидания permit, не жёсткий срок ответа или запроса. Ошибка чтения часов или расчёта deadline приводит к отказу как при admission, так и при получении permit; истечение ожидания также даёт отказ. Каждый отказ увеличивает `shamir_argon2_busy_refusals_total` ровно один раз. Бюджет привязан к admission на обоих часах: вместе с wall-clock deadline при admission фиксируется монотонный `Instant`, и остаток ожидания равен меньшему из wall-clock остатка и монотонного остатка от момента admission, поэтому шаг wall-clock назад, пока задача стоит в очереди blocking pool, не восстанавливает истёкший бюджет, а шаг вперёд может только сократить ожидание. Bootstrap-создание superuser (explicit-password или random-token режим) и ротация bootstrap-token при первом token login — exceptional ungated derivations. Pre-state до proof занимает 1KB слот, не permit. Post-auth DB-отказ `server_busy` из-за занятого per-session in-flight slot — отдельный путь и Argon2 counter не трогает.
 
 8.2. **Pre-handshake state GC** каждые 5 секунд: state без proof в течение `HANDSHAKE_TIMEOUT` (= `max(15s, kdf_time × 5)`) → drop.
 
@@ -593,16 +595,18 @@ Mitigation для этих случаев = generic errors + generic latency + �
 - Min: **5 минут**
 - Max: **24 часа**
 
-Air-gapped deployments (где token нужно физически доставить к KMS) могут использовать max.
+Air-gapped deployments (где token нужно физически доставить к KMS) могут использовать max. В запущенном сервере этот диапазон не настраивается: random-token boot использует фиксированный `BOOTSTRAP_TOKEN_TTL_NS` = 24 часа и пишет token-файл; `bootstrap_token_hash` и его срок истечения хранятся только в библиотечном bootstrap-состоянии `shamir-connect` (см. §11.3).
 
-11.2.3. **Token output** (server config):
+11.2.3. **Token output**. Запущенный сервер (`shamir-server`): если не заданы ни `--bootstrap-password`, ни `--bootstrap-password-stdin`, случайный токен записывается в файл `data_dir/bootstrap_token.txt` (путь меняет `--bootstrap-token-path <path>`) и один раз печатается на уровне WARN; файл удаляется при первом успешном входе или через 24 часа. Флагов `--bootstrap-token-tty` и `--bootstrap-token-file` в запущенном сервере нет. Описание ниже относится к библиотечному режиму (§11.3):
 - `--bootstrap-token-tty` (default): печать в stdout **только** если `isatty(stdout)`. Иначе server fails с инструкцией.
 - `--bootstrap-token-file <path>`: атомарно создать `chmod 600` файл, записать токен. Server **MUST** удалять файл (a) при `bootstrap_used` event AND (b) фоновым GC при `now_ns > bootstrap_token_expires_at_ns`. На startup server проверяет file existence vs `bootstrap_token_hash IS NULL` и удаляет orphan файл (audit event `bootstrap_token_file_orphan_cleaned`).
-- **Запрещено** логирование через `tracing!` / `log!`.
+- **Запрещено** логирование через `tracing!` / `log!` (требование библиотечного режима; запущенный сервер печатает токен на уровне WARN, см. выше).
 
 11.2.4. Рядом печатается `SERVER_PUB_FINGERPRINT: base64url(SHA256(server_ed25519_pub))` для out-of-band pinning.
 
 ### 11.3. Bootstrap connection
+
+**LIBRARY-ONLY.** Обмен `bootstrap_hello` → `bootstrap_challenge` → `bootstrap`, описанный ниже, не обслуживается запущенным сервером: native dispatch выбирает resume или SCRAM, bootstrap-кадров в живом listener нет. Живые режимы первого администратора перечислены в §11.2.0 — explicit-password boot и random-token boot; в random-token режиме сервер сам выводит verifier (`ensure_superuser` → `DerivedKeys::derive`), пишет token-файл и применяет фиксированный TTL 24 часа, а первый вход выполняется обычным SCRAM с токеном в роли пароля. Клиент, реализующий §11.3 против запущенного сервера, не получит `bootstrap_challenge`.
 
 Bootstrap **обязан** работать только на **native client** с TLS exporter (`binding_mode == 0x01`). Browser bootstrap **запрещён в v1**.
 
@@ -692,7 +696,9 @@ Response: { "kind": "user_created", "name": String, "user_id": bytes(16) }   // 
 Busy:     { "kind": "error", "code": "server_busy", "message": "password derivation is busy; retry later" }
 ```
 
-HMAC key берётся из текущего session id (`derive_session_hmac_key`); клиент вычисляет tag для канонических байтов запроса. `canonical_db_request` — источник канонического кодирования: для `CreateScramUser` это префикс `shamir-db hmac canonical v2\0`, tag `0x0019` в big-endian, затем `name` и список `roles` с длинами в big-endian. Password и сам `hmac` в канонические байты не входят. HMAC аутентифицирует запрос, но не шифрует его: при передаче по сети используйте TLS. Сервер выбирает свежую соль и `kdf_defaults`, выводит ключи и сохраняет запись. Порядок проверок сервером: superuser permission → HMAC tag (`hmac_required` / `hmac_mismatch`) → normalization → gated derivation (`server_busy`, без мутации) → insert (`user_exists` при коллизии). Старый контракт «клиент шлёт prederived `salt`/`stored_key`/`server_key`» не существует.
+На транспорте это не вложенные map конверта: `op`/`kind`, строка пароля, тег подтверждения, `user_created` и busy-тело — это MessagePack-БАЙТЫ в полях `req` и `res` конверта (`sid`/`rid` + `req` в запросе, `rid` + `res` в ответе).
+
+HMAC key берётся из текущего session id (`derive_session_hmac_key`); клиент вычисляет tag для канонических байтов запроса. `canonical_db_request` — источник канонического кодирования: для `CreateScramUser` это префикс `shamir-db hmac canonical v2\0`, tag `0x0019` в big-endian, затем `name` и список `roles`; длина `name`, счётчик списка `roles` и длина каждой строки роли кодируются как `u32` big-endian (сам тег — `u16` big-endian). Password и сам `hmac` в канонические байты не входят. Это CONFIRMATION-тег, а не независимая аутентификация запроса: сверх самого session id он аутентификационной силы не добавляет и пароль не покрывает. Тег не шифрует запрос: при передаче по сети используйте TLS. Сервер выбирает свежую соль и `kdf_defaults`, выводит ключи и сохраняет запись. Порядок проверок сервером: superuser permission → HMAC tag (`hmac_required` / `hmac_mismatch`) → normalization → gated derivation (`server_busy`, без мутации) → insert (`user_exists` при коллизии). Старый контракт «клиент шлёт prederived `salt`/`stored_key`/`server_key`» не существует.
 
 ### 12.2. `rotateServerIdentity`
 
@@ -886,8 +892,8 @@ access.
 - `known_hosts_integrity_failed` — MAC файла не сошёлся
 
 14.3. Server-side прочие:
-- `rate_limited` (с retry_after) — auth-фаза
-- `server_busy` — два разных контекста: (a) auth-фаза с `retry_after`; (b) post-auth DB-отказ с кодом и сообщением, без `retry_after`: gate при создании пользователя (§8.1) или отказ в получении per-session in-flight slot. Эти DB-отказы не являются auth-ответом; in-flight slot отказ не увеличивает Argon2 counter.
+- `rate_limited` (с retry_after) — wire-форма auth-фазы; живой native сервер закрывает соединение и только считает `auth_attempts_total{result="rate_limited"}` (см. §8), тела с `retry_after` не отдаёт
+- `server_busy` — два разных контекста: (a) wire-форма auth-фазы с `retry_after`, живого native-источника нет; (b) post-auth DB-отказ с кодом и сообщением, без `retry_after`: gate при создании пользователя (§8.1) или отказ в получении per-session in-flight slot. Эти DB-отказы не являются auth-ответом; in-flight slot отказ не увеличивает Argon2 counter.
 - `unsupported_version`
 - `bootstrap_failed`
 

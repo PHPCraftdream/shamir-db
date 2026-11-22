@@ -20,7 +20,7 @@ metrics from `/metrics` for your specific deployment.
 | Lockout entries | ~80 bytes per (subnet × user) pair | GC'd every 5 min |
 | Rate-limiter buckets | ~24 bytes per subnet | GC'd every 5 min |
 
-**Gated KDF working memory** ≈ `argon2_concurrent_max × kdf_defaults.memory_kb × 1.05` KiB, not peak process RAM. Queued blocking jobs retain passwords and task state, and permit waiters use thread stacks. Bootstrap, bootstrap-token rotation, follower outbound SCRAM, and SQL `argon2id` use memory independently.
+**Gated KDF working memory** ≈ `argon2_concurrent_max × kdf_defaults.memory_kb × 1.05` KiB, not peak process RAM. Queued blocking jobs retain passwords and task state, and permit waiters use thread stacks. Bootstrap, bootstrap-token rotation, follower outbound SCRAM, and SQL `argon2id` use memory independently. Admission also does not isolate the blocking pool: up to `2 × argon2_concurrent_max` jobs are admitted, while both server runtimes keep Tokio's default **512** blocking threads, so any setting above **256** lets the gate's own backlog fill the shared pool and queue unrelated blocking work (WAL sync, HTTP login proof lookups) behind it. There is no separate pool for derivations and the limit is not configurable.
 
 **Steady-state RAM** ≈ `idle + (active_sessions × 2 KB) + (active_connections × 8 KB)`.
 For 10 000 concurrent sessions × 8 000 connections that's roughly
@@ -31,7 +31,7 @@ independently consumed memory described above.
 
 | Operation | Cost | Notes |
 |-----------|------|-------|
-| Argon2id derivation (server, user creation) | Depends on `kdf_defaults` and hardware | Admission caps submitted jobs, not blocking-pool isolation; login proof verification runs no server-side KDF |
+| Argon2id derivation (server, user creation) | Depends on `kdf_defaults` and hardware | Admission caps submitted jobs, not blocking-pool isolation: above `argon2_concurrent_max: 256` the admitted backlog (`2 × capacity`) exceeds the shared pool's 512 default blocking threads. Login proof verification runs no server-side KDF and takes no permit |
 | TLS 1.3 handshake | ~5 ms | rustls + aws-lc-rs; one-off per connection |
 | Post-auth request | ~20 µs | RequestEnvelope decode → dispatch → ShamirDb query (fast path) |
 | Batch query (cold) | ~1 ms / query | Filter compile + index lookup + serde encode |
@@ -161,21 +161,21 @@ your `/metrics` data after a week of production traffic.
 ### Small (developer / single-tenant pilot)
 
 - 2 vCPU, 2 GB RAM, 20 GB SSD
-- `argon2_concurrent_max: 16` (≈2.1 GiB gated KDF working memory at 128 MiB cost)
+- `argon2_concurrent_max: 3` (≈403 MiB gated KDF working memory at 128 MiB cost: `3 × 128 × 1.05`; the old value of 16 would claim ≈2.1 GiB, more than the whole host)
 - `max_active_connections: 1000`
 - Up to ~100 concurrent users, ~10 RPS sustained
 
 ### Medium (small/mid SaaS)
 
 - 4 vCPU, 4 GB RAM, 100 GB SSD
-- `argon2_concurrent_max: 32`
+- `argon2_concurrent_max: 7` (≈940 MiB gated KDF working memory at 128 MiB cost: `7 × 128 × 1.05`)
 - `max_active_connections: 5000`
 - Up to ~5 000 concurrent users, ~500 RPS sustained
 
 ### Large (production tenant or multi-tenant)
 
 - 8 vCPU, 8 GB RAM, 500 GB SSD
-- `argon2_concurrent_max: 64` (default)
+- `argon2_concurrent_max: 15` (≈2.0 GiB gated KDF working memory at 128 MiB cost: `15 × 128 × 1.05`; the 64 default would claim ≈8 GiB, the whole host)
 - `max_active_connections: 10 000` (default)
 - Up to ~50 000 concurrent users, ~5 000 RPS sustained
 
