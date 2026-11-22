@@ -10,6 +10,8 @@ mod handler;
 mod handlers;
 #[path = "repo_admin/native_handler.rs"]
 mod native_handler;
+#[path = "repo_admin/operator_state.rs"]
+mod operator_state;
 #[path = "repo_admin/repo_audit.rs"]
 mod repo_audit;
 #[path = "repo_admin/tx_handlers.rs"]

@@ -766,6 +766,32 @@ impl Client {
         }
     }
 
+    /// Typed exact-key point read (admin-shell PR3, P2).
+    ///
+    /// SCRAM-session only: a token session is refused client-side before
+    /// any request is sent (`require_scram`; the server perimeter also
+    /// denies it with `token_request_denied`). NOT a `BatchOp` and NOT a
+    /// cursor: the server applies the `Database` `Read` THEN `Table`
+    /// `Read` ACLs (ancestor check before any lookup), the batch-path
+    /// repository quarantine, the typed-key size cap and the existing
+    /// result-size / in-flight response controls, then answers with the
+    /// one record or a typed `not_found` refusal. A malformed key is a
+    /// typed refusal, never a panic and never a scan.
+    pub async fn get_record(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        key: shamir_types::types::record_id::RecordId,
+    ) -> Result<shamir_query_types::read::QueryRecord, ClientError> {
+        self.require_scram()?;
+        let req = shamir_query_builder::wire::admin::get_record(db, repo, table, key);
+        match self.roundtrip(&req).await? {
+            DbResponse::Record { record } => Ok(record),
+            _ => Err(ClientError::Protocol("expected Record response".into())),
+        }
+    }
+
     /// Close the TLS write half cleanly and abort the reader task.
     ///
     /// After this call the session is dead on the server side too

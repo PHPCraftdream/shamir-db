@@ -253,6 +253,35 @@ impl SystemStore {
             .collect())
     }
 
+    /// Load every repository record's stored per-repo durability override in
+    /// ONE catalogue read: `(db_name, repo_name, override)` rows decoded
+    /// through the authoritative `repo_durability::durability_from_record`
+    /// (a corrupt `durability` value is a loud typed error, never silence).
+    /// `None` override = legacy row without a stored `durability` key.
+    pub async fn load_repository_durability_overrides(
+        &self,
+    ) -> DbResult<
+        Vec<(
+            String,
+            String,
+            Option<shamir_query_types::durability::DurabilityOverride>,
+        )>,
+    > {
+        let rows = self.load_repositories().await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let db_name = row["db_name"].as_str().ok_or_else(|| {
+                DbError::Internal("repository catalogue row is missing db_name".to_string())
+            })?;
+            let repo_name = row["repo_name"].as_str().ok_or_else(|| {
+                DbError::Internal("repository catalogue row is missing repo_name".to_string())
+            })?;
+            let stored = crate::shamir_db::repo_durability::durability_from_record(&row)?;
+            out.push((db_name.to_string(), repo_name.to_string(), stored));
+        }
+        Ok(out)
+    }
+
     /// Load a single repository's catalogue record by `(db_name, repo_name)`.
     /// Returns `Ok(None)` when no matching row exists.
     // Filtered read over an index-less catalogue table; this preserves corrupt-record errors.

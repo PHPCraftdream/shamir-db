@@ -5,7 +5,7 @@ pub use self::rename_outcome::RenamePersistOutcome;
 use super::RepoInstance;
 use crate::meta::repo_identity::RepoIdentity;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::table::{TableConfig, TableManager};
+use crate::table::{TableConfig, TableManager, TableRegistration};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
 use shamir_types::types::record_id::RecordId;
@@ -145,6 +145,12 @@ impl RepoInstance {
         self.core.catalog.install_table_for_test(name, table)
     }
 
+    /// Test-only: direct cell-map size (cold-resolver retention probe).
+    #[cfg(feature = "test-util")]
+    pub fn table_cell_count(&self) -> usize {
+        self.core.catalog.table_cell_count()
+    }
+
     /// Catalogue read; see `TableCatalog`.
     pub fn list_table_names(&self) -> Vec<String> {
         self.core.list_table_names()
@@ -207,6 +213,11 @@ impl RepoInstance {
     /// Catalogue read; see `TableCatalog`.
     pub fn table_config(&self, name: &str) -> Option<TableConfig> {
         self.core.catalog.table_config(name)
+    }
+
+    /// Live registration identity; see `TableCatalog::table_registration`.
+    pub fn table_registration(&self, name: &str) -> Option<TableRegistration> {
+        self.core.catalog.table_registration(name)
     }
 
     #[cfg(test)]

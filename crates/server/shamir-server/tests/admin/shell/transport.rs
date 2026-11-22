@@ -20,7 +20,7 @@ use tokio::io::AsyncWriteExt as _;
 use zeroize::Zeroizing;
 
 use crate::shell::output::ShellError;
-use crate::shell::parser::run_scripted;
+use crate::shell::parser::run::run_scripted;
 use crate::shell::terminal::secret::HiddenLineSession;
 use crate::shell::terminal::secret::Terminal;
 
@@ -798,7 +798,7 @@ fn shell_transport_hygiene_and_reflection() {
     assert!(!stdout.contains(needle) && !stderr.contains(needle));
     assert!(!stderr.contains(&format!("table describe {REPO_NAME} {needle}")));
     let record = parse_one_record(&run);
-    expect_error(&run, &record, "table describe", "server_error", 5, None);
+    expect_error(&run, &record, "table describe", "not_found", 5, None);
 
     // Argv hygiene: the canary never travels on argv; profile stays clean.
     assert_profile_clean(&fixture, &path);

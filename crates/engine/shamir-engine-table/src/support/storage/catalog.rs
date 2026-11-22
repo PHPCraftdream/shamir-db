@@ -3,7 +3,7 @@
 //! keeps delegating wrappers.
 
 use crate::interner_manager::InternerManager;
-use crate::{table_store_names, TableConfig, TableManager};
+use crate::{table_store_names, TableConfig, TableManager, TableRegistration};
 use shamir_storage::error::DbResult;
 use shamir_types::types::common::{TDashMap, THasher};
 use std::future::Future;
@@ -219,6 +219,20 @@ impl TableCatalog {
         self.configs.get(name).map(|entry| entry.value().clone())
     }
 
+    /// Live registration identity of a configured table: the catalogue cell
+    /// the registration reserved for `name`. Never instantiates the table. An
+    /// unconfigured name has no registration (`None`), so a caller fails closed
+    /// instead of inventing one; for a configured name the cell is reserved on
+    /// demand (the same get-or-insert `insert_table_cell` performs), which is
+    /// what makes an identity exist for every registration path, including
+    /// boot-loaded legacy tables.
+    pub fn table_registration(&self, name: &str) -> Option<TableRegistration> {
+        if !self.configs.contains_key(name) {
+            return None;
+        }
+        Some(TableRegistration::of(self.insert_table_cell(name)))
+    }
+
     pub fn config_pair_matches(
         &self,
         from: &str,
@@ -244,6 +258,12 @@ impl TableCatalog {
     /// Count configured tables.
     pub fn table_count(&self) -> usize {
         self.configs.len()
+    }
+
+    /// Test-only: direct cell-map size (cold-resolver retention probe).
+    #[cfg(feature = "test-util")]
+    pub fn table_cell_count(&self) -> usize {
+        self.tables.len()
     }
 
     /// Non-instantiating peek: like

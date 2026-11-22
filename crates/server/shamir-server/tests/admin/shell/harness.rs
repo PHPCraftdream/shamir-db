@@ -50,7 +50,7 @@ use shamir_test_diag::FlakeGuard;
 
 use crate::common;
 
-#[path = "secure_fixture.rs"]
+#[path = "secure/secure_fixture.rs"]
 pub(super) mod secure_fixture;
 
 // ── Named constants ──────────────────────────────────────────────────
@@ -407,7 +407,7 @@ fn tofu_options(addr: std::net::SocketAddr, password: &Zeroizing<Vec<u8>>) -> Co
 
 /// Everything owned, so callers can await it inside a `Send + 'static`
 /// [`TestRuntime::run`] job.
-async fn connect_tls_owned(
+pub(super) async fn connect_tls_owned(
     addr: std::net::SocketAddr,
     pin: [u8; 32],
     password: Zeroizing<Vec<u8>>,

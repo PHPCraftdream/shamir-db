@@ -48,6 +48,14 @@ pub(in crate::shell_tests) struct SecureFixture {
 }
 
 /// Boot WSS SCRAM and HTTPS REST/token WSS alongside the PR1 listeners.
+/// READ-ONLY path of the fixture's held data directory (e.g. verifying
+/// the on-disk format stamp against what `status` reports). A descendant
+/// helper of `harness`: it reaches the private `_data_dir` field from
+/// this child module so `harness.rs` itself stays at its line cap.
+pub(in crate::shell_tests) fn data_dir(fixture: &ShellFixture) -> &std::path::Path {
+    fixture._data_dir.path()
+}
+
 pub(in crate::shell_tests) fn boot_secure(name: &str) -> SecureFixture {
     boot_secure_with(name, false)
 }
