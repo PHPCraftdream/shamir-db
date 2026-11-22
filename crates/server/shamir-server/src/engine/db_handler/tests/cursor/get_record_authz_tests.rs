@@ -258,7 +258,10 @@ async fn chmod_items_table(handler: &ShamirDbHandler, mode: u16) {
 /// upfront reserve is `batch.limits.max_result_size`, 10 MB by default), which
 /// would deadlock the rendezvous.
 async fn replace_items_table(handler: &ShamirDbHandler) {
-    let session = alice_session();
+    // DROP TABLE and CREATE TABLE through the handler require a superuser
+    // session. It shares the session id, hence the confirmation-tag key, with
+    // the reading alice.
+    let session = superuser_alice_session();
     // The builder refuses to build without the confirmation tag, so the
     // canonical form is taken from the unsigned wire op itself.
     let unsigned = BatchOp::DropTable(DropTableOp {
