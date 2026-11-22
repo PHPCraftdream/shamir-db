@@ -1,7 +1,9 @@
 //! Tests for Access tree, chmod / chown / chgrp, Group DDL, Auth users / roles,
 //! and `res` helpers.
 
+#[cfg(feature = "crypto")]
 use shamir_query_types::batch::BatchOp;
+#[cfg(feature = "crypto")]
 use shamir_query_types::hmac;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
@@ -557,6 +559,7 @@ fn res_function_namespace() {
 // ============================================================================
 
 /// Extract the attached tag from any of the three signed access ops.
+#[cfg(feature = "crypto")]
 fn signed_tag(op: &BatchOp) -> String {
     match op {
         BatchOp::Chmod(o) => o.hmac.clone().expect("signed chmod"),
@@ -567,6 +570,7 @@ fn signed_tag(op: &BatchOp) -> String {
 }
 
 #[test]
+#[cfg(feature = "crypto")]
 fn chmod_sign_tag_covers_payload_not_tag_field() {
     let key = [0x11u8; 32];
     let resource = ddl::res::table("mydb", "main", "a");
@@ -597,6 +601,7 @@ fn chmod_sign_tag_covers_payload_not_tag_field() {
 }
 
 #[test]
+#[cfg(feature = "crypto")]
 fn chown_sign_tag_covers_payload_not_tag_field() {
     let key = [0x33u8; 32];
     let resource = ddl::res::database("testdb");
@@ -623,6 +628,7 @@ fn chown_sign_tag_covers_payload_not_tag_field() {
 }
 
 #[test]
+#[cfg(feature = "crypto")]
 fn chgrp_sign_tag_covers_payload_not_tag_field() {
     let key = [0x55u8; 32];
     let resource = ddl::res::store("testdb", "main");

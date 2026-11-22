@@ -85,6 +85,17 @@ pub(crate) enum ShellError {
     InvalidMode,
     /// The named owner or group does not exist in the observed directory.
     UnknownPrincipal,
+    /// A rights mutation named an owner or group id the server does not
+    /// know (`invalid_owner`).
+    InvalidOwner,
+    /// A signed rights mutation carried a tag that does not match the
+    /// canonical bytes (`hmac_mismatch`).
+    HmacMismatch,
+    /// A rights mutation reached the server without a tag the destructive-op
+    /// gate accepts (`hmac_required`).
+    HmacRequired,
+    /// A mutation addressed a database that does not exist (`unknown_db`).
+    UnknownDb,
 }
 
 impl ShellError {
@@ -129,6 +140,10 @@ impl ShellError {
             ShellError::ConfirmationRequired => "confirmation_required",
             ShellError::InvalidMode => "invalid_mode",
             ShellError::UnknownPrincipal => "unknown_principal",
+            ShellError::InvalidOwner => "invalid_owner",
+            ShellError::HmacMismatch => "hmac_mismatch",
+            ShellError::HmacRequired => "hmac_required",
+            ShellError::UnknownDb => "unknown_db",
         }
     }
 
@@ -214,6 +229,16 @@ impl ShellError {
             ShellError::UnknownPrincipal => {
                 "the named owner or group does not exist on this server"
             }
+            ShellError::InvalidOwner => {
+                "the addressed owner or group does not exist on this server"
+            }
+            ShellError::HmacMismatch => {
+                "the signed request was refused by the server: its signature did not match"
+            }
+            ShellError::HmacRequired => {
+                "the request carried no signature the server accepts for a destructive change"
+            }
+            ShellError::UnknownDb => "the addressed database does not exist on this server",
         }
     }
 
@@ -234,7 +259,11 @@ impl ShellError {
             | ShellError::UnknownTable
             | ShellError::ResyncRequired
             | ShellError::ResultTooLarge
-            | ShellError::UnknownPrincipal => 5,
+            | ShellError::UnknownPrincipal
+            | ShellError::InvalidOwner
+            | ShellError::HmacMismatch
+            | ShellError::HmacRequired
+            | ShellError::UnknownDb => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
@@ -394,16 +423,52 @@ fn write_envelope(envelope: &Envelope<'_>) -> u8 {
     }
 }
 
+/// Re-consult the per-command budget (design §5, §6) AFTER the last blocking
+/// step and after the synchronous projection / credential scan, which the
+/// outer [`crate::shell::parser::session::guarded`] `timeout` cannot preempt
+/// because no further `.await` happens. Same pattern as the `data head`
+/// deadline (`state.rs::head_tail`): an elapsed budget is the typed
+/// `timeout_outcome_unknown` refusal (exit 7), never a silent success.
+pub(super) fn deadline_check<T>(
+    started: tokio::time::Instant,
+    outcome: Result<T, ShellError>,
+) -> Result<T, ShellError> {
+    if started.elapsed() >= crate::shell::connect::REQUEST_TIMEOUT {
+        return Err(ShellError::Timeout);
+    }
+    outcome
+}
+
 /// Fixed-width FIELD/VALUE table (or a single `value` row) for stderr; every
 /// cell sanitized before rendering, truncation after sanitization.
-fn write_human_result(stderr: &mut dyn Write, command: &str, data: &Json) {
-    let rows: Vec<(String, String)> = match data {
-        Json::Object(fields) => fields
-            .iter()
-            .map(|(field, item)| (display_cell(field, HUMAN_LABEL_MAX_CHARS), human_cell(item)))
-            .collect(),
-        other => vec![(String::from("value"), human_cell(other))],
-    };
+pub(super) fn write_human_result(stderr: &mut dyn Write, command: &str, data: &Json) {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    match data {
+        Json::Object(fields) => {
+            for (field, item) in fields {
+                // A listing renders one row per LINE: a non-empty array of
+                // objects (the activity `rows` list, the principal directory)
+                // becomes `rows[0]`, `rows[1]`, ... so a later entry is never
+                // hidden behind the per-cell cap. Any other array keeps the
+                // single-cell rendering.
+                match item {
+                    Json::Array(items)
+                        if !items.is_empty() && items.iter().all(Json::is_object) =>
+                    {
+                        let label = display_cell(field, HUMAN_LABEL_MAX_CHARS);
+                        for (index, element) in items.iter().enumerate() {
+                            rows.push((
+                                display_cell(&format!("{label}[{index}]"), HUMAN_LABEL_MAX_CHARS),
+                                human_cell(element),
+                            ));
+                        }
+                    }
+                    _ => rows.push((display_cell(field, HUMAN_LABEL_MAX_CHARS), human_cell(item))),
+                }
+            }
+        }
+        other => rows.push((String::from("value"), human_cell(other))),
+    }
     let name_width = rows
         .iter()
         .map(|(name, _)| name.chars().count())
@@ -595,3 +660,7 @@ fn is_display_control(character: char) -> bool {
             | '\u{FEFF}'
     )
 }
+
+#[cfg(test)]
+#[path = "tests/human_rows_tests.rs"]
+mod human_rows_tests;

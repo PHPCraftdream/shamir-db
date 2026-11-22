@@ -61,6 +61,8 @@ pub enum BuilderError {
     MissingHmac,
     /// An HMAC-gated builder's `sign()` could not canonicalise the operation
     /// (the canonical v2 encoder does not cover this op, or encoding failed).
+    /// Only produced with the crate's `crypto` feature (the shared canonical encoder).
+    #[cfg(feature = "crypto")]
     #[error("this op could not be canonicalised for HMAC signing")]
     HmacSigning,
     /// [`crate::ddl::check_function().build()`] was called with both (or

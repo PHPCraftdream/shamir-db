@@ -230,6 +230,10 @@ fn run_batch(
 fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &mut Ctx<'_>) -> u8 {
     let prompt = if shell.quiet { "" } else { "> " };
     let mut session: Option<Session> = None;
+    // Design §3.2: an interactively declined confirmation exits with the
+    // typed refusal code (6). The refusal is REMEMBERED for the rest of the
+    // session, so a later `exit`/EOF cannot turn it into exit 0.
+    let mut declined: Option<u8> = None;
     loop {
         if !prompt.is_empty() {
             let _ = ctx.stderr.write_all(prompt.as_bytes());
@@ -237,7 +241,7 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         }
         let line = match read_line_bounded(&mut *ctx.input) {
             ReadLine::Line(line) => line,
-            ReadLine::Eof => return 0,
+            ReadLine::Eof => return declined.unwrap_or(0),
             // Read error: emit once and stop (looping would spin).
             ReadLine::Terminal => {
                 return output::emit_human(&mut *ctx.stderr, "shell", Err(ShellError::Usage));
@@ -249,7 +253,7 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
             continue;
         }
         match tokens[0] {
-            "quit" | "exit" => return 0,
+            "quit" | "exit" => return declined.unwrap_or(0),
             "help" => {
                 ctx.write_fixed(INTERACTIVE_HELP);
                 continue;
@@ -292,9 +296,16 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         // One human record per command; stdout stays silent. Ctrl+C exits
         // 130 instead of falling back into the input loop.
         let interrupted = matches!(result, Err(ShellError::Interrupted));
+        if matches!(result, Err(ShellError::ConfirmationRequired)) {
+            declined = Some(ShellError::ConfirmationRequired.exit());
+        }
         let exit = output::emit_human(&mut *ctx.stderr, id, result);
         if interrupted {
             return exit;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/repl_decline_tests.rs"]
+mod repl_decline_tests;

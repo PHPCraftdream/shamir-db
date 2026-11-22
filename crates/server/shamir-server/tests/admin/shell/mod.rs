@@ -46,6 +46,8 @@ mod access_activity_access;
 mod access_activity_activity;
 #[path = "access_activity/mutations.rs"]
 mod access_activity_mutations;
+#[path = "access_activity/rights_gaps.rs"]
+mod access_activity_rights_gaps;
 mod transport;
 
 use harness::secure_fixture;

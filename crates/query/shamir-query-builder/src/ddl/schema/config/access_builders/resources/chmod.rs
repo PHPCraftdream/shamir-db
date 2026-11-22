@@ -31,6 +31,8 @@ impl Chmod {
     /// Sign this operation for `db` (the routing database it will execute on)
     /// with the session-derived HMAC key, using the shared canonical v2
     /// encoding. The session key never leaves the caller; nothing is printed.
+    /// Only available with the crate's `crypto` feature, which provides the shared canonical encoder.
+    #[cfg(feature = "crypto")]
     pub fn sign(self, key: &[u8; 32], db: &str) -> Result<BatchOp, BuilderError> {
         let mut op = ChmodOp {
             chmod: self.resource,

@@ -1,12 +1,18 @@
 //! R5 PR4 shell rights-mutation tests: `chmod`, `chown` and `chgrp` over the
 //! REAL production shell, including the local confirmations/refusals and the
-//! server-side authorization decision. Drives the shared helpers of
-//! [`super::state_data_common`].
+//! server-side authorization decision. The signing seam is proven over the
+//! real wire (a `sign()`ed op is accepted, a wrong tag and an unknown target
+//! are refused by the server itself), and the zero-dial claims (unconfirmed
+//! mutations, the §3.3 token refusal, locally invalid selectors) use the
+//! counting relay. Drives the shared helpers of [`super::state_data_common`].
 
 use serde_json::Value;
+use shamir_client::Client;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_query_builder::token_admin;
 use shamir_query_types::hmac as canon;
+use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
@@ -14,8 +20,12 @@ use super::harness::{
     connect_tls_owned, overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellFixture,
     DB_NAME, PLAIN_TABLE, REPO_NAME, SHELL_USER,
 };
-use super::secure_fixture::{boot_secure, run_with_secret};
-use super::state_data_common::{data, leaf_u64, refusal, scram_profile, BOUND};
+use super::secure_fixture::{
+    boot_secure, provision_token, run_token_shell, run_with_secret, write_secure_profile,
+};
+use super::state_data_common::{
+    data, leaf_u64, refusal, scram_profile, Relay, BOUND, TOKEN_SUBSET,
+};
 
 /// Routing database every admin batch rides on (same value as the harness
 /// seeding batches).
@@ -312,4 +322,248 @@ fn chown_and_chgrp_happy_path() {
         Some(group_id),
         "the new group is observed"
     );
+}
+
+/// The signing seam over the REAL wire. A `sign()`ed chmod is accepted by the
+/// server and observed by a following `rights show`; a WRONG tag and an
+/// UNKNOWN target are refused by the server itself with its own typed code,
+/// and neither changes the mode.
+///
+/// Mutants caught: a client that sends an unsigned/placeholder tag (the
+/// wrong-tag send would then succeed), a shell that fabricates the effect
+/// without the server, a mapping that flattened every refusal into one code.
+#[test]
+fn signed_chmod_over_the_wire_is_accepted_and_a_wrong_tag_is_refused() {
+    let secure = boot_secure("signed_chmod_over_the_wire_is_accepted_and_a_wrong_tag_is_refused");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    use_admin_profile(fixture);
+    let path = table_path();
+    let before = rights(fixture, &path);
+    assert_mode(&before["mode"], "wire chmod before");
+
+    fixture.guard.mark("wire: signed chmod probes");
+    let tls_addr = fixture.tls_addr;
+    let pin = fixture.pin;
+    let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
+    // One live SCRAM connection; the session key is derived from it exactly
+    // as the production client does.
+    let (accepted_mode, wrong_code, unknown_code) = fixture.rt.run(async move {
+        let client = timeout(BOUND, connect_tls_owned(tls_addr, pin, password))
+            .await
+            .expect("wire mutation connect hang bound")
+            .expect("wire mutation verified TLS connect");
+        let key = canon::derive_session_hmac_key(&client.session_id());
+        let resource = ddl::res::table(DB_NAME, REPO_NAME, PLAIN_TABLE);
+
+        // 1. correctly signed: accepted.
+        let signed = ddl::chmod(resource.clone(), 0o705)
+            .sign(&key, ROUTING_DB)
+            .expect("signed chmod op");
+        let mut batch = Batch::new();
+        batch.id("wire_chmod_signed");
+        batch.op("chmod", signed);
+        let response = timeout(BOUND, client.execute(ROUTING_DB, batch.build()))
+            .await
+            .expect("signed chmod hang bound")
+            .expect("the server must accept a correctly signed chmod");
+        let result = response
+            .results
+            .get("chmod")
+            .expect("signed chmod alias present");
+        assert_eq!(
+            result.records.len(),
+            1,
+            "an accepted chmod must echo exactly one record"
+        );
+        assert_eq!(
+            result.records[0].get_value_i64("mode"),
+            Some(i64::from(0o705)),
+            "the server must echo the applied mode"
+        );
+
+        // 2. deliberately wrong tag: refused with `hmac_mismatch`.
+        let wrong = ddl::chmod(resource, 0o707)
+            .hmac("0".repeat(64))
+            .build()
+            .expect("typed chmod with a placeholder tag");
+        let mut batch = Batch::new();
+        batch.id("wire_chmod_wrong_tag");
+        batch.op("chmod", wrong);
+        let wrong_code = execute_code(&client, batch.build()).await;
+
+        // 3. unknown target, correctly signed: the server's own refusal.
+        let unknown_resource = ddl::res::table("nosuchdb", "nosuchrepo", "nosuchtable");
+        let unknown = ddl::chmod(unknown_resource, 0o705)
+            .sign(&key, ROUTING_DB)
+            .expect("signed chmod op for an unknown target");
+        let mut batch = Batch::new();
+        batch.id("wire_chmod_unknown_target");
+        batch.op("chmod", unknown);
+        let unknown_code = execute_code(&client, batch.build()).await;
+
+        client.close().await;
+        (0o705u16, wrong_code, unknown_code)
+    });
+
+    assert_eq!(
+        wrong_code, "hmac_mismatch",
+        "a placeholder tag must be refused by the server's HMAC gate"
+    );
+    // The unknown target fails while the mode is applied: the engine's
+    // `set_resource_meta` reports an alias-less `NotFound` QueryError, which
+    // the server classifies as `unknown_db` (its OWN typed code, distinct
+    // from both `hmac_mismatch` and `access_denied`).
+    assert_eq!(
+        unknown_code, "unknown_db",
+        "an unknown target must be refused by the server, not by the client"
+    );
+
+    let after = rights(fixture, &path);
+    assert_eq!(
+        after["mode"],
+        format!("{accepted_mode:04o}"),
+        "only the signed change applied"
+    );
+}
+
+/// An unconfirmed `chmod`/`chown`/`chgrp` opens NO connection at all: the
+/// counting relay in front of the TLS listener observes zero downstream
+/// accepts. Mutant: moving the confirmation after `with_session` (the relay
+/// sees a connection) or after the request.
+#[test]
+fn unconfirmed_mutations_open_no_connection() {
+    let secure = boot_secure("unconfirmed_mutations_open_no_connection");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    let relay = Relay::start(fixture, fixture.tls_addr);
+    let text = scram_profile(fixture, "tls-tcp", &relay.addr.to_string());
+    overwrite_profile(fixture, &text);
+    let path = table_path();
+
+    for (args, command_part) in [
+        (&["chmod", path.as_str(), "0750"][..], "chmod"),
+        (&["chown", path.as_str(), SHELL_USER][..], "chown"),
+        (&["chgrp", path.as_str(), GROUP_NAME][..], "chgrp"),
+    ] {
+        fixture.guard.mark(format!("unconfirmed: {command_part}"));
+        let run = run_shell(fixture, args);
+        let envelope = refusal(&run, command_part, "confirmation_required", 6);
+        assert!(
+            envelope["data"].is_null(),
+            "a confirmation refusal must carry no data leaf"
+        );
+    }
+    assert_eq!(
+        relay.finish(fixture),
+        0,
+        "an unconfirmed mutation must not open a downstream connection"
+    );
+}
+
+/// §3.3 for the mutation commands: a token session refuses each of them with
+/// the fixed subset message and exit 4, and the profile points at an address
+/// NOTHING listens on, so any dial would surface as `connection_failed`
+/// (exit 2) instead. Mutant: a command that re-entered the token allowlist
+/// would exit 2.
+///
+/// The four read-only rights views are repeated here at the same dead
+/// address (their relay-backed coverage lives in
+/// `access.rs::token_session_refuses_rights_commands`) so the whole §3.3
+/// rights set is pinned against a dial in one place.
+#[test]
+fn token_session_refuses_mutations_without_dialing() {
+    let secure = boot_secure("token_session_refuses_mutations_without_dialing");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    let token = provision_token(
+        fixture,
+        token_admin::create_api_token("https")
+            .for_user(SHELL_USER)
+            .databases([DB_NAME])
+            .mode(ApiTokenMode::ReadOnly)
+            .channels(ApiTokenChannels::Both),
+    );
+    // Port 1 of the loopback has no listener: a dial cannot be mistaken for
+    // the token refusal (it would be `connection_failed`, exit 2).
+    write_secure_profile(
+        fixture,
+        "https",
+        std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        DB_NAME,
+        Some(&secure.ca_path),
+    );
+    let path = table_path();
+
+    for (args, command_part) in [
+        (&["user", "list"][..], "user"),
+        (&["group", "tree"][..], "group"),
+        (&["group", "members"][..], "group"),
+        (&["rights", "show", DB_NAME][..], "rights"),
+        (&["chmod", path.as_str(), "0750", "--yes"][..], "chmod"),
+        (&["chown", path.as_str(), SHELL_USER, "--yes"][..], "chown"),
+        (&["chgrp", path.as_str(), GROUP_NAME, "--yes"][..], "chgrp"),
+    ] {
+        fixture.guard.mark(format!("token: {}", args.join(" ")));
+        let run = run_token_shell(fixture, &token, args);
+        let value = refusal(&run, command_part, "token_request_denied", 4);
+        assert!(
+            value["message"].as_str() == Some(TOKEN_SUBSET),
+            "wrong fixed token-subset message for `{command_part}`"
+        );
+    }
+}
+
+// ── Wire helpers ─────────────────────────────────────────────────────
+
+/// The server's typed refusal code of one batch that is expected to fail.
+/// Reads only the code; the server message is never asserted or printed.
+async fn execute_code(client: &Client, request: shamir_query_types::batch::BatchRequest) -> String {
+    match timeout(BOUND, client.execute(ROUTING_DB, request))
+        .await
+        .expect("refusal hang bound")
+    {
+        Ok(_) => String::from("accepted"),
+        Err(error) => client_error_code(&error),
+    }
+}
+
+/// The stable CODE of one client-side failure: a refusal the server typed
+/// keeps the server's own code, every other variant reports its NAME. Neither
+/// the server message nor any handshake text is carried onward.
+fn client_error_code(error: &shamir_client::ClientError) -> String {
+    use shamir_client::ClientError as Wire;
+    match error {
+        Wire::Db { code, .. } | Wire::Server { code } => code.clone(),
+        Wire::Io(_) => String::from("io"),
+        Wire::Tls { .. } => String::from("tls"),
+        Wire::Transport { .. } => String::from("transport"),
+        Wire::Handshake { .. } => String::from("handshake"),
+        Wire::Protocol(_) => String::from("protocol"),
+        Wire::IdentityRotationPending { .. } => String::from("identity_rotation_pending"),
+        Wire::TransactionOutcome(_) => String::from("transaction_outcome"),
+        Wire::AsOfVisibilityTimeout { .. } => String::from("as_of_visibility_timeout"),
+        Wire::AsOfFutureVersion { .. } => String::from("as_of_future_version"),
+        Wire::AsOfReopenRequired { .. } => String::from("as_of_reopen_required"),
+        Wire::ResyncRequired { .. } => String::from("resync_required"),
+        Wire::VisibilityFutureVersion { .. } => String::from("visibility_future_version"),
+        Wire::VisibilityWaitInvalid { .. } => String::from("visibility_wait_invalid"),
+        Wire::WriteCommittedVisibilityPending { .. } => {
+            String::from("write_committed_visibility_pending")
+        }
+        Wire::RequestIdMismatch { .. } => String::from("request_id_mismatch"),
+        Wire::IdEncodingWithRefs { .. } => String::from("id_encoding_with_refs"),
+        Wire::Encode(_) => String::from("encode"),
+        Wire::Decode(_) => String::from("decode"),
+        Wire::InvalidUsername(_) => String::from("invalid_username"),
+        Wire::ConnectionClosed(_) => String::from("connection_closed"),
+        Wire::ConnectTimeout(_) => String::from("connect_timeout"),
+        Wire::RequestTimeout(_) => String::from("request_timeout"),
+        Wire::HandshakeTimeout(..) => String::from("handshake_timeout"),
+        Wire::Http { .. } => String::from("http"),
+        Wire::InvalidToken => String::from("invalid_token"),
+    }
 }

@@ -114,6 +114,7 @@ impl ActivityCommand {
         client: &SessionClient,
         routing_db: &str,
     ) -> Result<Value, ShellError> {
+        let started = tokio::time::Instant::now();
         let payload = match self {
             ActivityCommand::Sessions { all, limit } => {
                 let (rows, truncated) =
@@ -134,7 +135,7 @@ impl ActivityCommand {
             }
         };
         client.check_catalogue_output(&payload)?;
-        Ok(payload)
+        output::deadline_check(started, Ok(payload))
     }
 }
 
@@ -154,8 +155,9 @@ fn parse_exec_id(text: &str) -> Result<u64, ShellError> {
 /// Fetch one listing page by page. The page size is `--limit` clamped to
 /// [`MAX_PAGE`] (default [`DEFAULT_PAGE`]); the loop stops when the server
 /// returns no continuation, after [`MAX_PAGES`] pages, or once the row cap
-/// [`MAX_ROWS`] is reached. The flag is true when a cap stopped a listing
-/// that still had a continuation, or when rows were dropped by the row cap.
+/// [`MAX_ROWS`] is reached — in the last case WITHOUT issuing another
+/// request. The flag is true when a cap stopped a listing that still had a
+/// continuation, or when rows were dropped by the row cap.
 async fn list_rows(
     client: &SessionClient,
     db: &str,
@@ -169,41 +171,58 @@ async fn list_rows(
     } else {
         ActivityScope::Own
     };
-    let mut rows: Vec<ActivityRow> = Vec::new();
-    let mut continuation: Option<String> = None;
-    let mut pages = 0usize;
-    let mut truncated = false;
-    loop {
+    collect_pages(MAX_ROWS, MAX_PAGES, |continuation| {
         let request = ListActivityReq {
             scope,
             kind,
             limit: Some(page_size),
-            continuation: continuation.take(),
+            continuation,
         };
-        let page: ActivityPage = client.list_activity(db, request).await?;
+        async move { client.list_activity(db, request).await }
+    })
+    .await
+}
+
+/// The paging rule of one listing, independent of the transport so the cap
+/// edge is testable with a counting fake. `fetch` returns the next page for
+/// the continuation it is given. Reaching `cap` rows ALWAYS ends the walk in
+/// the same iteration: a listing that is exactly `cap` rows long with a
+/// continuation is truncated, and no further request is issued.
+pub(super) async fn collect_pages<F, Fut>(
+    cap: usize,
+    max_pages: usize,
+    mut fetch: F,
+) -> Result<(Vec<ActivityRow>, bool), ShellError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<ActivityPage, ShellError>>,
+{
+    let mut rows: Vec<ActivityRow> = Vec::new();
+    let mut continuation: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let page = fetch(continuation.take()).await?;
         pages += 1;
         let mut dropped = false;
         for row in page.rows {
-            if rows.len() >= MAX_ROWS {
+            if rows.len() >= cap {
                 dropped = true;
                 break;
             }
             rows.push(row);
         }
-        continuation = page.continuation;
-        if dropped {
-            truncated = true;
-            break;
+        let next = page.continuation;
+        if rows.len() >= cap {
+            return Ok((rows, dropped || next.is_some()));
         }
-        if continuation.is_none() {
-            break;
+        let Some(next) = next else {
+            return Ok((rows, dropped));
+        };
+        if pages >= max_pages {
+            return Ok((rows, true));
         }
-        if pages >= MAX_PAGES {
-            truncated = true;
-            break;
-        }
+        continuation = Some(next);
     }
-    Ok((rows, truncated))
 }
 
 /// Project one listing: the requested registry name, the scope, the

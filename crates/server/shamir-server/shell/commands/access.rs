@@ -159,6 +159,7 @@ impl AccessCommand {
         client: &SessionClient,
         routing_db: Option<&str>,
     ) -> Result<Value, ShellError> {
+        let started = tokio::time::Instant::now();
         let db = routing_db.ok_or(ShellError::Usage)?;
         let payload = match self {
             AccessCommand::Users => {
@@ -218,7 +219,7 @@ impl AccessCommand {
             }
         };
         client.check_catalogue_output(&payload)?;
-        Ok(payload)
+        output::deadline_check(started, Ok(payload))
     }
 }
 
@@ -575,6 +576,24 @@ enum Selector {
     Resource(Vec<String>),
 }
 
+/// Whether one DATABASE or STORE name component passes the engine's own
+/// name rule. MIRRORS `validate_name_component`
+/// (`crates/engine/shamir-db/src/shamir_db/execute/core/helpers.rs`), which
+/// is `pub(super)` inside `shamir-db` and therefore not reachable from this
+/// crate: only `[A-Za-z0-9_-]`, and never empty or `.` / `..`. The shell
+/// applies it to the first two resource-path components, which are the
+/// names that gate the storage path a mutation addresses; the TABLE and
+/// function components keep the length / emptiness rule only, so the server
+/// stays the authority for those.
+fn valid_name_component(text: &str) -> bool {
+    !text.is_empty()
+        && text != "."
+        && text != ".."
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 /// Parse the `rights show` path selector. `root` and `/` name the resource
 /// root; `function:NAME` names a function by exact name (NAME non-empty, at
 /// most [`MAX_SEGMENT_BYTES`] bytes, and containing neither `/` nor `:`);
@@ -582,6 +601,7 @@ enum Selector {
 /// non-empty segments selecting a `database`, `store` or `table` node. An
 /// empty or oversized segment, or any other segment count, is
 /// `ShellError::Usage`.
+/// A first or second segment (database, store) that the engine's name rule rejects is also `ShellError::Usage`, before any request.
 fn parse_selector(path: &str) -> Result<Selector, ShellError> {
     if path == "root" || path == "/" {
         return Ok(Selector::Root);
@@ -600,8 +620,13 @@ fn parse_selector(path: &str) -> Result<Selector, ShellError> {
     if segments.is_empty() || segments.len() > RESOURCE_KINDS.len() {
         return Err(ShellError::Usage);
     }
-    for segment in &segments {
+    for (depth, segment) in segments.iter().enumerate() {
         if segment.is_empty() || segment.len() > MAX_SEGMENT_BYTES {
+            return Err(ShellError::Usage);
+        }
+        // The database and store components must satisfy the engine's own
+        // name rule before they can become a wire target.
+        if depth < 2 && !valid_name_component(segment) {
             return Err(ShellError::Usage);
         }
     }
@@ -802,3 +827,7 @@ fn project_rights(qv: &QueryValue, selector: &Selector) -> Result<Value, ShellEr
     out.extend(fields);
     Ok(Value::Object(out))
 }
+
+#[cfg(test)]
+#[path = "tests/access_deadline_tests.rs"]
+mod access_deadline_tests;

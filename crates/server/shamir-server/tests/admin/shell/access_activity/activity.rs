@@ -351,3 +351,47 @@ fn token_session_refuses_activity_commands() {
         );
     }
 }
+
+/// §3.3 for the activity commands: the token profile points at an address
+/// NOTHING listens on, so any dial would surface as `connection_failed`
+/// (exit 2); every command still exits 4 with the fixed subset message.
+/// Mutant: a command that re-entered the token allowlist would dial and fail
+/// with exit 2 instead.
+#[test]
+fn token_session_refuses_activity_commands_without_dialing() {
+    let secure = boot_secure("token_session_refuses_activity_commands_without_dialing");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    let token = provision_token(
+        fixture,
+        token_admin::create_api_token("https")
+            .for_user(SHELL_USER)
+            .databases([DB_NAME])
+            .mode(ApiTokenMode::ReadOnly)
+            .channels(ApiTokenChannels::Both),
+    );
+    // Port 1 on loopback has no listener: a dial here is `connection_failed`
+    // (exit 2), so exit 4 proves the token gate refused BEFORE connecting.
+    write_secure_profile(
+        fixture,
+        "https",
+        std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        DB_NAME,
+        Some(&secure.ca_path),
+    );
+    for (args, command_part) in [
+        (&["activity", "sessions"][..], "sessions"),
+        (&["activity", "requests"][..], "requests"),
+        (&["activity", "cancel", "1", "--yes"][..], "cancel"),
+    ] {
+        fixture.guard.mark(format!("token: {}", args.join(" ")));
+        let run = run_token_shell(fixture, &token, args);
+        let value = refusal(&run, command_part, "token_request_denied", 4);
+        assert!(
+            value["message"].as_str() == Some(TOKEN_SUBSET),
+            "wrong fixed token-subset message for `{}`",
+            args.join(" ")
+        );
+    }
+}

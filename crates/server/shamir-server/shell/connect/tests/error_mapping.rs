@@ -7,7 +7,7 @@ use shamir_connect::Error as ConnectError;
 use tokio_tungstenite::tungstenite::http::Response;
 use tokio_tungstenite::tungstenite::Error as WsError;
 
-use super::request_error;
+use super::{request_error, server_code};
 use crate::shell::output::ShellError;
 
 /// Native WSS upgrade rejected before SCRAM (404 from a listener on
@@ -58,4 +58,20 @@ fn token_channel_denied_is_denied() {
         message: "server text is dropped".to_string(),
     };
     assert_eq!(request_error(error), ShellError::Denied);
+}
+
+/// The ACL-mutation refusals keep their OWN typed error (and therefore their
+/// own stable code and exit) instead of collapsing into `Server`; an
+/// unlisted code still maps to `Server`, so the allowlist stays closed.
+#[test]
+fn acl_mutation_codes_are_typed() {
+    assert_eq!(server_code("invalid_owner"), ShellError::InvalidOwner);
+    assert_eq!(server_code("hmac_mismatch"), ShellError::HmacMismatch);
+    assert_eq!(server_code("hmac_required"), ShellError::HmacRequired);
+    assert_eq!(server_code("unknown_db"), ShellError::UnknownDb);
+    assert_eq!(
+        server_code("not_an_allowlisted_code"),
+        ShellError::Server,
+        "the allowlist must stay closed"
+    );
 }
