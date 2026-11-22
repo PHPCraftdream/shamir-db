@@ -3,9 +3,10 @@
 pub(in crate::boot::config::diagnostics::backup_online) struct RetentionOutcome {
     pub(in crate::boot::config::diagnostics::backup_online) deleted: u64,
     pub(in crate::boot::config::diagnostics::backup_online) failed: u64,
-    /// Snapshots left in place because another process held the read lease
-    /// during this deletion attempt. Normal contention is not an error; a
-    /// later pass may retry, but no retry or deletion is promised.
+    /// Snapshots left in place because the read lease could not be taken
+    /// exclusively during this deletion attempt (a reader, or another
+    /// exclusive holder, held it). Normal contention is not an error; a later
+    /// pass may retry, but no retry or deletion is promised.
     pub(in crate::boot::config::diagnostics::backup_online) skipped_in_use: u64,
     pub(in crate::boot::config::diagnostics::backup_online) untouched: Option<u64>,
     /// Directory name, manifest creation time and manifest SHA-256 digest

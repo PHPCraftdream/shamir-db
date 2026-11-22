@@ -121,8 +121,9 @@ pub(super) fn prune_inner(
         }
         // Crash-debris cleanup DURING the initial discovery: only a direct,
         // plain regular file with the reserved exact name shape and age
-        // threshold is removed before the cap. The age rule keeps another
-        // runner's live staging file safe, but is not a lock: one runner must
+        // threshold is removed before the cap. The age rule protects another
+        // runner's live staging file only while its reported modification time
+        // is younger than the threshold; it is not a lock, so one runner must
         // own the root by contract (sharing is not enforced by this code).
         if remove_staged_debris_entry(&name, &path, &root_meta) {
             continue;

@@ -16,12 +16,24 @@ const MAX_SIDECAR: u64 = 64 << 10;
 
 /// Recognizable fixed prefix of the staged sidecar file. The suffix is
 /// exactly 16 random alphanumeric characters; cleanup removes only old,
-/// plain regular files of that exact shape. The 15-minute minimum age keeps
-/// a live staging file from another runner safe, but does not serialize
-/// runners: one runner must own the root by contract.
+/// plain regular files of that exact shape. The 15-minute minimum age is not
+/// a lock: it protects a live staging file only while its reported
+/// modification time is younger than the threshold (a stalled writer or a
+/// clock step can outlive it), so one runner must own the root by contract.
 pub(super) const STAGED_PREFIX: &str = ".shamir-retention-staged-";
 const STAGED_RANDOM_LEN: usize = 16;
 const STAGED_DEBRIS_MIN_AGE: Duration = Duration::from_secs(15 * 60);
+
+/// Whether a modification time proves a staged file old enough to be debris:
+/// strictly after the Unix epoch (a filesystem without last-write times
+/// reports zero, which Windows reads as the year 1601), not in the future, and
+/// at least the minimum age old.
+pub(super) fn staged_debris_old_enough(modified: SystemTime, now: SystemTime) -> bool {
+    modified > SystemTime::UNIX_EPOCH
+        && now
+            .duration_since(modified)
+            .is_ok_and(|age| age >= STAGED_DEBRIS_MIN_AGE)
+}
 
 fn has_staged_name_shape(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
@@ -36,8 +48,8 @@ fn has_staged_name_shape(name: &OsStr) -> bool {
 /// direct root entry with the exact staged name shape, at least
 /// [`STAGED_DEBRIS_MIN_AGE`] old, and a plain regular file. Nonfollowing
 /// metadata plus the same reparse/mount exclusion as the scan means links,
-/// reparse points and directories are never removed. Missing, unreadable or
-/// future modification times are not debris. Returns true only when the
+/// reparse points and directories are never removed. Missing, unreadable,
+/// pre-epoch or future modification times are not debris. Returns true only when the
 /// entry was actually removed; every failure leaves it as a normal counted
 /// root entry, and cleanup never fails a pass.
 pub(super) fn remove_staged_debris_entry(name: &OsStr, path: &Path, root_meta: &Metadata) -> bool {
@@ -55,10 +67,7 @@ pub(super) fn remove_staged_debris_entry(name: &OsStr, path: &Path, root_meta: &
     let Ok(modified) = meta.modified() else {
         return false;
     };
-    let Ok(age) = SystemTime::now().duration_since(modified) else {
-        return false;
-    };
-    if age < STAGED_DEBRIS_MIN_AGE {
+    if !staged_debris_old_enough(modified, SystemTime::now()) {
         return false;
     }
     match fs::remove_file(path) {

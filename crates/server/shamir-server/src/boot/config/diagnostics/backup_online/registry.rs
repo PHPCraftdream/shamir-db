@@ -23,13 +23,17 @@
 //! return: it records the manifest bytes observed then, not proof of the
 //! protocol's original payload tree or directory identity. Adoption requires
 //! those manifest bytes/time to remain unchanged at capture, scan and late
-//! check, and an untagged copy; payload/directory replacement under unchanged
-//! manifest bytes is not detected, so the root is single-writer by contract.
+//! check; an untagged copy is tagged, and a copy already bearing this owner's
+//! tag is reported as adopted without a rewrite. Payload/directory
+//! replacement under unchanged manifest bytes is not detected, so the root is
+//! single-writer by contract.
 //! A refused/failed capture records nothing. A process restart loses the
 //! bounded 64-record list; outage copies whose records are lost remain
-//! untouched by selection. A late cancellation after protocol success with a
-//! healthy marker skips retention and leaves the completed copy untagged and
-//! unrecorded; the operator must verify and manually move or retire it.
+//! untouched by selection. A cancellation observed after protocol success and
+//! before tagging starts, with a healthy marker, skips retention and leaves
+//! the completed copy untagged and unrecorded; the operator must verify and
+//! manually move or retire it. A cancellation after tagging began leaves the
+//! fresh copy tagged and without an adoption record.
 //!
 //! Destination handling (§4.2 A): the operator `to` must be absolute and is
 //! validated exactly like the offline backup — canonicalize the nearest
@@ -636,8 +640,8 @@ impl RunJob {
         // Provenance is snapshotted and updated under the existing record
         // lock; filesystem capture happened before locking. Marker failure
         // observed before late cancellation still reaches the failure metric,
-        // and successful capture records provenance. A late cancellation
-        // after protocol success with a healthy marker skips prune, leaving
+        // and successful capture records provenance. A cancellation observed
+        // before tagging starts, with a healthy marker, skips prune, leaving
         // the copy untagged and unrecorded for operator verification/retirement.
         if let Some(scheduled) = scheduled {
             let recorded = record

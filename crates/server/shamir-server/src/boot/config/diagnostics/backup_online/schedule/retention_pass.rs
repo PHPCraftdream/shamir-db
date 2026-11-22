@@ -8,7 +8,9 @@
 //! returns, one bounded read captures the manifest bytes and decoded creation
 //! time; a replacement before capture is therefore what gets recorded. The
 //! digest checks that the manifest still matches at the scan and late check;
-//! adoption also requires an untagged copy. This does NOT prove payload-tree
+//! tagging also requires an untagged copy, while a matching entry that already
+//! bears this owner's tag is reported as adopted without a new tag. This does
+//! NOT prove payload-tree
 //! or directory identity: replacing either beneath unchanged manifest bytes
 //! is not detected, so the root remains single-writer by contract.
 //!
@@ -52,9 +54,10 @@ const MAX_PENDING_ADOPTIONS: usize = 64;
 /// creation time, and SHA-256 of the manifest bytes observed by the bounded
 /// post-protocol capture. A replacement before capture is therefore the
 /// bytes recorded. Adoption requires the same manifest bytes/time at scan
-/// and late check plus an untagged copy; this does not bind payload contents
-/// or directory identity, which remain protected by the single-writer root
-/// contract.
+/// and late check; an untagged copy is tagged, and a copy already bearing
+/// this owner's tag is reported without a rewrite. This does not bind payload
+/// contents or directory identity, which remain protected by the
+/// single-writer root contract.
 struct PendingAdoption {
     root: PathBuf,
     owner: String,
@@ -244,9 +247,11 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_retention_p
             ..RetentionOutcome::default()
         },
         (Ok(report), MarkerProvisioning::Provisioned) => {
-            // A late cancel after successful protocol completion with a
-            // healthy marker skips the scan: the completed copy remains
-            // untagged and unrecorded. The operator must verify and manually
+            // A cancel observed after successful protocol completion and
+            // before this pass starts tagging, with a healthy marker, skips
+            // the scan: the completed copy remains untagged and unrecorded.
+            // (A cancel after tagging began leaves the copy tagged.) The
+            // operator must verify and manually
             // move or retire it; no later pass can infer it. A marker
             // failure observed before cancellation is still accounted in the
             // branch above.
@@ -267,7 +272,8 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_retention_p
         }
     };
     backup_metrics::note_retention(result.deleted, result.failed, result.untouched);
-    // Normal next-pass contention, not an error: debug only.
+    // Lock contention on this attempt, not an error and not retried by this
+    // pass: debug only.
     if result.skipped_in_use > 0 {
         tracing::debug!(
             skipped = result.skipped_in_use,
