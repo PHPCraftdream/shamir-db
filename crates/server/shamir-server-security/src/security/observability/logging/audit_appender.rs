@@ -35,9 +35,11 @@ mod checkpoint;
 mod format;
 mod recovery;
 mod rotation;
+mod shutdown;
 
 use format::entry_to_line;
 use rotation::RotationState;
+pub use shutdown::AuditShutdownOutcome;
 
 #[cfg(test)]
 #[path = "tests/audit_appender_tests_manifest.rs"]
@@ -247,11 +249,11 @@ pub struct FjallAuditAppender {
     rotation: Option<RotationState>,
     #[cfg(test)]
     after_extract_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     fail_next_flush: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     gate_contention_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     gate_acquired_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test seam replacing [`rotation::sync_parent`] at dir sync.
     #[cfg(test)]
@@ -342,11 +344,11 @@ impl FjallAuditAppender {
             meta_hook: None,
             #[cfg(test)]
             after_extract_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             fail_next_flush: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gate_contention_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             gate_acquired_hook: Mutex::new(None),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
@@ -422,11 +424,11 @@ impl FjallAuditAppender {
             meta_hook,
             #[cfg(test)]
             after_extract_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             fail_next_flush: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             gate_contention_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             gate_acquired_hook: Mutex::new(None),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
@@ -610,37 +612,22 @@ impl FjallAuditAppender {
     }
 
     /// Shutdown the batched flusher, draining any buffered entries.
-    pub async fn shutdown(&self) {
-        if let Durab::Batched {
-            shutdown,
-            notify,
-            task,
-            ..
-        } = &self.mode
-        {
-            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
-            notify.notify_one();
-            let handle = task.lock().take();
-            if let Some(h) = handle {
-                let _ = h.await;
-            }
-            let result = blocking_io(|| {
-                let _guard = self.acquire_persistence_gate();
-                // Final batched shutdown: drain, persist the appender
-                // anchor, then run the optional server-meta hook. Retention
-                // sweeps stay rotation-only. Anchor and hook failures
-                // latch.
-                let result = self
-                    .flush_buffer_locked()
-                    .and_then(|()| self.persist_anchor_and_meta());
-                if let Err(error) = &result {
-                    *self.failed.lock() = Some(error.to_string());
-                }
-                result
-            });
-            if let Err(error) = &result {
-                tracing::error!(%error, "audit appender final shutdown flush failed; latched fail-closed");
-            }
+    ///
+    /// The three steps ([`Self::request_flusher_stop`],
+    /// [`Self::join_flusher`], [`Self::final_flush_blocking`]) are also
+    /// available separately so the server's bounded audit teardown can
+    /// budget each one and report which failed; this wrapper keeps the
+    /// historical stop-join-flush order and returns both results.
+    pub async fn shutdown(&self) -> AuditShutdownOutcome {
+        self.request_flusher_stop();
+        let flusher_join_error = self.join_flusher().await.err();
+        let flush_error = blocking_io(|| self.final_flush_blocking()).err();
+        if let Some(error) = &flush_error {
+            tracing::error!(%error, "audit appender final shutdown flush failed; latched fail-closed");
+        }
+        AuditShutdownOutcome {
+            flusher_join_error,
+            flush_error,
         }
     }
 
@@ -665,7 +652,7 @@ impl FjallAuditAppender {
             return Ok(());
         }
         let result = (|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             if self
                 .fail_next_flush
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -771,7 +758,7 @@ impl FjallAuditAppender {
     /// Acquire the sync gate, exposing only actual contention to the tests.
     fn acquire_persistence_gate(&self) -> parking_lot::MutexGuard<'_, ()> {
         if let Some(guard) = self.persistence_gate.try_lock() {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             {
                 let hook = self.gate_acquired_hook.lock().take();
                 if let Some(hook) = hook {
@@ -788,7 +775,7 @@ impl FjallAuditAppender {
             }
         }
         let guard = self.persistence_gate.lock();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         {
             let hook = self.gate_acquired_hook.lock().take();
             if let Some(hook) = hook {

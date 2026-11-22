@@ -121,6 +121,12 @@ pub(crate) struct CancelRefusalAudit {
     state: AtomicUsize,
     dropped: AtomicUsize,
     idle: Notify,
+    /// Abort handles of accepted-but-unfinished audit jobs. Bounded by
+    /// `CANCEL_AUDIT_CAPACITY` live slots (finished entries are pruned on
+    /// the next refusal), only ever pushed on a refusal — never on the
+    /// cancel reply path — and read once at teardown, so the contention
+    /// model is "a bounded push per refusal".
+    unfinished: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl CancelRefusalAudit {
@@ -170,7 +176,40 @@ impl CancelRefusalAudit {
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
 
-    pub(crate) async fn drain(&self) {
+    /// Abort audit jobs that have not started yet.
+    ///
+    /// A job that never ran drops its [`CancelAuditSlot`], so it is counted
+    /// exactly like a refused submission and its `Arc<AuditChainWriter>`
+    /// reference — which would otherwise keep the writer, the appender and
+    /// its fjall store alive past the release timeout — is released now.
+    /// A job already blocked inside the writer's persistence gate keeps
+    /// running: a timeout stops waiting, it does not cancel I/O.
+    pub(crate) fn discard_queued(&self) {
+        let aborted = self
+            .unfinished
+            .lock()
+            .map(|mut handles| {
+                let count = handles.len();
+                for handle in handles.drain(..) {
+                    handle.abort();
+                }
+                count
+            })
+            .unwrap_or(0);
+        if aborted != 0 {
+            tracing::warn!(aborted, "cancel refusal audit discarded queued jobs");
+        }
+    }
+
+    /// Remember one accepted job's abort handle, pruning finished ones.
+    fn track(&self, handle: tokio::task::AbortHandle) {
+        if let Ok(mut handles) = self.unfinished.lock() {
+            handles.retain(|queued| !queued.is_finished());
+            handles.push(handle);
+        }
+    }
+
+    pub(crate) async fn drain(&self) -> bool {
         let drained = tokio::time::timeout(DRAIN_BUDGET, async {
             // Cancel-safe: no jobs are consumed by waiting.
             loop {
@@ -184,7 +223,8 @@ impl CancelRefusalAudit {
             }
         })
         .await;
-        if drained.is_err() {
+        let complete = drained.is_ok();
+        if !complete {
             let pending = self.state.load(Ordering::Acquire) & COUNT_MASK;
             tracing::warn!(pending, "cancel refusal audit drain timed out");
         }
@@ -192,6 +232,7 @@ impl CancelRefusalAudit {
         if dropped != 0 {
             tracing::debug!(dropped, "cancel refusal audit drops so far");
         }
+        complete
     }
 }
 
@@ -299,7 +340,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
         audit: Arc::clone(audit),
         slot,
     };
-    Some(tokio::task::spawn_blocking(move || {
+    let job = tokio::task::spawn_blocking(move || {
         let guard = pending;
         let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
             if let Err(error) = guard.audit.append(
@@ -319,7 +360,9 @@ pub(super) fn enqueue_cancel_refusal_audit(
             true
         });
         guard.complete(appended);
-    }))
+    });
+    queue.track(job.abort_handle());
+    Some(job)
 }
 
 pub(super) fn repo_audit_observer(

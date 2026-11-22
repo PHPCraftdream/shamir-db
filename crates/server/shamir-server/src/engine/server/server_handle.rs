@@ -1,7 +1,5 @@
 //! Runtime handle for a launched server instance.
 
-#[cfg(test)]
-use std::future::{poll_fn, Future};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +14,7 @@ use crate::audit_appender::FjallAuditAppender;
 use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
+use crate::server::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::server::store_release_barrier::wait_stores_released;
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
@@ -299,27 +298,24 @@ impl ServerHandle {
         if let Some(task) = self.repl_supervisor_task {
             let _ = task.handle.await;
         }
-        // 3. Drain the audit chain + scheduler.
-        let drain = self.cancel_refusal_audit.drain();
-        #[cfg(test)]
-        {
-            let mut pending = self.refusal_drain_pending;
-            let mut drain = std::pin::pin!(drain);
-            poll_fn(move |cx| {
-                let result = drain.as_mut().poll(cx);
-                if result.is_pending() {
-                    if let Some(signal) = pending.take() {
-                        let _ = signal.send(());
-                    }
-                }
-                result
-            })
-            .await;
-        }
-        #[cfg(not(test))]
-        drain.await;
-        self.audit_appender.shutdown().await;
-        self.scheduler.shutdown().await;
+        // 3. Drain the refusal-audit queue and the audit chain under ONE
+        //    shared deadline: the scheduler is signalled before it is joined,
+        //    the appender's final drain + anchor write runs on a blocking
+        //    thread, and a stalled checkpoint or flusher marks the report
+        //    unclean instead of stalling the shutdown future. Teardown
+        //    continues to the repository flush either way; a timeout does not
+        //    cancel an in-flight fsync.
+        teardown_audit(
+            AuditTeardown {
+                cancel_refusal_audit: &self.cancel_refusal_audit,
+                appender: &self.audit_appender,
+                scheduler: self.scheduler,
+                #[cfg(test)]
+                drain_probe: self.refusal_drain_pending,
+            },
+            report,
+        )
+        .await;
         // Do not abort: an in-flight copy or retention operation must finish cleanup.
         join_backup_schedule(self.backup_schedule_task, report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered

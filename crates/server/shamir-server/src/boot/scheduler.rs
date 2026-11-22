@@ -296,7 +296,23 @@ impl Scheduler {
     /// `recv()` calls also return `Err(Closed)` which the loop treats as
     /// shutdown.
     pub async fn shutdown(self) {
+        self.signal_shutdown();
+        self.join().await;
+    }
+
+    /// Tell every task to stop without waiting for any of them.
+    ///
+    /// Teardown must signal BEFORE it joins: a task parked on a tick (an
+    /// hour for `identity_finalize`) or blocked on the audit persistence
+    /// gate only observes the stop request once it is sent, so sending it
+    /// first turns a join deadline into "the task is slow", while sending it
+    /// from inside the join turns it into "the task was never told".
+    pub fn signal_shutdown(&self) {
         let _ = self.shutdown_tx.send(());
+    }
+
+    /// Await every task after [`Self::signal_shutdown`].
+    pub async fn join(self) {
         for h in self.handles {
             let _ = h.await;
         }

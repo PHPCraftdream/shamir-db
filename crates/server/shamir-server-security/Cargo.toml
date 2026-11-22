@@ -10,6 +10,12 @@ repository = "https://github.com/PHPCraftdream/shamir-db"
 [lib]
 doctest = false
 
+[features]
+# Test-only plumbing (ordered-shutdown): lets a server-level test arm the
+# audit appender's persistence-gate hook and flush fault from outside this
+# crate. Never enabled by a production build.
+test-hooks = []
+
 [dependencies]
 shamir-connect = { path = "../../net/shamir-connect", features = ["server", "client", "durable-fjall"] }
 shamir-tunables = { path = "../../foundation/shamir-tunables" }

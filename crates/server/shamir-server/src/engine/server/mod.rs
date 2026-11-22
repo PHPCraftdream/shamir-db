@@ -11,6 +11,7 @@
 //! must do that exactly once per process (`rustls::crypto::aws_lc_rs::default_provider().install_default()`).
 //! This is enforced by rustls itself: a second install is a no-op.
 
+mod audit_teardown;
 mod boot_error;
 mod bootstrap_mode;
 mod meta_sinks;
