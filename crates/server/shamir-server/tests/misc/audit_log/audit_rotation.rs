@@ -186,9 +186,25 @@ async fn hmac_chain_is_intact_across_rotation() {
 //
 // The sweep runs piggyback on rotation: when a new rotated file is created,
 // sibling rotated files older than `retention_days` are deleted. File age is
-// determined from the embedded `unix_nanos` suffix in the filename (same
-// format `rotate_locked` produces), not from filesystem mtime.
+// determined from the filesystem mtime of each rotated file, not from the
+// embedded `unix_nanos` suffix in the filename; the fixtures below seed
+// explicit mtimes with `std::fs::FileTimes` so old/young ages are
+// independent of the (legacy, backwards-named) archive names.
 // ---------------------------------------------------------------------------
+
+/// Set the filesystem modified time of `path` to `age_ns` nanoseconds ago,
+/// cross-platform via `std::fs::FileTimes`.
+fn set_mtime_age(path: &std::path::Path, age_ns: u64) {
+    let modified = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_nanos(age_ns))
+        .expect("mtime before now");
+    let f = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open archive to set mtime");
+    f.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("set archive mtime");
+}
 
 fn now_unix_nanos() -> u64 {
     std::time::SystemTime::now()
@@ -201,6 +217,70 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const SECS_PER_DAY: u64 = 86400;
 const NANOS_PER_DAY: u64 = SECS_PER_DAY * NANOS_PER_SEC;
 
+/// Seed one rotated archive with genuine chain-generated records: the
+/// entries are appended through the shared HMAC chain (so every row
+/// authenticates and the sequences are sequential), the strict appender
+/// is closed/dropped to release its Fjall checkpoint store, and the
+/// active log is renamed to the requested `audit.log.<nanos>` archive
+/// name — the same shape `rotate_locked` produces.
+fn seed_archive(
+    dir: &std::path::Path,
+    chain: &AuditChain,
+    seqs: std::ops::Range<u64>,
+    archive_ns: u64,
+) {
+    let appender = FjallAuditAppender::open_strict(dir).unwrap();
+    for i in seqs {
+        let entry = chain
+            .append(
+                "auth_success",
+                "tcp",
+                format!("user_{i:02}"),
+                "127.0.0.0/24",
+                [0u8; 8],
+                "ok",
+                Vec::new(),
+                1_000_000_000 + i,
+            )
+            .expect("valid audit test entry");
+        appender.append_entry(&entry).expect("append succeeds");
+    }
+    drop(appender);
+    std::fs::rename(
+        dir.join("audit.log"),
+        dir.join(format!("audit.log.{archive_ns:020}")),
+    )
+    .expect("rename active log to archive");
+    set_mtime_age(
+        &dir.join(format!("audit.log.{archive_ns:020}")),
+        now_unix_nanos().saturating_sub(archive_ns),
+    );
+}
+
+/// Append genuinely chain-linked entries (continuing the archive chain's
+/// sequence and HMAC links) to force the size threshold to rotate.
+fn append_chain_entries(
+    appender: &FjallAuditAppender,
+    chain: &AuditChain,
+    seqs: std::ops::Range<u64>,
+) {
+    for i in seqs {
+        let entry = chain
+            .append(
+                "auth_success",
+                "tcp",
+                format!("user_{i:02}"),
+                "127.0.0.0/24",
+                [0u8; 8],
+                "ok",
+                Vec::new(),
+                1_000_000_000 + i,
+            )
+            .expect("valid audit test entry");
+        appender.append_entry(&entry).expect("append succeeds");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retention_sweep_deletes_old_rotated_files_only() {
     let temp = TempDir::new().unwrap();
@@ -210,27 +290,20 @@ async fn retention_sweep_deletes_old_rotated_files_only() {
     let old_ns = now - 10 * NANOS_PER_DAY; // 10 days ago
     let recent_ns = now - NANOS_PER_DAY; // 1 day ago
 
-    // Pre-create rotated files with KNOWN embedded timestamps.
-    std::fs::write(
-        dir.join(format!("audit.log.{old_ns:020}")),
-        b"old-should-be-deleted",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join(format!("audit.log.{recent_ns:020}")),
-        b"recent-should-survive",
-    )
-    .unwrap();
+    // Pre-create rotated archives containing genuine chain-generated,
+    // sequential, authenticated rows (the sweep's ordering relies on the
+    // archives' first content sequence).
+    let key = [0xC0u8; 32];
+    let chain = AuditChain::new(key);
+    seed_archive(dir, &chain, 1..11u64, old_ns);
+    seed_archive(dir, &chain, 11..21u64, recent_ns);
 
-    // retention_days = 5: the 10-day-old file exceeds it, the 1-day-old does not.
+    // retention_days = 5: the 10-day-old archive exceeds it, the 1-day-old does not.
     let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 5).unwrap();
 
-    // Trigger a rotation (1 KB threshold → ~10 entries suffice).
-    for i in 0..10 {
-        appender
-            .append_entry(&make_entry(i))
-            .expect("append succeeds");
-    }
+    // Trigger a rotation (1 KB threshold → ~10 entries suffice) with
+    // chain-linked rows continuing the same sequence.
+    append_chain_entries(appender.as_ref(), &chain, 21..31u64);
 
     // The old file is gone; the recent file survives.
     assert!(
@@ -256,6 +329,10 @@ async fn retention_zero_means_no_sweep() {
         b"ancient-should-survive-when-retention-is-0",
     )
     .unwrap();
+    set_mtime_age(
+        &dir.join(format!("audit.log.{ancient_ns:020}")),
+        now - ancient_ns,
+    );
 
     // retention_days = 0: the documented off-switch — no sweep ever.
     let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 0).unwrap();
@@ -276,6 +353,7 @@ async fn retention_zero_means_no_sweep() {
 async fn retention_sweep_failure_does_not_break_writes() {
     // A rotated-file-shaped entry that `remove_file` cannot delete (a
     // directory) must NOT propagate an error to the write/rotation caller.
+    // Its mtime is age-eligible, yet the sweep must never unlink it.
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
 
@@ -324,11 +402,11 @@ async fn retention_sweep_runs_in_batched_mode_too() {
     let now = now_unix_nanos();
     let old_ns = now - 10 * NANOS_PER_DAY;
 
-    std::fs::write(
-        dir.join(format!("audit.log.{old_ns:020}")),
-        b"old-should-be-deleted-in-batched-mode",
-    )
-    .unwrap();
+    // A genuine chain-generated archive with sequences 1-10 under an
+    // age-eligible (10-day-old) rotation name.
+    let key = [0xC1u8; 32];
+    let chain = AuditChain::new(key);
+    seed_archive(dir, &chain, 1..11u64, old_ns);
 
     let appender = FjallAuditAppender::open_batched_with_rotation(
         dir,
@@ -338,24 +416,68 @@ async fn retention_sweep_runs_in_batched_mode_too() {
     )
     .unwrap();
 
-    // Write enough to cross the 1 KB threshold.
-    for i in 0..10 {
-        appender
-            .append_entry(&make_entry(i))
-            .expect("append succeeds");
-    }
-
-    // Wait for the CONDITION (the batched flusher landed the writes, rotated and
-    // swept), not a fixed delay: a loaded Windows runner can need far longer
-    // than any sleep margin we could guess.
-    let old_path = dir.join(format!("audit.log.{old_ns:020}"));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while old_path.exists() && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    // Write enough chain-linked rows to cross the 1 KB threshold, then
+    // flush deterministically: `flush_now` drains the buffer, and the
+    // flush path performs the rotation and its piggyback retention sweep
+    // synchronously — no timing polling needed.
+    append_chain_entries(appender.as_ref(), &chain, 11..21u64);
+    appender
+        .flush_now()
+        .await
+        .expect("flush lands writes, rotation and sweep");
 
     assert!(
         !dir.join(format!("audit.log.{old_ns:020}")).exists(),
         "batched-mode retention sweep must delete old rotated files"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_sweep_preserves_backwards_named_archive_when_earlier_sequence_archive_is_younger(
+) {
+    // Regression: the sweep may prune only the oldest contiguous
+    // age-eligible prefix in first-content-sequence order. Here the
+    // archive holding the EARLIER sequences (1-10) carries a YOUNG name
+    // and a YOUNG mtime (1 day ago), while a later-sequence archive
+    // (11-20) carries an older, backwards rotation name (10 days ago) with
+    // an explicitly seeded OLD mtime (10 days ago) that is age-eligible on
+    // its own. Because the earlier-sequence archive is still inside the
+    // retention window, the eligible prefix is empty and the backwards
+    // named archive must be preserved — its eligible name and mtime alone
+    // must not cause deletion.
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let now = now_unix_nanos();
+    let young_ns = now - NANOS_PER_DAY; // 1 day ago — earlier sequences
+    let backwards_old_ns = now - 10 * NANOS_PER_DAY; // 10 days ago — later sequences
+
+    let key = [0xC2u8; 32];
+    let chain = AuditChain::new(key);
+    seed_archive(dir, &chain, 1..11u64, young_ns);
+    seed_archive(dir, &chain, 11..21u64, backwards_old_ns);
+    // Independent mtimes, decoupled from the legacy suffix names: the
+    // earlier-sequence archive stays young, the backwards named one is old.
+    set_mtime_age(
+        &dir.join(format!("audit.log.{young_ns:020}")),
+        NANOS_PER_DAY,
+    );
+    set_mtime_age(
+        &dir.join(format!("audit.log.{backwards_old_ns:020}")),
+        10 * NANOS_PER_DAY,
+    );
+
+    let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 5).unwrap();
+    append_chain_entries(appender.as_ref(), &chain, 21..31u64);
+
+    assert!(
+        dir.join(format!("audit.log.{backwards_old_ns:020}"))
+            .exists(),
+        "age-eligible backwards named archive must be preserved while an \
+         earlier-sequence archive is inside the retention window"
+    );
+    assert!(
+        dir.join(format!("audit.log.{young_ns:020}")).exists(),
+        "earlier-sequence archive inside the retention window must survive"
     );
 }

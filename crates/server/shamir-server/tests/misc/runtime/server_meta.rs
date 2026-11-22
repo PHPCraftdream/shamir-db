@@ -275,6 +275,106 @@ fn audit_checkpoint_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// Monotonic anchor guard (audit-chain review, finding 2): an anchor write
+// may never lower the stored anchor, so an offline command can never erase
+// a truncation boundary. Exercised through the public `store_audit_checkpoint`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_checkpoint_refuses_lower_sequence_and_stays_unchanged_across_reopen() {
+    let (_dir, path) = tmp_path();
+    let store = ServerMetaStore::open_or_init(&path).expect("init");
+
+    let high_seq = 500u64;
+    let high_hmac = [0x5au8; 32];
+    store
+        .store_audit_checkpoint(high_seq, high_hmac)
+        .expect("store high anchor");
+
+    let err = store
+        .store_audit_checkpoint(400, [0x4bu8; 32])
+        .expect_err("lowering the anchor must be refused");
+    assert!(
+        matches!(&err, MetaError::Encoding(m) if m.contains("refusing to lower") && m.contains("500") && m.contains("400")),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        store.audit_checkpoint(),
+        Some((high_seq, high_hmac)),
+        "a refused write must not change the anchor"
+    );
+
+    drop(store);
+    let store = ServerMetaStore::open_or_init(&path).expect("reopen");
+    assert_eq!(store.audit_checkpoint(), Some((high_seq, high_hmac)));
+    assert!(store.store_audit_checkpoint(499, [0x11u8; 32]).is_err());
+    assert_eq!(store.audit_checkpoint(), Some((high_seq, high_hmac)));
+}
+
+#[test]
+fn audit_checkpoint_refuses_conflicting_digest_at_same_sequence() {
+    let (_dir, path) = tmp_path();
+    let store = ServerMetaStore::open_or_init(&path).expect("init");
+
+    let seq = 42u64;
+    let hmac = [0xabu8; 32];
+    store
+        .store_audit_checkpoint(seq, hmac)
+        .expect("store anchor");
+
+    let conflicting = [0xcd; 32];
+    assert_ne!(conflicting, hmac);
+    let err = store
+        .store_audit_checkpoint(seq, conflicting)
+        .expect_err("same-sequence digest conflict must be refused");
+    assert!(
+        matches!(&err, MetaError::Encoding(m) if m.contains("digest conflict") && m.contains("42")),
+        "unexpected error: {err}"
+    );
+    assert_eq!(store.audit_checkpoint(), Some((seq, hmac)));
+
+    // An identical write is accepted and re-persisted (it also heals an
+    // earlier insert whose sync failed).
+    store
+        .store_audit_checkpoint(seq, hmac)
+        .expect("identical rewrite must succeed");
+    assert_eq!(store.audit_checkpoint(), Some((seq, hmac)));
+
+    drop(store);
+    let store = ServerMetaStore::open_or_init(&path).expect("reopen");
+    assert_eq!(store.audit_checkpoint(), Some((seq, hmac)));
+}
+
+#[test]
+fn audit_checkpoint_refuses_invalid_genesis_positions() {
+    let (_dir, path) = tmp_path();
+    let store = ServerMetaStore::open_or_init(&path).expect("init");
+
+    // Sequence 0 is never a valid chain position (genesis writes next_seq 1
+    // with a zero digest).
+    let err = store
+        .store_audit_checkpoint(0, [0u8; 32])
+        .expect_err("sequence 0 must be refused");
+    assert!(
+        matches!(&err, MetaError::Encoding(m) if m.contains("at least 1")),
+        "unexpected error: {err}"
+    );
+    // A nonzero digest at next sequence 1 is not the genesis position.
+    let err = store
+        .store_audit_checkpoint(1, [0x01u8; 32])
+        .expect_err("nonzero genesis digest must be refused");
+    assert!(
+        matches!(&err, MetaError::Encoding(m) if m.contains("zero genesis digest")),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        store.audit_checkpoint(),
+        None,
+        "a refused write must not create an anchor"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Crash simulation: 5 distinct rotations all survive a restart cycle.
 // ---------------------------------------------------------------------------
 

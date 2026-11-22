@@ -19,6 +19,16 @@ pub enum BootError {
     Counters(String),
     #[error("audit_appender: {0}")]
     AuditAppender(String),
+    #[error("audit recovery: {0}")]
+    AuditRecovery(#[source] crate::audit_appender::AuditRecoveryError),
+    #[error("audit recovery: failed to read the audit chain key")]
+    AuditKeyRead(#[source] crate::server_meta::MetaError),
+    #[error("audit recovery: failed to read the server metadata checkpoint")]
+    AuditCheckpointRead(#[source] crate::server_meta::MetaError),
+    #[error("audit recovery: failed to persist the appender checkpoint")]
+    AuditAppenderCheckpoint(#[source] std::io::Error),
+    #[error("audit recovery: failed to persist the server metadata checkpoint")]
+    AuditMetaCheckpoint(#[source] crate::server_meta::MetaError),
     #[error("shamir_db init: {0}")]
     ShamirDbInit(String),
     #[error("tls: {0}")]
