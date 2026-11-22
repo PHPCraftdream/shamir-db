@@ -14,7 +14,9 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::admin::UserDirectory as _;
 use shamir_db::{PortError, PrincipalInfo, PrincipalResolver, UserAdminPort};
 
-use shamir_server_security::user_directory::derive_scram_record;
+use shamir_server_security::user_directory::{
+    derive_scram_record_gated, ScramDerivationError, ScramDerivationGate,
+};
 
 use crate::user_directory::FjallUserDirectory;
 
@@ -33,15 +35,22 @@ pub fn map_clock_to_port(clock: Result<u64, EnvironmentError>) -> Result<u64, Po
 /// Thin adapter wrapping a shared [`FjallUserDirectory`] handle. Carries the
 /// KDF params used for new-user Argon2id derivation (mirrors `AdminGlue`'s
 /// `kdf` field — the port owns user creation end-to-end, so it needs its
-/// own copy rather than reaching back into `AdminGlue`).
+/// own copy rather than reaching back into `AdminGlue`) plus the boot's
+/// [`ScramDerivationGate`], so gated derivations share the global Argon2
+/// concurrency budget instead of bypassing it.
 pub struct DirectoryPorts {
     dir: Arc<FjallUserDirectory>,
     kdf: KdfParams,
+    gate: Arc<ScramDerivationGate>,
 }
 
 impl DirectoryPorts {
-    pub fn new(dir: Arc<FjallUserDirectory>, kdf: KdfParams) -> Self {
-        Self { dir, kdf }
+    pub fn new(
+        dir: Arc<FjallUserDirectory>,
+        kdf: KdfParams,
+        gate: Arc<ScramDerivationGate>,
+    ) -> Self {
+        Self { dir, kdf, gate }
     }
 
     /// Convenience: build the `Arc<dyn ...>` pair the boot path injects into
@@ -105,12 +114,18 @@ impl UserAdminPort for DirectoryPorts {
                 "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status",
             ));
         }
-        // Argon2id derivation reuses the shared helper factored out of
-        // `create_scram_user` (task #559 brief §3: don't duplicate a third
-        // time). shamir-db never touches SCRAM crypto.
-        let record = derive_scram_record(password.to_string(), self.kdf)
-            .await
-            .map_err(|error| PortError::other(error.to_string()))?;
+        // Argon2id derivation reuses the shared gated helper factored out
+        // of `create_scram_user` (task #559 brief §3: don't duplicate a
+        // third time), routed through the boot's derivation gate so the
+        // Argon2 concurrency semaphore is honored. shamir-db never touches
+        // SCRAM crypto.
+        let record =
+            derive_scram_record_gated(password.to_string(), self.kdf, Arc::clone(&self.gate))
+                .await
+                .map_err(|error| match error {
+                    ScramDerivationError::Busy => PortError::server_busy(error.to_string()),
+                    ScramDerivationError::Failed(msg) => PortError::other(msg),
+                })?;
         let user_id = self
             .dir
             .insert_with_scope(name.to_string(), record, database)

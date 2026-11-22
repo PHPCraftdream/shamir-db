@@ -102,12 +102,19 @@ impl Fixture {
             .expect("token service"),
         );
         let db = Arc::new(ShamirDb::init_memory().await.expect("memory db"));
+        // ARGON2-GATE fixture: roomy pool (64) so normal fixtures never refuse.
+        let gate = std::sync::Arc::new(crate::user_directory::ScramDerivationGate::new(
+            std::sync::Arc::new(
+                shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(64),
+            ),
+        ));
         let handler = ShamirDbHandler::with_admin(
             db,
             AdminGlue {
                 user_dir: Arc::clone(&directory),
                 kdf: shamir_connect::common::kdf_params::KdfParams::DEFAULT,
                 tables_registry: None,
+                derivation_gate: gate,
             },
         )
         .with_token_service(Arc::clone(&service), allow_self_service);

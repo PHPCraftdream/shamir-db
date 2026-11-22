@@ -103,7 +103,13 @@ async fn build_handler_with_ports() -> (ShamirDbHandler, Arc<FjallUserDirectory>
     // Create the "scratch" database so batch dispatch can target it.
     db.create_db("scratch").await.expect("create_db");
     // Inject the identity-seam ports BEFORE wrapping in Arc.
-    let (port, resolver) = DirectoryPorts::new(user_dir.clone(), fast_kdf()).into_trait_objects();
+    // ARGON2-GATE fixture: one gate SHARED by both DirectoryPorts and
+    // AdminGlue, roomy pool (64) so normal fixtures never refuse.
+    let gate = Arc::new(shamir_server::user_directory::ScramDerivationGate::new(
+        Arc::new(shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(64)),
+    ));
+    let (port, resolver) =
+        DirectoryPorts::new(user_dir.clone(), fast_kdf(), gate.clone()).into_trait_objects();
     let db = db
         .with_user_admin_port(port)
         .with_principal_resolver(resolver);
@@ -114,6 +120,7 @@ async fn build_handler_with_ports() -> (ShamirDbHandler, Arc<FjallUserDirectory>
             user_dir: user_dir.clone(),
             kdf: fast_kdf(),
             tables_registry: None,
+            derivation_gate: gate,
         },
     );
     std::mem::forget(tmp);
@@ -301,7 +308,13 @@ async fn rv_db_fa80a7b8_directory_adapter_classifies_missing_users() {
     let temp = TempDir::new().unwrap();
     let directory =
         Arc::new(FjallUserDirectory::open(temp.path().join("adapter-users.db")).unwrap());
-    let ports = DirectoryPorts::new(directory.clone(), fast_kdf());
+    let ports = DirectoryPorts::new(
+        directory.clone(),
+        fast_kdf(),
+        Arc::new(shamir_server::user_directory::ScramDerivationGate::new(
+            Arc::new(shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(64)),
+        )),
+    );
 
     let original = directory.grant_role("absent", "analyst", 1).unwrap_err();
     assert!(matches!(

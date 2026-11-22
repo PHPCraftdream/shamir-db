@@ -14,6 +14,14 @@ pub struct LoadMetricsSnapshot {
     pub connections_rejected_total: u64,
     /// Native, REST and WebSocket requests refused by post-auth rate limiting since boot.
     pub post_auth_rejected_total: u64,
+    /// Configured Argon2 permit pool size.
+    pub argon2_permits_capacity: u32,
+    /// Argon2 permits currently free to acquire; `capacity − available`
+    /// estimates running derivations, not an exact holder count.
+    pub argon2_permits_available: i64,
+    /// Refused requests (admission refusals plus acquisition timeouts/clock
+    /// failures), one per refused request, not delivered responses.
+    pub argon2_busy_refusals_total: u64,
 }
 
 pub(crate) struct LoadSource(Arc<dyn Fn() -> LoadMetricsSnapshot + Send + Sync>);
@@ -67,6 +75,27 @@ pub(crate) fn render_load_series(
             "Native, REST and WebSocket requests refused by post-auth rate limiting since boot",
             "counter",
             snapshot.post_auth_rejected_total,
+        );
+        render_sample(
+            out,
+            "shamir_argon2_permits_capacity",
+            "Configured Argon2 permit pool size",
+            "gauge",
+            snapshot.argon2_permits_capacity,
+        );
+        render_sample(
+            out,
+            "shamir_argon2_permits_available",
+            "Argon2 permits currently free to acquire",
+            "gauge",
+            snapshot.argon2_permits_available,
+        );
+        render_sample(
+            out,
+            "shamir_argon2_busy_refusals_total",
+            "Refused Argon2 derivation requests since boot (admission refusals plus acquisition timeouts/clock failures; one per refused request, not delivered responses)",
+            "counter",
+            snapshot.argon2_busy_refusals_total,
         );
     }
 
