@@ -43,7 +43,8 @@ use shamir_query_builder::ddl::{create_table, drop_table};
 use shamir_query_builder::doc;
 use shamir_query_builder::wire::admin::get_record;
 use shamir_query_builder::write::insert;
-use shamir_query_types::admin::ResourceRef;
+use shamir_query_types::admin::{DropTableOp, ResourceRef};
+use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex};
 use shamir_query_types::read::QueryRecord;
 use shamir_query_types::wire::{DbRequest, DbResponse};
@@ -258,10 +259,15 @@ async fn chmod_items_table(handler: &ShamirDbHandler, mode: u16) {
 /// would deadlock the rendezvous.
 async fn replace_items_table(handler: &ShamirDbHandler) {
     let session = alice_session();
-    let unsigned = drop_table("items")
-        .repo("main")
-        .build()
-        .expect("build unsigned drop table");
+    // The builder refuses to build without the confirmation tag, so the
+    // canonical form is taken from the unsigned wire op itself.
+    let unsigned = BatchOp::DropTable(DropTableOp {
+        drop_table: "items".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
     let tag = compute_tag_hex(
         &session.hmac_key(),
         &canonical_batch_op("app", &unsigned).expect("drop-table canonical form"),
