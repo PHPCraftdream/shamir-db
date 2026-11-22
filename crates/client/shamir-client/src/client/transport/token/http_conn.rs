@@ -88,7 +88,7 @@ impl TokenTransport {
             connect_timeout,
             request_timeout,
         )?;
-        let sender = transport.dial_timed().await?;
+        let sender = transport.dial_timed(None).await?;
         transport.release(sender);
         Ok(transport)
     }
@@ -100,6 +100,31 @@ impl TokenTransport {
         connect_timeout: Option<Duration>,
         request_timeout: Option<Duration>,
     ) -> Result<Self, ClientError> {
+        Self::connect_once_with_tcp_deadline(
+            endpoint,
+            authorization,
+            connect_timeout,
+            request_timeout,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::connect_once`] with an OPTIONAL absolute deadline bounding
+    /// ONLY the TCP dial (DNS is expected to be resolved by the caller —
+    /// the endpoint carries a `SocketAddr`). `connect_timeout` keeps its
+    /// legacy meaning unchanged: it always caps the WHOLE establishment
+    /// (TCP + TLS + the HTTP/1.1 handshake) as an overall relative limit,
+    /// whether or not a deadline is given; the deadline only ADDITIONALLY
+    /// bounds the TCP dial and never extends the overall cap. Legacy
+    /// default semantics are unchanged (`None`).
+    pub(crate) async fn connect_once_with_tcp_deadline(
+        endpoint: &TokenEndpoint,
+        authorization: HeaderValue,
+        connect_timeout: Option<Duration>,
+        request_timeout: Option<Duration>,
+        tcp_deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, ClientError> {
         let mut transport = Self::new(
             endpoint,
             Some(authorization),
@@ -107,7 +132,7 @@ impl TokenTransport {
             request_timeout,
         )?;
         transport.single_connection = true;
-        let sender = transport.dial_timed().await?;
+        let sender = transport.dial_timed(tcp_deadline).await?;
         transport.release(sender);
         Ok(transport)
     }
@@ -128,7 +153,7 @@ impl TokenTransport {
         body: Bytes,
         max_body: usize,
     ) -> Result<TokenReply, ClientError> {
-        let mut sender = self.dial_timed().await?;
+        let mut sender = self.dial_timed(None).await?;
         let req = self.build(Method::POST, path, body);
         let outcome = match self.request_timeout {
             Some(limit) => tokio::time::timeout(limit, Self::attempt(&mut sender, req, max_body))
@@ -201,7 +226,7 @@ impl TokenTransport {
         let mut fresh = false;
         loop {
             let mut sender = if fresh {
-                self.dial_timed().await?
+                self.dial_timed(None).await?
             } else {
                 self.acquire().await?
             };
@@ -342,7 +367,7 @@ impl TokenTransport {
                 return Ok(sender);
             }
         }
-        self.dial_timed().await
+        self.dial_timed(None).await
     }
 
     fn release(&self, sender: SendRequest<Full<Bytes>>) {
@@ -353,17 +378,53 @@ impl TokenTransport {
         self.pool.push(sender);
     }
 
-    async fn dial_timed(&self) -> Result<SendRequest<Full<Bytes>>, ClientError> {
+    /// One dial. `connect_timeout` keeps its legacy meaning: it caps the
+    /// whole establishment as an overall relative limit. `tcp_deadline`
+    /// ADDITIONALLY bounds only the TCP connect when given (an expired
+    /// deadline yields [`ClientError::ConnectTimeout`] before any dial I/O).
+    async fn dial_timed(
+        &self,
+        tcp_deadline: Option<tokio::time::Instant>,
+    ) -> Result<SendRequest<Full<Bytes>>, ClientError> {
+        let started = tokio::time::Instant::now();
         match self.connect_timeout {
-            Some(limit) => tokio::time::timeout(limit, self.dial())
+            Some(limit) => tokio::time::timeout(limit, self.dial(tcp_deadline, started))
                 .await
                 .map_err(|_| ClientError::ConnectTimeout(limit))?,
-            None => self.dial().await,
+            None => self.dial(tcp_deadline, started).await,
         }
     }
 
-    async fn dial(&self) -> Result<SendRequest<Full<Bytes>>, ClientError> {
-        let tcp = TcpStream::connect(self.addr).await?;
+    /// [`ClientError::ConnectTimeout`] for an exhausted TCP deadline, with
+    /// the TCP budget that was actually granted for this dial (the deadline
+    /// minus the dial start; zero when already spent).
+    fn deadline_exhausted(
+        &self,
+        tcp_deadline: tokio::time::Instant,
+        started: tokio::time::Instant,
+    ) -> ClientError {
+        ClientError::ConnectTimeout(tcp_deadline.saturating_duration_since(started))
+    }
+
+    async fn dial(
+        &self,
+        tcp_deadline: Option<tokio::time::Instant>,
+        started: tokio::time::Instant,
+    ) -> Result<SendRequest<Full<Bytes>>, ClientError> {
+        let tcp = match tcp_deadline {
+            Some(deadline) => {
+                // Pre-check so an already-expired deadline never polls the
+                // dial (it would surface as a socket error, not a timeout).
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(self.deadline_exhausted(deadline, started));
+                }
+                match tokio::time::timeout_at(deadline, TcpStream::connect(self.addr)).await {
+                    Ok(attempt) => attempt?,
+                    Err(_) => return Err(self.deadline_exhausted(deadline, started)),
+                }
+            }
+            None => TcpStream::connect(self.addr).await?,
+        };
         let _ = tcp.set_nodelay(true);
         let Some(tls) = &self.tls else {
             return handshake_io(tcp).await;
