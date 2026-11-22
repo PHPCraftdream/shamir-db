@@ -505,10 +505,10 @@ Cost: один `u64 <=` compare per request — тривиально.
 | `KDF_MAX_TIME` | 8 |
 | `KDF_MAX_PARALLEL` | 8 |
 | `HANDSHAKE_TIMEOUT` | max(15s, kdf_time × 5) |
-| `MAX_CONCURRENT_ARGON2` | 64 |
+| `ARGON2_CONCURRENT_MAX` | configured `argon2_concurrent_max` (default 64, valid 1..=1024) — caps **server-side user-creation KDF** only; login handshakes take no permit |
 | `MAX_CONNECTIONS_PER_IP` | 100 |
 
-8.1. **Argon2id semaphore** (`MAX_CONCURRENT_ARGON2`) берётся **только** на время фактического Argon2id. Pre-state до proof занимает 1KB слот, не permit.
+8.1. **Argon2id semaphore** (`argon2_concurrent_max`) НЕ применяется к login handshakes: proof-verify path не выполняет server-side Argon2id и не берёт permit (burst ограничен connection cap + per-subnet `auth_init` rate limit). Permit берут **только privileged server-side derivations** — SCRAM-запись при **user creation** (admin `createUser`), с fixed 3s busy deadline → busy refusal (metric `shamir_argon2_busy_refusals_total`). Bootstrap-создание superuser — exceptional: ungated derivation со случайным паролем. Pre-state до proof занимает 1KB слот, не permit.
 
 8.2. **Pre-handshake state GC** каждые 5 секунд: state без proof в течение `HANDSHAKE_TIMEOUT` (= `max(15s, kdf_time × 5)`) → drop.
 

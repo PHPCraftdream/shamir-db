@@ -33,6 +33,8 @@ use std::fmt;
 pub enum PortErrorKind {
     /// The named principal does not exist.
     UserNotFound,
+    /// A transient server-side capacity/availability condition.
+    ServerBusy,
     /// Any other failure.
     Other,
 }
@@ -48,6 +50,13 @@ impl PortError {
     pub fn user_not_found(message: impl Into<String>) -> Self {
         Self {
             kind: PortErrorKind::UserNotFound,
+            message: message.into(),
+        }
+    }
+
+    pub fn server_busy(message: impl Into<String>) -> Self {
+        Self {
+            kind: PortErrorKind::ServerBusy,
             message: message.into(),
         }
     }

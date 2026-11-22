@@ -244,7 +244,7 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 || `data_dir` | Корень данных (базы, WAL, сертификаты) |
 || `logging` | Уровень логирования, slow-query threshold, файл |
 || `kdf_defaults` | Параметры Argon2id (memory, time, parallelism) |
-|| `argon2_concurrent_max` | Лимит одновременных Argon2-верификаций |
+|| `argon2_concurrent_max` | Лимит одновременных серверных Argon2id-KDF (гейт создания пользователей; SCRAM-верификация и обычная смена пароля не гейтятся) |
 || `listeners[]` | Сетевые endpoints (TCP / WebSocket, TLS-профили) |
 || `tls` | Пути к сертификату и ключу |
 || `security` | Таймауты, лимиты соединений, query limits |
@@ -861,8 +861,13 @@ intent для алерта — неограниченный рост без но
 | `shamir_inflight_response_bytes_cap` | gauge | — | Байты: настроенный предел бюджета ответов; `-1` — бюджет не ограничен или отсутствует. | Настроенное значение, постоянное в рамках запуска. | Неожиданное значение, в том числе `-1`, — повод проверить конфигурацию. |
 | `shamir_response_budget_waiters` | gauge | — | Число одновременных попыток резервирования, перешедших на путь ожидания. Доступность бюджета проверяется повторно; порядок не FIFO. | `0`. | Устойчивое ненулевое значение означает, что запросы регулярно ждут освобождения бюджета. |
 | `shamir_post_auth_rate_limit_rejected_total` | counter | — | Запросы нативного протокола и токенных REST/WS, отклонённые посессионным лимитом частоты после аутентификации. Не включает отказы на входном gate, при аутентификации или по scope/политике. | Прирост и скорость прироста обычно равны `0`. | Положительный прирост означает, что запросы упираются в посессионный лимит. |
+| `shamir_argon2_permits_capacity` | gauge | — | Ёмкость boot-семафора серверного Argon2id-KDF; равна настроенному `argon2_concurrent_max`, без меток, постоянна в рамках запуска. | Настроенное `argon2_concurrent_max`. | Значение ниже ожидаемого — проверить конфигурацию. |
+| `shamir_argon2_permits_available` | gauge | — | Свободные разрешения boot-семафора серверного Argon2id-KDF на момент scrape; отрицательный остаток клампится к нулю. | `0..argon2_concurrent_max`. | Длительный `0` — все разрешения заняты, новые серверные KDF ждут. |
+| `shamir_argon2_busy_refusals_total` | counter | — | Гейтированные отказы серверного Argon2id-KDF: разрешение не получено за 3 секунды либо сбой часов; клиент получает `server_busy`. Отказы по scope/политике и обычные ошибки аутентификации не входят. | Прирост и скорость прироста обычно равны `0`. | Устойчивый рост — `argon2_concurrent_max` мал для нагрузки или KDF затянулись. |
 
-`shamir_sessions_active{db}` не экспортируется: на доступном пути наблюдения сессия не привязана к БД. Глобальная `shamir_active_sessions` не изменилась. `shamir_admission_queue_depth` нет, поскольку общей очереди допуска нет. Серии `shamir_argon2_{in_flight,waiters,capacity}` не экспортируются: в рабочем коде никто не берёт разрешения у семафора, созданного при запуске. В SCRAM клиент выполняет KDF, сервер проверяет доказательство без этого семафора; отдельно ограничиваемая SQL-функция хеширования к нему не относится.
+`shamir_sessions_active{db}` не экспортируется: на доступном пути наблюдения сессия не привязана к БД. Глобальная `shamir_active_sessions` не изменилась. `shamir_admission_queue_depth` нет, поскольку общей очереди допуска нет.
+
+`argon2_concurrent_max` гейтит серверный Argon2id-KDF в обоих путях создания пользователя: если разрешение boot-семафора не получено за 3 секунды ожидания либо произошёл сбой часов, запрос отклоняется с `server_busy` — повторить позже. Счётчик `shamir_argon2_busy_refusals_total` учитывает только эти гейтированные отказы. SCRAM-доказательство и обычная смена пароля выведены на клиент: сервер проверяет доказательство без Argon2 (`crates/net/shamir-connect/src/server/auth/changepw.rs`). Bootstrap и исключительная ротация учётных данных через bootstrap-токен идут мимо гейта.
 
 Отказы native auth-init в синхронном handshake уже учитывает `auth_attempts_total{result="rate_limited"}`, а отказы входного токенного gate по частоте — `shamir_token_auth_total{channel,result="rate_limited"}`; дублирующих счётчиков нет. `shamir_token_request_denied_total{endpoint}` учитывает отказы по scope/политике, а не посессионный лимит частоты после аутентификации.
 
@@ -1760,14 +1765,18 @@ const described = ddl.describeRepo('app2.archive');
 || Idle процесс | ~50 MB |
 || Активная сессия | ~2 KB |
 || Активное соединение | ~8 KB |
-|| Argon2 peak | `argon2_concurrent_max × memory_kb × 1.05` |
+|| Argon2id-KDF peak (создание пользователей, сервер) | `argon2_concurrent_max × memory_kb × 1.05` |
 || Steady-state | `50 MB + sessions × 2 KB + connections × 8 KB` |
 
-10 000 сессий → ~134 MB (без Argon2 spike).
+10 000 сессий → ~134 MB. Формула Argon2id — пиковая память только гейтованных
+серверных созданий пользователей (gated live user creation); boot и
+исключительная ротация bootstrap-токена в неё не входят. При обычной
+SCRAM-верификации и смене пароля серверный KDF не выполняется
+(см. §3 про `argon2_concurrent_max`).
 
 || Операция | CPU |
 ||---|---|
-|| Argon2id verify | ~50 ms (defaults) |
+|| Argon2id KDF (сервер, только создание пользователей) | Зависит от `kdf_defaults` и оборудования |
 || TLS handshake | ~5 ms |
 || Post-auth request | ~20 µs |
 || Batch query (cold) | ~1 ms / query |

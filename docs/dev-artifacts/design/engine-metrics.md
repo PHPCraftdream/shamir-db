@@ -86,10 +86,13 @@ Notes: `shamir_batch_duration_seconds` is deliberately **not** a separate series
 | `shamir_inflight_response_bytes_cap` | gauge | bytes | — | `ByteBudget::cap()` | none (sampled) | configured cap; -1 = unbounded/absent |
 | `shamir_response_budget_waiters` | gauge | reservations | — | `ByteBudget::waiters()`; concurrent acquisitions on contended path, recheck availability, not FIFO | atomic increment/decrement on contended path only | 0; persistent nonzero = budget pressure |
 | `shamir_post_auth_rate_limit_rejected_total` | counter | reqs | — | native and token REST/WS per-session post-auth bucket refusals; excludes gate/auth and scope/policy denials | one counter increment per refusal | zero increase/rate; growth = per-session throttling |
+| `shamir_argon2_permits_capacity` | gauge | — | — | boot `Argon2Semaphore::capacity()` | none (sampled) | configured boot cap; constant since boot |
+| `shamir_argon2_permits_available` | gauge | — | — | boot `Argon2Semaphore::available().max(0)` | none (sampled) | 0 – capacity; = capacity at rest |
+| `shamir_argon2_busy_refusals_total` | counter | refusals | — | `ScramDerivationGate::busy_refusals()`; atomic increment only on failed permit acquisition, including the fail-closed unreadable-clock path | one `fetch_add` on the `None` branch only | zero increase/rate; growth = failed permit wait or clock failure |
 
 Notes: Sampled per scrape from this boot's sources. The two `shamir_inflight_response_bytes_*` names are retained without aliases; no global 5 s budget poller. Native auth-init in the sync handshake already uses `auth_attempts_total{result="rate_limited"}`; the token admission gate uses `shamir_token_auth_total{channel,result="rate_limited"}`. `shamir_token_request_denied_total{endpoint}` is for scope/policy denials, not post-auth throttling.
 
-Omitted: `shamir_sessions_active{db}` (no bound database on the observation path; global `shamir_active_sessions` unchanged), `shamir_admission_queue_depth` (no common queue), and `shamir_argon2_{in_flight,waiters,capacity}` (no production caller acquires the boot semaphore: SCRAM client runs the KDF and server verifies the proof without it; the separately gated SQL hashing function is not this signal).
+Omitted: `shamir_sessions_active{db}` (no bound database on the observation path; global `shamir_active_sessions` unchanged) and `shamir_admission_queue_depth` (no common queue) — these omissions are preserved unchanged. The argon2 gauges/counter above are the boot semaphore and SCRAM gate signals only: no login or bootstrap path is counted by them (SCRAM client runs the KDF and server verifies the proof without a permit; the separately gated SQL hashing function is not this signal). No `shamir_argon2_{in_flight,waiters,capacity}` alias series are added — in-flight (permit-held) counts can be inferred from the two gauges (`capacity − available`), and waiter counts are not exposed by this boot semaphore.
 
 ### 2.3 Storage (R4a-2)
 

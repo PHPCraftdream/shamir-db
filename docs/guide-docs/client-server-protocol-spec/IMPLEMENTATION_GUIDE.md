@@ -140,7 +140,7 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 
 - `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — глобальный cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). Превышение → новые sessions из subnet rejected с `server_busy`.
 - Backpressure policy: при достижении 75% от cap — server отклоняет non-critical operations (admin commands proceed) и шлёт `Retry-After` header.
-- `MAX_CONCURRENT_ARGON2` рекомендуется derive from RAM: `floor(available_ram_mb / (kdf.memory_kb / 1024 × 2.5))`. Hard cap 64. Защищает от OOM при memory_kb=128, server с 4GB RAM.
+- `argon2_concurrent_max` (semaphore capacity) рекомендуется derive from RAM: `floor(available_ram_mb / (kdf.memory_kb / 1024 × 2.5))`. Valid range 1..=1024, default 64 (configured, not a hardcoded auth cap). Он ограничивает **только server-side SCRAM derivations при user creation** — login proof-verify не берёт permit.
 
 ### 1.6. known_hosts.bin fallback encryption (NORMATIVE для headless deploy)
 
@@ -169,11 +169,11 @@ bootstrap_token_ttl_ns = 3_600_000_000_000     # default 1 час (60·60·1e9 n
 memory_kb = 131072
 time = 4
 parallelism = 1
-# MAX_CONCURRENT_ARGON2 — RECOMMENDED derive from RAM:
+# argon2_concurrent_max — RECOMMENDED derive from RAM:
 #   floor(available_ram_mb / (memory_kb / 1024 * 2.5))
-# Hard cap 64 (защита от runaway).
+# Valid 1..=1024; gates server-side user-creation KDF only (login takes no permit).
 # Без autodetect — fixed:
-max_concurrent_argon2 = 32              # для server с 8 GB RAM
+argon2_concurrent_max = 32             # для server с 8 GB RAM
 
 # Strict mode hardening (defaults для backward compat, для prod рекомендуется true)
 [strict]
@@ -643,8 +643,8 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.3. Gauges
 
 - `shamir_active_sessions{transport}`
-- `shamir_inflight_handshakes`
-- `shamir_argon2id_semaphore_available`
+- `shamir_argon2_permits_available` (semaphore capacity: `shamir_argon2_permits_capacity`)
+- `shamir_argon2_busy_refusals_total` — user-creation derivations that hit the 3s busy deadline
 - `shamir_auth_failures_tracked_keys`
 - `shamir_token_active_ws` — активные токен-сокеты
 - `shamir_token_listener_plaintext_remote` — 1, если есть токен-listener с `allow_plaintext_remote`
@@ -652,7 +652,7 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.4. Suggested Alerts
 
 - Lockout rate spike: `rate(shamir_lockouts_total[5m]) > baseline × 3`
-- Server busy: `shamir_inflight_handshakes / MAX_CONCURRENT_ARGON2 > 0.8`
+- Argon2 creation-gate saturation: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused at configured `argon2_concurrent_max`; login is unaffected)
 - Identity rotation: `increase(shamir_admin_command_total{command="rotateServerIdentity"}[1h]) > 0`
 - Bootstrap usage anomaly: `shamir_bootstrap_attempts_total > 1`
 - Resumption downgrade: `rate(shamir_resumption_used_total{result="downgrade_blocked"}[5m]) > 0`
@@ -797,7 +797,7 @@ individual entries exist as dedicated integration tests where applicable:
 - Identity rotation (broadcast, signed_by_old, transition_until, per-recipient signing)
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection
-- Argon2id semaphore exhaustion
+- Argon2id semaphore exhaustion at user creation (`derive_scram_record_gated` busy refusal after 3s deadline at configured `argon2_concurrent_max`; login proof-verify is ungated)
 - Pre-Argon2id binding_mode rejection (DoS-amp)
 - updateUser → ticket invalidation (всех families)
 - Restart warmup window

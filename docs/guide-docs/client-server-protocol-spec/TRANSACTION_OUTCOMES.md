@@ -312,6 +312,7 @@ allowlist of every operation-specific DDL/query code.
 | `validation` | `CircularDependency`, `UnknownAlias`, `AfterPathIgnored`, `InvalidWhenFilter`, `InvalidCondCondition` |
 | `timeout` | `Timeout` (distinct from the cooperative execution deadline) |
 | `lock_timeout` | `LockTimeout` |
+| `server_busy` | Argon2-KDF permit gate refused a user-administration write (e.g. SCRAM user creation) before it executed; the refused creation itself made no change. Safe to retry with backoff (this is not a promise that other operations in a surrounding batch did not mutate state; `shamir_argon2_busy_refusals_total` counts these refusals). |
 | `unknown_db` | Untagged `QueryError` with empty alias and message containing `not found` (legacy heuristic, can include repository lookup failures) |
 | `access_denied` | Untagged `QueryError` beginning `access denied:`; also forwarded when explicitly coded |
 | `query` | Other untagged `QueryError` |

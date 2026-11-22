@@ -70,7 +70,7 @@ sequenceDiagram
 ## Edge cases
 
 - **Pre-state GC:** state без proof через `HANDSHAKE_TIMEOUT` (≥15s) → drop
-- **Argon2id semaphore exhaustion:** `MAX_CONCURRENT_ARGON2=64` → `server_busy`
+- **Server-side Argon2id:** login proof-verify runs NO server-side Argon2id and never refuses login on semaphore exhaustion; the Argon2 permit applies only to privileged user-creation derivation (AUTH §8.1)
 - **Rate limit per subnet:** `RATE_LIMIT_AUTH_INIT_PER_SUBNET=10/sec` → `rate_limited`
 - **Lockout** (50 fails/час per (subnet, user)): silent (генерик `authentication_failed`)
 - **`rotation_in_progress` в auth_ok** (during overlap window) → клиент handles via §6.5

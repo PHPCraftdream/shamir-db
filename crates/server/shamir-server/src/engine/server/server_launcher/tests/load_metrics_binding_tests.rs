@@ -180,11 +180,29 @@ fn assert_load(body: &str, expected: [i64; 7]) {
     }
     assert!(
         body.lines().map(sample_name).all(|name| {
-            !name.starts_with("shamir_argon2_")
-                && name != "shamir_sessions_active"
-                && name != "shamir_admission_queue_depth"
+            name != "shamir_sessions_active" && name != "shamir_admission_queue_depth"
         }),
         "load export must omit series without a real source"
+    );
+}
+
+// Argon2 gate series: the tiny boot fixes capacity at 1 and exposes the
+// free-permit gauge plus the busy-refusal counter.
+fn assert_argon2(body: &str, available: i64, refused: i64) {
+    assert_eq!(
+        series(body, "shamir_argon2_permits_capacity", "gauge"),
+        1,
+        "tiny boot must expose the configured permit capacity"
+    );
+    assert_eq!(
+        series(body, "shamir_argon2_permits_available", "gauge"),
+        available,
+        "argon2 permits available"
+    );
+    assert_eq!(
+        series(body, "shamir_argon2_busy_refusals_total", "counter"),
+        refused,
+        "argon2 busy refusals"
     );
 }
 
@@ -246,9 +264,14 @@ async fn shutdown(mut handle: ServerHandle) {
 async fn run(guard: &FlakeGuard) {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let temp = tempfile::tempdir().expect("boot tempdir");
+    // ARGON2-GATE: this boot runs with a tiny permit pool (auth_init rate
+    // stays at 64) so the load test can saturate the derivation gate with a
+    // single held permit and observe the typed busy refusal end to end.
+    let mut config = boot_config(temp.path().to_path_buf());
+    config.argon2_concurrent_max = 1;
     let handle = Box::pin(
         ServerLauncher {
-            config: boot_config(temp.path().to_path_buf()),
+            config,
             bootstrap: BootstrapMode::Password {
                 username: USERNAME.into(),
                 password: Zeroizing::new(PASSWORD.to_vec()),
@@ -267,8 +290,94 @@ async fn run(guard: &FlakeGuard) {
     let cap = CAP as i64;
     let limit = CONNECTION_LIMIT as i64;
     assert_load(&scrape(obs).await, [0, limit, 0, 0, cap, 0, 0]);
+    assert_argon2(&scrape(obs).await, 1, 0);
+    guard.mark("argon2 gate at rest observed");
 
+    // ARGON2-GATE: saturate the pool by holding the boot's only permit, then
+    // prove both the wire path and the port path refuse with their typed busy
+    // errors while the exported series track occupancy. No `Debug` formatting
+    // of errors anywhere: the password never reaches panic output.
+    let permit = seam
+        .argon2_sem
+        .try_acquire()
+        .expect("tiny pool permit must be free at rest");
     let first = connect(tcp).await;
+    guard.mark("one plain TCP handshake completed under the held permit");
+    assert_argon2(&scrape(obs).await, 0, 0);
+    let wire_error = timeout(
+        CALL_TIMEOUT,
+        Box::pin(first.create_scram_user(
+            "gate_wire",
+            Zeroizing::new("fixture password for gate".into()),
+            vec![],
+        )),
+    )
+    .await
+    .expect("bounded wire create_scram_user")
+    .expect_err("wire create_scram_user must be refused while the pool is busy");
+    let shamir_client::ClientError::Db { code, message } = wire_error else {
+        panic!("wire refusal must be a typed Db error")
+    };
+    assert_eq!(code, "server_busy", "wire busy code");
+    assert_eq!(
+        message, "password derivation is busy; retry later",
+        "wire busy message"
+    );
+    assert_argon2(&scrape(obs).await, 0, 1);
+
+    let port_error = timeout(
+        CALL_TIMEOUT,
+        Box::pin(
+            handle
+                .shamir
+                .user_admin_port()
+                .expect("launcher installed a user admin port")
+                .create_user("gate_port", "fixture password for gate", vec![], None),
+        ),
+    )
+    .await
+    .expect("bounded port create_user")
+    .expect_err("port create_user must be refused while the pool is busy");
+    assert_eq!(
+        port_error.kind(),
+        shamir_db::PortErrorKind::ServerBusy,
+        "port busy kind"
+    );
+    assert_eq!(
+        port_error.to_string(),
+        "password derivation is busy; retry later",
+        "port busy message"
+    );
+    assert_argon2(&scrape(obs).await, 0, 2);
+
+    drop(permit);
+    timeout(
+        CALL_TIMEOUT,
+        Box::pin(first.create_scram_user(
+            "gate_wire",
+            Zeroizing::new("fixture password for gate".into()),
+            vec![],
+        )),
+    )
+    .await
+    .expect("bounded wire retry")
+    .expect("retry succeeds once the permit is released");
+    timeout(
+        CALL_TIMEOUT,
+        Box::pin(
+            handle
+                .shamir
+                .user_admin_port()
+                .expect("launcher installed a user admin port")
+                .create_user("gate_port", "fixture password for gate", vec![], None),
+        ),
+    )
+    .await
+    .expect("bounded port retry")
+    .expect("port retry succeeds once the permit is released");
+    assert_argon2(&scrape(obs).await, 1, 2);
+    guard.mark("argon2 gate busy and recovery observed");
+
     let second = connect(tcp).await;
     guard.mark("two plain TCP handshakes completed");
     assert_load(&scrape(obs).await, [limit, limit, 0, 0, cap, 0, 0]);

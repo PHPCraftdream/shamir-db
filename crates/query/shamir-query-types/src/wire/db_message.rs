@@ -437,6 +437,12 @@ pub enum DbResponse {
         ///   `token_ttl_invalid`, `token_not_found`, `token_browser_session`,
         ///   `token_request_denied`, `token_self_service_disabled`,
         ///   `session_invalidated`, `invalid_username`, `not_found`, `internal`.
+        /// - User / auth administration (Argon2 permit gate): `server_busy` —
+        ///   an Argon2 KDF permit could not be acquired before the
+        ///   administrative write (e.g. SCRAM user creation); the refused
+        ///   creation itself made no change, so retry after backoff (this is
+        ///   not a promise that other operations in a surrounding batch did
+        ///   not mutate state).
         /// - Batch / planner: `limits`, `validation`, `query`, `timeout`,
         ///   `lock_timeout`, `nesting_too_deep`, `unknown_db`, `not_supported`,
         ///   `user_exists`, `cancelled`.
