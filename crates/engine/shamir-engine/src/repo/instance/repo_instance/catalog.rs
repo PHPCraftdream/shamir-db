@@ -176,13 +176,22 @@ impl RepoInstance {
     }
 
     /// Round 6 — whether an ALREADY-OPEN table's persisted validator binding
-    /// record is IN DOUBT: a failed binding write could not be rolled back and
+    /// record is IN DOUBT: a failed binding write could not be written back and
     /// flushed, so the live snapshot and the backing envelope may disagree.
     ///
+    /// The flag expresses UNCERTAINTY, not guaranteed exclusion. It is also
+    /// raised when the forward write fails, and a future dropped (cancelled) at
+    /// the forward set/flush or at a compensation step leaves it raised; the
+    /// backing record may then hold the previous value, the new one or a partial
+    /// compensating write, and a visible old value after a failed sync proves
+    /// nothing about durability.
+    ///
     /// Non-instantiating and cheap: a table whose manager is dormant (or which
-    /// has no manager) reports `false`, which is correct by definition — a
-    /// fresh process has no doubt state, the restart that re-reads the envelope
-    /// is the recovery path. Read by the validator holder scan only.
+    /// has no manager) reports `false`, which is correct by definition — a fresh
+    /// process has no doubt state. A restart RESETS the flag; it does not repair
+    /// the records, so the residual states the operations guide documents can
+    /// survive a reopen. Read by the validator holder scan and by the facade
+    /// refusals (schema activation, table rename).
     pub fn table_validator_bindings_in_doubt(&self, table_name: &str) -> bool {
         self.core
             .catalog

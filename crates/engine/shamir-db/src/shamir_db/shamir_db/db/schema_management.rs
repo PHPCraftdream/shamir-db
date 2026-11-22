@@ -469,6 +469,31 @@ pub fn schema_validator_name(db: &str, repo: &str, table: &str) -> String {
 // ── ShamirDb integration ────────────────────────────────────────────────
 
 impl ShamirDb {
+    /// Round 7 (G4): refuse schema activation on an IN-DOUBT table BEFORE any
+    /// artifact is replaced — both activation entries swap the live artifact
+    /// (`replace_artifact`) and only later bind it, whose bind refuses on the
+    /// flag and restores, so a concurrent validated write could run against the
+    /// not-yet-admitted artifact in between.
+    ///
+    /// No schema-activation barrier is taken for this one-shot read: the flag is
+    /// only raised by that table's binding DDL under the same replication
+    /// control, and `REMOVE SCHEMA RULE` takes no such barrier at all.
+    fn refuse_schema_activation_in_doubt(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<()> {
+        let in_doubt = self
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name))
+            .is_some_and(|repo| repo.table_validator_bindings_in_doubt(table_name));
+        if in_doubt {
+            return Err(crate::engine::table::TableManager::binding_in_doubt_error());
+        }
+        Ok(())
+    }
+
     /// Compile and register a declarative schema validator for one table.
     ///
     /// Called from:
@@ -504,6 +529,9 @@ impl ShamirDb {
         schema_validator_id: RecordId,
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
+        // Round 7 (G4): the artifact swap below must not run on a doubtful
+        // table — see `refuse_schema_activation_in_doubt`.
+        self.refuse_schema_activation_in_doubt(db_name, repo_name, table_name)?;
         let name = schema_validator_name(db_name, repo_name, table_name);
         // DDL path: the admitted twin rebuilds from `rules`, so clone here.
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules.clone()));
@@ -603,6 +631,9 @@ impl ShamirDb {
         rules: Vec<FieldRule>,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
+        // Round 7 (G4): the artifact swap below must not run on a doubtful
+        // table — see `refuse_schema_activation_in_doubt`.
+        self.refuse_schema_activation_in_doubt(db_name, repo_name, table_name)?;
         let name = schema_validator_name(db_name, repo_name, table_name);
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
 

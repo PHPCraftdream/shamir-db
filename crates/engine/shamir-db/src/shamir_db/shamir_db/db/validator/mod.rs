@@ -10,3 +10,6 @@ mod binding_scan;
 mod validator_drop;
 mod validator_management;
 mod validator_rename;
+
+#[cfg(test)]
+mod tests;

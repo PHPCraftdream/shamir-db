@@ -67,18 +67,24 @@ impl ShamirDb {
                     &_control,
                 )?;
             }
-            // Round 6: a holder whose binding record is IN DOUBT is evidence
-            // without a name — it holds every validator identity, so the drop
-            // is refused, but its table ref must not reach the message (the
-            // fourth review's foreign-table disclosure stays closed).
-            let bound = if holders.tables().is_empty() {
-                "binding state in doubt (restart required)".to_string()
-            } else {
-                holders.tables().join(", ")
-            };
+            // Round 7 (G1): the shared in-doubt decision, built from the same
+            // evidence set this drop reads. A table in doubt holds every
+            // validator identity, so the drop refuses with the fixed, path-free
+            // in-doubt error — the same one replace, rename and that table's
+            // own bind/unbind use. Its database is usually FREE, so the
+            // reservation above can succeed; the doubt must refuse on its own
+            // instead of relying on a fence.
+            holders.refuse_in_doubt()?;
+            // No doubt evidence survives the refusal, so `is_empty()` was false
+            // because of NAMED holders: the previous still-bound message is
+            // exact, and an in-doubt table alone never reaches it. (Round 6
+            // added the reverse: a doubtful USER-table reference is refused
+            // here without a name; this is not a general redaction guarantee —
+            // named, ordinary holders still appear in the message below.)
             return Err(DbError::Validation(format!(
                 "cannot drop validator '{}': still bound to tables: {}",
-                name, bound
+                name,
+                holders.tables().join(", ")
             ))
             .into());
         }

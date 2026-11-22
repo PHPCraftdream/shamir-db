@@ -53,16 +53,28 @@ impl ShamirDb {
                 // AUTHORITATIVE (round 3, findings 1+2): see the locked
                 // registration commit — the holder set comes from the
                 // tables' own persisted bindings, not the reverse index.
-                let dbs = match self.validators.id_for_name(from) {
-                    Some(id) => self
-                        .validator_binding_holders(&id, &control)
-                        .await?
-                        .dbs()
-                        .to_vec(),
+                let holders = match self.validators.id_for_name(from) {
                     // `validators.rename` refuses the absent name below.
-                    None => Vec::new(),
+                    Some(id) => Some(self.validator_binding_holders(&id, &control).await?),
+                    None => None,
                 };
-                Some(self.reserve_validator_target_identities_locked(&dbs, exempt, &control)?)
+                let dbs: Vec<String> = holders
+                    .as_ref()
+                    .map(|holders| holders.dbs().to_vec())
+                    .unwrap_or_default();
+                let guards =
+                    self.reserve_validator_target_identities_locked(&dbs, exempt, &control)?;
+                // Round 7 (G1): a rename re-keys the durable record the
+                // doubtful table still invokes, so in-doubt evidence refuses it
+                // even when every holder database reserved successfully (a
+                // free database leaves the fence vacant). Shared decision and
+                // text, as in replace and drop. `ExclusionOnly` (direct
+                // embedder) takes no scan: this fence guards the wire and
+                // migration paths.
+                if let Some(holders) = &holders {
+                    holders.refuse_in_doubt()?;
+                }
+                Some(guards)
             }
         };
 
@@ -89,6 +101,11 @@ impl ShamirDb {
         let (foreign, serving) = proof.permits();
         if let Some(id) = self.validators.id_for_name(from) {
             let holders = self.validator_binding_holders(&id, &control).await?;
+            // Round 7 (G1): the in-doubt refusal comes BEFORE the proof check.
+            // The migration preflight reserved the in-doubt database like a real
+            // holder, so `permits()` would otherwise wave this rename through on
+            // evidence that cannot be trusted.
+            holders.refuse_in_doubt()?;
             for db in holders.dbs() {
                 let Some(holder_id) = self.database_identity_for_fence(db) else {
                     // Stale binding ref: fail closed (same shape as the

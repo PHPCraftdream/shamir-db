@@ -16,13 +16,19 @@
 //! scan never drains or syncs the backend; rare DDL binding writes do so
 //! through the storage wrapper. The internal store is read by its own handle.
 //!
-//! Round 6 (F2b): a table whose binding record is IN DOUBT — a failed binding
-//! write the manager could not roll back and flush — holds EVERY validator
-//! identity, because it may still validate with a binding the backing record
-//! lost. The flag lives on the table's already-open manager; a never-opened
-//! (cold) manager has none, and a restart clears it by definition. Such a
-//! table contributes its DATABASE to the reservation set and nothing to the
-//! table refs, so the DROP refusal message never discloses it.
+//! Round 6 (F2b), widened in round 7 (G1): a table whose binding record is IN
+//! DOUBT — a failed binding write the manager could not write back and flush —
+//! holds EVERY validator identity, because it may still validate with a binding
+//! the backing record lost. The flag lives on the table's already-open manager:
+//! a never-opened (cold) manager has none, so such a table contributes nothing
+//! here, and a restart clears the flag by definition (it resets the flag; it
+//! does not repair the records). Such a table contributes its DATABASE to the
+//! reservation set and nothing to the table refs, so no refusal message
+//! discloses it. Its database is also added to `in_doubt_dbs`, which drives
+//! `BindingHolders::refuse_in_doubt` — the shared refusal that validator
+//! replace, rename and drop all call, because a reservation alone is NOT
+//! evidence: a doubtful table's database is usually free, and a vacant fence
+//! slot reserves successfully.
 //!
 //! Exclusion domain / TOCTOU: the `ReplicationControlGuard` parameter
 //! proves the caller holds replication control for the whole derive →
@@ -53,8 +59,10 @@ pub(in crate::shamir_db) struct BindingHolders {
     dbs: Vec<String>,
     tables: Vec<String>,
     /// Databases holding an IN-DOUBT table (round 6). Their fence is
-    /// reserved like a real holder's, but their table refs stay out of
-    /// `tables()` so no refusal message discloses them.
+    /// reserved like a real holder's, their table refs stay out of `tables()`
+    /// so no refusal message discloses them, and the field is the input of
+    /// `refuse_in_doubt` — the shared in-doubt refusal every admitted caller
+    /// (replace, rename, drop) consumes (round 7, G1).
     in_doubt_dbs: Vec<String>,
 }
 
@@ -74,6 +82,27 @@ impl BindingHolders {
     /// an in-doubt table both count.
     pub(in crate::shamir_db) fn is_empty(&self) -> bool {
         self.tables.is_empty() && self.in_doubt_dbs.is_empty()
+    }
+
+    /// Round 7 (G1): pure decision on this evidence set — at least one scanned
+    /// table has an IN-DOUBT binding record. No I/O, no table path.
+    pub(in crate::shamir_db) fn has_in_doubt(&self) -> bool {
+        !self.in_doubt_dbs.is_empty()
+    }
+
+    /// The ONE in-doubt refusal, built from [`Self::has_in_doubt`] (round 7,
+    /// G1): every admitted caller that must not act on a doubtful binding state
+    /// — validator replace, rename (wire and migration preflight) and drop —
+    /// returns this same typed error, so drop's `is_empty()` evidence and the
+    /// new refusal cannot drift apart. The text is fixed and path-free (see
+    /// `TableManager::binding_in_doubt_error`): neither the table nor the
+    /// database name reaches it, and it is the same text this table's own
+    /// bind/unbind refuses with.
+    pub(in crate::shamir_db) fn refuse_in_doubt(&self) -> DbResult<()> {
+        if self.has_in_doubt() {
+            return Err(crate::engine::table::TableManager::binding_in_doubt_error());
+        }
+        Ok(())
     }
 }
 
@@ -109,9 +138,9 @@ impl ShamirDb {
                     )));
                 };
                 for table_name in instance.list_tables(&repo_name)? {
-                    // Round 6 (F2b): an in-doubt table holds EVERY identity.
-                    // Checked BEFORE the envelope read: the envelope is
-                    // exactly what cannot be trusted here.
+                    // Round 6 (F2b), widened in round 7: an in-doubt table
+                    // holds EVERY identity. Checked BEFORE the envelope read:
+                    // the envelope is exactly what cannot be trusted here.
                     if repo.table_validator_bindings_in_doubt(&table_name) {
                         in_doubt.insert(db_name.clone());
                         dbs.insert(db_name.clone());
@@ -132,8 +161,13 @@ impl ShamirDb {
                 }
             }
         }
-        // The internal system store: scanned through its own handle, added
-        // to the DROP refusal evidence but NEVER to the reservation set.
+        // The internal system store: scanned through its own handle, added to
+        // the DROP refusal evidence but NEVER to the reservation set. This loop
+        // deliberately IGNORES the in-doubt flag: a system table may not
+        // reserve a database, so an in-doubt internal binding must not raise
+        // the database-level doubt refusal either — it is simply invisible
+        // here (known limit: an internal binding removed in backing before a
+        // failed UNBIND is reconciled is not DROP evidence).
         let system_repo = self.system_store.system_repo()?;
         for table_name in system_repo.list_table_names() {
             let bound = system_repo
@@ -160,5 +194,22 @@ impl ShamirDb {
             tables,
             in_doubt_dbs: in_doubt.into_iter().collect(),
         })
+    }
+}
+
+#[cfg(test)]
+impl BindingHolders {
+    /// Test-only construction (round 7): the three evidence inputs of the pure
+    /// in-doubt decision, with no database, store or table involved.
+    pub(in crate::shamir_db) fn for_test(
+        dbs: Vec<String>,
+        tables: Vec<String>,
+        in_doubt_dbs: Vec<String>,
+    ) -> Self {
+        Self {
+            dbs,
+            tables,
+            in_doubt_dbs,
+        }
     }
 }

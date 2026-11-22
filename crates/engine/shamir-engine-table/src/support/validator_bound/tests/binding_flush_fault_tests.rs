@@ -6,10 +6,19 @@
 //!
 //! Fault injection: [`FlushFaultStore`] delegates every store operation to an
 //! in-memory store and fails `flush()` while armed, so these tests need no
-//! sleep and no timing. Without the round-6 fix they fail — the old
-//! compensation was an unchecked, unflushed `set`, so test 1 and test 3 read
-//! the NEW envelope back from the backing store and test 2 sees no in-doubt
-//! refusal at all.
+//! sleep and no timing.
+//!
+//! Oracle, corrected in round 7: the tests distinguish a MISSING compensation
+//! flush by the FLUSH CALL COUNT, not by reading the forward value back — the
+//! in-memory store makes a `set` visible without any flush, so the backing
+//! record cannot tell a flushed compensation from an unflushed one. Without the
+//! round-6 fix tests 1 and 3 fail on that count (the old compensation was an
+//! unchecked, unflushed `set`) and test 2 sees no in-doubt refusal at all. The
+//! F3 oracle is the per-flush observation log: the FORWARD flush of an unbind
+//! must run while the live binding is STILL present, and the whole slice for the
+//! operation is asserted — a publish-before-flush regression (publish the
+//! removal, then restore the old snapshot before compensating) keeps the final
+//! snapshot and the compensation observation right and still fails.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -67,7 +76,11 @@ struct FlushFaultStore {
     /// compensation is FLUSHED (one forward flush + one per attempt).
     flushes: AtomicUsize,
     live_at_flush: Mutex<Vec<bool>>,
-    table: OnceLock<TableManager>,
+    /// Attached live-snapshot source for the F3 oracle. The fixture DETACHES it
+    /// at the end of every test: the fault store is the table's own info store,
+    /// so a retained manager clone closes a strong cycle
+    /// (store -> manager -> store).
+    table: Mutex<Option<TableManager>>,
     watched: OnceLock<RecordId>,
 }
 
@@ -78,7 +91,7 @@ impl FlushFaultStore {
             failing: AtomicUsize::new(0),
             flushes: AtomicUsize::new(0),
             live_at_flush: Mutex::new(Vec::new()),
-            table: OnceLock::new(),
+            table: Mutex::new(None),
             watched: OnceLock::new(),
         }
     }
@@ -94,6 +107,16 @@ impl FlushFaultStore {
 
     fn live_observations(&self) -> Vec<bool> {
         self.live_at_flush.lock().expect("observation log").clone()
+    }
+
+    /// Attach the live-snapshot source for the F3 oracle.
+    fn attach(&self, table: TableManager) {
+        *self.table.lock().expect("attached table") = Some(table);
+    }
+
+    /// Break the store -> manager -> store cycle at the end of a test.
+    fn detach(&self) {
+        self.table.lock().expect("attached table").take();
     }
 }
 
@@ -136,11 +159,19 @@ impl Store for FlushFaultStore {
 
     async fn flush(&self) -> DbResult<()> {
         self.flushes.fetch_add(1, Ordering::SeqCst);
-        if let (Some(table), Some(id)) = (self.table.get(), self.watched.get()) {
-            let present = table
-                .validator_bindings()
-                .iter()
-                .any(|binding| binding.validator_id == *id);
+        let present = {
+            let table = self.table.lock().expect("attached table");
+            match (table.as_ref(), self.watched.get()) {
+                (Some(table), Some(id)) => Some(
+                    table
+                        .validator_bindings()
+                        .iter()
+                        .any(|binding| binding.validator_id == *id),
+                ),
+                _ => None,
+            }
+        };
+        if let Some(present) = present {
             self.live_at_flush
                 .lock()
                 .expect("observation log")
@@ -171,7 +202,7 @@ async fn fixture() -> (TableManager, Arc<FlushFaultStore>, RecordId, Arc<dyn Sto
     .await
     .expect("table manager");
     let id = RecordId::system(VALIDATOR);
-    let _ = fault.table.set(table.clone());
+    fault.attach(table.clone());
     let _ = fault.watched.set(id);
     (table, fault, id, info)
 }
@@ -221,6 +252,7 @@ async fn bind_flush_fault_restores_the_backing_record_and_retry_succeeds() {
         let stored = load_validators_metadata(&info).await.unwrap().unwrap();
         assert_eq!(stored.bindings.len(), 1);
         assert_eq!(stored.bindings[0].validator_id, id);
+        fault.detach();
     })
     .await;
 }
@@ -271,6 +303,7 @@ async fn bind_compensation_flush_fault_marks_the_table_in_doubt() {
             .insert(&InnerValue::Map(new_map()))
             .await
             .expect("ordinary writes are not gated by the in-doubt flag");
+        fault.detach();
     })
     .await;
 }
@@ -283,6 +316,7 @@ async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
         let before = load_validators_metadata(&info).await.unwrap().unwrap();
         assert_eq!(before.bindings.len(), 1);
         let flushes_before = fault.flush_calls();
+        let observations_before = fault.live_observations().len();
 
         fault.fail_next_flushes(1);
         let error = table
@@ -302,9 +336,12 @@ async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
                 .any(|binding| binding.validator_id == id),
             "F3: the live removal must not be published before the flush succeeds"
         );
-        assert!(
-            fault.live_observations().last() == Some(&true),
-            "F3: the failing flush must have run while the binding was still live, saw {:?}",
+        assert_eq!(
+            &fault.live_observations()[observations_before..],
+            &[true, true],
+            "F3: the FORWARD flush must run while the live binding is still present (publishing \
+             the removal first is the regression this pins) and the compensation flush must \
+             observe the same live binding; saw {:?}",
             fault.live_observations()
         );
         assert!(
@@ -328,6 +365,7 @@ async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
             .unwrap()
             .bindings
             .is_empty());
+        fault.detach();
     })
     .await;
 }
@@ -338,6 +376,7 @@ async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
         let (table, fault, id, _info) = fixture().await;
         table.add_validator_binding(binding(id)).await.unwrap();
         fault.fail_next_flushes(usize::MAX);
+        let observations_before = fault.live_observations().len();
 
         let error = table
             .remove_validator_binding(&id)
@@ -345,6 +384,14 @@ async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
             .expect_err("an unreconciled unbind must fail");
         assert!(is_in_doubt(&error), "{error}");
         assert!(table.validator_bindings_in_doubt());
+
+        assert_eq!(
+            &fault.live_observations()[observations_before..],
+            &[true, true, true, true],
+            "F3: the forward flush and all three compensation attempts must run while the live \
+             binding is still present; saw {:?}",
+            fault.live_observations()
+        );
         assert!(
             table
                 .validator_bindings()
@@ -357,6 +404,7 @@ async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
             .await
             .expect_err("bind must refuse while the table is in doubt");
         assert!(is_in_doubt(&again), "{again}");
+        fault.detach();
     })
     .await;
 }

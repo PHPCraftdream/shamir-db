@@ -87,6 +87,7 @@ use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 
 use super::super::schema_management::schema_validator_name;
+use crate::DbError;
 use crate::ShamirDb;
 
 /// An empty rule list is sufficient — these tests exercise the registry
@@ -704,4 +705,112 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
          rolled-back ALTER — the cache must rebuild to the correct live state, \
          not a stale/corrupted view: {post:?}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Round 7 (G4) — schema activation refuses an IN-DOUBT table BEFORE it
+// replaces the live artifact.
+//
+// Before the fix the ALTER branch swapped the live artifact
+// (`replace_artifact`) and only afterwards waited at repository admission /
+// called the table's bind, which refuses on the in-doubt flag and restores.
+// In between a concurrent validated write could run against the temporary
+// (weakened) artifact. The oracle is the ORDER: with repository admission
+// held, the future must complete on the FIRST poll with the refusal and no
+// artifact change, instead of staying pending with the swap already live.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn schema_activation_refuses_an_in_doubt_table_before_replacing_the_artifact() {
+    let db = db_without_tables().await;
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.create_repo("cr", ddl::create_repo("main").tables(["users", "orders"]));
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .expect("create_repo must succeed");
+
+    let repo = db
+        .get_db("testdb")
+        .and_then(|db| db.get_repo("main"))
+        .expect("seeded repository must exist");
+    let table = db
+        .get_table("testdb", "main", "users")
+        .await
+        .expect("seeded table must exist");
+    let id = RecordId::system("g4_schema");
+    let name = schema_validator_name("testdb", "main", "users");
+    // A previously-active schema artifact (the state an ALTER starts from).
+    let artifact: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(no_rules()));
+    db.validators()
+        .register(id, &name, Arc::clone(&artifact))
+        .expect("precondition register must succeed");
+    let live = db.validators().get_by_id(&id).expect("artifact must exist");
+    assert!(Arc::ptr_eq(&live, &artifact));
+
+    // Round 7: this table's persisted binding record is in doubt.
+    table.mark_validator_bindings_in_doubt();
+    assert!(table.validator_bindings_in_doubt());
+
+    // Hold repository admission. The ALTER branch replaces the live artifact
+    // FIRST and only then waits here, so a pending activation would already be
+    // exposing the weakened artifact to concurrent validated writes. The
+    // in-doubt refusal must instead run before any artifact change: the future
+    // completes on the FIRST poll, with the ordinary artifact still live.
+    let permit = repo
+        .write_domain()
+        .admit()
+        .await
+        .expect("test must hold repository admission");
+    let db_ref = &db;
+    let compile = db_ref.compile_table_schema("testdb", "main", "users", id, no_rules());
+    tokio::pin!(compile);
+    let error = match futures::poll!(compile.as_mut()) {
+        std::task::Poll::Ready(Err(error)) => error,
+        std::task::Poll::Ready(Ok(())) => {
+            panic!("schema activation on an in-doubt table must be refused")
+        }
+        std::task::Poll::Pending => panic!(
+            "G4: the in-doubt refusal must precede the artifact swap and the repository \
+             admission wait"
+        ),
+    };
+    assert!(matches!(error, DbError::Conflict(_)), "{error}");
+    assert!(error.to_string().contains("in doubt"), "{error}");
+    assert!(
+        !error.to_string().contains("users"),
+        "the refusal must not disclose the table: {error}"
+    );
+    let live = db
+        .validators()
+        .get_by_id(&id)
+        .expect("the artifact must survive the refusal");
+    assert!(
+        Arc::ptr_eq(&live, &artifact),
+        "G4: no artifact may be replaced before the in-doubt refusal"
+    );
+    assert!(
+        table.validator_bindings().is_empty(),
+        "G4: no binding may be attempted on a doubtful table"
+    );
+    drop(permit);
+
+    // Control: a healthy table in the same repository still activates.
+    let healthy = db
+        .get_table("testdb", "main", "orders")
+        .await
+        .expect("seeded table must exist");
+    let healthy_id = RecordId::system("g4_schema_healthy");
+    let healthy_name = schema_validator_name("testdb", "main", "orders");
+    db.compile_table_schema("testdb", "main", "orders", healthy_id, no_rules())
+        .await
+        .expect("a healthy table must still activate its schema");
+    assert_eq!(db.validators().id_for_name(&healthy_name), Some(healthy_id));
+    assert_eq!(healthy.validator_bindings().len(), 1);
+    assert!(!healthy.validator_bindings_in_doubt());
 }

@@ -20,19 +20,33 @@ use shamir_engine_validator::validator::{ValidatorBinding, ValidatorRegistry};
 
 use crate::table_manager::TableManager;
 
-/// Fixed refusal text for a table whose validator binding record is IN DOUBT
-/// (round 6). Deliberately carries NO table path: the doubt is reported to an
-/// actor that may not be allowed to read the table, and the recovery path is a
-/// restart that re-reads the persisted binding record — state that, not a
-/// machine path.
+/// Fixed refusal text for a table whose validator binding record is IN DOUBT.
+/// Deliberately carries NO table path: the doubt may be reported to an actor
+/// that is not allowed to read the table, and the state to report is that, not
+/// a machine path. Round 7: this is the ONE text — `binding_in_doubt_error()` is
+/// its only construction site, so the table's own bind/unbind, the admitted
+/// validator replace/rename/drop and the facade refusals (schema activation,
+/// table rename) cannot drift apart.
+///
+/// The flag behind it expresses UNCERTAINTY, not guaranteed exclusion: it is
+/// raised when the forward `set` fails (before any flush), and when the future
+/// is dropped at the forward `set`, at the forward flush or at a compensation
+/// step — cancellation is itself a source of doubt. There is no suspension
+/// point between a successful flush result and the publication that follows, so
+/// a completed flush cannot be cancelled before the live snapshot catches up;
+/// the cancellable case is a backing flush that took effect while the future was
+/// still pending.
 const BINDING_IN_DOUBT: &str =
     "validator binding state in doubt: a failed binding write could not be rolled back to the previous persisted record; reads and writes continue, validator binding DDL on this table is refused until the process restarts and re-reads the persisted binding record";
 
 /// Attempts for the compensating `set` + `flush` pair that restores the
 /// previous logical envelope after a failed binding write. Deliberately no
-/// sleep between attempts: a flush failure is either persistent or already
-/// gone, and a delay would only widen the window in which the durable record
-/// is unknown.
+/// sleep between attempts: a delay would only widen the window in which the
+/// durable record is unknown. Three immediate attempts are a POLICY, not
+/// evidence about the fault: they prove neither that a flush fault is
+/// persistent nor that it is already gone, which is exactly why a still-failing
+/// compensation leaves the table in doubt instead of returning the original
+/// error.
 const COMPENSATION_ATTEMPTS: usize = 3;
 
 impl TableManager {
@@ -55,15 +69,22 @@ impl TableManager {
     /// Idempotent. Rare administrative metadata writes are flushed before
     /// return so independently opened read handles observe the new binding.
     ///
-    /// Guarantee after round 6 (F1/F2): on success the live snapshot and the
-    /// FLUSHED durable envelope both carry the new binding. On a failed write
-    /// or flush the previous LOGICAL envelope (a new timestamp, not the old
-    /// bytes) is written back AND flushed, with a bounded number of immediate
-    /// attempts, and the bind is reported as not done. If that compensation
-    /// cannot be flushed either, the table is left IN DOUBT: the caller gets
-    /// the fixed in-doubt error, bind/unbind on this table refuse until a
-    /// restart re-reads the envelope, and the holder scan treats the table as
-    /// holding every validator identity.
+    /// Guarantee after round 6 (F1/F2), wording tightened in round 7: on
+    /// success the live snapshot and the FLUSHED durable envelope both carry
+    /// the new binding. On a failed write or flush the previous LOGICAL
+    /// envelope — the FULL binding list, ops and priority included, under a new
+    /// timestamp, not the old bytes — is written back AND flushed, with a
+    /// bounded number of immediate attempts, and the bind is reported as not
+    /// done. A record that did not exist before is restored as a PRESENT-EMPTY
+    /// record, not as an absent one. If that compensation cannot be written or
+    /// flushed (either failure is enough after the last attempt; the attempt
+    /// count is policy, not evidence), the table is left IN DOUBT: the caller
+    /// gets the fixed in-doubt error, this table's bind/unbind refuse, the
+    /// holder scan treats the table as holding every validator identity, and the
+    /// facade refusals that consult it (validator replace/rename/drop, schema
+    /// activation on this table, rename of this table) refuse too — until a
+    /// restart re-reads the envelope, which RESETS the flag but does not repair
+    /// the records.
     ///
     /// cancel-safe: NO — cancellation inside the write → flush → publish
     /// window leaves the in-doubt flag raised for the rest of the process, so
@@ -135,10 +156,12 @@ impl TableManager {
     /// treat the table as holding EVERY identity, so no foreign replace/drop
     /// can act on that split state, and a restart re-reads the envelope.
     ///
-    /// On a failed write or flush the previous LOGICAL envelope is written back
-    /// and flushed (bounded immediate attempts) and the unbind is reported as
-    /// not done; a compensation that cannot be flushed leaves the table IN
-    /// DOUBT with the fixed in-doubt error, as for a failed bind.
+    /// On a failed write or flush the previous LOGICAL envelope — the FULL
+    /// binding list, ops and priority included; a record that did not exist
+    /// before is restored as a PRESENT-EMPTY record — is written back and
+    /// flushed (bounded immediate attempts) and the unbind is reported as not
+    /// done; a compensation that cannot be written or flushed leaves the table
+    /// IN DOUBT with the fixed in-doubt error, as for a failed bind.
     pub async fn remove_validator_binding(
         &self,
         validator_id: &RecordId,
@@ -181,20 +204,48 @@ impl TableManager {
 
     /// Whether this table's persisted validator binding record is IN DOUBT
     /// (round 6): set while a binding write is unreconciled, and left set when
-    /// its compensation could not be flushed. Read by bind/unbind (refusal)
-    /// and by the holder scan (via the repository); never on the write path.
+    /// its compensation could not be written and flushed. Read by bind/unbind
+    /// (refusal), by the holder scan and by the facade refusals (schema
+    /// activation, table rename) via the repository; never on the write path.
+    ///
+    /// It expresses UNCERTAINTY, not guaranteed exclusion: the backing record
+    /// may be the previous one, the new one or a partial compensating write, and
+    /// ordinary validated reads and writes do NOT consult it — they run against
+    /// the live snapshot, which is unchanged on this path, so a concurrent or
+    /// later write is neither blocked nor re-validated.
     pub fn validator_bindings_in_doubt(&self) -> bool {
         self.bindings_in_doubt.load(Ordering::Acquire)
+    }
+
+    /// The fixed, path-free in-doubt refusal as a typed error (round 7). One
+    /// construction site for every caller that must refuse on a doubtful binding
+    /// state — this table's own bind/unbind, the admitted validator holder
+    /// decisions (replace/rename/drop, built by `BindingHolders::refuse_in_doubt`
+    /// in `shamir-db`) and the facade DDL that runs before touching a table
+    /// (schema activation, table rename) — so the text cannot drift between
+    /// them.
+    pub fn binding_in_doubt_error() -> DbError {
+        DbError::Conflict(BINDING_IN_DOUBT.to_string())
     }
 
     /// Fixed in-doubt refusal (round 6, F2a): bind/unbind on a doubtful table
     /// stay refused until a restart re-reads the persisted record.
     fn refuse_bindings_in_doubt(&self) -> DbResult<()> {
-        if self.bindings_in_doubt.load(Ordering::Acquire) {
-            Err(DbError::Conflict(BINDING_IN_DOUBT.to_string()))
+        if self.validator_bindings_in_doubt() {
+            Err(Self::binding_in_doubt_error())
         } else {
             Ok(())
         }
+    }
+
+    /// Test-only: raise the in-doubt flag directly, so facade-level tests can
+    /// prove the refusal paths without injecting a storage fault through the
+    /// whole database. Production has exactly one writer of this flag: the
+    /// binding DDL window of this manager.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn mark_validator_bindings_in_doubt(&self) {
+        self.bindings_in_doubt.store(true, Ordering::Release);
     }
 
     /// The durable half of a binding DDL step: write the envelope, then flush
@@ -236,7 +287,7 @@ impl TableManager {
             self.bindings_in_doubt.store(false, Ordering::Release);
             error
         } else {
-            DbError::Conflict(BINDING_IN_DOUBT.to_string())
+            Self::binding_in_doubt_error()
         }
     }
 

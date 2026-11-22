@@ -456,6 +456,7 @@ impl ShamirDb {
             .validator_replacement_identity(&prepared.name, prepared.replace)
             .await?;
 
+        let mut in_doubt = None;
         let _guards = match admission {
             ValidatorTargetAdmission::ExclusionOnly => None,
             mode => {
@@ -472,14 +473,26 @@ impl ShamirDb {
                     // never from the best-effort reverse snapshot in
                     // `bound_in`.
                     let holders = self.validator_binding_holders(&id, _control).await?;
-                    Some(self.reserve_validator_target_identities_locked(
+                    let guards = self.reserve_validator_target_identities_locked(
                         holders.dbs(),
                         exempt,
                         _control,
-                    )?)
+                    )?;
+                    in_doubt = Some(holders);
+                    Some(guards)
                 }
             }
         };
+        // Round 7 (G1): an in-doubt table holds every validator identity and its
+        // database is usually free, so a successful reservation above is NOT
+        // sufficient evidence — the replacement must refuse BEFORE the
+        // catalogue save and the registry swap, with the same shared decision
+        // (and the same fixed, path-free text) that drop and rename use. A
+        // direct embedder (`ExclusionOnly`) takes no scan at all: this fence
+        // guards the wire and migration paths.
+        if let Some(holders) = &in_doubt {
+            holders.refuse_in_doubt()?;
+        }
 
         // Build the catalogue row from the authoritative snapshot; the
         // prepared fields are moved in (no wasm byte clones).
