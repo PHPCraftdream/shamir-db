@@ -308,6 +308,19 @@ pub struct TableManager {
         Arc<arc_swap::ArcSwap<Vec<shamir_engine_validator::validator::ValidatorBinding>>>,
     /// DDL-only contention across clones; held across persist awaits, never on writes.
     pub(super) bindings_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Round 6 — shared "this table's persisted validator binding record is
+    /// IN DOUBT" flag. Raised for the whole save → flush → publish window of
+    /// `add_validator_binding` / `remove_validator_binding`, cleared when the
+    /// durable record and the live snapshot agree again, and left SET when a
+    /// failed binding write could not be rolled back and flushed. While set,
+    /// bind/unbind on this table refuse with the fixed in-doubt error and the
+    /// holder scan treats the table as holding EVERY validator identity (fail
+    /// closed); reads and writes are NOT gated. A restart re-reads the
+    /// envelope, which is the recovery path. Read only by bind/unbind and by
+    /// the scan, so the write hot path pays nothing. Shared across clones
+    /// (`Arc<AtomicBool>` inside), same rationale as the sibling barrier
+    /// fields.
+    pub(super) bindings_in_doubt: Arc<std::sync::atomic::AtomicBool>,
     /// Handle to the global validator registry (S3). `None` for system
     /// tables / tests that don't need validation. The S3 write path
     /// reads this to resolve `ValidatorBinding.validator_id` to a
@@ -537,6 +550,7 @@ impl Clone for TableManager {
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
             bindings_lock: Arc::clone(&self.bindings_lock),
+            bindings_in_doubt: Arc::clone(&self.bindings_in_doubt),
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
             scalar_resolver: Arc::clone(&self.scalar_resolver),
@@ -710,6 +724,7 @@ impl TableManager {
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bindings_in_doubt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(

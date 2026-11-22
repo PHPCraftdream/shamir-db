@@ -67,10 +67,18 @@ impl ShamirDb {
                     &_control,
                 )?;
             }
+            // Round 6: a holder whose binding record is IN DOUBT is evidence
+            // without a name — it holds every validator identity, so the drop
+            // is refused, but its table ref must not reach the message (the
+            // fourth review's foreign-table disclosure stays closed).
+            let bound = if holders.tables().is_empty() {
+                "binding state in doubt (restart required)".to_string()
+            } else {
+                holders.tables().join(", ")
+            };
             return Err(DbError::Validation(format!(
                 "cannot drop validator '{}': still bound to tables: {}",
-                name,
-                holders.tables().join(", ")
+                name, bound
             ))
             .into());
         }

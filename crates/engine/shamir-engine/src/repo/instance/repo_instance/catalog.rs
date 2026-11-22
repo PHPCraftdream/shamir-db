@@ -175,6 +175,21 @@ impl RepoInstance {
         crate::validator::persistence::load_validators_metadata(&store).await
     }
 
+    /// Round 6 — whether an ALREADY-OPEN table's persisted validator binding
+    /// record is IN DOUBT: a failed binding write could not be rolled back and
+    /// flushed, so the live snapshot and the backing envelope may disagree.
+    ///
+    /// Non-instantiating and cheap: a table whose manager is dormant (or which
+    /// has no manager) reports `false`, which is correct by definition — a
+    /// fresh process has no doubt state, the restart that re-reads the envelope
+    /// is the recovery path. Read by the validator holder scan only.
+    pub fn table_validator_bindings_in_doubt(&self, table_name: &str) -> bool {
+        self.core
+            .catalog
+            .initialized_table(table_name)
+            .is_some_and(|table| table.validator_bindings_in_doubt())
+    }
+
     /// Catalogue read; see `TableCatalog`.
     pub fn has_table(&self, name: &str) -> bool {
         self.core.has_table(name)

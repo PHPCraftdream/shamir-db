@@ -571,8 +571,7 @@ fn bound_validator_admission_survives_a_missing_reverse_row() {
         );
         drop(gate);
 
-        // Unbind flushes the table's info record before it returns, so the
-        // drop-time scan reads the unbound state from the backing store.
+        // Still bound here (the unbind is below): the scan must refuse.
         refused_still_bound(
             &db,
             SERVING,
@@ -583,6 +582,7 @@ fn bound_validator_admission_survives_a_missing_reverse_row() {
         .await;
 
         watchdog.mark("after a real unbind the drop goes through");
+        // The unbind flushes the info record, so the later scan sees it unbound.
         admin(&db, SERVING, unbind_op(TARGET, REPO, TABLE, BOUND)).await;
         admin(&db, SERVING, drop_validator_op(BOUND)).await;
         assert_eq!(db.validators().id_for_name(BOUND), None);

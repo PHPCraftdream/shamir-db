@@ -7,12 +7,22 @@
 //! bound legitimately has none, and a reverse reference to an earlier
 //! incarnation of the same name must not decide for a new table). Known
 //! limit: an envelope lost by storage damage is therefore not detected here.
-//! Reads use an existing-only lookup that creates no store. Existing metadata
-//! reads use only the mapped `__info__` store; no `TableManager` is
-//! constructed, no `__data__`/`__history__` store is touched, no index
-//! recovery runs, no row data is loaded. This read-only scan never drains or
-//! syncs the backend; rare DDL binding writes do so through the storage
-//! wrapper. The internal store is read by its own handle.
+//! Reads use an existing-only lookup that creates no store — scoped exactly
+//! like the operations guide scopes the Fjall caveat: FACADE DDL only, because
+//! an external deletion of the keyspace can still race the check-then-create
+//! inside that lookup. Existing metadata reads use only the mapped `__info__`
+//! store; no `TableManager` is constructed, no `__data__`/`__history__` store
+//! is touched, no index recovery runs, no row data is loaded. This read-only
+//! scan never drains or syncs the backend; rare DDL binding writes do so
+//! through the storage wrapper. The internal store is read by its own handle.
+//!
+//! Round 6 (F2b): a table whose binding record is IN DOUBT — a failed binding
+//! write the manager could not roll back and flush — holds EVERY validator
+//! identity, because it may still validate with a binding the backing record
+//! lost. The flag lives on the table's already-open manager; a never-opened
+//! (cold) manager has none, and a restart clears it by definition. Such a
+//! table contributes its DATABASE to the reservation set and nothing to the
+//! table refs, so the DROP refusal message never discloses it.
 //!
 //! Exclusion domain / TOCTOU: the `ReplicationControlGuard` parameter
 //! proves the caller holds replication control for the whole derive →
@@ -42,6 +52,10 @@ use crate::shamir_db::shamir_db::{ShamirDb, SYSTEM_DB_NAME};
 pub(in crate::shamir_db) struct BindingHolders {
     dbs: Vec<String>,
     tables: Vec<String>,
+    /// Databases holding an IN-DOUBT table (round 6). Their fence is
+    /// reserved like a real holder's, but their table refs stay out of
+    /// `tables()` so no refusal message discloses them.
+    in_doubt_dbs: Vec<String>,
 }
 
 impl BindingHolders {
@@ -56,9 +70,10 @@ impl BindingHolders {
         &self.tables
     }
 
-    /// True when no table anywhere holds a binding.
+    /// True when nothing anywhere holds a binding — a real envelope match or
+    /// an in-doubt table both count.
     pub(in crate::shamir_db) fn is_empty(&self) -> bool {
-        self.tables.is_empty()
+        self.tables.is_empty() && self.in_doubt_dbs.is_empty()
     }
 }
 
@@ -81,6 +96,7 @@ impl ShamirDb {
             .collect();
         let mut dbs = BTreeSet::new();
         let mut tables = Vec::new();
+        let mut in_doubt = BTreeSet::new();
         for (db_name, instance) in instances {
             for repo_name in instance.list_repos() {
                 // Clone the repo handle out of the map; no map guard is
@@ -93,6 +109,14 @@ impl ShamirDb {
                     )));
                 };
                 for table_name in instance.list_tables(&repo_name)? {
+                    // Round 6 (F2b): an in-doubt table holds EVERY identity.
+                    // Checked BEFORE the envelope read: the envelope is
+                    // exactly what cannot be trusted here.
+                    if repo.table_validator_bindings_in_doubt(&table_name) {
+                        in_doubt.insert(db_name.clone());
+                        dbs.insert(db_name.clone());
+                        continue;
+                    }
                     let bound = repo.table_validator_bindings_metadata(&table_name).await?;
                     let Some(bound) = bound else {
                         continue;
@@ -134,6 +158,7 @@ impl ShamirDb {
         Ok(BindingHolders {
             dbs: dbs.into_iter().collect(),
             tables,
+            in_doubt_dbs: in_doubt.into_iter().collect(),
         })
     }
 }
