@@ -1,8 +1,9 @@
 use crate::common::crypto::hmac_sha256;
 use crate::server::audit_chain::{
     canonical_bytes, compute_entry_hmac, AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
-    AuditError, RETAINED_ENTRIES,
+    AuditError, MAX_RECORD_BYTES, RETAINED_ENTRIES,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::sync::Arc;
 
 #[test]
@@ -680,4 +681,270 @@ fn rv_audit_8a65768f_snapshot_window_is_bounded() {
     for pair in entries.windows(2) {
         assert_eq!(pair[1].prev_hmac, pair[0].hmac);
     }
+}
+
+// --- Finding 5: shared exact audit record size admission -----------------
+
+/// Byte-exact replica of the durable appender's fixed-format line
+/// (eleven tab-separated columns, unpadded base64url, `\`/tab/LF
+/// escaping) plus the terminating LF, so the admission bound is checked
+/// against REAL emitted bytes — including actual base64 encoding —
+/// not against the formula under test.
+fn emitted_line_len(entry: &AuditEntry) -> usize {
+    let escape = |s: &str| {
+        let mut out = String::new();
+        for ch in s.chars() {
+            match ch {
+                '\\' => out.push_str(r"\\"),
+                '\t' => out.push_str(r"\t"),
+                '\n' => out.push_str(r"\n"),
+                c => out.push(c),
+            }
+        }
+        out
+    };
+    let line = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        entry.seq,
+        entry.ts_ns,
+        escape(&entry.event),
+        escape(&entry.transport),
+        escape(&entry.user),
+        escape(&entry.ip_subnet),
+        URL_SAFE_NO_PAD.encode(entry.session_id_prefix),
+        escape(&entry.result),
+        URL_SAFE_NO_PAD.encode(&entry.details_canonical_msgpack),
+        URL_SAFE_NO_PAD.encode(entry.prev_hmac),
+        URL_SAFE_NO_PAD.encode(entry.hmac),
+    );
+    line.len() + 1 // LF
+}
+
+fn size_probe(seq: u64, user: &str, details_len: usize) -> AuditEntry {
+    AuditEntry {
+        seq,
+        ts_ns: 0,
+        event: "event".into(),
+        transport: "t".into(),
+        user: user.into(),
+        ip_subnet: String::new(),
+        session_id_prefix: [0; 8],
+        result: "ok".into(),
+        details_canonical_msgpack: vec![0u8; details_len],
+        prev_hmac: [0; 32],
+        hmac: [0; 32],
+    }
+}
+
+/// Pinned reader ceiling: the security appender's recovery reader
+/// refuses records above this exact byte count.
+#[test]
+fn record_size_ceiling_matches_reader_expression() {
+    assert_eq!(MAX_RECORD_BYTES, 22_502_883usize);
+}
+
+/// Exact-boundary admission, verified against actually emitted bytes:
+/// the boundary entry's real line (with real base64) is exactly
+/// `MAX_RECORD_BYTES` and is accepted; one more user byte gives
+/// exactly `MAX + 1` and is refused; a further base64 group gives
+/// `MAX + 4` and is refused by the preflight lower bound.
+#[test]
+fn record_size_admission_boundary_matches_emitted_bytes() {
+    let boundary = size_probe(1, "x", 16_877_073);
+    assert_eq!(emitted_line_len(&boundary), MAX_RECORD_BYTES);
+    boundary.validate_log_record_size().expect("boundary fits");
+    let chain = AuditChain::new(key());
+    let entry = chain
+        .append(
+            "event",
+            "t",
+            "x",
+            "",
+            [0; 8],
+            "ok",
+            vec![0u8; 16_877_073],
+            0,
+        )
+        .expect("boundary record must be admitted");
+    assert_eq!(entry.seq, 1);
+
+    let over_by_one = size_probe(1, "xx", 16_877_073);
+    assert_eq!(emitted_line_len(&over_by_one), MAX_RECORD_BYTES + 1);
+    assert_eq!(
+        over_by_one.validate_log_record_size(),
+        Err(AuditError::RecordTooLarge)
+    );
+
+    let over_by_four = size_probe(1, "x", 16_877_076);
+    assert_eq!(emitted_line_len(&over_by_four), MAX_RECORD_BYTES + 4);
+    assert_eq!(
+        chain
+            .append(
+                "event",
+                "t",
+                "x",
+                "",
+                [0; 8],
+                "ok",
+                vec![0u8; 16_877_076],
+                0,
+            )
+            .unwrap_err(),
+        AuditError::RecordTooLarge
+    );
+    // The refusals changed no chain state.
+    assert_eq!(chain.checkpoint(), (2u64, entry.hmac));
+}
+
+/// Admission must use the assigned sequence's decimal width: the same
+/// record fits at seq 1 but not at a 20-digit sequence, and the
+/// in-lock exact check (not the placeholder) decides.
+#[test]
+fn record_size_admission_is_seq_width_exact() {
+    let fits = size_probe(1, "", 16_877_073);
+    assert_eq!(emitted_line_len(&fits), MAX_RECORD_BYTES - 1);
+    fits.validate_log_record_size().expect("fits at seq 1");
+    let mut huge = fits.clone();
+    huge.seq = u64::MAX;
+    assert_eq!(emitted_line_len(&huge), MAX_RECORD_BYTES + 18);
+    assert_eq!(
+        huge.validate_log_record_size(),
+        Err(AuditError::RecordTooLarge)
+    );
+    let chain = AuditChain::from_checkpoint(key(), u64::MAX, [0; 32]);
+    assert!(matches!(
+        chain.append("event", "t", "", "", [0; 8], "ok", vec![0u8; 16_877_073], 0,),
+        Err(AuditError::RecordTooLarge)
+    ));
+    assert_eq!(chain.checkpoint(), (u64::MAX, [0; 32]));
+}
+
+/// Escape counting and small-entry exactness against real emitted
+/// bytes: a 7-byte user with all three escapes emits a 10-byte column,
+/// identical to ten plain bytes.
+#[test]
+fn record_size_counts_escapes_like_emitted_bytes() {
+    let escaped = size_probe(1, "a\\b\tc\nd", 1);
+    let plain_ten = size_probe(1, "xxxxxxxxxx", 1);
+    assert_eq!(emitted_line_len(&escaped), 130);
+    assert_eq!(emitted_line_len(&plain_ten), 130);
+    assert_eq!(emitted_line_len(&size_probe(1, "x", 1)), 121);
+    for entry in [&escaped, &plain_ten] {
+        entry.validate_log_record_size().expect("small records fit");
+    }
+}
+
+/// The writer path refuses oversized input as a typed input refusal
+/// BEFORE publication: nothing reaches the appender, no state change,
+/// and no fail-closed persistence latch.
+#[test]
+fn writer_refuses_oversized_record_without_latching() {
+    let shared = Arc::new(AuditChain::new(key()));
+    let concrete = Arc::new(CountingAppender::default());
+    let appender = Arc::clone(&concrete) as Arc<dyn AuditAppender>;
+    let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
+    assert_eq!(
+        writer
+            .append(
+                "event",
+                "t",
+                "x",
+                "",
+                [0; 8],
+                "ok",
+                vec![0u8; 16_877_076],
+                0,
+            )
+            .unwrap_err(),
+        AuditError::RecordTooLarge
+    );
+    // The refusal happened before publication: nothing reached the
+    // appender at all.
+    assert!(concrete.appends.lock().unwrap().is_empty());
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
+    let seq = writer
+        .append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0)
+        .map(|e| e.seq)
+        .expect("typed input refusal must not latch persistence");
+    assert_eq!(seq, 1);
+    // Exactly one publication (and its companion checkpoint) after the
+    // valid append.
+    assert_eq!(concrete.appends.lock().unwrap().len(), 1);
+    // Checkpointing is periodic (every 1000th seq), so seq=1 alone does not
+    // checkpoint; an explicit checkpoint_now() produces exactly one.
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
+    writer.checkpoint_now().expect("manual checkpoint succeeds");
+    assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
+}
+
+/// The sequence boundary at `u64::MAX - 1` and above: the direct chain
+/// refuses BEFORE consuming the sequence, predecessor HMAC or retained
+/// history; `u64::MAX - 2` is still admitted, the refusal repeats
+/// without latching and leaves the checkpoint state untouched. A
+/// public `from_checkpoint` can also start at `u64::MAX` directly;
+/// `MAX` must not be consumed either. Without the fix the old code
+/// consumed the sequence and published the entry (saturating
+/// arithmetic left a `MAX` start pinned there), so the durable
+/// appender's refusal of a `MAX - 1` record surfaced only afterwards
+/// as a latching persistence failure, not a typed stateless refusal.
+#[test]
+fn chain_refuses_sequence_exhaustion_before_consuming_state() {
+    // Positive control: MAX - 2 is admitted, landing at the boundary.
+    let chain = AuditChain::from_checkpoint(key(), u64::MAX - 2, [7; 32]);
+    let last = chain
+        .append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0)
+        .expect("MAX - 2 must be admitted");
+    assert_eq!(last.seq, u64::MAX - 2);
+    assert_eq!(chain.checkpoint(), (u64::MAX - 1, last.hmac));
+    for _ in 0..2 {
+        assert!(matches!(
+            chain.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ));
+    }
+    // The refusals consumed nothing: state is as after MAX - 2.
+    assert_eq!(chain.checkpoint(), (u64::MAX - 1, last.hmac));
+    let retained = chain.snapshot();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].seq, u64::MAX - 2);
+    assert_eq!(retained[0].hmac, last.hmac);
+    // A chain constructed directly at `MAX` is refused too.
+    let at_max = AuditChain::from_checkpoint(key(), u64::MAX, [7; 32]);
+    assert!(matches!(
+        at_max.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+        Err(AuditError::SequenceExhausted { next }) if next == u64::MAX
+    ));
+    assert_eq!(at_max.checkpoint(), (u64::MAX, [7; 32]));
+}
+
+/// The writer path at the same boundary: the refusal is a typed input
+/// refusal raised inside the durable-gate + chain synchronization
+/// before publication, so nothing reaches the appender, the checkpoint
+/// state is untouched, the refusal repeats, and persistence is not
+/// latched (an explicit `checkpoint_now` afterwards still succeeds).
+/// Without the fix the writer consumed the sequence and published the
+/// entry: `CountingAppender` accepted it without latching, but the
+/// real Fjall adapter refuses a `MAX - 1` record itself — a defect
+/// this seam cannot expose, so the refusal must be in-chain.
+#[test]
+fn writer_refuses_sequence_exhaustion_without_latching_or_appending() {
+    let shared = Arc::new(AuditChain::from_checkpoint(key(), u64::MAX - 1, [9; 32]));
+    let concrete = Arc::new(CountingAppender::default());
+    let appender = Arc::clone(&concrete) as Arc<dyn AuditAppender>;
+    let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
+    for _ in 0..2 {
+        assert!(matches!(
+            writer.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ));
+    }
+    assert!(concrete.appends.lock().unwrap().is_empty());
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
+    // No fail-closed latch: chain state unchanged, manual checkpoint
+    // still persists it.
+    assert_eq!(writer.chain().checkpoint(), (u64::MAX - 1, [9; 32]));
+    writer
+        .checkpoint_now()
+        .expect("input refusal must not latch persistence");
+    assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
 }

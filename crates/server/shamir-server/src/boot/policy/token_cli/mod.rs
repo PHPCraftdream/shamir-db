@@ -3,6 +3,8 @@ mod args;
 mod create;
 #[path = "commands/list.rs"]
 mod list;
+#[path = "commands/lock.rs"]
+mod lock;
 #[path = "commands/revoke.rs"]
 mod revoke;
 #[path = "commands/run.rs"]
