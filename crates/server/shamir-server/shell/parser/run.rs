@@ -67,7 +67,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
 /// injected `input`/`stderr`/`terminal` and an explicit `profile_root`
 /// (`Some`), which additionally refuses batch mode after `--` and never
 /// reads the process-global environment.
-pub fn run_scripted(
+pub(crate) fn run_scripted(
     args: impl IntoIterator<Item = OsString>,
     input: &mut dyn Read,
     stderr: &mut dyn Write,

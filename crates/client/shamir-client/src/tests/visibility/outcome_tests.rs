@@ -1,3 +1,7 @@
+use shamir_query_types::read::QueryRecord;
+use shamir_query_types::wire::{OperatorStatus, StatusRole, StatusStampOutcome};
+use shamir_types::types::value::QueryValue;
+
 use crate::{
     ClientError, CommitResult, DbResponse, TransactionInfo, VisibilityPendingReason,
     VisibilityState,
@@ -137,4 +141,43 @@ fn rv_wal_3b29232e_indeterminate_keeps_error_classification() {
         CommitResult::from_transaction(transaction),
         Err(ClientError::TransactionOutcome(_))
     ));
+}
+
+/// The two PR3 success kinds pass through BY NAME (`Status` / `Record` are
+/// explicit arms of `map_response`, not the catch-all): the value comes
+/// back unchanged, so a caller never has to unwrap a `Db` error for them.
+#[test]
+fn status_and_record_pass_through() {
+    let status = OperatorStatus {
+        server_version: "0.1.0-test".into(),
+        format_epoch: 4,
+        stamp_outcome: StatusStampOutcome::Unchanged,
+        uptime_ms: 12,
+        role: StatusRole::Follower,
+        node_id: Some("node-7".into()),
+        replication: Vec::new(),
+        repositories: Vec::new(),
+    };
+    let mapped = crate::visibility::map_response(DbResponse::Status {
+        status: status.clone(),
+    })
+    .expect("a status reply is a success kind");
+    assert!(
+        matches!(mapped, DbResponse::Status { status: ref got } if *got == status),
+        "status must pass through unchanged: {mapped:?}"
+    );
+
+    let mapped = crate::visibility::map_response(DbResponse::Record {
+        record: QueryRecord::Direct(QueryValue::Null),
+    })
+    .expect("a record reply is a success kind");
+    assert!(
+        matches!(
+            mapped,
+            DbResponse::Record {
+                record: QueryRecord::Direct(QueryValue::Null)
+            }
+        ),
+        "record must pass through unchanged: {mapped:?}"
+    );
 }

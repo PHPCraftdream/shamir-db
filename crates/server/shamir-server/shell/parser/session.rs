@@ -121,7 +121,7 @@ pub(super) fn establish_profile(
     Ok((profile, client))
 }
 
-pub(super) fn read_secret(
+fn read_secret(
     shell: &ShellArgs,
     mode: Mode,
     auth: AuthKind,

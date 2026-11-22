@@ -246,6 +246,12 @@ impl TableCatalog {
         self.configs.len()
     }
 
+    /// Test-only: direct cell-map size (cold-resolver retention probe).
+    #[cfg(feature = "test-util")]
+    pub fn table_cell_count(&self) -> usize {
+        self.tables.len()
+    }
+
     /// Non-instantiating peek: like
     /// `RepoInstance::table_by_token`,
     /// but returns `None` (rather than lazily creating and returning) for a

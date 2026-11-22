@@ -137,15 +137,24 @@ fn status_and_version_show_golden_structure() {
         );
         // Durability / WAL telemetry per repository: the seeded catalogue
         // repository appears with its identity, and its `wal` block is
-        // present (the empty DB carries no repository rows).
+        // present. The server boot also opens its default database and
+        // repository, so the list is searched by identity, never indexed.
         let repositories = payload["repositories"]
             .as_array()
             .expect("repositories array");
-        assert_eq!(repositories.len(), 1, "one seeded repository expected");
-        assert_eq!(repositories[0]["db"].as_str(), Some(DB_NAME));
-        assert_eq!(repositories[0]["repo"].as_str(), Some(REPO_NAME));
+        let seeded = repositories
+            .iter()
+            .filter(|row| {
+                row["db"].as_str() == Some(DB_NAME) && row["repo"].as_str() == Some(REPO_NAME)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seeded.len(),
+            1,
+            "the seeded repository appears exactly once"
+        );
         assert!(
-            repositories[0].get("wal").is_some(),
+            seeded[0].get("wal").is_some(),
             "repository telemetry missing its `wal` block"
         );
         let text = serde_json::to_string(&payload).expect("status payload serializes");
@@ -348,8 +357,13 @@ fn data_count_head_get_goldens_and_refusals() {
         "a row-clamped head must not claim byte truncation"
     );
 
-    // data get with a REAL inserted id: the record comes back with its
-    // seeded payload (and its id, if the projection carries one).
+    // data get with a REAL inserted id: the projection is EXACTLY the seeded
+    // row — asserted UNCONDITIONALLY, no "any record will do" fallback.
+    // `ids[0]` is the FIRST row of `insert_rows`, whose stored payload is
+    // exactly the fixture's `{ n: 0, tag: "state_data_probe" }` map (the P2
+    // point read returns the stored record body, so no extra system fields
+    // appear), and the per-row `n` value pins the row's IDENTITY: every
+    // seeded row carries a different `n`.
     let real_id = &ids[0];
     let get_run = run_shell(
         fixture,
@@ -357,20 +371,24 @@ fn data_count_head_get_goldens_and_refusals() {
     );
     assert!(!get_run.contains_canary(fixture.canary.as_str()));
     let got = data(&get_run, "get");
-    let text = serde_json::to_string(&got).expect("get payload serializes");
-    assert!(
-        text.contains("state_data_probe"),
-        "data get lost the record payload"
+    let got_object = got.as_object().expect("data get payload is a JSON object");
+    let mut keys = got_object.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["n", "tag"],
+        "data get must project exactly the seeded row's fields"
     );
-    for id_key in ["_id", "id"] {
-        if let Some(id) = got.get(id_key) {
-            assert_eq!(
-                id.as_str(),
-                Some(real_id.as_str()),
-                "data get returned a DIFFERENT record than the requested key"
-            );
-        }
-    }
+    assert_eq!(
+        leaf_u64(&got["n"]),
+        Some(0),
+        "data get returned a DIFFERENT record than the seeded row 0"
+    );
+    assert_eq!(
+        got["tag"].as_str(),
+        Some("state_data_probe"),
+        "data get lost the seeded payload value"
+    );
 
     // HOSTILE-VALUE probe (real fixture record, real output): a record
     // whose payload carries a C0 control byte must NEVER reach stdout

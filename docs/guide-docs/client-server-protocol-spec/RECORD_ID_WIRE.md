@@ -7,7 +7,8 @@ RU6).
 ## Fields
 
 Exactly four wire-visible fields carry a `RecordId` as a **canonical base58
-string**, never as raw MessagePack bytes:
+string**, never as raw MessagePack bytes (`GetRecord.key` is the sole `bin`
+exception — see below):
 
 | Message | Field |
 |---|---|
@@ -15,6 +16,23 @@ string**, never as raw MessagePack bytes:
 | `DdlOpStatus` (inside the `ddl_op_status` response envelope) | `op_id` |
 | `DropIndexOp` | `request_id` |
 | `RenameIndexOp` | `request_id` |
+
+## The one `bin` exception: `GetRecord.key`
+
+`DbRequest::GetRecord.key` (admin-shell P2 exact-key point read) is the ONE
+place a record id travels as **raw MessagePack `bin`**, never as a base58
+string:
+
+- the value marker is `bin8` (`0xc4`), its length byte `0x10`, then EXACTLY
+  16 raw id bytes — 18 bytes of msgpack in total
+  (`serde_bytes::ByteArray<16>` in
+  `crates/query/shamir-query-types/src/wire/db_message.rs`,
+  `mod record_id_wire`);
+- the width is fixed: a 15-byte or 17-byte payload is a typed decode error,
+  never a silently re-sized id, and the sequence form is bounded by the same
+  fixed size (no unbounded allocation);
+- every OTHER surface keeps the base58 **string** form listed in the table
+  above — do not "unify" this field with them.
 
 ## Format
 

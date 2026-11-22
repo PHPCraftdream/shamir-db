@@ -5,8 +5,8 @@
 //!
 //! Every network operation uses a real fixture over pinned TLS/IPC/WSS and
 //! bounded handshakes; wire writes use the typed query builders. Insert
-//! responses are read as `QueryRecord::Inserted` and use the storage ID at
-//! `InsertedRecord.id`, not a projected `_id` map field.
+//! responses decode as `QueryRecord::Direct` maps; the storage ID is read from
+//! the `_id` field.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -14,7 +14,6 @@ use std::time::Duration;
 use serde_json::Value;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
-use shamir_query_types::read::QueryRecord;
 use shamir_types::types::value::QueryValue;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -25,16 +24,16 @@ use zeroize::Zeroizing;
 use super::harness::{profile_text, ShellFixture, ShellRun, DB_NAME, PLAIN_TABLE, REPO_NAME};
 
 /// Hard hang bound — a hang DETECTOR, not a latency assertion.
-pub(crate) const BOUND: Duration = Duration::from_secs(120);
+pub(super) const BOUND: Duration = Duration::from_secs(120);
 
 /// The fixed token-subset refusal message (§3.3; identical to the PR2
 /// `refusals` suite — the message is fixed, not per-command).
-pub(crate) const TOKEN_SUBSET: &str =
+pub(super) const TOKEN_SUBSET: &str =
     "token sessions expose only the read-only shell subset; log in with SCRAM for this command";
 
 /// Top-level fields of the `status` payload (`data` object of
 /// `shell/commands/state.rs::project_status`) — the §4.2 contract.
-pub(crate) const STATUS_FIELDS: &[&str] = &[
+pub(super) const STATUS_FIELDS: &[&str] = &[
     "server_version",
     "format_epoch",
     "stamp_outcome",
@@ -49,7 +48,7 @@ pub(crate) const STATUS_FIELDS: &[&str] = &[
 
 /// `StatusStampOutcome` renderings of `shell/commands/state.rs`
 /// (snake_case).
-pub(crate) const STAMP_OUTCOMES: &[&str] = &[
+pub(super) const STAMP_OUTCOMES: &[&str] = &[
     "created",
     "adopted",
     "unchanged",
@@ -64,7 +63,7 @@ pub(crate) const STAMP_OUTCOMES: &[&str] = &[
 /// Asserts exactly one LF-terminated line, wire version 1, exit 0, a
 /// nonempty command id whose lowercase form contains `command_part`, and
 /// `kind: result`.
-pub(crate) fn data(run: &ShellRun, command_part: &str) -> Value {
+pub(super) fn data(run: &ShellRun, command_part: &str) -> Value {
     assert_eq!(run.exit_code, 0, "shell command failed (exit code only)");
     let line = run
         .stdout
@@ -90,7 +89,7 @@ pub(crate) fn data(run: &ShellRun, command_part: &str) -> Value {
 /// table, `kind: error`, the expected `code`, a nonempty message. The
 /// WHOLE envelope is returned (callers assert on `message` and on the
 /// `data` leaf — always `null` for errors — through this value).
-pub(crate) fn refusal(run: &ShellRun, command_part: &str, code: &str, exit: i32) -> Value {
+pub(super) fn refusal(run: &ShellRun, command_part: &str, code: &str, exit: i32) -> Value {
     assert_eq!(
         run.exit_code, exit,
         "wrong exit for `{command_part}` ({code})"
@@ -125,7 +124,7 @@ pub(crate) fn refusal(run: &ShellRun, command_part: &str, code: &str, exit: i32)
 
 /// Read a leaf as u64 from the documented decimal-STRING rendering
 /// (defensively accepting a JSON number too).
-pub(crate) fn leaf_u64(leaf: &Value) -> Option<u64> {
+pub(super) fn leaf_u64(leaf: &Value) -> Option<u64> {
     match leaf {
         Value::Number(number) => number.as_u64(),
         Value::String(text) => text.parse::<u64>().ok(),
@@ -136,7 +135,7 @@ pub(crate) fn leaf_u64(leaf: &Value) -> Option<u64> {
 /// `true` when the output text carries the standalone word `lag`
 /// (case-insensitive) — the gap line must say `gap_versions_merged` with
 /// its merged-aggregate caveat, never "lag".
-pub(crate) fn mentions_lag(run: &ShellRun) -> bool {
+pub(super) fn mentions_lag(run: &ShellRun) -> bool {
     let text = String::from_utf8_lossy(&run.stdout).to_ascii_lowercase();
     text.split(|c: char| !c.is_ascii_alphabetic())
         .any(|word| word == "lag")
@@ -147,7 +146,7 @@ pub(crate) fn mentions_lag(run: &ShellRun) -> bool {
 /// Insert `rows` real records into the fixture's plain table over the REAL
 /// pinned wire (builder-only), returning the server-minted base58
 /// `RecordId` strings in insertion order. Field `n` carries the row index.
-pub(crate) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
+pub(super) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
     fixture.guard.mark("seed: state_data rows");
     let addr = fixture.tls_addr;
     let pin = fixture.pin;
@@ -178,20 +177,17 @@ pub(crate) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
             .results
             .get("ins")
             .expect("insert result alias present");
-        // ORACLE: a write-result row is `QueryRecord::Inserted` and
-        // carries the storage id in `row.id` (`InsertedRecord.id`), NOT
-        // in a projected `_id` field — `get_value_str("_id")` is None for
-        // this variant (query_record.rs).
+        // ORACLE: the server serialises a write-result row as a msgpack map
+        // carrying the storage id under `_id` (Base58 string), and the client
+        // always decodes a map as `QueryRecord::Direct` (query_record.rs).
         let ids: Vec<String> = result
             .records
             .iter()
-            .map(|record| match record {
-                QueryRecord::Inserted(inserted) => inserted
-                    .id
-                    .as_ref()
-                    .expect("server-minted id on inserted row")
-                    .to_string(),
-                other => panic!("insert echoed a non-inserted row: {other:?}"),
+            .map(|record| {
+                record
+                    .get_value_str("_id")
+                    .expect("server-minted `_id` on inserted row")
+                    .to_owned()
             })
             .collect();
         assert_eq!(ids.len(), rows, "insert echoes one id per row");
@@ -203,7 +199,7 @@ pub(crate) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
 /// Insert ONE real record with the given string field (builder-only
 /// wire), returning its server-minted Base58 id. Used by the hostile-value
 /// and credential-reflection probes; authorized defensive content only.
-pub(crate) fn insert_doc(fixture: &ShellFixture, field: &str, value: &str) -> String {
+pub(super) fn insert_doc(fixture: &ShellFixture, field: &str, value: &str) -> String {
     fixture.guard.mark("seed: hostile doc");
     let addr = fixture.tls_addr;
     let pin = fixture.pin;
@@ -236,14 +232,13 @@ pub(crate) fn insert_doc(fixture: &ShellFixture, field: &str, value: &str) -> St
             .results
             .get("ins")
             .expect("insert result alias present");
-        let [QueryRecord::Inserted(inserted)] = result.records.as_slice() else {
+        let [record] = result.records.as_slice() else {
             panic!("hostile-doc insert did not echo one inserted row");
         };
-        let id = inserted
-            .id
-            .as_ref()
-            .expect("server-minted id on inserted row")
-            .to_string();
+        let id = record
+            .get_value_str("_id")
+            .expect("server-minted `_id` on inserted row")
+            .to_owned();
         client.close().await;
         id
     })
@@ -251,7 +246,7 @@ pub(crate) fn insert_doc(fixture: &ShellFixture, field: &str, value: &str) -> St
 
 /// The profile text for an admin SCRAM transport, with the fixture's
 /// verified pin filled in.
-pub(crate) fn scram_profile(fixture: &ShellFixture, transport: &str, address: &str) -> String {
+pub(super) fn scram_profile(fixture: &ShellFixture, transport: &str, address: &str) -> String {
     let sni = (transport != "ipc").then_some("localhost");
     profile_text(transport, address, sni, Some(DB_NAME))
         .replace("pin: <PIN>\n", &format!("pin: {}\n", fixture.pin_hex()))
@@ -261,14 +256,14 @@ pub(crate) fn scram_profile(fixture: &ShellFixture, transport: &str, address: &s
 /// downstream connection (0 or 1 falsifies pre-dial), forwarding TLS
 /// unchanged. Same shape as the PR2 `refusals` relay (that one is
 /// module-private; visibility is not widened for this file).
-pub(crate) struct Relay {
-    pub(crate) addr: SocketAddr,
+pub(super) struct Relay {
+    pub(super) addr: SocketAddr,
     stop: oneshot::Sender<()>,
     task: JoinHandle<usize>,
 }
 
 impl Relay {
-    pub(crate) fn start(fixture: &ShellFixture, target: SocketAddr) -> Self {
+    pub(super) fn start(fixture: &ShellFixture, target: SocketAddr) -> Self {
         fixture.rt.run(async move {
             let listener = timeout(BOUND, TcpListener::bind("127.0.0.1:0"))
                 .await
@@ -314,7 +309,7 @@ impl Relay {
         })
     }
 
-    pub(crate) fn finish(self, fixture: &ShellFixture) -> usize {
+    pub(super) fn finish(self, fixture: &ShellFixture) -> usize {
         let _ = self.stop.send(());
         fixture.rt.run(async move {
             let mut task = self.task;

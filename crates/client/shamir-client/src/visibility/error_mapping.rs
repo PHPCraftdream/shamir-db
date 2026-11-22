@@ -29,6 +29,9 @@ pub(crate) fn map_response(response: DbResponse) -> Result<DbResponse, ClientErr
             }
             _ => ClientError::Db { code, message },
         }),
+        // The two P1/P2 success kinds are accepted BY NAME (not through the
+        // catch-all below) and returned unchanged.
+        DbResponse::Status { .. } | DbResponse::Record { .. } => Ok(response),
         other => Ok(other),
     }
 }

@@ -145,6 +145,12 @@ impl RepoInstance {
         self.core.catalog.install_table_for_test(name, table)
     }
 
+    /// Test-only: direct cell-map size (cold-resolver retention probe).
+    #[cfg(feature = "test-util")]
+    pub fn table_cell_count(&self) -> usize {
+        self.core.catalog.table_cell_count()
+    }
+
     /// Catalogue read; see `TableCatalog`.
     pub fn list_table_names(&self) -> Vec<String> {
         self.core.list_table_names()

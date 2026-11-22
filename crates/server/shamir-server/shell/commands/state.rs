@@ -67,10 +67,11 @@ const HEAD_MAX_ROW_BYTES: usize = 256 * 1024;
 const HEAD_WALL: Duration = Duration::from_secs(5);
 
 /// `data get` KEY cap in bytes before decoding: a Base58 `RecordId` is
-/// exactly 22 characters (ceil(log_58(2^128)) = 22); anything longer is
-/// refused without parsing — the decoder under `RecordId::from_str` has no
-/// internal length bound, so the shell caps first. The server applies its
-/// own typed-key cap as well.
+/// 16–22 characters (22 = ceil(log_58(2^128)), the canonical full-length
+/// form; leading zero bytes shorten it); anything longer is refused without
+/// parsing — the decoder under `RecordId::from_str` has no internal length
+/// bound, so the shell caps first. The server applies its own typed-key cap
+/// as well.
 const GET_KEY_MAX_BYTES: usize = 22;
 
 /// Response alias for the single-entry batch (`data count`, `data head`,
@@ -122,6 +123,12 @@ const SUBSCRIPTION_FIELDS: &[&str] = &[
     "seed_source_version",
     "local_baseline_version",
 ];
+
+/// Width of a lineage id on the admin surface: `RepoIdentity::lineage_id`
+/// is `[u8; 16]` (`shamir-engine-repo` `meta/repo_identity.rs:36`), which
+/// serializes as a 16-element msgpack array of non-negative integers
+/// (`execute/core/helpers.rs::to_qv`).
+const LINEAGE_ID_BYTES: usize = 16;
 
 /// R5 step 3 state and narrow data view commands.
 #[derive(Debug, Clone)]
@@ -264,12 +271,17 @@ impl StateCommand {
                 let result = result?;
                 // The credential-reflection scan is part of the SAME
                 // head deadline (projection + guard, one budget, no
-                // retry — a sent request is never resent on expiry).
-                let payload = project_head(&result, requested, limit, deadline)?;
-                client.check_catalogue_output(&payload)?;
+                // retry — a sent request is never resent on expiry). The
+                // deadline is consulted BEFORE the projection result is
+                // unwrapped: an already-elapsed budget is the typed
+                // `head_wall_time` refusal even when a projection error
+                // is what the projection returned.
+                let projected = project_head(&result, requested, limit, deadline);
                 if tokio::time::Instant::now() >= deadline {
                     return Err(ShellError::HeadWallTime);
                 }
+                let payload = projected?;
+                client.check_catalogue_output(&payload)?;
                 Ok(payload)
             }
             StateCommand::Get {
@@ -352,10 +364,12 @@ fn single_direct_value(result: &QueryResult) -> Result<&QueryValue, ShellError> 
 
 /// STRICT projection of `replication subscriptions`: the result must be
 /// exactly one direct map with exactly the `subscriptions` list; each entry
-/// must be a map and is re-projected through the typed sanitizer with ONLY
-/// the [`SUBSCRIPTION_FIELDS`] allowlist. No raw server `QueryValue` map
-/// projection: unknown peer fields (raw `status_message`, terminal
-/// reasons, source paths) are dropped.
+/// must be a map and is re-projected through the typed per-field shape
+/// check with ONLY the [`SUBSCRIPTION_FIELDS`] allowlist. No raw server
+/// `QueryValue` map projection: unknown peer fields (raw `status_message`,
+/// terminal reasons, source paths) are dropped, and a value whose SHAPE
+/// does not match the engine's own record is the typed `Server` refusal
+/// rather than data — the offending value is never echoed.
 fn project_subscriptions(result: &QueryResult) -> Result<Value, ShellError> {
     let qv = single_direct_value(result)?;
     let QueryValue::Map(fields) = qv else {
@@ -375,12 +389,118 @@ fn project_subscriptions(result: &QueryResult) -> Result<Value, ShellError> {
         let mut item = serde_json::Map::new();
         for field in SUBSCRIPTION_FIELDS {
             if let Some(element) = entry_fields.get(*field) {
-                item.insert((*field).to_string(), value(element)?);
+                item.insert((*field).to_string(), subscription_field(field, element)?);
             }
         }
         projected.push(Value::Object(item));
     }
     Ok(json!({ "subscriptions": projected }))
+}
+
+/// ONE table keyed on the allowlisted field name: the typed shape of every
+/// projected subscription value. The shapes are the engine's own record
+/// (`shamir-db` `execute/replication_seed/status.rs`): `recorded_identity`
+/// / `observed_identity` are `Option<RepoIdentity>`, the bookmark / version
+/// / gap fields are `Option<u64>`, `source_lineage_id` is an optional
+/// `[u8; 16]`, and the name / state fields are strings (see each helper).
+/// A name that is in [`SUBSCRIPTION_FIELDS`] but has no arm here is a
+/// deliberate decision point: it is refused instead of silently rendered.
+fn subscription_field(field: &str, element: &QueryValue) -> Result<Value, ShellError> {
+    match field {
+        "recorded_identity" => identity_field(element),
+        "observed_identity" => identity_field(element),
+        "source_lineage_id" => lineage_field(element),
+        "upstream_bookmark" => version_field(element),
+        "next_pull_version" => version_field(element),
+        "local_consistent_version" => version_field(element),
+        "certified_gap_first" => version_field(element),
+        "certified_gap_through" => version_field(element),
+        "seed_source_version" => version_field(element),
+        "local_baseline_version" => version_field(element),
+        "source_history_epoch" => version_field(element),
+        "db" | "repo" | "name" | "state" | "installation_state" => text_field(element),
+        // Observed in `replication_seed/status.rs:85-96`: the engine seeds
+        // `artifact_digest` as `Null` and replaces it with a string ONLY
+        // when a seed-install receipt exists, so both shapes are real.
+        "artifact_digest" => optional_text_field(element),
+        _ => Err(ShellError::Server),
+    }
+}
+
+/// `Option<RepoIdentity>` → `Null`, or a map with EXACTLY `lineage_id`
+/// (16 non-negative integers) and `history_epoch` (a non-negative
+/// integer). Extra nested fields are a shape mismatch, not data.
+fn identity_field(element: &QueryValue) -> Result<Value, ShellError> {
+    match element {
+        QueryValue::Null => Ok(Value::Null),
+        QueryValue::Map(fields) => {
+            let Some(lineage) = fields.get("lineage_id") else {
+                return Err(ShellError::Server);
+            };
+            let Some(QueryValue::Int(epoch)) = fields.get("history_epoch") else {
+                return Err(ShellError::Server);
+            };
+            if fields.len() != 2 || *epoch < 0 || !is_lineage_id(lineage) {
+                return Err(ShellError::Server);
+            }
+            render_field(element)
+        }
+        _ => Err(ShellError::Server),
+    }
+}
+
+/// `Option<[u8; 16]>` → `Null`, or exactly 16 non-negative integers.
+fn lineage_field(element: &QueryValue) -> Result<Value, ShellError> {
+    match element {
+        QueryValue::Null => Ok(Value::Null),
+        _ if is_lineage_id(element) => render_field(element),
+        _ => Err(ShellError::Server),
+    }
+}
+
+/// `Option<u64>` version / bookmark / gap endpoint → `Null` or a
+/// non-negative integer.
+fn version_field(element: &QueryValue) -> Result<Value, ShellError> {
+    match element {
+        QueryValue::Null | QueryValue::Int(0..) => render_field(element),
+        _ => Err(ShellError::Server),
+    }
+}
+
+fn text_field(element: &QueryValue) -> Result<Value, ShellError> {
+    match element {
+        QueryValue::Str(_) => render_field(element),
+        _ => Err(ShellError::Server),
+    }
+}
+
+fn optional_text_field(element: &QueryValue) -> Result<Value, ShellError> {
+    match element {
+        QueryValue::Null | QueryValue::Str(_) => render_field(element),
+        _ => Err(ShellError::Server),
+    }
+}
+
+/// A lineage id is a list of exactly [`LINEAGE_ID_BYTES`] non-negative
+/// integers (`[u8; 16]` through the engine's `to_qv`).
+fn is_lineage_id(element: &QueryValue) -> bool {
+    match element {
+        QueryValue::List(items) => {
+            items.len() == LINEAGE_ID_BYTES
+                && items
+                    .iter()
+                    .all(|item| matches!(item, QueryValue::Int(0..)))
+        }
+        _ => false,
+    }
+}
+
+/// Render an already shape-checked value through the v1 conventions
+/// (decimal strings for integers, sanitized strings); a projection refusal
+/// here can only be a depth overrun, reported as the typed `Server` shape
+/// refusal.
+fn render_field(element: &QueryValue) -> Result<Value, ShellError> {
+    value(element).map_err(|_| ShellError::Server)
 }
 
 /// Project the `data head` output under the byte budget: rows are held
@@ -396,9 +516,13 @@ fn project_subscriptions(result: &QueryResult) -> Result<Value, ShellError> {
 /// `records.len() == limit` inference. The rows are constrained to the
 /// requested limit with `.take(limit)` so a dishonest peer's extra rows
 /// are dropped, not projected. The shared monotonic deadline is checked
-/// INSIDE the loop, before and after the last row (the tail CPU work);
-/// expiry is the typed `head_wall_time` refusal (exit 7), never a partial
-/// success.
+/// between rows and around them — INSIDE the loop, before and after the
+/// last row (the tail CPU work); expiry is the typed `head_wall_time`
+/// refusal (exit 7), never a partial success. A single row is NOT
+/// interruptible: it is projected in full first, so one row's projection
+/// cost is bounded only by the server's result cap — this is NOT a hard
+/// wall-time bound on one row. An already-elapsed deadline wins over any
+/// per-row projection refusal ([`head_error`]).
 fn project_head(
     result: &QueryResult,
     requested: u64,
@@ -415,17 +539,17 @@ fn project_head(
             return Err(ShellError::HeadWallTime);
         }
         let QueryRecord::Direct(qv) = record else {
-            return Err(ShellError::Server);
+            return Err(head_error(deadline, ShellError::Server));
         };
-        let rendered = value(qv)?;
+        let rendered = value(qv).map_err(|error| head_error(deadline, error))?;
         let width = serde_json::to_string(&rendered)
             .map(|text| text.len())
-            .map_err(|_| ShellError::ProjectionLimit)?;
+            .map_err(|_| head_error(deadline, ShellError::ProjectionLimit))?;
         let separator: usize = if rows.is_empty() { 0 } else { 1 };
         let needed = separator
             .checked_add(width)
             .and_then(|needed| bytes.checked_add(needed))
-            .ok_or(ShellError::ProjectionLimit)?;
+            .ok_or_else(|| head_error(deadline, ShellError::ProjectionLimit))?;
         if needed > HEAD_MAX_ROW_BYTES {
             bytes_truncated = true;
             break;
@@ -456,6 +580,20 @@ fn project_head(
         }
     }
     Ok(out)
+}
+
+/// A projection refusal on the shared `data head` deadline keeps the
+/// deadline's typed outcome: an already-elapsed budget wins over any
+/// per-row projection error (exit 7 `head_wall_time`, never a misleading
+/// exit 5). A single row is NOT interruptible — the budget is checked
+/// between rows, so one row's projection cost is bounded only by the
+/// server's result cap.
+fn head_error(deadline: tokio::time::Instant, error: ShellError) -> ShellError {
+    if tokio::time::Instant::now() >= deadline {
+        ShellError::HeadWallTime
+    } else {
+        error
+    }
 }
 
 /// Project the `data count` result. The count row is exactly one direct

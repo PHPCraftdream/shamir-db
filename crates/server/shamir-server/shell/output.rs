@@ -130,7 +130,7 @@ impl ShellError {
             ShellError::Authentication => "authentication failed",
             ShellError::Denied => "permission denied by the server",
             ShellError::Server => "the operation failed on the server",
-            ShellError::NotFound => "the requested record was not found",
+            ShellError::NotFound => "the addressed record or table was not found",
             ShellError::UnknownTable => "the addressed table does not exist",
             ShellError::ResyncRequired => "the repository is in replication quarantine; a reseed is required",
             ShellError::ResultTooLarge => "the encoded response exceeds the server's result-size cap",

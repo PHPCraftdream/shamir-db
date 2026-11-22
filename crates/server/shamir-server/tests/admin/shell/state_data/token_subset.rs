@@ -320,7 +320,7 @@ fn token_data_head_credential_reflection_fails_closed() {
     );
     let envelope: Value = serde_json::from_slice(
         run.stdout
-            .strip_suffix(b"\\n")
+            .strip_suffix(b"\n")
             .expect("LF-terminated output"),
     )
     .expect("reflection probe emitted invalid JSON");
