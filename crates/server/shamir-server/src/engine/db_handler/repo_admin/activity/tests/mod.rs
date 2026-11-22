@@ -7,7 +7,10 @@
 //! (`list::select_window`) with duplicate ids, exact limits and
 //! continuation boundaries. No server harness — these exercise the same
 //! code the paging worker calls.
+//! `refusal_fairness_tests` — one principal cannot occupy the whole
+//! refusal-audit queue while another principal is still recorded.
 
 mod cancellation_tests;
 mod continuation_token_tests;
 mod paging_tests;
+mod refusal_fairness_tests;

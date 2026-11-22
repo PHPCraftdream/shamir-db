@@ -39,7 +39,7 @@ mod shutdown;
 
 use format::entry_to_line;
 use rotation::RotationState;
-pub use shutdown::AuditShutdownOutcome;
+pub use shutdown::{AuditFinalFlush, AuditShutdownOutcome};
 
 #[cfg(test)]
 #[path = "tests/audit_appender_tests_manifest.rs"]
@@ -436,6 +436,12 @@ impl FjallAuditAppender {
         });
 
         // Spawn the background flusher.
+        //
+        // The flush waits on the persistence gate, which a checkpoint can
+        // hold across its own fsync, so the gate + drain run on a blocking
+        // thread that this task awaits: the flusher's poll never sits inside
+        // a `parking_lot` gate wait, which on a current-thread runtime would
+        // stall the whole runtime (shutdown deadline timer included).
         let weak = Arc::downgrade(&me);
         let task = tokio::spawn(async move {
             loop {
@@ -448,12 +454,24 @@ impl FjallAuditAppender {
                 let Some(strong) = weak.upgrade() else {
                     break;
                 };
-                let result = blocking_io(|| {
+                // A stop request wins over one more flush: the caller's
+                // final flush drains the buffer anyway.
+                if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let result = tokio::task::spawn_blocking(move || {
                     let _guard = strong.acquire_persistence_gate();
                     strong.flush_buffer_locked()
-                });
-                if let Err(error) = result {
-                    tracing::error!(%error, "audit background flush failed; appender latched fail-closed");
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "audit background flush failed; appender latched fail-closed");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "audit background flush job failed; appender latched fail-closed");
+                    }
                 }
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
@@ -617,17 +635,22 @@ impl FjallAuditAppender {
     /// [`Self::join_flusher`], [`Self::final_flush_blocking`]) are also
     /// available separately so the server's bounded audit teardown can
     /// budget each one and report which failed; this wrapper keeps the
-    /// historical stop-join-flush order and returns both results.
+    /// historical stop-join-flush order and returns all three results.
     pub async fn shutdown(&self) -> AuditShutdownOutcome {
         self.request_flusher_stop();
         let flusher_join_error = self.join_flusher().await.err();
-        let flush_error = blocking_io(|| self.final_flush_blocking()).err();
-        if let Some(error) = &flush_error {
+        let final_flush = blocking_io(|| self.final_flush_blocking());
+        let reason = final_flush
+            .flush_error
+            .as_ref()
+            .or(final_flush.anchor_error.as_ref());
+        if let Some(error) = reason {
             tracing::error!(%error, "audit appender final shutdown flush failed; latched fail-closed");
         }
         AuditShutdownOutcome {
             flusher_join_error,
-            flush_error,
+            flush_error: final_flush.flush_error,
+            anchor_error: final_flush.anchor_error,
         }
     }
 

@@ -14,7 +14,7 @@ use crate::audit_appender::FjallAuditAppender;
 use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
-use crate::server::audit_teardown::{teardown_audit, AuditTeardown};
+use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::server::store_release_barrier::wait_stores_released;
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
@@ -168,7 +168,9 @@ pub struct ServerHandle {
     /// `shamir-server` that tries to open the same `data_dir` gets
     /// `BootError::AlreadyRunning` instead of silently corrupting the
     /// redb stores. Do NOT explicitly unlock — drop is the release.
-    pub(super) _data_dir_lock: std::fs::File,
+    /// `None` once [`ServerHandle::take_shutdown_owner`] moved it out for the
+    /// embedding path.
+    pub(super) data_dir_lock: Option<std::fs::File>,
     /// Instance-level runtime tunables. Initialized from `instance_defaults`
     /// consts — reads are a single atomic load (instant, non-blocking).
     /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
@@ -224,6 +226,39 @@ async fn join_backup_schedule(
     }
 }
 
+/// The shutdown state that must OUTLIVE the bounded shutdown wait.
+///
+/// `runtime::serve` wraps the shutdown future in a deadline; on expiry that
+/// future is dropped, and with it anything it still owns. These two must not
+/// be dropped there: the scheduled-backup worker is a native thread that keeps
+/// writing under the data directory after its last cancellation checkpoint,
+/// and the single-instance lock must not be released while it does — an
+/// embedding process would otherwise see I/O and a free data dir that outlive
+/// `serve`. The deadline still marks the report unclean; it only bounds the
+/// audit/repository teardown.
+pub(crate) struct ShutdownOwner {
+    schedule_task: Option<(DropGuard, JoinHandle<()>)>,
+    data_dir_lock: Option<std::fs::File>,
+}
+
+impl ShutdownOwner {
+    /// Await the scheduled worker, then release the instance lock by drop.
+    ///
+    /// Deliberately unbounded: a run already past its last cooperative
+    /// cancellation checkpoint has to finish its own cleanup. Only an
+    /// embedding caller that never returns can wait here.
+    pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
+        if let Some((_guard, task)) = self.schedule_task.take() {
+            if let Err(error) = task.await {
+                report.add_error(format!("backup schedule task failed: {error}"));
+            }
+        }
+        // Released here, after the scheduled worker finished — never
+        // explicitly unlocked (drop is the release).
+        drop(self.data_dir_lock.take());
+    }
+}
+
 impl ServerHandle {
     /// What the boot-time format-stamp check did to `data_dir`.
     pub fn format_stamp(&self) -> shamir_sync::format_stamp::StampOutcome {
@@ -242,6 +277,21 @@ impl ServerHandle {
 
     pub(crate) fn pending_shutdown_report(&self) -> ShutdownReport {
         self.shamir.shutdown_report()
+    }
+
+    /// Move the scheduled worker and the instance lock out of the handle.
+    ///
+    /// `runtime::serve` calls this BEFORE it wraps the shutdown future in its
+    /// deadline, so expiry can abandon the audit/repository teardown without
+    /// dropping a running native backup thread or releasing the data directory.
+    /// Callers that keep the handle until it is consumed (`shutdown`,
+    /// `shutdown_with_report`) are unaffected: they still join the worker and
+    /// drop the lock themselves.
+    pub(crate) fn take_shutdown_owner(&mut self) -> ShutdownOwner {
+        ShutdownOwner {
+            schedule_task: self.backup_schedule_task.take(),
+            data_dir_lock: self.data_dir_lock.take(),
+        }
     }
 
     /// cancel-safe: NO — joins and flushes may be incomplete; caller retains
@@ -364,7 +414,9 @@ impl ServerHandle {
         //    (buffered-store flushers, connection tasks) can outlive the
         //    steps above; returning before they finish made an immediate
         //    relaunch of the same data dir fail with `Locked`. The
-        //    single-instance `_data_dir_lock` is released last, on return.
+        //    single-instance `data_dir_lock` is released last, on return — or
+        //    by the embedding caller when [`ServerHandle::take_shutdown_owner`]
+        //    owns it.
         let data_dir = self.data_dir;
         drop(self.shamir);
         drop(self.audit_appender);

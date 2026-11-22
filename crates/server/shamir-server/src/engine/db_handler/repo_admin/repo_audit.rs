@@ -1,3 +1,4 @@
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,6 +112,16 @@ struct CancelRefusalDetails<'a> {
 // The low bits count queued and running jobs; the high bits close admission
 // and latch the first rejected submission of each saturation episode.
 const CANCEL_AUDIT_CAPACITY: usize = 256;
+/// Share of the queue one principal may hold (queued + running jobs). An
+/// eighth of the global cap, so at least eight principals keep their whole
+/// share while the global cap binds and no single principal can starve the
+/// rest. Enforced per hash bucket of the principal name: a collision only
+/// tightens a bucket's share, never loosens it, and the accounting stays a
+/// fixed array instead of an unbounded per-name map on a non-waiting path.
+pub(crate) const CANCEL_AUDIT_PRINCIPAL_SHARE: usize = 32;
+/// Buckets for the per-principal share (`CANCEL_AUDIT_PRINCIPAL_SHARE * 32`
+/// exceeds the global cap, so buckets never bind before the share does).
+const CANCEL_AUDIT_PRINCIPAL_BUCKETS: usize = 32;
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const SATURATED: usize = CLOSED >> 1;
 const COUNT_MASK: usize = !(CLOSED | SATURATED);
@@ -121,25 +132,54 @@ pub(crate) struct CancelRefusalAudit {
     state: AtomicUsize,
     dropped: AtomicUsize,
     idle: Notify,
+    /// Queued + running jobs per principal bucket. Only ever touched by the
+    /// non-waiting CAS in `try_reserve` and the slot's `Drop`, so the
+    /// contention model is "one CAS pair per refusal" with no lock.
+    principals: [AtomicUsize; CANCEL_AUDIT_PRINCIPAL_BUCKETS],
     /// Abort handles of accepted-but-unfinished audit jobs. Bounded by
     /// `CANCEL_AUDIT_CAPACITY` live slots (finished entries are pruned on
-    /// the next refusal), only ever pushed on a refusal — never on the
-    /// cancel reply path — and read once at teardown, so the contention
-    /// model is "a bounded push per refusal".
+    /// the next refusal), taken once per accepted refusal for one bounded
+    /// push plus a prune of finished handles, and once at teardown; it is
+    /// never held across an `.await`. The client-visible cancel REPLY is
+    /// produced before any of this and does not wait on the audit.
     unfinished: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 impl CancelRefusalAudit {
-    fn try_reserve(self: &Arc<Self>) -> Option<CancelAuditSlot> {
+    fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
+        let bucket = principal_bucket(principal);
+        let mut held = self.principals[bucket].load(Ordering::Acquire);
+        loop {
+            if held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
+                let dropped = self.record_drop();
+                tracing::warn!(
+                    share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+                    dropped,
+                    "cancel refusal audit principal share full; dropping event"
+                );
+                return None;
+            }
+            match self.principals[bucket].compare_exchange_weak(
+                held,
+                held + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => held = current,
+            }
+        }
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CLOSED != 0 {
+                self.principals[bucket].fetch_sub(1, Ordering::AcqRel);
                 let dropped = self.record_drop();
                 tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
                 return None;
             }
             let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
             if full && state & SATURATED != 0 {
+                self.principals[bucket].fetch_sub(1, Ordering::AcqRel);
                 self.record_drop();
                 return None;
             }
@@ -149,6 +189,7 @@ impl CancelRefusalAudit {
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) if full => {
+                    self.principals[bucket].fetch_sub(1, Ordering::AcqRel);
                     let dropped = self.record_drop();
                     tracing::warn!(
                         capacity = CANCEL_AUDIT_CAPACITY,
@@ -160,6 +201,7 @@ impl CancelRefusalAudit {
                 Ok(_) => {
                     return Some(CancelAuditSlot {
                         queue: Arc::clone(self),
+                        bucket,
                         appended: false,
                     });
                 }
@@ -201,12 +243,30 @@ impl CancelRefusalAudit {
         }
     }
 
-    /// Remember one accepted job's abort handle, pruning finished ones.
-    fn track(&self, handle: tokio::task::AbortHandle) {
-        if let Ok(mut handles) = self.unfinished.lock() {
-            handles.retain(|queued| !queued.is_finished());
-            handles.push(handle);
+    /// Register one accepted job's abort handle, pruning finished ones.
+    ///
+    /// Invariant: `close()` is always called before `discard_queued()`, and
+    /// the closed-bit test and the push happen under the same mutex the
+    /// discard sweep drains, so a job is either swept or aborted — it is
+    /// never registered after the sweep.
+    fn track_or_abort(&self, handle: tokio::task::AbortHandle) {
+        let mut handles = match self.unfinished.lock() {
+            Ok(handles) => handles,
+            Err(_) => {
+                // Poisoned: the queue is unusable, so never leave the job
+                // running past teardown.
+                handle.abort();
+                return;
+            }
+        };
+        if self.state.load(Ordering::Acquire) & CLOSED != 0 {
+            // `close()` already ran, so the discard sweep either saw nothing or
+            // has already passed this job: abort it here instead of tracking it.
+            handle.abort();
+            return;
         }
+        handles.retain(|queued| !queued.is_finished());
+        handles.push(handle);
     }
 
     pub(crate) async fn drain(&self) -> bool {
@@ -238,6 +298,7 @@ impl CancelRefusalAudit {
 
 struct CancelAuditSlot {
     queue: Arc<CancelRefusalAudit>,
+    bucket: usize,
     appended: bool,
 }
 
@@ -246,6 +307,7 @@ impl Drop for CancelAuditSlot {
         if !self.appended {
             self.queue.record_drop();
         }
+        self.queue.principals[self.bucket].fetch_sub(1, Ordering::AcqRel);
         // Releasing any slot necessarily makes the queue non-full. Clear
         // the saturation latch in the same transition as the decrement.
         let mut state = self.queue.state.load(Ordering::Acquire);
@@ -313,7 +375,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
         CancelOutcome::NotCancellable => "not_cancellable",
         CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished => return None,
     };
-    let slot = queue.try_reserve()?;
+    let slot = queue.try_reserve(&session.username)?;
     let details = match rmp_serde::to_vec_named(&CancelRefusalDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
@@ -361,8 +423,15 @@ pub(super) fn enqueue_cancel_refusal_audit(
         });
         guard.complete(appended);
     });
-    queue.track(job.abort_handle());
+    queue.track_or_abort(job.abort_handle());
     Some(job)
+}
+
+/// Map a principal name to its share bucket. `THasher` is the workspace's
+/// deterministic, unseeded hasher; a collision only makes the share tighter.
+fn principal_bucket(principal: &str) -> usize {
+    let hashed = shamir_collections::THasher::default().hash_one(principal);
+    (hashed as usize) % CANCEL_AUDIT_PRINCIPAL_BUCKETS
 }
 
 pub(super) fn repo_audit_observer(

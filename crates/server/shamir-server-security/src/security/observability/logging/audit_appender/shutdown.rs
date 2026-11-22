@@ -23,15 +23,37 @@ pub struct AuditShutdownOutcome {
     /// cancelled): its buffered entries were drained by the final flush,
     /// but the task itself did not end cleanly.
     pub flusher_join_error: Option<String>,
-    /// The final drain, anchor write or server-meta hook failed. The
-    /// appender is latched fail-closed either way.
+    /// The final drain or its log sync failed. The appender is latched
+    /// fail-closed either way.
     pub flush_error: Option<String>,
+    /// The chain anchor write or the server-meta hook failed. The appender
+    /// is latched fail-closed either way.
+    pub anchor_error: Option<String>,
 }
 
 impl AuditShutdownOutcome {
+    /// All three steps completed without an error.
+    pub fn is_ok(&self) -> bool {
+        self.flusher_join_error.is_none()
+            && self.flush_error.is_none()
+            && self.anchor_error.is_none()
+    }
+}
+
+/// One final-close result, split by step so the caller reports an anchor or
+/// metadata failure as such instead of as a plain flush failure.
+#[derive(Clone, Debug, Default)]
+pub struct AuditFinalFlush {
+    /// The final drain of the buffer or its log sync failed.
+    pub flush_error: Option<String>,
+    /// The chain anchor row or the server-metadata hook failed.
+    pub anchor_error: Option<String>,
+}
+
+impl AuditFinalFlush {
     /// Both steps completed without an error.
     pub fn is_ok(&self) -> bool {
-        self.flusher_join_error.is_none() && self.flush_error.is_none()
+        self.flush_error.is_none() && self.anchor_error.is_none()
     }
 }
 
@@ -66,20 +88,48 @@ impl FjallAuditAppender {
         handle.await.map_err(|error| error.to_string())
     }
 
-    /// Final batched drain, anchor persistence and server-meta hook.
+    /// Final batched drain, anchor persistence and server-meta hook,
+    /// reported per step.
     ///
-    /// Synchronous by design (it acquires the persistence gate and fsyncs):
-    /// the caller runs it on a blocking thread so the shutdown future's poll
-    /// is never the thread that waits for the gate. Retention sweeps stay
-    /// rotation-only. Anchor and hook failures latch fail-closed.
-    pub fn final_flush_blocking(&self) -> Result<(), String> {
-        let result = self
-            .flush_buffer_locked()
-            .and_then(|()| self.persist_anchor_and_meta());
-        if let Err(error) = &result {
-            *self.failed.lock() = Some(error.to_string());
+    /// Synchronous by design: it takes the persistence gate itself and
+    /// fsyncs, so the caller runs it on a blocking thread and the shutdown
+    /// future's poll never waits for whoever holds the gate. Both helpers it
+    /// calls require the caller to own the gate, so the gate is acquired
+    /// here. Strict mode does nothing (entries are already durable) and
+    /// touches no gate. A failed drain skips the anchor, so the anchor cannot
+    /// advance past lost log records; retention sweeps stay rotation-only.
+    /// Either failure latches fail-closed.
+    pub fn final_flush_blocking(&self) -> AuditFinalFlush {
+        if let Durab::Strict = &self.mode {
+            return AuditFinalFlush::default();
         }
-        result.map_err(|error| error.to_string())
+        let _guard = self.acquire_persistence_gate();
+        // `flush_buffer_locked` already latches its own failure; its error
+        // also means the anchor must not move.
+        let flush_error = match self.flush_buffer_locked() {
+            Ok(()) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        if flush_error.is_some() {
+            return AuditFinalFlush {
+                flush_error,
+                anchor_error: None,
+            };
+        }
+        // The anchor/metadata step does not latch on its own (it also runs at
+        // rotation), so latch it here exactly as the single result did.
+        let anchor_error = match self.persist_anchor_and_meta() {
+            Ok(()) => None,
+            Err(error) => {
+                let message = error.to_string();
+                *self.failed.lock() = Some(message.clone());
+                Some(message)
+            }
+        };
+        AuditFinalFlush {
+            flush_error: None,
+            anchor_error,
+        }
     }
 }
 

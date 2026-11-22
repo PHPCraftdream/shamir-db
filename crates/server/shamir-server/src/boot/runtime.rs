@@ -14,8 +14,13 @@ use crate::config::Config;
 use crate::server::{BootstrapMode, ServerLauncher};
 
 /// Maximum time to wait for in-flight connections to drain after receiving
-/// a shutdown signal. If the deadline expires, we return an unclean report
-/// so the process exits (the OS reclaims sockets).
+/// a shutdown signal. If the deadline expires, we return an unclean report.
+///
+/// The deadline bounds the audit + repository teardown only: on expiry that
+/// shutdown future is dropped and the report is marked unclean, but the
+/// scheduled-backup worker and the data-directory lock are owned outside it
+/// and are still awaited before [`serve`] returns. There is no forced exit
+/// and nothing calls `std::process::exit`.
 const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Boot the server, wait for `shutdown`, then drain gracefully.
@@ -27,7 +32,10 @@ const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 /// After the shutdown signal fires, the drain phase is bounded by
 /// [`SHUTDOWN_DEADLINE`]. If draining exceeds the deadline (e.g. a stuck
 /// connection), we return an unclean report rather than blocking
-/// indefinitely.
+/// indefinitely. The bound covers the audit + repository teardown; the
+/// scheduled-backup worker and the data-directory lock are owned outside it
+/// and are still awaited before this function returns (there is no forced
+/// exit and nothing calls `std::process::exit`).
 pub async fn serve(
     config: Config,
     bootstrap: BootstrapMode,
@@ -39,10 +47,14 @@ pub async fn serve(
         bootstrap,
         ..launcher
     };
-    let handle = launcher
+    let mut handle = launcher
         .launch()
         .await
         .map_err(|e| anyhow::anyhow!("server boot failed: {e}"))?;
+
+    // Taken BEFORE the deadline below: expiry drops the shutdown future, and a
+    // running native backup thread plus the instance lock must survive that.
+    let shutdown_owner = handle.take_shutdown_owner();
 
     tracing::info!(
         bound = ?handle.bound_addrs.iter().filter_map(|a| *a).collect::<Vec<_>>(),
@@ -55,10 +67,14 @@ pub async fn serve(
     tracing::info!("shutting down");
 
     let mut report = handle.pending_shutdown_report();
-    let report = finish_shutdown(SHUTDOWN_DEADLINE, &mut report, |report| {
+    let mut report = finish_shutdown(SHUTDOWN_DEADLINE, &mut report, |report| {
         Box::pin(handle.shutdown_with_report(report))
     })
     .await;
+    // Outside the deadline: the scheduled worker is still awaited before this
+    // embedding path returns, and its data-directory lock is only released
+    // after it finished. Expiry only marked the report unclean.
+    shutdown_owner.drain(&mut report).await;
     crate::observability::record_shutdown(&report);
     Ok(report)
 }

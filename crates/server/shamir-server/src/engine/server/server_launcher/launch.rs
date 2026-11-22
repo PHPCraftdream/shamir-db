@@ -33,11 +33,11 @@ use crate::db_handler::{
 use crate::http_ws::{PreAuthAdmission, TokenWsCancelRegistry};
 use crate::ports::DirectoryPorts;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
-use crate::server::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::server::boot_error::BootError;
 use crate::server::bootstrap_mode::BootstrapMode;
 use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
 use crate::server::server_handle::ServerHandle;
+use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::tables_registry::TablesRegistry;
 use crate::user_directory::ScramDerivationGate;
 
@@ -823,7 +823,7 @@ impl ServerLauncher {
             data_dir: config.data_dir.clone(),
             conn_tasks: conn_tasks.clone(),
             format_stamp,
-            _data_dir_lock: data_dir_lock,
+            data_dir_lock: Some(data_dir_lock),
             tunables: Arc::new(RuntimeTunables::new()),
             // Tests drive the real handler and scrape the actual bound metrics address.
             #[cfg(test)]

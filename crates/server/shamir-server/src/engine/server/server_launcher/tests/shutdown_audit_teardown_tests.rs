@@ -4,22 +4,25 @@
 //! Both tests drive the REAL production launcher over a real data dir:
 //!
 //! * [`shutdown_reports_audit_timeout_while_checkpoint_holds_gate`] arms the
-//!   audit appender's persistence-gate hook (`test-hooks` feature) and runs
-//!   a REAL checkpoint on a separate thread, which therefore holds the real
-//!   `parking_lot` gate for as long as the test keeps it. Shutdown must
-//!   report an audit timeout and must still finish the repository teardown
-//!   before the gate is released — the old code awaited the flusher and then
-//!   took that same gate inline, so it could never return.
+//!   audit appender's persistence-gate hook (`test-hooks` feature) and runs a
+//!   REAL checkpoint on a blocking thread inside it, so the checkpoint owns
+//!   the real `parking_lot` persistence gate for as long as the test keeps
+//!   it. The audit deadline must fire while that gate is still held: shutdown
+//!   returns with the `audit teardown exceeded` prefix and the repository
+//!   teardown still completes. The gate is released before any assertion
+//!   runs, so a failing claim can never strand the checkpoint inside it.
 //! * [`shutdown_report_is_unclean_when_audit_flush_fails`] arms the
-//!   appender's one-shot flush fault and asserts the failure reaches
-//!   `ShutdownReport` (unclean, exit code 70) instead of being discarded.
+//!   appender's one-shot flush fault and asserts the failed final flush
+//!   reaches `ShutdownReport` exactly once (unclean, exit code 70) instead of
+//!   being discarded.
 //!
-//! No sleeps are used for synchronization: both rendezvous are channels;
-//! every await is bounded by [`CALL_TIMEOUT`].
+//! No sleeps are used for synchronization: the gate rendezvous is a condition
+//! variable and every wait is bounded by [`CALL_TIMEOUT`]; an expired bound is
+//! a hard failure naming its stage, never an unbounded park.
 
 use std::future::Future;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChainWriter};
@@ -76,19 +79,17 @@ async fn run_audit_timeout_while_gate_held() {
     // thread. The hook runs while that thread owns the persistence gate, so
     // blocking in it keeps the gate held for the whole shutdown stage.
     let appender = Arc::clone(&handle.audit_appender);
-    // (entered, released): the hook runs while the checkpoint owns the real
-    // persistence gate, so it parks there until the test releases it.
-    let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
     appender.arm_gate_acquired_hook({
         let gate = Arc::clone(&gate);
         Arc::new(move || {
-            let (lock, condvar) = &*gate;
-            let mut state = lock.lock().expect("gate state");
-            state.0 = true;
-            condvar.notify_all();
-            while !state.1 {
-                state = condvar.wait(state).expect("gate wait");
+            {
+                let (lock, condvar) = &*gate;
+                let mut state = lock.lock().expect("gate state");
+                state.entered = true;
+                condvar.notify_all();
             }
+            wait_until(&gate, "gate release", |state| state.released);
         })
     });
     let holder = tokio::task::spawn_blocking({
@@ -98,25 +99,33 @@ async fn run_audit_timeout_while_gate_held() {
     // The checkpoint runs on a blocking thread, so waiting for the
     // rendezvous on this (current-thread runtime) task blocks nothing that
     // the handshake needs.
-    {
-        let (lock, condvar) = &*gate;
-        let mut state = lock.lock().expect("gate state");
-        while !state.0 {
-            state = condvar.wait(state).expect("gate wait");
-        }
-    }
-    assert!(
-        !holder.is_finished(),
-        "the checkpoint must still hold the gate"
-    );
+    wait_until(&gate, "gate rendezvous", |state| state.entered);
     guard.mark("real checkpoint holds the audit persistence gate");
 
-    // No refusal is queued, so the drain is immediate: the deadline is spent
-    // on the flusher join / final flush that need the held gate.
-    let report = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown()))
-        .await
-        .expect("shutdown future must finish inside the bound");
+    // Observations only until the gate is released: the watchdog only logs,
+    // so a panic here would park the checkpoint inside the real persistence
+    // gate for the rest of the process. No refusal is queued, so the drain is
+    // immediate and the deadline is spent on the flusher join / final flush
+    // that need the held gate.
+    let shutdown = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown())).await;
+    let shutdown_returned_while_gate_held = !holder.is_finished();
+    let shutdown_report = shutdown.ok();
     guard.mark("shutdown returned while the gate was still held");
+
+    // Unconditional release, then join; assertions run only afterwards.
+    release_gate(&gate);
+    let checkpoint = tokio::time::timeout(CALL_TIMEOUT, holder)
+        .await
+        .expect("released checkpoint deadline")
+        .expect("checkpoint task");
+    checkpoint.expect("held checkpoint must succeed");
+    guard.mark("released gate and joined the checkpoint");
+
+    let report = shutdown_report.expect("shutdown future must finish inside the bound");
+    assert!(
+        shutdown_returned_while_gate_held,
+        "shutdown must return while the real checkpoint still holds the gate: {report:?}"
+    );
     assert!(
         report
             .errors()
@@ -131,18 +140,6 @@ async fn run_audit_timeout_while_gate_held() {
         "repository teardown must still complete: {report:?}"
     );
     assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
-
-    {
-        let (lock, condvar) = &*gate;
-        let mut state = lock.lock().expect("gate state");
-        state.1 = true;
-        condvar.notify_all();
-    }
-    let _ = tokio::time::timeout(CALL_TIMEOUT, holder)
-        .await
-        .expect("released checkpoint deadline")
-        .expect("checkpoint task");
-    guard.mark("released gate and joined the checkpoint");
 }
 
 async fn run_audit_flush_failure() {
@@ -198,9 +195,59 @@ async fn run_audit_flush_failure() {
             .any(|error| error.contains("audit flush failed at shutdown")),
         "the audit flush error must reach the report: {report:?}"
     );
+    // Each distinct failure is reported once: a latch observed by more than
+    // one step must not duplicate the prefix in the report.
+    let flush_failures = report
+        .errors()
+        .iter()
+        .filter(|error| error.contains("audit flush failed at shutdown"))
+        .count();
+    assert_eq!(
+        flush_failures, 1,
+        "the audit flush failure must be reported exactly once: {report:?}"
+    );
     assert!(!report.is_clean(), "unclean report expected: {report:?}");
     assert_eq!(report.exit_code(), 70, "supervisor exit code");
     guard.mark("shutdown reported the audit flush failure");
+}
+
+/// The test rendezvous with the REAL persistence-gate hook.
+#[derive(Clone, Copy, Default)]
+struct GateState {
+    /// The real checkpoint owns the persistence gate and is parked inside the
+    /// hook.
+    entered: bool,
+    /// The test released the hook; the checkpoint may finish and drop the
+    /// gate.
+    released: bool,
+}
+
+/// Block until `ready` holds, bounded by [`CALL_TIMEOUT`] from a deadline
+/// taken when the wait starts. An expired bound is a hard failure naming the
+/// stage, so no rendezvous in this file can park a thread forever.
+fn wait_until(gate: &(Mutex<GateState>, Condvar), stage: &str, ready: impl Fn(GateState) -> bool) {
+    let (lock, condvar) = gate;
+    let deadline = Instant::now() + CALL_TIMEOUT;
+    let mut state = lock.lock().expect("gate state");
+    while !ready(*state) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (next, timed_out) = condvar
+            .wait_timeout(state, remaining)
+            .expect("gate state wait");
+        state = next;
+        if timed_out.timed_out() && !ready(*state) {
+            panic!("{stage} did not happen within {CALL_TIMEOUT:?}");
+        }
+    }
+}
+
+/// Release the parked checkpoint. Called on every path that saw the gate
+/// entered, so no failure can leave the checkpoint inside it.
+fn release_gate(gate: &(Mutex<GateState>, Condvar)) {
+    let (lock, condvar) = gate;
+    let mut state = lock.lock().expect("gate state");
+    state.released = true;
+    condvar.notify_all();
 }
 
 fn on_big_stack<F, Fut>(body: F)
