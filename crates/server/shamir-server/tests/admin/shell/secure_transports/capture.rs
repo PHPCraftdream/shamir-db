@@ -1,6 +1,6 @@
 //! The scripted REPL driven through a real child process (review items
 //! 6a/6b): the entry test below runs the production
-//! [`crate::shell::parser::run_scripted`] loop with the real process stdin
+//! [`crate::shell::parser::run::run_scripted`] loop with the real process stdin
 //! and stderr, so the parent captures INDEPENDENT real stdout and stderr
 //! pipes — the human result stays on stderr by design; the child's stdout
 //! legitimately carries only libtest framing, and the parent scans ALL
@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use tokio::io::AsyncWriteExt;
 
 use crate::shell::output::ShellError;
-use crate::shell::parser::run_scripted;
+use crate::shell::parser::run::run_scripted;
 use crate::shell::terminal::secret::{HiddenLineSession, Terminal};
 
 use crate::shell_tests::harness::{ShellRun, PROFILE_NAME};

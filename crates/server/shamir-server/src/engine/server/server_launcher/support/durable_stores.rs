@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::durable_counters::FjallConsumedCounters;
-use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode, StampOutcome};
+use shamir_sync::format_stamp::{
+    check_data_dir, inspect, EpochPolicy, IgnoreSet, StampError as FsStampError, StampMode,
+    StampOutcome, StampState, CURRENT_FORMAT_EPOCH,
+};
 
 use crate::audit_appender::FjallAuditAppender;
 use crate::bootstrap::{
@@ -29,6 +32,10 @@ pub(super) struct DurableStores {
     pub(super) counters: Arc<FjallConsumedCounters>,
     pub(super) audit_appender: Arc<FjallAuditAppender>,
     pub(super) kdf_for_bootstrap: KdfParams,
+    /// Format epoch observed in the data directory after a successful
+    /// Writer check (fail-closed classification below). Used by the boot
+    /// path for operator diagnostics.
+    pub(super) observed_format_epoch: u64,
 }
 
 pub(super) async fn open(
@@ -71,6 +78,32 @@ pub(super) async fn open(
         &format_stamp_ignore,
         &EpochPolicy::compiled(),
     )?;
+
+    // Capture the observed format epoch (design 2.5). A successful Writer
+    // check guarantees a valid stamp; the re-read below must agree or boot
+    // fails closed with the corresponding typed error.
+    let observed_format_epoch = match inspect(&config.data_dir) {
+        StampState::Valid(stamp) => stamp.format_epoch(),
+        StampState::Corrupt { kind } => {
+            return Err(BootError::FormatStamp(FsStampError::Corrupt {
+                dir: config.data_dir.clone(),
+                kind,
+            }));
+        }
+        StampState::NewerLayout { layout, epoch } => {
+            return Err(BootError::FormatStamp(FsStampError::NewerLayout {
+                dir: config.data_dir.clone(),
+                layout,
+                epoch,
+            }));
+        }
+        StampState::Absent { .. } => {
+            return Err(BootError::FormatStamp(FsStampError::AbsentOlderBase {
+                dir: config.data_dir.clone(),
+                current: CURRENT_FORMAT_EPOCH,
+            }));
+        }
+    };
 
     let meta = Arc::new(
         ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
@@ -227,5 +260,6 @@ pub(super) async fn open(
         counters,
         audit_appender,
         kdf_for_bootstrap,
+        observed_format_epoch,
     })
 }

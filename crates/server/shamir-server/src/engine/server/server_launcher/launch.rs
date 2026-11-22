@@ -110,6 +110,9 @@ impl ServerLauncher {
             node_mode,
         } = self;
         config.validate()?;
+        // Operator boot diagnostics: wall-clock origin of this launch, used
+        // with the observed format epoch for the with_operator_boot call.
+        let started_at = std::time::Instant::now();
         let durability = config.durability.resolve_policy()?;
         config.durability.warn_unimplemented_retention();
 
@@ -137,6 +140,7 @@ impl ServerLauncher {
             counters,
             audit_appender,
             kdf_for_bootstrap,
+            observed_format_epoch,
         } = durable_stores::open(&config, &bootstrap).await?;
 
         // 3. In-memory stores.
@@ -439,7 +443,13 @@ impl ServerLauncher {
             .with_byte_budget(byte_budget.clone())
             .with_session_store(session_store.clone())
             .with_node_mode(node_mode)
-            .with_token_service(token_service.clone(), config.tokens.allow_self_service),
+            .with_token_service(token_service.clone(), config.tokens.allow_self_service)
+            .with_operator_boot(
+                started_at,
+                observed_format_epoch,
+                format_stamp,
+                config.replication.as_ref().and_then(|r| r.node_id.clone()),
+            ),
         );
         let cancel_refusal_audit = handler_concrete.cancel_refusal_audit();
         let tx_registry_for_reaper = handler_concrete.tx_registry();

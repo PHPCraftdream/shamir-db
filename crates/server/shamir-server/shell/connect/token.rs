@@ -129,6 +129,43 @@ impl SessionClient {
             Self::TokenRest(session) => session.client.execute(db, batch).await,
         }
     }
+
+    /// Read-only operator status observation (admin-shell PR3, P1; design
+    /// §4.2). SCRAM sessions only: §3.3 puts `status` OUTSIDE the token
+    /// read-only subset, so a token session is refused HERE with the fixed
+    /// typed denial BEFORE any request is sent (zero requests policy; the
+    /// parser gates it too, and the server perimeter denies it as well).
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn status(
+        &self,
+    ) -> Result<shamir_query_types::wire::db_message::OperatorStatus, ShellError> {
+        match self {
+            Self::Scram(client) => client.operator_status().await.map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Typed exact-key point read (admin-shell PR3, P2; design §4.4).
+    /// SCRAM sessions only: §3.3 puts `data get` OUTSIDE the token read-only
+    /// subset, so a token session is refused HERE with the fixed typed
+    /// denial BEFORE any request is sent (zero requests policy). Not a
+    /// cursor: no cursor is created or consumed. cancel-safe: NO — a
+    /// cancelled request may remain in flight.
+    pub(in crate::shell) async fn get_record(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        key: shamir_types::types::record_id::RecordId,
+    ) -> Result<shamir_query_types::read::QueryRecord, ShellError> {
+        match self {
+            Self::Scram(client) => client
+                .get_record(db, repo, table, key)
+                .await
+                .map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
 }
 
 // Only called on catalogue JSON already depth-bounded by output::value.

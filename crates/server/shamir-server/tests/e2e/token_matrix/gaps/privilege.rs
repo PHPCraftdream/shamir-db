@@ -32,7 +32,11 @@ fn classify_request(request: &DbRequest) -> &'static str {
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => "admin-denied",
+        | DbRequest::RevokeUserTokens { .. }
+        // R5 PR3: the operator state snapshot and the exact-key point read
+        // are outside the token read-only subset (§3.3).
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => "admin-denied",
     }
 }
 
@@ -205,7 +209,7 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
     assert!(!cases.is_empty(), "request fixtures are complete");
     assert_eq!(
         cases.len(),
-        10,
+        12,
         "every current admin-denied DbRequest variant has one fixture"
     );
     assert!(!batches.is_empty(), "batch fixtures are complete");

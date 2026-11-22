@@ -346,6 +346,13 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
             user: None,
             hmac: None,
         },
+        shamir_query_builder::wire::admin::status(),
+        shamir_query_builder::wire::admin::get_record(
+            "db",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
     ];
     for request in requests {
         assert_eq!(
@@ -426,5 +433,42 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
             ),
             Decision::NotSupported("not_supported_over_rest")
         );
+    }
+}
+
+#[test]
+fn operator_status_and_point_read_are_denied_for_every_token_mode_channel_and_scope() {
+    // Admin-shell R5 PR3 (release design §3.3): the two new top-level
+    // variants are NOT in the token read-only subset. A scoped database
+    // allowlist must not override the refusal, whatever the payload's
+    // db is — inside or outside the allowlist.
+    let requests = [
+        shamir_query_builder::wire::admin::status(),
+        shamir_query_builder::wire::admin::get_record(
+            "db",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+        shamir_query_builder::wire::admin::get_record(
+            "outside",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+    ];
+    let allow = ["db".to_owned()];
+    let other = ["other".to_owned()];
+    for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+        for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+            for databases in [None, Some(allow.as_slice()), Some(other.as_slice())] {
+                for request in &requests {
+                    assert_eq!(
+                        classify_request(request, mode, databases, endpoint),
+                        Decision::Denied("token_request_denied")
+                    );
+                }
+            }
+        }
     }
 }

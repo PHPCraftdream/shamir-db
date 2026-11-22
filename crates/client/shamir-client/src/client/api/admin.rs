@@ -197,3 +197,29 @@ impl Client {
         }
     }
 }
+
+impl Client {
+    /// Read-only operator status observation (admin-shell PR3, P1).
+    ///
+    /// Named `operator_status`: `Client::status` is already taken by the
+    /// schema-migration status read (`receipts/schema_migration/status.rs`)
+    /// and two inherent impls cannot repeat a method name.
+    ///
+    /// Superuser-class, SCRAM-session only: a token session is refused
+    /// client-side before any request is sent (`require_scram`; the
+    /// server perimeter also denies it with `token_request_denied`).
+    /// The snapshot carries what the server observed at boot plus live
+    /// telemetry; the replication gap is a merged, non-authoritative
+    /// aggregate (`gap_versions_merged`) and the per-repository age is
+    /// always `unknown`.
+    pub async fn operator_status(
+        &self,
+    ) -> Result<shamir_query_types::wire::db_message::OperatorStatus, ClientError> {
+        self.require_scram()?;
+        let req = shamir_query_builder::wire::admin::status();
+        match self.roundtrip(&req).await? {
+            DbResponse::Status { status } => Ok(status),
+            _ => Err(ClientError::Protocol("expected Status response".into())),
+        }
+    }
+}

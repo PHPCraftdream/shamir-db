@@ -20,7 +20,7 @@ use tokio::io::AsyncWriteExt as _;
 use zeroize::Zeroizing;
 
 use crate::shell::output::ShellError;
-use crate::shell::parser::run_scripted;
+use crate::shell::parser::run::run_scripted;
 use crate::shell::terminal::secret::HiddenLineSession;
 use crate::shell::terminal::secret::Terminal;
 

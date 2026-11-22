@@ -1,0 +1,425 @@
+//! Operator-state and narrow data read handlers (admin-shell PR3).
+//!
+//! Holds BOTH PR3 halves: the P2 exact-key point read
+//! ([`DbRequest::GetRecord`] → [`DbResponse::Record`]) and the P1 typed
+//! `status` request ([`DbRequest::Status`] → [`DbResponse::Status`]).
+//! The module name is the design's (`operator_state.rs`), mounted
+//! through the same `#[path = "repo_admin/..."]` mechanism as
+//! `cursor_support` / `execute` / `tx_handlers`, because `db_handler/`
+//! itself is over its folder-entry limit while `repo_admin/` has room.
+//!
+//! # P2 semantics (design §4.4/§4.11)
+//!
+//! A typed, top-level point read — NOT a `BatchOp`, no cursor is
+//! created and no cursor path is engaged:
+//!
+//! 1. Authorization FIRST, before any lookup: the exact two-call ACL of
+//!    [`authorize_cursor_read`] (`Action::Read` on the `Database`, then
+//!    on the `Table`; the ancestor walk inside `authorize_access` covers
+//!    the `Store` link). Authorizing before resolution keeps an
+//!    unauthorized caller's response indistinguishable from a genuine
+//!    not-found (same property `get_ddl_op_status` relies on).
+//! 2. The same repository quarantine probe as the cursor read path
+//!    ([`quarantine_cursor_error`] — one `read_quarantine_reason`
+//!    atomic-map probe, the same reason the batch path carries inside
+//!    `BatchError::ResyncRequired`).
+//! 3. Per-session in-flight slot (`Session::try_acquire_request_slot`,
+//!    after auth — an exhausted session gets the fixed-text `server_busy`
+//!    rejection before any engine work; stateless handle-0 sessions skip
+//!    the cap, same as `try_track_activity_request`).
+//! 4. A single fixed-16-byte [`RecordId`] lookup. Resolve the parent
+//!    database/repository with `resolve_repo` (typed `unknown_db` /
+//!    `unknown_repo` from its explicit `BatchError.code`), then acquire
+//!    the table through `ShamirDb::get_table`, which rechecks the
+//!    repository quarantine at acquisition; the table's own `get`
+//!    rechecks its reopen fence. A typed `DbError::NotFound` from table
+//!    acquisition maps to `unknown_table`; other error variants retain
+//!    their distinct mappings. There is no table-list scan, record scan,
+//!    or cursor.
+//! 5. The record is converted through the SAME decoding the batch read
+//!    path uses: `InnerValue` → `QueryValue` via the table's interner
+//!    read view (`inner_to_query_value`, the changelog decoder's codec),
+//!    wrapped as the batch path's canonical `QueryRecord::Direct`.
+//! 6. The existing result controls, mirrored from
+//!    `cursor_handlers/budget.rs` and the batch `execute` path: an
+//!    upfront RI-15 reservation when the budget AND a finite result cap
+//!    are active, one serialization of the full `DbResponse` envelope,
+//!    rejection (`result_too_large`) when it exceeds
+//!    `query_limits.max_result_size_bytes`, shrink of the reservation to
+//!    the actual size, and a stash of the exact bytes via
+//!    `byte_budget::stash_serialized_response` so
+//!    `RequestHandler::handle` reuses them instead of re-encoding.
+
+use core::num::NonZeroU64;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use shamir_collections::TFxMap;
+
+use shamir_connect::server::session::Session;
+use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
+use shamir_db::engine::repo::DurabilityPolicy;
+use shamir_query_types::durability::DurabilityOverride;
+use shamir_query_types::read::QueryRecord;
+use shamir_query_types::wire::{
+    DbResponse, OperatorStatus, StatusReplication, StatusRepository, StatusRole,
+    StatusStampOutcome, StatusWal,
+};
+use shamir_types::types::record_id::RecordId;
+
+use super::activity::server_busy_response;
+use super::config::NodeMode;
+use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard};
+use crate::db_handler::cursor_handlers::error_response;
+use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
+use crate::db_handler::handler::{session_actor, ShamirDbHandler};
+use crate::db_handler::visibility_handlers::quarantine_cursor_error;
+
+/// Map an engine [`shamir_db::DbError`] onto the coarse wire `code` tag,
+/// mirroring `handler.rs`'s `get_ddl_op_status` mapping (`validation` /
+/// `not_found` / `query`) with one addition: the quarantine gate inside
+/// `ShamirDb::get_table` surfaces as `resync_required` (defense in
+/// depth — the probe above normally fires first).
+fn db_error_response(e: shamir_db::DbError) -> DbResponse {
+    let code = match &e {
+        shamir_db::DbError::NotFound(_) => "not_found",
+        shamir_db::DbError::Validation(_) => "validation",
+        shamir_db::DbError::ResyncRequired(_) => "resync_required",
+        _ => "query",
+    };
+    DbResponse::Error {
+        code: code.to_string(),
+        message: e.to_string(),
+    }
+}
+
+/// Map a `NotFound` from `ShamirDb::get_table` after parent resolution
+/// succeeded. This call site has already resolved the database and repo
+/// through `resolve_repo`, so any typed `DbError::NotFound` here is
+/// specifically the missing table. No error-text parsing, and no other
+/// error variant is relabeled as `unknown_table`.
+fn table_resolution_error_response(e: shamir_db::DbError) -> DbResponse {
+    match e {
+        not_found @ shamir_db::DbError::NotFound(_) => DbResponse::Error {
+            code: "unknown_table".to_string(),
+            message: not_found.to_string(),
+        },
+        other => db_error_response(other),
+    }
+}
+
+/// CR-B2-shaped upfront RI-15 reservation, mirroring
+/// `cursor_handlers/budget.rs::reserve_page_budget_upfront`: reserve the
+/// pessimistic full-cap slice only when BOTH the RI-15 budget is active
+/// AND `query_limits.max_result_size_bytes` is a finite bound; otherwise
+/// `None` (an unbounded case must stay a pure no-op — there is no
+/// natural estimate to invent, per the CR-A4 precedent).
+async fn reserve_record_budget_upfront(handler: &ShamirDbHandler) -> Option<ByteBudgetGuard> {
+    let budget_active = handler.byte_budget.cap().is_some();
+    let cap_active = handler.query_limits.max_result_size_bytes < usize::MAX;
+    if !budget_active || !cap_active {
+        return None;
+    }
+    Some(
+        handler
+            .byte_budget
+            .acquire(handler.query_limits.max_result_size_bytes)
+            .await,
+    )
+}
+
+impl ShamirDbHandler {
+    /// P2 — `DbRequest::GetRecord`: the typed exact-key point read.
+    /// See the module docs for the gate ordering and the budget story.
+    pub(super) async fn get_record(
+        &self,
+        session: &Session,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        key: RecordId,
+    ) -> DbResponse {
+        // 1. Authorization BEFORE any lookup (Database Read, then Table Read).
+        let actor = session_actor(session);
+        let authorized =
+            authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await;
+        if let Err(e) = authorized {
+            return error_response(&e);
+        }
+
+        // 2. Per-session in-flight slot (AFTER auth, mirroring the batch
+        //    `execute` path): an exhausted session gets the fixed-text
+        //    `server_busy` rejection before any engine work. The stateless
+        //    handle-0 fallback skips the cap exactly like
+        //    `try_track_activity_request`. The slot is held to the end of
+        //    the request (drop on every early-return path).
+        let _request_slot = if session.activity_handle() == 0 {
+            // Stateless token-REST fallback: no minted handle, no slot.
+            None
+        } else {
+            match session
+                .try_acquire_request_slot(self.query_limits.max_in_flight_requests_per_session)
+            {
+                Some(slot) => Some(slot),
+                None => return server_busy_response(),
+            }
+        };
+
+        // 3. The same repository quarantine the cursor read path probes
+        //    (the batch path carries the same reason inside its own error).
+        if let Some(e) = quarantine_cursor_error(&self.db, db_name, repo_name) {
+            return error_response(&e);
+        }
+
+        // 4. Upfront RI-15 slice (both gates active only — see above),
+        //    released by drop on every early-return path below.
+        let budget_guard = reserve_record_budget_upfront(self).await;
+
+        // 5. Typed parent/table resolution (no error-text parsing):
+        //    `resolve_repo` gives the typed `unknown_db` / `unknown_repo`
+        //    codes (authorized callers only — strictly after the two-call
+        //    ACL). Table acquisition goes through `ShamirDb::get_table`
+        //    so its repository quarantine gate is re-checked AT
+        //    ACQUISITION, closing the probe→lookup race. The table's own
+        //    `get` preserves the reopen fence. A typed `NotFound` here can
+        //    only be the missing table because parent resolution succeeded;
+        //    no list-table scan is needed. No record scan, no cursor.
+        if let Err(parent) = resolve_repo(&self.db, db_name, repo_name) {
+            return error_response(&parent);
+        }
+        let table = match self.db.get_table(db_name, repo_name, table_name).await {
+            Ok(table) => table,
+            Err(e) => return table_resolution_error_response(e),
+        };
+        let inner = match table.get(key).await {
+            Ok(inner) => inner,
+            Err(e) => return db_error_response(e),
+        };
+
+        // 6. Same decoding as the batch read path: interner-backed
+        //    `InnerValue` → `QueryValue`, wrapped as `QueryRecord::Direct`.
+        let value = match table
+            .info_store_read_view()
+            .inner_to_query_value(&inner)
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => return db_error_response(e),
+        };
+        let response = DbResponse::Record {
+            record: QueryRecord::Direct(value),
+        };
+
+        // 7. Result controls — measure the FULL `DbResponse` envelope once,
+        //    reject oversize (`result_too_large`, mirroring `execute`'s
+        //    rejection shape), shrink/reacquire the RI-15 reservation, then
+        //    stash the exact bytes so `RequestHandler::handle` reuses them
+        //    (this `response` IS the final return value — nothing can
+        //    replace it past this point, so stashing here is safe; the
+        //    CR-D4 concern does not apply).
+        let budget_active = self.byte_budget.cap().is_some();
+        let cap_active = self.query_limits.max_result_size_bytes < usize::MAX;
+        if budget_active || cap_active {
+            let Ok(bytes) = rmp_serde::to_vec_named(&response) else {
+                // Mirror `execute`/`enforce_page_budget`: a serialization
+                // failure here is swallowed — the response still goes out,
+                // just without budget accounting; any upfront reservation
+                // is dropped as-is.
+                return response;
+            };
+            if cap_active && bytes.len() > self.query_limits.max_result_size_bytes {
+                // Rejected — release the pessimistic reservation; never
+                // stash the rejected payload.
+                drop(budget_guard);
+                return DbResponse::Error {
+                    code: "result_too_large".to_string(),
+                    message: format!(
+                        "encoded response is {} bytes; maximum is {}",
+                        bytes.len(),
+                        self.query_limits.max_result_size_bytes
+                    ),
+                };
+            }
+            if budget_active {
+                let guard = match budget_guard {
+                    Some(mut guard) => {
+                        if bytes.len() > guard.bytes_reserved() {
+                            // No unchecked growth: release before
+                            // re-acquiring, avoiding self-deadlock.
+                            drop(guard);
+                            self.byte_budget.acquire(bytes.len()).await
+                        } else {
+                            guard.shrink_to(bytes.len());
+                            guard
+                        }
+                    }
+                    None => self.byte_budget.acquire(bytes.len()).await,
+                };
+                stash_guard(guard);
+            }
+            stash_serialized_response(bytes);
+        }
+
+        response
+    }
+}
+
+/// Mirror the replication owner's `StampOutcome` onto the wire enum
+/// (names kept in sync by hand — six variants, no invention).
+fn status_stamp_outcome(outcome: shamir_sync::format_stamp::StampOutcome) -> StatusStampOutcome {
+    match outcome {
+        shamir_sync::format_stamp::StampOutcome::Created => StatusStampOutcome::Created,
+        shamir_sync::format_stamp::StampOutcome::Adopted => StatusStampOutcome::Adopted,
+        shamir_sync::format_stamp::StampOutcome::Unchanged => StatusStampOutcome::Unchanged,
+        shamir_sync::format_stamp::StampOutcome::VersionUpdated => {
+            StatusStampOutcome::VersionUpdated
+        }
+        shamir_sync::format_stamp::StampOutcome::InspectedStampless => {
+            StatusStampOutcome::InspectedStampless
+        }
+        shamir_sync::format_stamp::StampOutcome::InspectedOlder => {
+            StatusStampOutcome::InspectedOlder
+        }
+    }
+}
+
+/// Live WAL telemetry from the repo-owned durability snapshot, read at
+/// the ACTUAL export indices (`durability_export.rs` renders gauges and
+/// counters positionally; see `DurabilityMetricsSnapshot`'s slots).
+fn status_wal(snapshot: &DurabilityMetricsSnapshot) -> StatusWal {
+    StatusWal {
+        backend_mem: snapshot.gauges[2] == 1,
+        watermark_w: snapshot.gauges[4],
+        recoverable_through: snapshot.gauges[5],
+        pending_versions: snapshot.gauges[8],
+        first_pending_version: (snapshot.gauges[9] != 0).then_some(snapshot.gauges[9]),
+        first_pending_age_ns: (snapshot.gauges[10] != 0).then_some(snapshot.gauges[10]),
+        sync_now_calls: snapshot.counters[0],
+        sync_rounds: snapshot.counters[1],
+        sync_coalesced: snapshot.counters[2],
+        sync_errors: snapshot.counters[3],
+        sync_duration_ns: snapshot.counters[4],
+    }
+}
+
+/// Effective policy → override fields (the same projection as the ALTER
+/// path's `effective_durability_record`: `effective_wal_commit()` is the
+/// tier that actually applies on this backend).
+fn effective_override(policy: &DurabilityPolicy) -> DurabilityOverride {
+    DurabilityOverride {
+        wal_commit: Some(policy.effective_wal_commit()),
+        wal_retention_max_bytes: NonZeroU64::new(policy.wal_retention_max_bytes()),
+        on_wal_retention_exceeded: Some(policy.on_wal_retention_exceeded()),
+        replication_serve: Some(policy.replication_serve()),
+    }
+}
+
+fn unix_now_ns() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+}
+
+impl ShamirDbHandler {
+    /// P1 — `DbRequest::Status`: the typed operator state snapshot
+    /// (design §4.2). Superuser-class read; no stamp or data-dir
+    /// inspection at request time (the system-catalogue override read MAY
+    /// touch disk) — everything observed comes from the launcher's
+    /// boot capture, the replication owner's exported snapshot, the
+    /// open repos' durability telemetry, and ONE system-store catalogue
+    /// read of the stored overrides. A handler built outside the server
+    /// boot path (`operator_boot: None`, direct fixtures) is a typed
+    /// `not_supported` — never faked.
+    pub(super) async fn operator_status(&self, session: &Session) -> DbResponse {
+        if !session.permissions.is_superuser {
+            return DbResponse::Error {
+                code: "permission_denied".to_string(),
+                message: "status requires superuser".to_string(),
+            };
+        }
+        let Some(boot) = self.operator_boot.as_ref() else {
+            return DbResponse::Error {
+                code: "not_supported".to_string(),
+                message: "status is unavailable outside the server launch path".to_string(),
+            };
+        };
+
+        let stored_overrides: TFxMap<(String, String), Option<DurabilityOverride>> = match self
+            .db
+            .system_store()
+            .load_repository_durability_overrides()
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(db, repo, stored)| ((db, repo), stored))
+                .collect(),
+            Err(e) => return db_error_response(e),
+        };
+
+        // Design §6: configured ReadOnly node ⇒ Follower; every other
+        // configuration (including ReadWrite / replication disabled) is
+        // Unknown — nothing is invented.
+        let role = match self.node_mode {
+            NodeMode::ReadOnly => StatusRole::Follower,
+            NodeMode::ReadWrite => StatusRole::Unknown,
+        };
+
+        let now_ns = unix_now_ns();
+        let replication: Vec<StatusReplication> =
+            shamir_sync::replication::replication_metrics_snapshot()
+                .into_iter()
+                .map(|s| StatusReplication {
+                    db: s.db,
+                    repo: s.repo,
+                    gap_versions_merged: s.lag_versions,
+                    // No timestamp plumbing exists: always `unknown`.
+                    age: None,
+                    receipt_age_ns: match now_ns {
+                        Some(now) if s.last_receipt_ns != 0 => {
+                            Some(now.saturating_sub(s.last_receipt_ns))
+                        }
+                        _ => None,
+                    },
+                })
+                .collect();
+
+        let mut repositories = Vec::new();
+        for db_name in self.db.list_dbs() {
+            let Some(db) = self.db.get_db(&db_name) else {
+                continue;
+            };
+            for repo_name in db.list_repos() {
+                let Some(repo) = db.get_repo(&repo_name) else {
+                    continue;
+                };
+                let snapshot = repo.durability_metrics_snapshot();
+                let policy = repo.durability_policy();
+                let stored = stored_overrides
+                    .get(&(db_name.clone(), repo_name.clone()))
+                    .cloned()
+                    .flatten();
+                repositories.push(StatusRepository {
+                    db: db_name.clone(),
+                    repo: repo_name.clone(),
+                    effective: effective_override(&policy),
+                    stored,
+                    wal: status_wal(&snapshot),
+                });
+            }
+        }
+
+        DbResponse::Status {
+            status: OperatorStatus {
+                server_version: env!("CARGO_PKG_VERSION").to_string(),
+                format_epoch: boot.observed_format_epoch,
+                stamp_outcome: status_stamp_outcome(boot.format_stamp),
+                uptime_ms: u64::try_from(boot.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                role,
+                node_id: boot.node_id.clone(),
+                replication,
+                repositories,
+            },
+        }
+    }
+}

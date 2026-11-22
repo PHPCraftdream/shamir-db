@@ -58,7 +58,13 @@ pub(crate) fn classify_request(
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => None,
+        | DbRequest::RevokeUserTokens { .. }
+        // Status and GetRecord are non-batch admin-shell surfaces: they
+        // carry a db in their payload, but the token perimeter denies
+        // them outright, so they stay in the non-db group — a scoped
+        // database allowlist must never override the refusal.
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => None,
     };
     if endpoint == Endpoint::Rest
         && matches!(
@@ -130,7 +136,11 @@ pub(crate) fn classify_request(
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => Decision::Denied("token_request_denied"),
+        | DbRequest::RevokeUserTokens { .. }
+        // Admin-shell PR3: operator status and exact-key point reads
+        // are not token surfaces on any endpoint or mode.
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => Decision::Denied("token_request_denied"),
     }
 }
 

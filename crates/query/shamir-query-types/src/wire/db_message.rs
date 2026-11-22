@@ -11,11 +11,14 @@ use crate::admin::{ActivityPage, CancelOutcome};
 use crate::batch::{
     BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
 };
+use crate::durability::DurabilityOverride;
+use crate::read::QueryRecord;
 use crate::read::{QueryResult, ReadQuery};
 use crate::wire::change_password_secrets::ChangePasswordSecrets;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
 use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView};
+use shamir_types::types::record_id::RecordId;
 
 /// Current query-language version. Bumped when the on-the-wire
 /// `BatchRequest` schema changes incompatibly. The server keeps a
@@ -346,6 +349,72 @@ pub enum DbRequest {
         /// The operation ID to query (from `QueryResult::op_id`).
         op_id: String,
     },
+
+    /// Read-only operator status observation (admin-shell PR3, P1).
+    ///
+    /// Carries no parameters: the reply ([`DbResponse::Status`])
+    /// describes the whole server. The observed format epoch and stamp
+    /// outcome were captured BY THE LAUNCHER AT BOOT via the on-disk
+    /// stamp `inspect` while the boot lock was held — never re-read
+    /// from disk at request time. Requires a superuser-class session;
+    /// a token session never reaches it (the token perimeter denies
+    /// it with `token_request_denied`).
+    Status,
+
+    /// Typed exact-key point read (admin-shell PR3, P2). NOT a
+    /// `BatchOp`: no cursor is created and no cursor path is engaged.
+    /// The server applies `Database` `Read` THEN `Table` `Read` ACLs
+    /// (ancestor check before any lookup), the same repository
+    /// quarantine as the batch path, a typed-key size cap and the
+    /// existing result-size / in-flight response controls. `key` is a
+    /// `RecordId` (fixed 16-byte msgpack `bin` on the wire); a
+    /// malformed key or a missing record is a typed refusal, not a
+    /// panic and not a scan. Replies [`DbResponse::Record`].
+    GetRecord {
+        /// Target database name.
+        db: String,
+        /// Target repository name.
+        repo: String,
+        /// Target table name.
+        table: String,
+        /// Exact record key (base58-decoded 16-byte id, fixed
+        /// 16-byte msgpack `bin` on the wire — see the
+        /// `record_id_wire` codec module below).
+        #[serde(with = "record_id_wire")]
+        key: RecordId,
+    },
+}
+
+/// Fixed 16-byte msgpack `bin` codec for [`RecordId`] on the wire.
+///
+/// Deliberately does NOT use `RecordId`'s own `Deserialize`: that impl
+/// binds `&[u8]` (borrowed), which fails when the msgpack decoder
+/// buffers content. Instead it uses `serde_bytes::ByteArray<16>`, whose
+/// visitor accepts both borrowed bytes and owned `byte_buf` (and whose
+/// `visit_seq` path is bounded by the fixed size — no unbounded
+/// allocation). Serialization emits the 16 bytes as msgpack `bin`;
+/// deserialization requires EXACTLY 16 bytes and is a typed decode
+/// error otherwise.
+///
+/// Private on purpose: the `serde(with = "record_id_wire")` attribute
+/// resolves the path inside this module, so no external caller can ever
+/// need it (admin-shell PR3 review: minimal visibility).
+mod record_id_wire {
+    use super::RecordId;
+    use serde_bytes::{Deserialize, Serialize};
+
+    /// Serialize the id as msgpack `bin` (16 bytes).
+    pub(super) fn serialize<S: serde::Serializer>(id: &RecordId, s: S) -> Result<S::Ok, S::Error> {
+        serde_bytes::ByteArray::new(id.0).serialize(s)
+    }
+
+    /// Deserialize from msgpack `bin`, requiring EXACTLY 16 bytes.
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<RecordId, D::Error> {
+        let arr = serde_bytes::ByteArray::<16>::deserialize(d)?;
+        Ok(RecordId(arr.into_array()))
+    }
 }
 
 /// Application-layer DB response.
@@ -550,6 +619,157 @@ pub enum DbResponse {
         /// The cancellation attempt's result, not the target batch's reply.
         outcome: CancelOutcome,
     },
+    /// Reply to [`DbRequest::Status`] — the operator state snapshot
+    /// ([`OperatorStatus`]).
+    Status {
+        /// The observed server state.
+        status: OperatorStatus,
+    },
+    /// Reply to [`DbRequest::GetRecord`] — the one record the exact
+    /// key resolved to (the same shape a batch read returns). A
+    /// missing record is a typed `DbResponse::Error` with code
+    /// `not_found`, never an empty success.
+    Record {
+        /// The record at the requested key.
+        record: QueryRecord,
+    },
+}
+
+/// Boot-time format-stamp observation, mirrored from the
+/// replication owner's `StampOutcome` (six variants, names kept in
+/// sync by hand — the owner's enum is not re-exported across the
+/// layer boundary). Captured BY THE LAUNCHER AT BOOT via the on-disk
+/// stamp `inspect` while the boot lock was held; NOT the bare
+/// getter's outcome-only value and NOT a process constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusStampOutcome {
+    /// Stamp written into an empty directory.
+    Created,
+    /// Stampless data adopted at the base epoch.
+    Adopted,
+    /// Valid stamp, current epoch, nothing rewritten.
+    Unchanged,
+    /// `last_opened_by` rewritten (binary version changed).
+    VersionUpdated,
+    /// Inspect on a stampless directory.
+    InspectedStampless,
+    /// Inspect on an older-epoch directory.
+    InspectedOlder,
+}
+
+/// Replication role, derived from the node's configured mode at
+/// launch. `Follower` means this node follows a leader; `Unknown`
+/// covers any configuration the launcher could not map (including
+/// replication disabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusRole {
+    /// This node follows a leader.
+    Follower,
+    /// Role could not be determined (no configured mode / unknown
+    /// configuration).
+    Unknown,
+}
+
+/// One replication observation from the exported snapshot.
+///
+/// `gap_versions_merged` is a MERGED, NON-AUTHORITATIVE aggregate:
+/// the exporter cannot distinguish per-source gaps, and no
+/// timestamp plumbing exists, so `age` is ALWAYS `None` (`unknown`)
+/// — consumers must never present it as lag against a specific
+/// leader. `receipt_age_ns` is the age of the last durable
+/// observation receipt when one is available — a durable write
+/// observation, not necessarily a pull.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StatusReplication {
+    /// Database name.
+    pub db: String,
+    /// Repository name.
+    pub repo: String,
+    /// Merged non-authoritative gap aggregate per repository (see
+    /// the type docs for the caveat).
+    pub gap_versions_merged: u64,
+    /// Always `None` (`unknown`): no timestamp plumbing exists.
+    pub age: Option<u64>,
+    /// Nanoseconds since the last durable observation receipt, when
+    /// available. This is the receipt age of a durable observation, not
+    /// necessarily the age of a pull.
+    pub receipt_age_ns: Option<u64>,
+}
+
+/// WAL watermark / pending / commit telemetry for one repository,
+/// with the semantics of `durability_export.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StatusWal {
+    /// `true` when the WAL backend is the in-memory backend.
+    pub backend_mem: bool,
+    /// Current WAL watermark.
+    pub watermark_w: u64,
+    /// Highest version recoverable from the WAL after a crash.
+    pub recoverable_through: u64,
+    /// Span between the current watermark and the highest version
+    /// recoverable from the WAL (`watermark_w - recoverable_through`) —
+    /// a bound, NOT the actual number of unflushed records.
+    pub pending_versions: u64,
+    /// First pending version, when any exist.
+    pub first_pending_version: Option<u64>,
+    /// Age in nanoseconds of the first pending version, when known.
+    pub first_pending_age_ns: Option<u64>,
+    /// Number of `sync_now` calls.
+    pub sync_now_calls: u64,
+    /// Number of sync rounds run.
+    pub sync_rounds: u64,
+    /// Number of syncs coalesced away.
+    pub sync_coalesced: u64,
+    /// Number of sync errors.
+    pub sync_errors: u64,
+    /// Total sync duration in nanoseconds.
+    pub sync_duration_ns: u64,
+}
+
+/// Effective vs stored durability for one repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StatusRepository {
+    /// Database name.
+    pub db: String,
+    /// Repository name.
+    pub repo: String,
+    /// The durability override actually in force.
+    pub effective: DurabilityOverride,
+    /// The override as stored (may differ from `effective`); `None`
+    /// when nothing is stored.
+    pub stored: Option<DurabilityOverride>,
+    /// WAL telemetry for this repository.
+    pub wal: StatusWal,
+}
+
+/// Operator state snapshot ([`DbResponse::Status`]). Everything the
+/// server observed about itself at boot plus live telemetry; no disk
+/// read happens at request time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OperatorStatus {
+    /// Server binary version string.
+    pub server_version: String,
+    /// On-disk format epoch observed by the launcher at boot.
+    pub format_epoch: u64,
+    /// Boot-time stamp outcome observed by the launcher at boot.
+    pub stamp_outcome: StatusStampOutcome,
+    /// Monotonic uptime in milliseconds.
+    pub uptime_ms: u64,
+    /// Replication role from the node's configured mode at launch.
+    pub role: StatusRole,
+    /// Stable node id, when one is configured.
+    pub node_id: Option<String>,
+    /// Per-repository replication observations (merged, non-
+    /// authoritative — see [`StatusReplication`]).
+    pub replication: Vec<StatusReplication>,
+    /// Per-repository durability / WAL state.
+    pub repositories: Vec<StatusRepository>,
 }
 
 /// Stable codes used by [`DbResponse::Error`].

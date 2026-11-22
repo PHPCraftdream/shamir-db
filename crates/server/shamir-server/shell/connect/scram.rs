@@ -293,6 +293,12 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         | ClientError::Tls { .. }
         | ClientError::Transport { .. }
         | ClientError::ConnectionClosed(_) => ShellError::Connection,
+        // Typed replication-quarantine refusal: the SDK's response mapper
+        // rewrites the server's stable `resync_required` code into this
+        // variant BEFORE the shell sees it, so the `Db` code match below
+        // never fires for it — classify the variant directly (the typed
+        // `resync_required` outcome, exit 5).
+        ClientError::ResyncRequired { .. } => ShellError::ResyncRequired,
         // Envelope or DB error: only the allowlisted stable codes are
         // classified; the code/message strings are never carried onward.
         ClientError::Server { code } | ClientError::Db { code, .. } => server_code(&code),
@@ -308,7 +314,6 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         | ClientError::AsOfVisibilityTimeout { .. }
         | ClientError::AsOfFutureVersion { .. }
         | ClientError::AsOfReopenRequired { .. }
-        | ClientError::ResyncRequired { .. }
         | ClientError::VisibilityFutureVersion { .. }
         | ClientError::VisibilityWaitInvalid { .. }
         | ClientError::WriteCommittedVisibilityPending { .. }
@@ -367,12 +372,21 @@ fn server_code(code: &str) -> ShellError {
         // (transport/token/status.rs) — permission refusal (§5 exit 4).
         | "token_channel_denied" => ShellError::Denied,
         "token_request_denied" => ShellError::TokenRequestDenied,
+        // Typed P2 point-read miss (`DbResponse::Error` code `not_found`).
+        "not_found" => ShellError::NotFound,
         "not_supported" => ShellError::Unsupported,
         // Session-level invalidation after a successful connect: the
         // authenticated session is gone; re-login required.
         "session_expired" | "session_invalidated" | "token_revoked" | "token_expired" => {
             ShellError::Authentication
         }
+        // Typed bounded server conditions (§5 server-error class, exit 5,
+        // each with its own stable code and fixed local message; the
+        // arbitrary server text is never echoed):
+        // missing table, replication quarantine, oversized result.
+        "unknown_table" => ShellError::UnknownTable,
+        "resync_required" => ShellError::ResyncRequired,
+        "result_too_large" => ShellError::ResultTooLarge,
         _ => ShellError::Server,
     }
 }

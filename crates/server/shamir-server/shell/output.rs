@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::io::{self, IsTerminal, Write};
 
 use serde::Serialize;
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 
 use shamir_types::types::value::QueryValue;
 
@@ -34,12 +34,29 @@ pub(crate) enum ShellError {
     Authentication,
     Denied,
     Server,
+    /// Typed peer refusal `not_found` (the P2 exact-key point read missed).
+    NotFound,
+    /// Typed peer refusal `unknown_table`: the addressed table does not
+    /// exist (P2 point read).
+    UnknownTable,
+    /// Typed peer refusal `resync_required`: the repository is in
+    /// replication quarantine; retryable only after a reseed.
+    ResyncRequired,
+    /// Typed peer refusal `result_too_large`: the encoded response is over
+    /// the server's byte cap.
+    ResultTooLarge,
     ProjectionLimit,
     Unsupported,
     Plaintext,
     /// Token auth on a transport that does not support it.
     Token,
     TokenRequestDenied,
+    /// `data get` KEY that is not a well-formed Base58 `RecordId` (typed,
+    /// refused pre-connect after the token gate).
+    InvalidRecordId,
+    /// `data head` local monotonic projection budget expired after the
+    /// request was sent: outcome unknown, never a partial success.
+    HeadWallTime,
     Deferred,
     Resume,
     MissingPin,
@@ -70,11 +87,17 @@ impl ShellError {
             ShellError::Authentication => "authentication_failed",
             ShellError::Denied => "permission_denied",
             ShellError::Server => "server_error",
+            ShellError::NotFound => "not_found",
+            ShellError::UnknownTable => "unknown_table",
+            ShellError::ResyncRequired => "resync_required",
+            ShellError::ResultTooLarge => "result_too_large",
             ShellError::ProjectionLimit => "projection_limit",
             ShellError::Unsupported => "unsupported",
             ShellError::Plaintext => "plaintext_refused",
             ShellError::Token => "token_transport_refused",
             ShellError::TokenRequestDenied => "token_request_denied",
+            ShellError::InvalidRecordId => "invalid_record_id",
+            ShellError::HeadWallTime => "head_wall_time",
             ShellError::Deferred => "deferred",
             ShellError::Resume => "resume_refused",
             ShellError::MissingPin => "missing_pin",
@@ -107,6 +130,10 @@ impl ShellError {
             ShellError::Authentication => "authentication failed",
             ShellError::Denied => "permission denied by the server",
             ShellError::Server => "the operation failed on the server",
+            ShellError::NotFound => "the requested record was not found",
+            ShellError::UnknownTable => "the addressed table does not exist",
+            ShellError::ResyncRequired => "the repository is in replication quarantine; a reseed is required",
+            ShellError::ResultTooLarge => "the encoded response exceeds the server's result-size cap",
             ShellError::ProjectionLimit => "the record could not be projected to the output schema",
             ShellError::Unsupported => {
                 "the requested command, transport or authentication combination is not supported"
@@ -117,6 +144,12 @@ impl ShellError {
             ShellError::Token => "API tokens require HTTPS REST or the native token WSS listener",
             ShellError::TokenRequestDenied => {
                 "token sessions expose only the read-only shell subset; log in with SCRAM for this command"
+            }
+            ShellError::InvalidRecordId => {
+                "the KEY is not a valid Base58 record id"
+            }
+            ShellError::HeadWallTime => {
+                "the read exceeded its local wall-time budget after send; its outcome is unknown and no result is reported"
             }
             ShellError::Deferred => {
                 "browser profile and HTTP password login are deferred; HTTP login mints a reusable API token, not a session"
@@ -160,11 +193,19 @@ impl ShellError {
     /// Exit code, exactly the design §5 table; no failure maps to 0.
     pub(super) fn exit(self) -> u8 {
         match self {
-            ShellError::Usage | ShellError::OutputVersion | ShellError::MissingTty => 1,
+            ShellError::Usage
+            | ShellError::OutputVersion
+            | ShellError::MissingTty
+            | ShellError::InvalidRecordId => 1,
             ShellError::Connection => 2,
             ShellError::Authentication => 3,
             ShellError::Denied | ShellError::TokenRequestDenied => 4,
-            ShellError::Server | ShellError::ProjectionLimit => 5,
+            ShellError::Server
+            | ShellError::ProjectionLimit
+            | ShellError::NotFound
+            | ShellError::UnknownTable
+            | ShellError::ResyncRequired
+            | ShellError::ResultTooLarge => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
@@ -182,22 +223,24 @@ impl ShellError {
             | ShellError::SecretSourceConflict => 6,
             #[cfg(windows)]
             ShellError::SecretFdWindows => 6,
-            ShellError::Timeout => 7,
+            ShellError::Timeout | ShellError::HeadWallTime => 7,
             ShellError::Interrupted => 130,
         }
     }
 }
 
 /// JSON Lines v1 envelope. `data` is always present (`null` on error);
-/// `code`/`message` appear on error records only. `node` is always `null`
-/// in PR1 (no verified id+role source; `auth_ok` is never read).
+/// `code`/`message` appear on error records only. `node` carries the
+/// OBSERVED role and node id only for the P1 status view (`Status` op:
+/// `status` and `version show`); it stays `null` everywhere else — the
+/// shell cannot invent an identity it never observed (§5/§6).
 #[derive(Serialize)]
 struct Envelope<'a> {
     version: u8,
     command: &'a str,
     kind: &'static str,
     op: Option<&'static str>,
-    node: Option<()>,
+    node: &'a Json,
     data: &'a Json,
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<&'static str>,
@@ -218,13 +261,14 @@ pub(super) fn emit(
     result: Result<Json, ShellError>,
 ) -> u8 {
     if batch {
+        let node = observed_node(op, result.as_ref().ok());
         let envelope = match &result {
             Ok(data) => Envelope {
                 version: 1,
                 command,
                 kind: "result",
                 op,
-                node: None,
+                node: &node,
                 data,
                 code: None,
                 message: None,
@@ -234,7 +278,7 @@ pub(super) fn emit(
                 command,
                 kind: "error",
                 op,
-                node: None,
+                node: &node,
                 data: &Json::Null,
                 code: Some(err.code()),
                 message: Some(err.message()),
@@ -260,6 +304,26 @@ pub(super) fn emit(
     let stderr = io::stderr();
     let mut handle = stderr.lock();
     emit_human(&mut handle, command, result)
+}
+
+/// The observed node identity for the envelope `node` field: only the P1
+/// status view (`op == "Status"`, i.e. `status` AND `version show`) has
+/// one, and only when the payload actually OBSERVED a role (both fields
+/// are copies of the ALREADY SANITIZED projected status payload; absent
+/// leaves stay `null`). A payload without an observed role — or any
+/// other command — is `null`: an all-null object is never emitted, and
+/// the shell cannot invent an identity it never observed (§5/§6).
+fn observed_node(op: Option<&str>, data: Option<&Json>) -> Json {
+    let Some(data) = data else {
+        return Json::Null;
+    };
+    match op {
+        Some("Status") if data.get("role").and_then(Json::as_str).is_some() => json!({
+            "role": data.get("role").cloned().unwrap_or(Json::Null),
+            "node_id": data.get("node_id").cloned().unwrap_or(Json::Null),
+        }),
+        _ => Json::Null,
+    }
 }
 
 /// Human rendering of one command result through an explicit writer, for the

@@ -70,6 +70,18 @@ pub(super) fn admin_request_cases() -> Vec<(DbRequest, &'static str)> {
             token_admin::revoke_user_tokens().build(),
             "RevokeUserTokens",
         ),
+        // R5 PR3: these top-level requests are outside the token
+        // read-only subset and must be refused on the real token path.
+        (shamir_query_builder::wire::admin::status(), "Status"),
+        (
+            shamir_query_builder::wire::admin::get_record(
+                "default",
+                "main",
+                "items",
+                shamir_types::types::record_id::RecordId([0xAB; 16]),
+            ),
+            "GetRecord",
+        ),
     ]
 }
 

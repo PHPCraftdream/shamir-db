@@ -230,6 +230,27 @@ pub struct ShamirDbHandler {
     /// when a BATCH is admitted (same shape as `next_cursor_id`). The
     /// client's optional `rid` is carried alongside, never replaced.
     pub(super) next_request_exec_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Operator boot metadata captured by `ServerLauncher` and attached
+    /// via [`Self::with_operator_boot`]. `None` for handlers built
+    /// outside the server boot path (unit tests).
+    pub(super) operator_boot: Option<OperatorBootContext>,
+}
+
+/// Boot metadata captured at server launch (see `with_operator_boot`).
+/// `pub(super)` on purpose (= `pub(in crate::engine::db_handler)`): only
+/// the launcher attaches it and only the `operator_state` handler reads
+/// it — no wider surface is needed (admin-shell PR3 review: minimal
+/// visibility).
+#[derive(Clone)]
+pub(super) struct OperatorBootContext {
+    /// `Instant::now()` at the very start of `launch_inner`.
+    pub(super) started_at: std::time::Instant,
+    /// Format epoch observed in the data directory at boot.
+    pub(super) observed_format_epoch: u64,
+    /// What the format-stamp check did (created/adopted/unchanged/...).
+    pub(super) format_stamp: shamir_sync::format_stamp::StampOutcome,
+    /// Configured replication node id, if any.
+    pub(super) node_id: Option<String>,
 }
 
 impl ShamirDbHandler {
@@ -266,6 +287,7 @@ impl ShamirDbHandler {
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            operator_boot: None,
         }
     }
 
@@ -292,7 +314,27 @@ impl ShamirDbHandler {
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            operator_boot: None,
         }
+    }
+
+    /// Attach operator boot metadata (launch instant, observed format
+    /// epoch, stamp outcome, replication node id). Called once from the
+    /// server boot path; `pub(crate)` so only the launcher can attach it.
+    pub(crate) fn with_operator_boot(
+        mut self,
+        started_at: std::time::Instant,
+        observed_format_epoch: u64,
+        format_stamp: shamir_sync::format_stamp::StampOutcome,
+        node_id: Option<String>,
+    ) -> Self {
+        self.operator_boot = Some(OperatorBootContext {
+            started_at,
+            observed_format_epoch,
+            format_stamp,
+            node_id,
+        });
+        self
     }
 
     /// Attach the shared token service and configure self-service creation.
@@ -647,6 +689,22 @@ impl ShamirDbHandler {
                 self.get_ddl_op_status(session, &db, &repo, &table, &op_id)
                     .await
             }
+            // Admin-shell PR3, P2 — the typed exact-key point read. See
+            // `repo_admin/operator_state.rs` for the gate ordering
+            // (authorization before lookup), the quarantine probe, and the
+            // result-size / RI-15 budget controls.
+            DbRequest::GetRecord {
+                db,
+                repo,
+                table,
+                key,
+            } => self.get_record(session, &db, &repo, &table, key).await,
+            // Admin-shell PR3, P1 — the typed operator status snapshot.
+            // See `repo_admin/operator_state.rs`: superuser gate, boot
+            // capture (no request-time stamp or data-dir inspection; the
+            // one catalogue read may touch disk), exported replication
+            // snapshot.
+            DbRequest::Status => self.operator_status(session).await,
         };
 
         // CR-B2: `ShamirDbHandler::execute` already serialized this
