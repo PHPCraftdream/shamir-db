@@ -17,14 +17,14 @@ const MAX_DEPTH: usize = 32;
 // A stamp frame has a 64 KiB maximum body plus header and digest.
 const MAX_STAMP: u64 = (64 << 10) + 50;
 
-/// Verified manifest creation time of the exact tree at `dir`, plus —
-/// only when `want_digest` is set — the SHA-256 (lowercase hex, via the
-/// retention-pass `manifest_digest_hex` helper) of the exact raw manifest
-/// bytes this verification read. The digest binds an adoption record to
-/// the OUTPUT's bytes, not just the (name, creation time) pair, so a
-/// replaced directory with the same name and the same creation time is
-/// never adopted. Digest computation is skipped for names without a
-/// pending record, so a normal pass pays no hashing overhead.
+/// Verified manifest creation time at `dir`, plus — only when
+/// `want_digest` is set — the SHA-256 (lowercase hex, via the retention-pass
+/// `manifest_digest_hex` helper) of the raw manifest bytes this verification
+/// read. Adoption compares the captured creation time and manifest digest
+/// against the scan and late reread; this does not bind payload bytes or
+/// directory identity, which rely on the single-writer-root contract.
+/// Digest computation is skipped for names without a pending record, so a
+/// normal pass pays no hashing overhead.
 /// Match exact paths from the actual directory listing before allowing the
 /// verifier to resolve names. This also excludes filesystem aliases that
 /// aren't listed (e.g. Windows short names or case aliases).
@@ -123,16 +123,18 @@ pub(super) fn verified_time(
     }
 
     budget.checkpoint()?;
-    // The verifier verifies the exact bounded bytes `raw` (no re-read).
+    // The verifier checks the bounded manifest bytes `raw` without a
+    // second manifest read. This preserves manifest consistency for this
+    // check, but does not prove directory identity or prevent later payload
+    // changes under the single-writer-root contract.
     let verified = verify_retention_candidate(dir, &raw);
     budget.checkpoint()?;
     verified.map_err(|error| match error {
         BackupError::Io(_) => Refusal::Incomplete,
         _ => Refusal::Unverifiable,
     })?;
-    // Digest of the EXACT bytes just verified: taken over the same `raw`
-    // the candidate verifier checked, never a re-read, so the digest can
-    // not describe bytes different from the verified ones.
+    // Digest the same manifest bytes checked above; this binds the manifest
+    // contents only, not the payload tree or directory identity.
     let digest = want_digest.then(|| manifest_digest_hex(&raw));
     Ok((decoded.created_at_unix_ns, digest))
 }

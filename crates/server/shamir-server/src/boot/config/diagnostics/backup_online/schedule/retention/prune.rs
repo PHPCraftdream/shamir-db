@@ -78,7 +78,7 @@ pub(super) fn prune_inner(
     // no managed reads to protect, and this pass must gain it here. Failing
     // before the scan keeps `untouched` unaccounted (an incomplete scan
     // leaves the last complete classification intact) and never tags or
-    // deletes; the next repaired pass does the work.
+    // deletes; a later repaired pass may retry, but no work is promised.
     provision_snapshot_lease(&canonical).map_err(|_| Refusal::Incomplete)?;
 
     let mut owned = Vec::new();
@@ -94,16 +94,13 @@ pub(super) fn prune_inner(
             .or_default()
             .insert((*time, digest.clone()));
     }
-    // Exact provenance matches: (name, manifest creation time, manifest
-    // SHA-256 digest) triples the registry itself published, verified and
-    // kept in THIS root under THIS owner while the lease marker was
-    // broken. Nothing else untagged is ever adopted; a different output
-    // under a recorded name is bound out by the creation time AND digest.
-    // Adoption happens only when marker provisioning succeeded (it runs
-    // BEFORE the scan): a broken marker fails closed before any scan, tag
-    // or deletion. The unavoidable pre-marker transition (a reader may
-    // have resolved a copy while the marker was absent) is covered only
-    // by the documented stable-marker / operator-quiescence contract.
+    // Provenance matches compare a recorded name, manifest creation time and
+    // digest. They bind manifest bytes at post-protocol capture, scan and
+    // late reread, not payload bytes or directory identity. Capture is after
+    // protocol return, so a replacement already present then is what gets
+    // recorded. Adoption assumes one writer owns the root; sharing is not
+    // enforced here. Untagged candidates are tagged only after the late
+    // sidecar check; already-owned matching entries need no new tag.
     let mut adopt: Vec<(String, u128, PathBuf, String)> = Vec::new();
     let entries = fs::read_dir(&canonical).map_err(|_| Refusal::Incomplete)?;
     let mut index = 0usize;
@@ -122,13 +119,11 @@ pub(super) fn prune_inner(
         if name == SNAPSHOT_LEASE_FILE_NAME {
             continue;
         }
-        // Crash-debris cleanup DURING the initial discovery (reviewer P2):
-        // a staged sidecar left by an earlier crashed pass is removed
-        // here, per entry, instead of a second full pre-scan directory
-        // listing. A successfully removed entry neither consumes a
-        // visit-cap slot nor counts; a failed cleanup stays a normal
-        // counted entry, so cleanup never bypasses the cap nor fails the
-        // pass. Cancellation is the loop's existing checkpoint.
+        // Crash-debris cleanup DURING the initial discovery: only a direct,
+        // plain regular file with the reserved exact name shape and age
+        // threshold is removed before the cap. The age rule keeps another
+        // runner's live staging file safe, but is not a lock: one runner must
+        // own the root by contract (sharing is not enforced by this code).
         if remove_staged_debris_entry(&name, &path, &root_meta) {
             continue;
         }
@@ -162,19 +157,14 @@ pub(super) fn prune_inner(
             Ok((time, sidecar, _)) if is_fresh => {
                 fresh = Some((time, path, sidecar));
             }
-            // The scan-time sidecar is only a cheap gate: the decision to
-            // tag is made on a FRESH sidecar read AND a FRESH manifest
-            // digest immediately below, which is what detects a
-            // concurrently swapped tag or a replaced manifest (unsupported
-            // writers); the scan snapshot makes no such claim. A recorded
-            // (name, creation time, MANIFEST DIGEST) triple is adoptable:
-            // the digest binds the record to the recorded OUTPUT's exact
-            // manifest bytes, so a replacement tree under the same name
-            // with the same creation time (but different bytes) is adopted
-            // never — but if it is already owner-tagged it stays a normal
-            // selection candidate exactly as before (selection unchanged),
-            // otherwise untouched. The `untouched` metric is published only
-            // at the complete-scan point below.
+            // A recorded name/time/digest match means only that the manifest
+            // bytes captured after protocol success still match at scan and
+            // late check. It does not bind payload bytes or directory
+            // identity; unchanged-manifest replacements are outside the
+            // single-writer-root contract. An untagged copy can be tagged
+            // only while both sidecar checks find no tag; a matching entry
+            // already bearing this owner's tag remains a normal selection
+            // candidate and may be reported without a new tag.
             Ok((time, sidecar, digest)) if is_pending => {
                 let matched = pending_records.is_some_and(|records| {
                     digest
@@ -210,20 +200,20 @@ pub(super) fn prune_inner(
         "retention scan verified candidates"
     );
 
-    // Marker is fresh and verified: adopt exactly the provenance matches.
-    // Every child is revalidated immediately before tagging — same root,
-    // same plain-directory disposition the scan enforced — and BOTH the
-    // sidecar and the manifest digest are re-checked FRESH, so a tag or
-    // manifest swapped since the scan is honored, not missed. Nothing is
-    // deleted before this loop.
+    // Marker is available and the fresh copy was checked: adopt only the
+    // recorded provenance matches. Before tagging each untagged candidate,
+    // re-check the root/child disposition, sidecar and bounded manifest
+    // bytes. This catches sidecar or manifest changes since scan, but does
+    // not reverify payloads or bind directory identity; those rely on the
+    // single-writer-root contract. Nothing is deleted before this loop.
     for (name, time, path, digest) in adopt {
         budget.checkpoint()?;
         check_root(root, &canonical)?;
         check_child(&path, &root_meta)?;
         let sidecar = read_sidecar(&path, &root_meta, budget)?;
-        // Bounded re-read of the exact manifest bytes: same cap as the
-        // scan (MAX_MANIFEST) and the same Budget charging; a normal read
-        // refusal fails closed (untouched), never weakens the refusal.
+        // Bounded late re-read of the manifest: same cap as the scan
+        // (MAX_MANIFEST) and the same Budget charging. A failed read leaves
+        // this entry untagged; it does not turn the refusal into adoption.
         let raw = match budget.read(&path.join(MANIFEST_FILE_NAME), &root_meta, MAX_MANIFEST) {
             Ok(raw) => raw,
             Err(Refusal::Unverifiable) => {
@@ -234,9 +224,9 @@ pub(super) fn prune_inner(
             Err(error) => return Err(error),
         };
         let digest_now = manifest_digest_hex(&raw);
-        // The scan enqueued this entry only on an exact (name, time,
-        // digest) record match, and the re-read digest above equals the
-        // scanned one — nothing else to check before tagging.
+        // Late bounded manifest reread: a refusal keeps this candidate
+        // untagged. The digest covers manifest bytes only; payload bytes and
+        // directory identity rely on the single-writer root contract.
         if digest_now != digest {
             untouched += 1;
             outcome.untouched = Some(untouched);
@@ -244,8 +234,8 @@ pub(super) fn prune_inner(
         }
         if has_tag(&sidecar) {
             if is_owned(&sidecar, owner) {
-                // Already tagged by an earlier repaired pass: nothing left
-                // to adopt, but it is a normal selection candidate.
+                // The matching entry already has our tag; do not write a
+                // second tag, but report this provenance match as retired.
                 outcome.adopted.push((name, time, digest_now));
                 owned.push((time, path));
             } else {

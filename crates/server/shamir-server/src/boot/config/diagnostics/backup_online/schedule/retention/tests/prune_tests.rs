@@ -615,20 +615,9 @@ fn already_tagged_provenance_match_reports_adopted_without_retagging() {
     assert!(tracked.exists());
 }
 
-/// Finding: `tag_fresh` staged its sidecar INSIDE the snapshot, so a
-/// verifier holding the shared lease saw it on the final walk and reported
-/// `UnmanifestedFile` for a valid snapshot. The staging file now lives in
-/// the ROOT (outside every leased child). Deterministic interlock:
-/// retention provisions the marker BEFORE the reader starts (readers never
-/// create it), the reader pauses after loading the manifest (its shared
-/// lease is then held for the whole walk), and the test thread runs the
-/// tagging WITH the staged file present. Inside the seam callback — before
-/// the persist — the test proves the staged file exists, that the reader's
-/// shared lease is actually held (an independent exclusive attempt fails),
-/// releases the verifier and waits for its verdict: it must complete
-/// WITHOUT seeing the staged file. Without the fix the resumed verifier's
-/// final walk runs over the staged file and fails, and the callback's
-/// parent/inside-snapshot assertions fail even earlier.
+/// A tag tempfile under `dir` would appear unmanifested to the paused reader.
+/// The real staged file must live in the root under the reserved shape, while
+/// the reader's shared lease is held; it is released before asserting shape.
 #[test]
 fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
     let (_temp, root) = private_root();
@@ -663,6 +652,7 @@ fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
             .expect("verifier loaded the manifest (lease held)");
 
         let sidecar_map = sidecar(&fresh).as_object().expect("sidecar object").clone();
+        let mut staged_suffix_valid = false;
         let mut on_staged = |staged: &Path| {
             assert!(
                 staged.is_file(),
@@ -673,14 +663,15 @@ fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
                 Some(root.as_path()),
                 "staged in the ROOT, never inside the snapshot"
             );
-            assert!(
-                staged
-                    .file_name()
-                    .expect("staged name")
-                    .to_string_lossy()
-                    .starts_with(STAGED_PREFIX),
-                "the staged name uses the actual tempfile prefix"
-            );
+            let staged_name = staged
+                .file_name()
+                .expect("staged name")
+                .to_string_lossy()
+                .into_owned();
+            staged_suffix_valid = staged_name.len() == STAGED_PREFIX.len() + 16
+                && staged_name
+                    .strip_prefix(STAGED_PREFIX)
+                    .is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()));
             assert!(
                 !fresh
                     .join(staged.file_name().expect("staged name"))
@@ -711,6 +702,10 @@ fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
             &mut on_staged,
         )
         .expect("tagging succeeds under the held read lease");
+        assert!(
+            staged_suffix_valid,
+            "staged suffix is exactly 16 ASCII alphanumeric characters"
+        );
 
         reader.join().expect("verifier thread");
     });
@@ -847,35 +842,122 @@ fn leftover_staged_file_is_removed_and_not_counted_against_the_cap() {
     let (_temp, root) = private_root();
     let old = copy(&root, "20200101_000001", 1, Some(OWNER));
     let fresh = copy(&root, "20200101_000002", 2, None);
-    // Exactly ROOT_ENTRIES counted entries (the marker is excluded):
-    // without the debris the pass succeeds at the cap.
-    for index in 0..ROOT_ENTRIES - 2 {
+    // Exactly ROOT_ENTRIES counted entries remain after cleanup: the
+    // preserved matching-name live file still occupies one of the cap slots.
+    for index in 0..ROOT_ENTRIES - 3 {
         fs::write(root.join(format!("foreign-{index}")), []).expect("foreign entry");
     }
-    let debris = root.join(format!("{STAGED_PREFIX}crash"));
+    let preserved = root.join(format!("{STAGED_PREFIX}fedcba9876543210"));
+    fs::write(&preserved, b"live staged sidecar").expect("preserved live entry");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&preserved)
+        .expect("open preserved entry for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .expect("fresh timestamp is representable"),
+        )
+        .expect("set fresh mtime");
+    let debris = root.join(format!("{STAGED_PREFIX}0123456789abcdef"));
     fs::write(&debris, b"partial sidecar").expect("stage debris");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&debris)
+        .expect("open debris for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(15 * 60 + 1))
+                .expect("old timestamp is representable"),
+        )
+        .expect("set old debris mtime");
     let outcome = retain(&root, &fresh, 1);
     assert_eq!(
-        (outcome.deleted, outcome.failed),
-        (1, 0),
-        "the debris was cleaned up and did not wedge the pass"
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (
+            1,
+            0,
+            Some(u64::try_from(ROOT_ENTRIES - 2).expect("count fits u64"))
+        ),
+        "old debris is excluded while the preserved live file counts"
     );
-    assert!(!debris.exists(), "staged debris removed before the scan");
+    assert!(
+        !debris.exists(),
+        "old exact-shape debris removed before the scan"
+    );
+    assert!(preserved.is_file(), "fresh matching entry stays counted");
     assert!(!old.exists());
     assert!(fresh.is_dir());
 }
 
-/// The cleanup removes plain REGULAR root files only: a DIRECTORY (and on
-/// Unix a SYMLINK) with the staged prefix is never removed and still
-/// counts as a normal entry.
+/// The cleanup removes only an old plain regular file with the exact
+/// reserved name shape. Entries with that shape that are directories or
+/// symlinks, a fresh matching file, a future-mtime matching file, a
+/// prefix-only foreign name, or a malformed suffix remain counted.
 #[test]
 fn staged_prefix_directories_and_links_are_never_removed() {
     let (_temp, root) = private_root();
     let fresh = copy(&root, "20200101_000001", 1, None);
-    let dir_debris = root.join(format!("{STAGED_PREFIX}dir"));
+    let dir_debris = root.join(format!("{STAGED_PREFIX}aaaaaaaaaaaaaaaa"));
     fs::create_dir(&dir_debris).expect("debris directory");
+    let fresh_debris = root.join(format!("{STAGED_PREFIX}0123456789abcdef"));
+    fs::write(&fresh_debris, b"live staged sidecar").expect("fresh staged file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&fresh_debris)
+        .expect("open fresh staged file for timestamp update")
+        .set_modified(std::time::SystemTime::now())
+        .expect("set fresh staged mtime");
+    let prefix_only = root.join(format!("{STAGED_PREFIX}notes"));
+    fs::write(&prefix_only, b"operator notes").expect("prefix-only foreign file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&prefix_only)
+        .expect("open prefix-only file for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(60 * 60))
+                .expect("old timestamp is representable"),
+        )
+        .expect("set old foreign mtime");
+    let future_debris = root.join(format!("{STAGED_PREFIX}bbbbbbbbbbbbbbbb"));
+    fs::write(&future_debris, b"future timestamp").expect("future staged file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&future_debris)
+        .expect("open future staged file for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_add(std::time::Duration::from_secs(60 * 60))
+                .expect("future timestamp is representable"),
+        )
+        .expect("set future staged mtime");
+    let malformed = root.join(format!("{STAGED_PREFIX}0123456789abcde!"));
+    fs::write(&malformed, b"malformed suffix").expect("malformed staged file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&malformed)
+        .expect("open malformed suffix for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(60 * 60))
+                .expect("old timestamp is representable"),
+        )
+        .expect("set old malformed mtime");
+    let malformed_short = root.join(format!("{STAGED_PREFIX}0123456789abcde"));
+    fs::write(&malformed_short, b"short suffix").expect("short staged file");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&malformed_short)
+        .expect("open short suffix for timestamp update")
+        .set_modified(
+            std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(60 * 60))
+                .expect("old timestamp is representable"),
+        )
+        .expect("set old short-name mtime");
     #[cfg(unix)]
-    let link_debris = root.join(format!("{STAGED_PREFIX}link"));
+    let link_debris = root.join(format!("{STAGED_PREFIX}cccccccccccccccc"));
     #[cfg(unix)]
     symlink(&fresh, &link_debris).expect("debris symlink");
     let outcome = retain(&root, &fresh, 1);
@@ -884,17 +966,23 @@ fn staged_prefix_directories_and_links_are_never_removed() {
         (0, 0),
         "neither debris entry blocks a pass below the cap"
     );
-    let extra = if cfg!(unix) { 2 } else { 1 };
+    let extra = if cfg!(unix) { 7 } else { 6 };
     assert_eq!(outcome.untouched, Some(extra));
-    assert!(
-        dir_debris.exists(),
-        "a directory is never removed as debris"
-    );
+    for path in [
+        dir_debris,
+        fresh_debris,
+        prefix_only,
+        future_debris,
+        malformed,
+        malformed_short,
+    ] {
+        assert!(path.exists(), "preserved {path:?}");
+    }
     #[cfg(unix)]
     assert!(
         fs::symlink_metadata(&link_debris)
             .expect("link remains")
             .is_symlink(),
-        "a symlink is never removed or followed as debris"
+        "an exact-shape symlink is never removed or followed"
     );
 }

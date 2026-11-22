@@ -1,20 +1,16 @@
 //! Scheduled-run retention publication and adoption provenance (moved out
 //! of `registry.rs` for layout): marker-failure accounting, the bounded
 //! in-memory adoption provenance ([`PendingAdoption`] inside
-//! [`PendingAdoptions`]), and the capture of the exact published manifest
-//! bytes.
+//! [`PendingAdoptions`]), and capture of manifest bytes after protocol
+//! success.
 //!
-//! Manifest capture (R2d-FIX-C round 3, reviewer P2): the record binds to
-//! the OUTPUT, not the pathname — at copy completion one bounded read of
-//! the published manifest (capped by [`MAX_MANIFEST`], the same cap the
-//! retention preflight enforces) yields the SHA-256 digest of those exact
-//! bytes plus the manifest's own creation time; both are stored in
-//! [`PendingAdoption`]. The digest is content identity of non-secret
-//! manifest bytes under a trusted, stable, account-private root — it is
-//! not an authenticator. Adoption only matches an output whose manifest
-//! bytes hash to the recorded digest, so a replacement tree under the same
-//! name with the same creation time is never adopted (see
-//! `retention::preflight::verified_time` and `retention::prune`).
+//! Manifest capture (R2d-FIX-C round 3, reviewer P2): after the protocol
+//! returns, one bounded read captures the manifest bytes and decoded creation
+//! time; a replacement before capture is therefore what gets recorded. The
+//! digest checks that the manifest still matches at the scan and late check;
+//! adoption also requires an untagged copy. This does NOT prove payload-tree
+//! or directory identity: replacing either beneath unchanged manifest bytes
+//! is not detected, so the root remains single-writer by contract.
 //!
 //! All derivation happens BEFORE any record lock is taken: no filesystem
 //! I/O runs under the registry's `RunRecord` lock. The provenance set
@@ -25,6 +21,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Read;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -49,18 +47,14 @@ pub(in crate::boot::config::diagnostics::backup_online) const MAX_MANIFEST: u64 
 /// unrecorded.
 const MAX_PENDING_ADOPTIONS: usize = 64;
 
-/// Exact provenance of one successful, self-verified scheduled output that
-/// was published while the lease marker could not be provisioned (module
-/// doc): only the registry's own run — exact root, exact owner, exact
-/// timestamped directory name, that output's exact manifest creation time
-/// and the SHA-256 digest of the exact manifest bytes captured at
-/// completion — never a discovery heuristic, so no arbitrary, foreign or
-/// historical untagged directory can be adopted. A different output that
-/// later occupies the same name (even with the same creation time and
-/// valid manifest hashes) is bound out by the (creation time, digest)
-/// pair. Concurrent modification of an already-published child stays
-/// outside the documented stable-root contract; the fresh sidecar and
-/// manifest digest checks at adoption catch tag and manifest swaps.
+/// Manifest-byte provenance for one successful scheduled output published
+/// while marker provisioning failed: root, owner, name, decoded manifest
+/// creation time, and SHA-256 of the manifest bytes observed by the bounded
+/// post-protocol capture. A replacement before capture is therefore the
+/// bytes recorded. Adoption requires the same manifest bytes/time at scan
+/// and late check plus an untagged copy; this does not bind payload contents
+/// or directory identity, which remain protected by the single-writer root
+/// contract.
 struct PendingAdoption {
     root: PathBuf,
     owner: String,
@@ -74,7 +68,6 @@ struct PendingAdoption {
 /// reparse tag).
 #[cfg(windows)]
 fn is_plain_file(meta: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
@@ -114,8 +107,9 @@ impl PendingAdoptions {
             .collect()
     }
 
-    /// Record one freshly captured output identity, evicting the OLDEST
-    /// record at [`MAX_PENDING_ADOPTIONS`] (module doc).
+    /// Record one freshly captured manifest identity (name, creation time
+    /// and digest), evicting the OLDEST record at [`MAX_PENDING_ADOPTIONS`]
+    /// (module doc).
     pub(in crate::boot::config::diagnostics::backup_online) fn record(
         &mut self,
         root: &Path,
@@ -250,13 +244,12 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_retention_p
             ..RetentionOutcome::default()
         },
         (Ok(report), MarkerProvisioning::Provisioned) => {
-            // A cancelled run publishes no prune: with a healthy marker a
-            // late cancel skips the scan and neither tags nor records
-            // anything — the provisioning alone decided this run's tag
-            // state, so skipping loses nothing observable. (The cancel
-            // check lives in the helper, not at the call site, so a marker
-            // FAILURE is still accounted even when the run was cancelled
-            // mid-copy.)
+            // A late cancel after successful protocol completion with a
+            // healthy marker skips the scan: the completed copy remains
+            // untagged and unrecorded. The operator must verify and manually
+            // move or retire it; no later pass can infer it. A marker
+            // failure observed before cancellation is still accounted in the
+            // branch above.
             if cancel.is_cancelled() {
                 RetentionOutcome::default()
             } else {

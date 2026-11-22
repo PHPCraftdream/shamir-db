@@ -10,23 +10,26 @@
 //! protocol's `CancelFlag`, whose cleanup removes the destination and
 //! releases pins/seals (R4).
 //!
-//! Snapshot lease (R2d-FIX-C): the protocol's self-verify of the exact
-//! fresh child it just published runs through the crate-private unleased
-//! entry (`verify_writer_snapshot`) so it never waits on a reader or
-//! retention pass and can never unlease an older sibling — there is NO
-//! thread-scoped bypass anymore — and for scheduled runs the lease marker
-//! is provisioned BEFORE the snapshot is published (see
-//! `MarkerProvisioning` below). A provisioning failure is a retention failure with the same
-//! outcome and metric a failed prune produces, independent of the copy
-//! outcome, and a successful copy from such a run is recorded as bounded
-//! IN-MEMORY provenance (exact root + owner + name, plus that output's
-//! exact manifest creation time and a SHA-256 digest of its exact manifest
-//! bytes, `PendingAdoption` in `schedule::retention_pass`); a LATER
-//! COMPLETE retention pass may then adopt that output if and only if its
-//! exact (name, creation time, digest) triple still matches. A process
-//! restart loses the list, and copies published during an outage that
-//! outlives the process then stay `untouched` by selection — the
-//! documented limitation, fail-safe: no arbitrary adoption ever.
+//! Snapshot lease (R2d-FIX-C): the protocol's private self-check uses the
+//! crate-private unleased entry (`verify_writer_snapshot`) only for the
+//! fresh child it just created; it takes no lease and cannot unlease an
+//! older sibling. There is NO thread-scoped bypass anymore. Scheduled runs
+//! provision the lease marker BEFORE publishing the snapshot. A provisioning
+//! failure is a retention failure with the same outcome and metric as a
+//! failed prune, independent of copy outcome. A successful copy from such a
+//! run is recorded as bounded IN-MEMORY provenance only if the post-protocol
+//! bounded manifest capture succeeds and decodes (root + owner + name +
+//! creation time + manifest-byte digest). The capture happens after protocol
+//! return: it records the manifest bytes observed then, not proof of the
+//! protocol's original payload tree or directory identity. Adoption requires
+//! those manifest bytes/time to remain unchanged at capture, scan and late
+//! check, and an untagged copy; payload/directory replacement under unchanged
+//! manifest bytes is not detected, so the root is single-writer by contract.
+//! A refused/failed capture records nothing. A process restart loses the
+//! bounded 64-record list; outage copies whose records are lost remain
+//! untouched by selection. A late cancellation after protocol success with a
+//! healthy marker skips retention and leaves the completed copy untagged and
+//! unrecorded; the operator must verify and manually move or retire it.
 //!
 //! Destination handling (§4.2 A): the operator `to` must be absolute and is
 //! validated exactly like the offline backup — canonicalize the nearest
@@ -553,12 +556,9 @@ impl RunJob {
         };
         let preflight_failed = preflight.is_err();
         // Publication-window guard (R2d-FIX-C): provision the marker BEFORE
-        // the protocol publishes the fresh child, so an early standalone
-        // reader leases it. On failure the writer still runs, but retention
-        // is skipped for THIS run — a copy first published without a marker
-        // must never be tagged (made prune-eligible). Future runs retry the
-        // provisioning; a permanently untagged copy stays untouched by
-        // selection (rules unchanged).
+        // A later pass may adopt the markerless copy only if bounded capture
+        // succeeds and the manifest still matches; this records no payload or
+        // directory identity. Refused capture leaves no provenance.
         let marker_provisioning = if preflight_failed || scheduled.is_none() {
             MarkerProvisioning::NotAttempted
         } else {
@@ -578,9 +578,9 @@ impl RunJob {
         let outcome = preflight
             .inspect_err(|error| progress.record_failure(error.stage(), error))
             .and_then(|()| {
-                // No writer bypass: the protocol's self-verify leases only
-                // the exact fresh child via the crate-private entry; any
-                // other verify on this thread stays under the shared lease.
+                // The protocol self-check uses its crate-private unleased
+                // entry only for the exact fresh child it created. Ordinary
+                // verification of a managed path still takes the shared lease.
                 run_online_backup(
                     &port,
                     &data_dir,
@@ -618,29 +618,27 @@ impl RunJob {
             guard.completed_dir = Some(report.dest_dir.clone());
             backup_metrics::note_success(report.total_bytes, copy_duration);
         }
-        // Completion capture (R2d-FIX-C, module doc): ONE bounded read of
-        // the published manifest — only a marker-broken run needs adoption
-        // provenance, and its captured bytes ALSO feed progress
-        // attribution (no second read). Ordinary runs keep the original
-        // unbounded attribution read.
-        let captured_raw =
-            if let (Ok(report), MarkerProvisioning::Failed) = (&outcome, &marker_provisioning) {
-                bounded_manifest_bytes(&report.dest_dir)
-            } else {
-                None
-            };
-        let captured = captured_raw.as_deref().and_then(manifest_capture);
-        // Scheduled retention (marker-provisioning defect; module doc): a
-        // marker error reports the same `RetentionOutcome` shape and metric
-        // as a failed prune, INDEPENDENTLY of the copy outcome, fail-closed;
-        // an unattempted marker accounts nothing. The adoptable provenance
-        // set is snapshotted and the record/retire bookkeeping runs under
-        // the existing `RunRecord` lock — no filesystem I/O under it; the
-        // capture above happened before any lock. The pass runs for EVERY
-        // scheduled run (never filtered on cancellation): a marker failure
-        // observed before a late cancellation must still reach the
-        // retention-failure metric and the provenance record; the prune
-        // itself checks the cancel flag (inside `scheduled_retention_pass`).
+        // Capture is attempted only for a completed run with failed marker
+        // provisioning. The outer option distinguishes not attempted from an
+        // attempted read; the inner result distinguishes success from refusal.
+        let capture_outcome = match (&outcome, &marker_provisioning) {
+            (Ok(report), MarkerProvisioning::Failed) => {
+                Some(bounded_manifest_bytes(&report.dest_dir).ok_or(()))
+            }
+            _ => None,
+        };
+        let captured = capture_outcome
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|raw| manifest_capture(raw));
+        // Scheduled retention reports marker-provisioning failures with the
+        // same outcome and metric as failed pruning, independent of the copy.
+        // Provenance is snapshotted and updated under the existing record
+        // lock; filesystem capture happened before locking. Marker failure
+        // observed before late cancellation still reaches the failure metric,
+        // and successful capture records provenance. A late cancellation
+        // after protocol success with a healthy marker skips prune, leaving
+        // the copy untagged and unrecorded for operator verification/retirement.
         if let Some(scheduled) = scheduled {
             let recorded = record
                 .lock()
@@ -672,14 +670,14 @@ impl RunJob {
                                 );
                             }
                             (None, _) => {
-                                // Fail closed: without the exact captured
-                                // output identity nothing is recorded, and
-                                // an unrecorded copy is never adopted by
-                                // selection.
+                                // Capture or decode refusal stores no
+                                // provenance; manifest equality is not proof
+                                // of payload/directory identity, and refused
+                                // capture skips fallback attribution reads.
                                 tracing::warn!(
                                     dest_dir = %report.dest_dir.display(),
-                                    "cannot capture the published manifest for adoption \
-                                     provenance; the copy stays untouched by selection"
+                                    "bounded manifest capture or decode was refused; no adoption \
+                                     provenance was stored and the copy stays untouched by selection"
                                 );
                             }
                             (Some(_), None) => tracing::warn!(
@@ -699,19 +697,23 @@ impl RunJob {
                 MarkerProvisioning::NotAttempted => {}
             }
         }
-        // Owner-side final progress: the protocol only notes zeroed
-        // per-repo entries (step B) and exposes no progress callback, so
-        // the run's hashed bytes/files would otherwise stay invisible in
-        // `status()` after `Done`. Attribute the snapshot (which the
-        // manifest describes per repo); recorded under a short lock below.
-        // A marker-broken run reuses its captured bounded bytes.
-        if let Some(raw) = captured_raw.as_deref() {
-            for (repo, bytes_hashed, files_hashed) in final_per_repo_progress_bytes(raw) {
-                progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+        // Owner-side final progress: the protocol notes zeroed per-repo
+        // entries and exposes no progress callback. Successful bounded
+        // capture supplies attribution; a refused capture leaves zero/unknown
+        // fields and deliberately skips the ordinary unbounded fallback read.
+        match &capture_outcome {
+            Some(Ok(raw)) => {
+                for (repo, bytes_hashed, files_hashed) in final_per_repo_progress_bytes(raw) {
+                    progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+                }
             }
-        } else if let Ok(report) = &outcome {
-            for (repo, bytes_hashed, files_hashed) in final_per_repo_progress(report) {
-                progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+            Some(Err(())) => {}
+            None => {
+                if let Ok(report) = &outcome {
+                    for (repo, bytes_hashed, files_hashed) in final_per_repo_progress(report) {
+                        progress.note_repo_progress(&repo, bytes_hashed, files_hashed);
+                    }
+                }
             }
         }
         let snapshot_count = run_state.snapshot_count();
@@ -923,11 +925,19 @@ impl OnlineBackupRegistry {
         *self.pending_step_callback.lock() = Some(callback);
     }
 
+    #[cfg(test)]
+    pub(super) fn pending_adoption_count_for_test(&self, root: &Path, owner: &str) -> usize {
+        self.record
+            .lock()
+            .pending_adoptions
+            .recorded_for(root, owner)
+            .len()
+    }
+
     /// Arm a one-shot post-run callback for this registry's NEXT `start`:
-    /// after the protocol returns `Ok` on that run's runner thread — and
-    /// before the guard stamp, the completion capture and the retention
-    /// pass — it may rename the published child and returns its new
-    /// location (`None` keeps the report as-is). Per-registry opt-in.
+    /// after the protocol returns `Ok` on the runner thread and before the
+    /// guard stamp, completion capture and retention pass, it may rename the
+    /// published child (`None` keeps the report path). Per-registry opt-in.
     pub(super) fn arm_post_run_callback(&self, callback: TestPostRunCallback) {
         *self.pending_post_run_callback.lock() = Some(callback);
     }

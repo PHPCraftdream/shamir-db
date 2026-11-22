@@ -48,8 +48,9 @@ pub(super) fn verify_manifest_v2(
 }
 
 /// Decode-and-classify half of [`verify_manifest_v2`]: UTF-8 + JSON decode,
-/// the ORIGINAL format-version check (v1 and anything unknown refuse typed
-/// with [`BackupError::UnsupportedManifestFormatVersion`], unchanged) and
+/// the ORIGINAL format-version behavior: decoded v1 manifests refuse with
+/// [`BackupError::UnsupportedManifestFormatVersion`], while an unknown
+/// version rejected by `manifest::decode` maps to `ManifestInvalid`; then
 /// the online-section presence checks — ALL pure manifest-byte work, no
 /// payload I/O, so a caller can refuse a candidate on `kind` (or format)
 /// before any tree walk. Retention's kind-first preflight stops right here.

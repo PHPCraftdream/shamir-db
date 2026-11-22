@@ -2,9 +2,9 @@
 //! of `registry.rs` for layout): derives final per-repo hashed
 //! `(bytes, files)` from the snapshot manifest the protocol just wrote.
 //! Ordinary runs use [`final_per_repo_progress`] with the original
-//! unbounded manifest read; a marker-broken run reuses the ONE capped
-//! completion read the registry already performed for the adoption-digest
-//! capture via [`final_per_repo_progress_bytes`] — no second read.
+//! unbounded manifest read. A marker-broken completed run reuses its bounded
+//! capture when it succeeds; if capture is refused, attribution stays at the
+//! zero/unknown values set by the protocol and the manifest is not reread.
 
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::protocol::BackupReport;
@@ -24,10 +24,9 @@ pub(super) fn final_per_repo_progress(report: &BackupReport) -> Vec<(String, u64
     from_decoded(parsed)
 }
 
-/// [`final_per_repo_progress`] over manifest bytes the caller already
-/// read (the registry's capped completion capture on a marker-broken
-/// run): attribution is derived from those exact bytes, never a second
-/// filesystem read. Same best-effort contract.
+/// [`final_per_repo_progress`] over bytes from a successful bounded completion
+/// capture: attribution uses those exact bytes with no second filesystem read.
+/// A refused bounded capture does not call this or the unbounded fallback.
 pub(super) fn final_per_repo_progress_bytes(raw: &[u8]) -> Vec<(String, u64, u64)> {
     from_decoded(
         std::str::from_utf8(raw)

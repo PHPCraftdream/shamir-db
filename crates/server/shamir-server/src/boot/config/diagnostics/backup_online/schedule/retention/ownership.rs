@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Map, Value};
 use tempfile::Builder;
@@ -13,32 +14,51 @@ use super::budget::{plain_on_root, Budget, Refusal};
 const TAG: &str = "scheduled_retention";
 const MAX_SIDECAR: u64 = 64 << 10;
 
-/// Recognizable fixed prefix of the staged sidecar file (R2d-FIX-C round
-/// 3, reviewer P2): a crash between staging and the atomic replace leaves
-/// plain regular root entry. One runner owns the root, so any such file
-/// at the start of a later pass is debris of an earlier crash; prune
-/// removes it during the initial scan discovery (a successfully removed
-/// entry neither consumes a visit-cap slot nor counts), while a cleanup
-/// failure leaves it as a normal counted entry.
+/// Recognizable fixed prefix of the staged sidecar file. The suffix is
+/// exactly 16 random alphanumeric characters; cleanup removes only old,
+/// plain regular files of that exact shape. The 15-minute minimum age keeps
+/// a live staging file from another runner safe, but does not serialize
+/// runners: one runner must own the root by contract.
 pub(super) const STAGED_PREFIX: &str = ".shamir-retention-staged-";
+const STAGED_RANDOM_LEN: usize = 16;
+const STAGED_DEBRIS_MIN_AGE: Duration = Duration::from_secs(15 * 60);
+
+fn has_staged_name_shape(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.strip_prefix(STAGED_PREFIX).is_some_and(|suffix| {
+        suffix.len() == STAGED_RANDOM_LEN && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    })
+}
 
 /// Best-effort removal of ONE leftover staged sidecar debris entry: a
-/// direct root entry whose name starts with [`STAGED_PREFIX`], a plain
-/// REGULAR file only (nonfollowing metadata plus the same reparse/mount
-/// exclusion as the scan, so directories, symlinks and junctions are
-/// never removed). Returns true only when the entry was actually
-/// removed. Every failure is logged and the entry is left in place as a
-/// normal counted root entry; cleanup never fails a pass.
+/// direct root entry with the exact staged name shape, at least
+/// [`STAGED_DEBRIS_MIN_AGE`] old, and a plain regular file. Nonfollowing
+/// metadata plus the same reparse/mount exclusion as the scan means links,
+/// reparse points and directories are never removed. Missing, unreadable or
+/// future modification times are not debris. Returns true only when the
+/// entry was actually removed; every failure leaves it as a normal counted
+/// root entry, and cleanup never fails a pass.
 pub(super) fn remove_staged_debris_entry(name: &OsStr, path: &Path, root_meta: &Metadata) -> bool {
-    if !name.to_string_lossy().starts_with(STAGED_PREFIX) {
+    if !has_staged_name_shape(name) {
         return false;
     }
-    // Nonfollowing: a symlink (or reparse point) with the prefix is
+    // Nonfollowing: a symlink (or reparse point) with the matching name is
     // NOT ours to remove.
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
     };
     if !meta.is_file() || !plain_on_root(&meta, root_meta) {
+        return false;
+    }
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    if age < STAGED_DEBRIS_MIN_AGE {
         return false;
     }
     match fs::remove_file(path) {
@@ -133,6 +153,7 @@ fn tag_fresh_impl(
     // tagging takes no lease at all.
     let mut staged = Builder::new()
         .prefix(STAGED_PREFIX)
+        .rand_bytes(STAGED_RANDOM_LEN)
         .tempfile_in(root)
         .map_err(|_| Refusal::Incomplete)?;
     staged.write_all(&bytes).map_err(|_| Refusal::Incomplete)?;

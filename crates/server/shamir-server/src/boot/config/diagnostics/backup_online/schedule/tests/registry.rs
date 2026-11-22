@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +60,65 @@ fn pin_fixture(published: &Path, fixed_name: &str, created_at: u128) -> Option<P
         .unwrap_or_else(|error| panic!("encode pinned manifest: {error}"));
     fs::write(fixed.join(MANIFEST_FILE_NAME), encoded)
         .unwrap_or_else(|error| panic!("write pinned manifest: {error}"));
+    Some(fixed)
+}
+
+/// Rename the just-published snapshot and pad its manifest with whitespace
+/// to one byte above the bounded-capture limit. The post-run callback executes
+/// after the protocol's self-verification.
+fn pin_oversized_fixture(published: &Path, fixed_name: &str, created_at: u128) -> Option<PathBuf> {
+    let fixed = pin_fixture(published, fixed_name, created_at)?;
+    let manifest_path = fixed.join(MANIFEST_FILE_NAME);
+    let raw = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("read pinned manifest before padding: {error}"));
+    let decoded = manifest::decode(&raw)
+        .unwrap_or_else(|error| panic!("decode pinned manifest before padding: {error}"));
+    let consistency = decoded.consistency.as_ref().expect("online repo metadata");
+    let main = consistency
+        .per_repo
+        .get("app/main")
+        .expect("fixture contains the main repo");
+    let wal_dirs: Vec<_> = decoded
+        .wal
+        .as_ref()
+        .expect("online WAL metadata")
+        .dirs
+        .iter()
+        .filter(|dir| dir.repo == "app/main")
+        .map(|dir| format!("{}/", dir.dir))
+        .collect();
+    let main_files = decoded.files.iter().filter(|entry| {
+        entry.path.starts_with(&format!("{}/", main.store_dir))
+            || wal_dirs.iter().any(|dir| entry.path.starts_with(dir))
+    });
+    let expected_bytes: u64 = main_files.clone().map(|entry| entry.size_bytes).sum();
+    let expected_files = main_files.count();
+    assert!(
+        expected_bytes > 0 && expected_files > 0,
+        "valid manifest attributes main files"
+    );
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest_path)
+        .unwrap_or_else(|error| panic!("open pinned manifest for padding: {error}"));
+    let current_len = file
+        .metadata()
+        .unwrap_or_else(|error| panic!("stat pinned manifest: {error}"))
+        .len();
+    let target_len = super::super::retention_pass::MAX_MANIFEST + 1;
+    assert!(
+        current_len < target_len,
+        "fixture manifest starts below cap"
+    );
+    let mut remaining = target_len - current_len;
+    let padding = [b' '; 8192];
+    while remaining > 0 {
+        let chunk_len =
+            usize::try_from(remaining.min(padding.len() as u64)).expect("padding chunk fits usize");
+        file.write_all(&padding[..chunk_len])
+            .unwrap_or_else(|error| panic!("pad pinned manifest: {error}"));
+        remaining -= chunk_len as u64;
+    }
     Some(fixed)
 }
 
@@ -234,7 +294,121 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
     drop(db);
 }
 
-/// Marker-provisioning defect, real registry, TWO successful runs on the
+/// A marker-broken successful run with a manifest one byte over the capture
+/// limit must refuse provenance and skip the attribution fallback read. The
+/// callback runs after protocol verification; its valid, positive attribution
+/// fixture proves the old unbounded read would populate the status counters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_manifest_capture_records_no_provenance_or_fallback_attribution() {
+    let guard = FlakeGuard::with_watchdog(
+        "refused_manifest_capture_records_no_provenance_or_fallback_attribution",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    let source = tempfile::tempdir().expect("source tempdir");
+    let dest = tempfile::tempdir().expect("destination tempdir");
+    let to = dest.path().join("private");
+    create_private_dir(&to).expect("private destination");
+    let to = to.canonicalize().expect("canonical destination");
+    let root = source.path();
+    let db = tokio::time::timeout(WAIT, async {
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(root.join("system")))
+            .await
+            .expect("init durable engine");
+        db.create_db("app").await.expect("create database");
+        db.add_repo(
+            "app",
+            RepoConfig::new("main", BoxRepoFactory::fjall_raw(root.join("repos/main")))
+                .add_table(TableConfig::new("rows")),
+        )
+        .await
+        .expect("add durable repo");
+        db.flush_all_waiting().await.expect("flush engine");
+        db
+    })
+    .await
+    .expect("fixture within deadline");
+    guard.mark("durable engine ready");
+    let db = Arc::new(db);
+    let registry = OnlineBackupRegistry::new(
+        Arc::clone(&db),
+        root.to_path_buf(),
+        tokio::runtime::Handle::current(),
+    );
+    // The obstruction makes pre-copy marker provisioning fail but leaves the
+    // destination usable for the scheduled protocol.
+    fs::create_dir(to.join(SNAPSHOT_LEASE_FILE_NAME)).expect("marker obstruction");
+    let fixed_name = "20200101_000005".to_owned();
+    registry.arm_post_run_callback(Box::new(move |published| {
+        pin_oversized_fixture(published, &fixed_name, 5)
+    }));
+    let completion = registry
+        .start_scheduled(
+            to.clone(),
+            OWNER.to_owned(),
+            BackupRetentionConfig {
+                keep_last: 1,
+                max_age_days: None,
+            },
+        )
+        .expect("admit scheduled run");
+    guard.mark("scheduled run admitted");
+    let completed = tokio::time::timeout(WAIT, completion)
+        .await
+        .expect("scheduled completion within deadline")
+        .expect("runner reports completion");
+    assert!(completed, "protocol completed successfully");
+    guard.mark("scheduled run finished");
+
+    let status = registry.status();
+    let snapshot = status.dest_dir.expect("completed snapshot path");
+    assert_eq!(snapshot, to.join("20200101_000005"));
+    assert_eq!(
+        fs::metadata(snapshot.join(MANIFEST_FILE_NAME))
+            .expect("padded manifest exists")
+            .len(),
+        super::super::retention_pass::MAX_MANIFEST + 1
+    );
+    let manifest_raw = fs::read_to_string(snapshot.join(MANIFEST_FILE_NAME))
+        .expect("padded manifest remains readable");
+    let manifest_data =
+        manifest::decode(&manifest_raw).expect("whitespace-padded manifest remains valid JSON");
+    let consistency = manifest_data
+        .consistency
+        .as_ref()
+        .expect("online repo metadata");
+    let main = consistency
+        .per_repo
+        .get("app/main")
+        .expect("manifest records the main repo");
+    let wal_dirs: Vec<_> = manifest_data
+        .wal
+        .as_ref()
+        .expect("online WAL metadata")
+        .dirs
+        .iter()
+        .filter(|dir| dir.repo == "app/main")
+        .map(|dir| format!("{}/", dir.dir))
+        .collect();
+    let main_files = manifest_data.files.iter().filter(|entry| {
+        entry.path.starts_with(&format!("{}/", main.store_dir))
+            || wal_dirs.iter().any(|dir| entry.path.starts_with(dir))
+    });
+    let would_be_bytes: u64 = main_files.clone().map(|entry| entry.size_bytes).sum();
+    let would_be_files = main_files.count();
+    assert!(would_be_bytes > 0 && would_be_files > 0);
+    assert_eq!(registry.pending_adoption_count_for_test(&to, OWNER), 0);
+    let main_progress = status
+        .progress
+        .per_repo
+        .iter()
+        .find(|progress| progress.repo == "app/main")
+        .expect("protocol initialized main repo progress");
+    assert_eq!(main_progress.bytes_hashed, 0);
+    assert_eq!(main_progress.files_hashed, 0);
+    drop(db);
+}
+
 /// SAME registry and root: run 1 publishes under a DIRECTORY parked at the
 /// marker path — the copy succeeds while retention reports the failure
 /// (+1 retention-failure metric, no deletions, no scan so the `untouched`
@@ -318,7 +492,7 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
     .await
     .expect("run 1 within deadline")
     .expect("run 1 reports completion");
-    assert!(completed, "the copy itself must succeed");
+    assert!(completed, "the scheduled protocol completed successfully");
     let status = registry.status();
     let dir1 = status.dest_dir.clone().expect("run 1 published a copy");
     guard.mark("run 1 finished");
@@ -339,7 +513,7 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
             .expect("decode sidecar");
     assert!(
         sidecar1.get("scheduled_retention").is_none(),
-        "a copy published without a marker must stay untagged"
+        "this run publishes without a tag; a later pass can adopt it only with the recorded manifest provenance"
     );
     assert!(to.join("foreign").is_dir());
 

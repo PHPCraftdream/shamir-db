@@ -3,20 +3,19 @@
 pub(in crate::boot::config::diagnostics::backup_online) struct RetentionOutcome {
     pub(in crate::boot::config::diagnostics::backup_online) deleted: u64,
     pub(in crate::boot::config::diagnostics::backup_online) failed: u64,
-    /// Snapshots left in place because another process holds the read lease.
-    /// Normal contention, not an error: the next pass retries.
+    /// Snapshots left in place because another process held the read lease
+    /// during this deletion attempt. Normal contention is not an error; a
+    /// later pass may retry, but no retry or deletion is promised.
     pub(in crate::boot::config::diagnostics::backup_online) skipped_in_use: u64,
     pub(in crate::boot::config::diagnostics::backup_online) untouched: Option<u64>,
-    /// Exact (directory name, manifest creation time, manifest SHA-256
-    /// digest) TRIPLES this pass TAGGED as fresh adoptable outputs recorded
-    /// in the registry's bounded IN-MEMORY provenance
-    /// (`RunRecord::pending_adoptions`): outputs the registry published
-    /// while the lease marker was broken. The digest binds the report to
-    /// the recorded OUTPUT's exact manifest bytes, not just a pathname and
-    /// timestamp. The caller drops exactly these reported triples from that
-    /// list once reported, whatever the rest of the pass did — the
-    /// ownership tag is already durable. The triple (not the bare name) is
-    /// what is reported and retired, so a different output that later
-    /// occupies a recorded name is never mistaken for the recorded one.
+    /// Directory name, manifest creation time and manifest SHA-256 digest
+    /// triples reported as adopted by this pass for entries in the registry's
+    /// bounded in-memory provenance (`RunRecord::pending_adoptions`). A
+    /// matching entry already bearing this owner's tag may be reported here
+    /// without writing a new tag. The digest compares manifest bytes captured
+    /// after protocol success, at scan and at the late check; it does not
+    /// establish payload or directory identity. The caller retires exactly
+    /// these triples because they are now owner-tagged or were already
+    /// owner-tagged, regardless of later pass outcome.
     pub(in crate::boot::config::diagnostics::backup_online) adopted: Vec<(String, u128, String)>,
 }
