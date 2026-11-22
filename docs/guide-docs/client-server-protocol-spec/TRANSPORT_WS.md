@@ -76,7 +76,7 @@ WS close 1000 ИЛИ logout
 | 1011 | Server error |
 | 4000 | `authentication_failed` |
 | 4001 | `unsupported_version` |
-| 4002 | `server_busy` |
+| 4002 | `server_busy` (reserved; no live native SCRAM handshake producer today — the Argon2 gate refuses only post-auth at user creation) |
 | 4003 | `heartbeat_timeout` |
 | 4010 | `token_sid_mismatch` (только токен-соединения, TOKEN_API.md §10) |
 | 4011 | `token_revoked` (только токен-соединения) |

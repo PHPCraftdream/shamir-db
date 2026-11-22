@@ -35,13 +35,15 @@
 mod derive_scram_record;
 mod directory;
 mod record;
+mod scram_gate;
 #[cfg(test)]
 mod tests;
 
-pub use derive_scram_record::derive_scram_record;
+pub use derive_scram_record::{derive_scram_record, derive_scram_record_gated};
 pub use directory::FjallUserDirectory;
 #[cfg(test)]
 pub(crate) use record::project_user_ids_to_principal64;
 #[cfg(test)]
 pub(crate) use record::PersistedUser;
 pub use record::UserDirectoryState;
+pub use scram_gate::{ScramDerivationError, ScramDerivationGate};

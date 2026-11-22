@@ -15,8 +15,10 @@ use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::hmac as canon;
 
 use crate::tables_registry::TablesRegistry;
-use crate::user_directory::derive_scram_record;
 use crate::user_directory::FjallUserDirectory;
+use shamir_server_security::user_directory::{
+    derive_scram_record_gated, ScramDerivationError, ScramDerivationGate,
+};
 
 use crate::db_handler::handler::DbResponse;
 
@@ -35,6 +37,8 @@ pub struct AdminGlue {
     /// re-register them on restart. `None` means "don't persist table
     /// changes" — fine for in-memory test setups, wrong for production.
     pub tables_registry: Option<Arc<TablesRegistry>>,
+    /// Boot's single `ScramDerivationGate` over the boot `Argon2Semaphore`.
+    pub derivation_gate: Arc<ScramDerivationGate>,
 }
 
 /// Create a SCRAM-authenticatable user. Server-side Argon2id is CPU-bound
@@ -143,9 +147,21 @@ pub(crate) async fn create_scram_user(
     // zeroizing buffer right away. `Zeroizing` wipes on Drop, so we don't
     // need an explicit `.zeroize()` call — both the success and error
     // paths drop `pw_buf` before returning.
-    let record = match derive_scram_record(password.reveal().to_owned(), admin.kdf).await {
+    let record = match derive_scram_record_gated(
+        password.reveal().to_owned(),
+        admin.kdf,
+        admin.derivation_gate.clone(),
+    )
+    .await
+    {
         Ok(r) => r,
-        Err(msg) => {
+        Err(ScramDerivationError::Busy) => {
+            return DbResponse::Error {
+                code: "server_busy".into(),
+                message: ScramDerivationError::Busy.to_string(),
+            };
+        }
+        Err(ScramDerivationError::Failed(msg)) => {
             return DbResponse::Error {
                 code: "query".into(),
                 message: msg,

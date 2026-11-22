@@ -68,6 +68,7 @@ const RETRYABLE_ERROR_CODES = new Set([
   'lock_timeout',
   'tx_conflict',
   'read_only_replica',
+  'server_busy',
 ]);
 
 /** `true` if `code` is a transient failure worth retrying. */
