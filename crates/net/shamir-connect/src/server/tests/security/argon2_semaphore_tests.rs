@@ -12,6 +12,25 @@ use std::time::Duration;
 /// synchronisation.
 const WATCHDOG: Duration = Duration::from_secs(120);
 
+/// Bounded wait for a release that is attempted while the waiter is held in
+/// its check-to-sleep gap. It is a sequencer, not an oracle: the assertion
+/// reads the wake reason.
+const RELEASE_GRACE: Duration = Duration::from_millis(500);
+
+/// Join a worker without an unbounded wait: a reaper thread owns the handle
+/// and the test only waits, bounded, for its report.
+fn join_bounded(handle: thread::JoinHandle<()>) {
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let reaper = thread::spawn(move || {
+        let _ = handle.join();
+        let _ = finished_tx.send(());
+    });
+    finished_rx
+        .recv_timeout(WATCHDOG)
+        .expect("worker thread finishes");
+    drop(reaper);
+}
+
 #[test]
 fn try_acquire_succeeds_when_capacity_available() {
     let s = Argon2Semaphore::with_capacity(3);
@@ -32,18 +51,56 @@ fn permit_drop_releases_back() {
     assert!(s.try_acquire().is_some());
 }
 
+/// A release racing the waiter's check-to-sleep gap must not lose its
+/// notification: the waiter has to be NOTIFIED, not woken by its slice
+/// timeout.
+///
+/// The interleaving is forced, not hoped for. The waiter holds the waiter
+/// mutex across the gap (exactly as production does: it re-enters `wait`
+/// with the guard after a failed attempt) and parks there on a handshake, so
+/// the release is attempted strictly between the failed attempt and the
+/// registration inside `wait_timeout`. The mutex-serialized release cannot
+/// proceed there — it needs the waiter mutex — so its increment and its
+/// notification happen only after the waiter registered (registration is
+/// atomic with releasing the mutex). A release that incremented and notified
+/// without the mutex instead completes inside the gap and its notification
+/// reaches nobody, so the waiter could only time out.
 #[test]
 fn release_after_failed_check_wakes_waiter() {
     let semaphore = Arc::new(Argon2Semaphore::with_capacity(1));
-    let held_permit = semaphore.try_acquire().expect("hold the only permit");
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (drop_tx, drop_rx) = mpsc::channel();
+    let (released_tx, released_rx) = mpsc::channel();
     let (parked_tx, parked_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let notified = Arc::new(AtomicBool::new(false));
+
+    // The releaser owns the only permit until the waiter is parked in the gap.
+    let releaser = {
+        let semaphore = Arc::clone(&semaphore);
+        thread::spawn(move || {
+            let semaphore = &*semaphore;
+            let permit = semaphore.try_acquire().expect("hold the only permit");
+            holding_tx.send(()).expect("test observes the held permit");
+            drop_rx
+                .recv_timeout(WATCHDOG)
+                .expect("test drops the permit");
+            drop(permit);
+            released_tx
+                .send(())
+                .expect("test observes the completed release");
+        })
+    };
+    holding_rx
+        .recv_timeout(WATCHDOG)
+        .expect("the only permit is held by the releaser");
 
     let waiter = {
         let semaphore = Arc::clone(&semaphore);
         let notified = Arc::clone(&notified);
         let mut parked_tx = Some(parked_tx);
+        let mut go_rx = Some(go_rx);
         thread::spawn(move || {
             let semaphore = &*semaphore;
             let acquired = semaphore
@@ -52,19 +109,23 @@ fn release_after_failed_check_wakes_waiter() {
                     || Ok(UnixNanos(100)),
                     || Duration::ZERO,
                     || semaphore.try_acquire(),
-                    move |guard, _lock, cvar, wait_dur| {
-                        // Signalled while the waiter mutex is still held, so
-                        // the release below has to wait for this waiter to
-                        // register on the condvar before it can notify.
+                    move |guard, _lock, cvar, _wait_dur| {
+                        // The gap: the attempt above failed and nothing is
+                        // registered yet. The guard keeps the waiter mutex
+                        // held, so the release stays stuck until this closure
+                        // calls `wait_timeout`.
                         if let Some(tx) = parked_tx.take() {
-                            tx.send(()).expect("test observes the wait boundary");
+                            tx.send(()).expect("test observes the gap");
                         }
-                        let (guard, outcome) =
-                            cvar.wait_timeout(guard, wait_dur).map_err(|_| ())?;
+                        if let Some(rx) = go_rx.take() {
+                            rx.recv_timeout(WATCHDOG).expect("test closes the gap");
+                        }
+                        // A long slice: only a notification ends this wait in
+                        // time, so a lost wake-up surfaces as a timeout.
+                        let (guard, outcome) = cvar
+                            .wait_timeout(guard, Duration::from_secs(10))
+                            .map_err(|_| ())?;
                         if outcome.timed_out() {
-                            // Nothing notified this waiter: abort instead of
-                            // sleeping through another slice, so a lost
-                            // wake-up fails fast.
                             return Err(());
                         }
                         notified.store(true, Ordering::Relaxed);
@@ -80,15 +141,25 @@ fn release_after_failed_check_wakes_waiter() {
 
     parked_rx
         .recv_timeout(WATCHDOG)
-        .expect("waiter must reach the failed-check/wait boundary");
-    // The waiter is now inside `wait_timeout` (it released the waiter mutex
-    // only to register), so this release cannot miss it.
-    drop(held_permit);
+        .expect("waiter must reach the failed-check gap");
+    drop_tx.send(()).expect("releaser still waiting");
+    // Sequencing only: a correct release cannot complete while the gap is
+    // open, so this receive is expected to time out and the wake reason
+    // below stays the oracle. A release that skipped the waiter mutex would
+    // complete here instead — before the waiter registered — and lose its
+    // notification.
+    let completed_early = released_rx.recv_timeout(RELEASE_GRACE).is_ok();
+    go_tx.send(()).expect("waiter still in the gap");
 
     let acquired = done_rx
         .recv_timeout(WATCHDOG)
         .expect("released permit must be acquired");
-    waiter.join().expect("waiter thread finishes");
+    join_bounded(waiter);
+    join_bounded(releaser);
+    assert!(
+        !completed_early,
+        "the release must serialize with the waiter mutex, not notify inside the gap"
+    );
     assert!(acquired, "released permit must be acquired");
     assert!(
         notified.load(Ordering::Relaxed),
@@ -152,6 +223,10 @@ fn acquire_until_rechecks_deadline_after_release_before_retry() {
     assert_eq!(semaphore.available(), 1, "late retry leaves permit free");
 }
 
+/// A live wait slice must stay bounded by the MONOTONIC remainder when the
+/// wall clock steps back by more than that remainder: a backward step can
+/// lengthen the wall-limited remainder relative to the previous sample, never
+/// the budget fixed at admission.
 #[test]
 fn acquire_until_bounds_wait_by_monotonic_remaining_when_wall_clock_moves_back() {
     let semaphore = Argon2Semaphore::with_capacity(0);
@@ -160,11 +235,14 @@ fn acquire_until_bounds_wait_by_monotonic_remaining_when_wall_clock_moves_back()
     let mut waits = Vec::new();
 
     let result = semaphore.acquire_until_with_test_sources(
+        // 2.5 s of wall budget fixed at admission.
         Argon2PermitBudget::at_admission(2_500_000_100, 100),
         || {
-            if wall_reads.fetch_add(1, Ordering::Relaxed) < 2 {
+            if wall_reads.fetch_add(1, Ordering::Relaxed) < 1 {
                 Ok(UnixNanos(100))
             } else {
+                // The wall clock stepped back past the admission reading, so
+                // a wall-only remainder would grow back to a full 2.5 s.
                 Ok(UnixNanos(0))
             }
         },
@@ -173,6 +251,8 @@ fn acquire_until_bounds_wait_by_monotonic_remaining_when_wall_clock_moves_back()
         |guard, _lock, _cvar, wait_dur| {
             assert!(waits.len() < 2, "backward clock must not add a wait slice");
             waits.push(wait_dur);
+            // 1.75 s spent at the first wake-up, so the monotonic remainder is
+            // 750 ms even though the wall clock now claims 2.5 s.
             let elapsed = if waits.len() == 1 {
                 1_750_000_000
             } else {
@@ -187,7 +267,7 @@ fn acquire_until_bounds_wait_by_monotonic_remaining_when_wall_clock_moves_back()
     assert_eq!(
         waits,
         [Duration::from_secs(1), Duration::from_millis(750)],
-        "backward wall-clock movement must not restore elapsed budget"
+        "a backward wall-clock step must not lengthen a live slice past the monotonic remainder"
     );
 }
 
@@ -231,11 +311,13 @@ fn admitted_waiter_does_not_regain_budget_from_a_backward_wall_clock_step() {
 #[test]
 fn expired_notified_waiter_hands_the_wake_up_on() {
     let semaphore = Arc::new(Argon2Semaphore::with_capacity(2));
-    let _first_held = semaphore.try_acquire().expect("hold the first permit");
+    let first_held = semaphore.try_acquire().expect("hold the first permit");
     let second_held = semaphore.try_acquire().expect("hold the second permit");
+    let second_held = Cell::new(Some(second_held));
     let (parked_tx, parked_rx) = mpsc::channel();
     let (woken_tx, woken_rx) = mpsc::channel();
     let (hold_tx, hold_rx) = mpsc::channel();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
     let notified = Arc::new(AtomicBool::new(false));
 
     let waiter = {
@@ -273,6 +355,7 @@ fn expired_notified_waiter_hands_the_wake_up_on() {
                 .recv_timeout(WATCHDOG)
                 .expect("test inspects accounting before release");
             drop(permit);
+            dropped_tx.send(()).expect("test observes the permit drop");
         })
     };
 
@@ -293,9 +376,17 @@ fn expired_notified_waiter_hands_the_wake_up_on() {
         || semaphore.try_acquire(),
         |guard, lock, _cvar, _wait_dur| {
             drop(guard);
-            // Release one permit WITHOUT notifying: this models the release
-            // whose single notification this waiter already consumed. Dropping
-            // a real permit here would notify and hide a missing handoff.
+            // One permit is released WITHOUT notifying: this models the
+            // release whose single notification this waiter already consumed.
+            // Dropping that permit's guard normally would notify the parked
+            // waiter directly and hide a missing handoff, so the guard is
+            // forgotten instead of dropped: exactly one permit leaves the
+            // accounting and the fixture still ends at capacity.
+            std::mem::forget(
+                second_held
+                    .take()
+                    .expect("the released permit is accounted once"),
+            );
             semaphore.release_with_test_notify(|_lock, _cvar| {});
             elapsed_ns.set(3_000_000_000);
             lock.lock().map_err(|_| ())
@@ -323,15 +414,23 @@ fn expired_notified_waiter_hands_the_wake_up_on() {
         "exactly one released permit is accounted: the parked waiter holds it"
     );
 
+    // The join follows the permit drop, not a message sent before it.
     hold_tx.send(()).expect("waiter still waiting");
-    waiter.join().expect("waiter thread finishes");
+    dropped_rx
+        .recv_timeout(WATCHDOG)
+        .expect("the parked waiter drops its permit");
+    join_bounded(waiter);
     assert_eq!(
         semaphore.available(),
         1,
         "the parked waiter released its permit again"
     );
-    drop(second_held);
-    drop(_first_held);
+    drop(first_held);
+    assert_eq!(
+        semaphore.available(),
+        2,
+        "capacity accounting ends exactly at capacity"
+    );
 }
 
 #[test]
@@ -407,4 +506,74 @@ fn rv_connect_387eaa05_acquire_until_failing_clock_returns_none_without_panic() 
     assert!(result.is_none(), "failing clock must fail closed to None");
     // The permit accounting must be untouched by the failed acquisition.
     assert_eq!(s.available(), 0);
+}
+
+/// The pre-expired entry reading must be refused before the waiter mutex is
+/// taken: while a probe keeps the waiter mutex locked, a pre-expired call
+/// still returns at once and reads the clock exactly once.
+#[test]
+fn acquire_until_refuses_preexpired_entry_reading_without_the_waiter_mutex() {
+    let semaphore = Arc::new(Argon2Semaphore::with_capacity(1));
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (unlock_tx, unlock_rx) = mpsc::channel();
+
+    // `release_with_test_notify` runs with the waiter mutex held; parking in
+    // its notify closure keeps that mutex locked for the whole probe.
+    let holder = {
+        let semaphore = Arc::clone(&semaphore);
+        thread::spawn(move || {
+            semaphore.release_with_test_notify(|_lock, _cvar| {
+                locked_tx.send(()).expect("test observes the held mutex");
+                unlock_rx
+                    .recv_timeout(WATCHDOG)
+                    .expect("test unlocks the mutex");
+            });
+        })
+    };
+    locked_rx
+        .recv_timeout(WATCHDOG)
+        .expect("the waiter mutex is held by the probe");
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let probe = {
+        let semaphore = Arc::clone(&semaphore);
+        thread::spawn(move || {
+            let reads = Cell::new(0_usize);
+            let result = semaphore.acquire_until_with_clock(100, || {
+                reads.set(reads.get() + 1);
+                Ok(UnixNanos(100))
+            });
+            done_tx
+                .send((result.is_none(), reads.get()))
+                .expect("test observes the pre-expired refusal");
+        })
+    };
+
+    let (refused, reads) = done_rx
+        .recv_timeout(WATCHDOG)
+        .expect("a pre-expired entry reading must not block on the waiter mutex");
+    assert!(refused, "a pre-expired entry reading must refuse");
+    assert_eq!(
+        reads, 1,
+        "the refusal must skip the acquisition loop, so only the entry read happens"
+    );
+    // The probe above repaid one permit that no guard owns, so this
+    // capacity-one semaphore holds two: neither the attempt nor the wait ran.
+    assert_eq!(semaphore.available(), 2, "no permit may be consumed");
+
+    unlock_tx.send(()).expect("probe still parked");
+    join_bounded(probe);
+    join_bounded(holder);
+}
+
+/// `u64::MAX` is the indefinite-wait sentinel, never an expired deadline.
+#[test]
+fn acquire_until_indefinite_deadline_is_not_expired() {
+    let semaphore = Argon2Semaphore::with_capacity(1);
+    let result = semaphore.acquire_until_with_clock(u64::MAX, || Ok(UnixNanos(u64::MAX)));
+    assert!(
+        result.is_some(),
+        "an indefinite deadline must not be treated as expired"
+    );
+    assert_eq!(semaphore.available(), 0, "the free permit is taken");
 }

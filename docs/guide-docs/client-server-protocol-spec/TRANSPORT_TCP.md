@@ -79,11 +79,12 @@ TCP close ИЛИ logout ИЛИ idle timeout
 ```
 {
   "sid": bytes(32),               // session_id из auth_ok
+  "rid": Optional<u32>,           // необязательный клиентский correlation id
   "req": bytes                    // MessagePack-БАЙТЫ тела запроса, НЕ map конверта
 }
 ```
 
-Response — отдельный конверт, ветки `error` внутри `res` нет:
+Response — отдельный конверт; поля `error` в самом конверте нет (внешний `error` — третий, самостоятельный конверт ниже), но `res` — это байты application-level тела, и отказ внутри него (например `DbResponse::Error` с `server_busy` от гейта деривации) приходит именно там, а не отдельным `ErrorEnvelope` (`common/messages/envelope.rs:23-32,154-190`; `server/infra/dispatch.rs:213-223`):
 ```
 {
   "rid": Optional<u32>,           // request id для correlation

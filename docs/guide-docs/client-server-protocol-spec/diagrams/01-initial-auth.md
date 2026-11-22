@@ -71,6 +71,6 @@ sequenceDiagram
 
 - **Pre-state GC:** state без proof через `HANDSHAKE_TIMEOUT` (≥15s) → drop
 - **Server-side Argon2id:** login proof-verify runs NO server-side Argon2id and never refuses login on semaphore exhaustion; the Argon2 permit applies only to privileged user-creation derivation (AUTH §8.1)
-- **Rate limit per subnet:** `RATE_LIMIT_AUTH_INIT_PER_SUBNET=10/sec` → соединение закрывается без тела ответа и учитывается как `auth_attempts_total{result="rate_limited"}`; ошибка `rate_limited` клиенту не возвращается
+- **Rate limit per subnet:** `security.auth_init_rate_per_second` (по умолчанию `10/sec`, допустимо `1..=100_000`) → соединение закрывается без тела ответа, пишется `tracing::info!` и audit-событие `rate_limited`, инкрементируется `auth_attempts_total{result="rate_limited"}`; ошибка `rate_limited` клиенту не возвращается
 - **Lockout** (50 fails/час per (subnet, user)): silent (генерик `authentication_failed`)
 - **`rotation_in_progress` в auth_ok** (during overlap window) → клиент handles via §6.5

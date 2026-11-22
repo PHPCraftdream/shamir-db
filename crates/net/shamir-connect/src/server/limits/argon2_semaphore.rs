@@ -2,7 +2,8 @@
 //!
 //! Argon2id allocates ~128 MB of RAM per concurrent invocation by default.
 //! Without a cap an attacker can OOM the server with a few hundred parallel
-//! derivations. Spec §8 mandates `MAX_CONCURRENT_ARGON2 = 64` permits; spec
+//! derivations. Spec §8 sets `MAX_CONCURRENT_ARGON2 = 64` permits as the
+//! default (the server's `argon2_concurrent_max` configures it); spec
 //! §8.1 clarifies the permit is held ONLY for the duration of the actual KDF
 //! call (NOT the surrounding state machine — pre-state occupies a 1KB slot,
 //! not a permit).
@@ -146,7 +147,9 @@ impl Argon2Semaphore {
     ///
     /// The remaining budget is the SMALLER of the wall remainder and the
     /// monotonic remainder measured from the admission instant, so a backward
-    /// wall-clock step can only ever shorten the wait.
+    /// wall-clock step cannot extend the wait beyond the monotonic budget
+    /// (it can lengthen the wall-limited remainder relative to the previous
+    /// sample, never the original budget).
     pub fn acquire_until_admitted(&self, budget: Argon2PermitBudget) -> Option<Argon2Permit<'_>> {
         self.acquire_with_budget_sources(
             budget,
@@ -166,6 +169,10 @@ impl Argon2Semaphore {
         now: impl Fn() -> Result<UnixNanos, EnvironmentError>,
     ) -> Option<Argon2Permit<'_>> {
         let entry = now().ok()?;
+        if deadline_ns != u64::MAX && entry.as_u64() >= deadline_ns {
+            // Already expired at entry: refuse without touching the waiter mutex.
+            return None;
+        }
         let budget = Argon2PermitBudget::at_admission(deadline_ns, entry.as_u64());
         self.acquire_with_budget_sources(
             budget,
@@ -325,7 +332,7 @@ fn handoff(cvar: &Condvar) {
 
 /// Remaining budget, or `None` when it is spent. The monotonic remainder is
 /// measured from the admission instant and wins whenever it is smaller, so a
-/// backward wall-clock step can only shorten the wait.
+/// backward wall-clock step cannot extend the wait beyond the monotonic budget.
 fn remaining_budget(
     budget: &Argon2PermitBudget,
     now_ns: u64,

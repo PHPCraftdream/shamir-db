@@ -657,7 +657,7 @@ Prometheus-style. Фактически отдаётся observability-listener-�
 ### 6.4. Suggested Alerts
 
 - Lockout rate spike: `rate(shamir_lockouts_total[5m]) > baseline × 3`
-- Argon2 creation-gate refusals: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused by the admission cap, permit-wait deadline, clock read failure or deadline-calculation failure; **login takes no Argon2 permit at all** — it runs no server-side password KDF. Post-auth per-session in-flight-slot `server_busy` is not counted)
+- Argon2 creation-gate refusals: `increase(shamir_argon2_busy_refusals_total[5m]) > 0` (user-creation derivations refused by the admission cap, permit-wait deadline, clock read failure or deadline-calculation failure; **ordinary login (proof verification) takes no Argon2 permit at all** — it runs no server-side password KDF; only the first bootstrap-token login rotates the credential (`handshake.rs:580-589`), and that rotation is ungated. Post-auth per-session in-flight-slot `server_busy` is not counted)
 - Identity rotation: `increase(shamir_admin_command_total{command="rotateServerIdentity"}[1h]) > 0`
 - Bootstrap usage anomaly: `shamir_bootstrap_attempts_total > 1`
 - Resumption downgrade: `rate(shamir_resumption_used_total{result="downgrade_blocked"}[5m]) > 0`
@@ -803,7 +803,7 @@ individual entries exist as dedicated integration tests where applicable:
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection
 - Argon2id semaphore exhaustion at user creation (`derive_scram_record_gated` busy refusal — bounded admission or 3s permit wait measured from admission, at configured `argon2_concurrent_max`; login proof-verify is ungated)
-- `binding_mode` rejection before the challenge (ordered before the challenge; it is a listener-policy guard, not a KDF guard — a login whose proof matches still runs no server-side password KDF)
+- `binding_mode` rejection before the challenge (ordered before the challenge; it is a listener-policy guard, not a KDF guard — an ordinary login whose proof matches still runs no server-side password KDF; the one exception is the first bootstrap-token login, which rotates the credential ungated (`handshake.rs:580-589`))
 - updateUser → ticket invalidation (всех families)
 - Restart warmup window
 - **Multi-device family isolation:** device A refresh не invalidates device B

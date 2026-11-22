@@ -176,6 +176,12 @@ fn queued_cancel_retains_ticket_until_blocking_job_finishes() {
         let before_overflow = gate.busy_refusals();
         assert!(matches!(gate.admit(), Err(ScramDerivationError::Busy)));
         assert_eq!(gate.busy_refusals(), before_overflow + 1);
+        // The cancelled request's job is still queued and its admission
+        // budget is spent while the sole blocking worker is occupied, so the
+        // expiry outcome it reaches is fixed before it runs.
+        let before_job_refusal = gate.busy_refusals();
+        let before_job_kdf_runs = gate.kdf_runs();
+        tokio::time::sleep(Duration::from_secs(4)).await;
 
         // FIFO blocking-pool submission makes this sentinel's channel message
         // independent evidence that the earlier cancelled request's job ended.
@@ -199,6 +205,26 @@ fn queued_cancel_retains_ticket_until_blocking_job_finishes() {
         job_done_rx
             .recv_timeout(WATCHDOG)
             .expect("sentinel confirms queued job completed first");
+
+        // The queued job's outcome is deterministic: its permit budget was
+        // anchored at admission and is spent by the time it runs, so it is
+        // refused as busy exactly once, never reaches the derivation closure
+        // and never takes the free permit.
+        assert_eq!(
+            gate.busy_refusals(),
+            before_job_refusal + 1,
+            "the queued job reports its expiry as exactly one counted refusal"
+        );
+        assert_eq!(
+            gate.kdf_runs(),
+            before_job_kdf_runs,
+            "an expired permit must never reach the derivation closure"
+        );
+        assert_eq!(
+            gate.semaphore().available(),
+            1,
+            "the expired job must not consume the free permit"
+        );
 
         // The queued job has dropped its ticket; with the other ticket still
         // live, exactly one slot has reopened.
@@ -327,8 +353,8 @@ fn busy_display_is_fixed_safe_text() {
 /// A job that only reaches the semaphore after its admission budget is spent
 /// must be refused with the typed busy outcome, counted once, without running
 /// the KDF and without consuming the free permit. This drives the PUBLIC
-/// `derive_scram_record_gated` path, so it fails if that job recomputes a fresh
-/// budget instead of reusing the one fixed at admission.
+/// `derive_scram_record_gated` path, so it fails if that job recomputes a
+/// fresh budget instead of reusing the one fixed at admission.
 #[test]
 fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -357,33 +383,35 @@ fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
             .recv_timeout(WATCHDOG)
             .expect("blocking worker reserved by handshake");
 
-        let job = tokio::spawn(derive_scram_record_gated(
+        // One manual poll is the admission handshake: when it returns Pending
+        // the job has already admitted itself, fixed its budget and been
+        // submitted to the blocking queue. No yield count is involved.
+        let mut job = Box::pin(derive_scram_record_gated(
             "queued past its admission budget".to_string(),
             small_kdf(),
             Arc::clone(&gate),
         ));
-        // Wait, bounded, until the spawned job has admitted itself and
-        // queued: a capacity-one gate admits two jobs, so while the second
-        // admission still succeeds the spawned job has not admitted yet.
-        let mut admitted = false;
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-            match (gate.admit(), gate.admit()) {
-                (Ok(first), Err(ScramDerivationError::Busy)) => {
-                    drop(first);
-                    admitted = true;
-                    break;
-                }
-                (first, second) => {
-                    drop(first);
-                    drop(second);
-                }
-            }
-        }
-        assert!(admitted, "the spawned job must admit before it queues");
-        let before_refusals = gate.busy_refusals();
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            Future::poll(Pin::as_mut(&mut job), &mut context),
+            Poll::Pending
+        ));
 
-        // Stay queued past the fixed three-second admission budget.
+        // Observed, not hoped for: the queued job holds one of the two
+        // admission slots of a capacity-one gate.
+        let probe = gate
+            .admit()
+            .expect("the queued job holds one admission slot");
+        assert!(matches!(gate.admit(), Err(ScramDerivationError::Busy)));
+        drop(probe);
+        let before_refusals = gate.busy_refusals();
+        let before_kdf_runs = gate.kdf_runs();
+
+        // Stay queued past the fixed three-second admission budget. The
+        // oracle below does not depend on the wall clock: the monotonic
+        // remainder measured from admission is already spent, so the correct
+        // implementation refuses even if no wall time appears to pass.
         tokio::time::sleep(Duration::from_secs(4)).await;
 
         release_tx.send(()).expect("blocking worker still waiting");
@@ -391,14 +419,20 @@ fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
             .await
             .expect("blocker watchdog")
             .expect("blocker join");
+        // Resuming the future registers the real waker; a job whose blocking
+        // closure already finished returns at once.
         let outcome = tokio::time::timeout(WATCHDOG, job)
             .await
-            .expect("queued job watchdog")
-            .expect("queued job join");
+            .expect("queued job watchdog");
 
         assert!(
             matches!(outcome, Err(ScramDerivationError::Busy)),
             "a job resuming after its admission budget must be refused as busy"
+        );
+        assert_eq!(
+            gate.kdf_runs(),
+            before_kdf_runs,
+            "an expired permit must never reach the derivation closure"
         );
         assert_eq!(
             gate.busy_refusals(),

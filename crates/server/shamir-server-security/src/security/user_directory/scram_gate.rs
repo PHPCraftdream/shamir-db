@@ -45,6 +45,10 @@ pub struct ScramDerivationGate {
     /// permit. Numeric-only capacity enforcement needs no synchronization with
     /// other state.
     admitted: AtomicU32,
+    /// Derivation closures entered. Test-only witness: availability proves no
+    /// permit leaked, not that the KDF never ran.
+    #[cfg(test)]
+    kdf_runs: AtomicU64,
 }
 
 /// RAII admission owned by a blocking job. Dropping it releases one bounded
@@ -69,6 +73,8 @@ impl ScramDerivationGate {
             semaphore,
             busy_refusals: AtomicU64::new(0),
             admitted: AtomicU32::new(0),
+            #[cfg(test)]
+            kdf_runs: AtomicU64::new(0),
         }
     }
 
@@ -81,6 +87,12 @@ impl ScramDerivationGate {
     /// Refused requests so far (relaxed load; advisory counter).
     pub fn busy_refusals(&self) -> u64 {
         self.busy_refusals.load(Ordering::Relaxed)
+    }
+
+    /// Derivation closures entered so far (test-only witness).
+    #[cfg(test)]
+    pub(super) fn kdf_runs(&self) -> u64 {
+        self.kdf_runs.load(Ordering::Relaxed)
     }
 
     fn busy(&self) -> ScramDerivationError {
@@ -113,6 +125,11 @@ impl ScramDerivationGate {
         else {
             return Err(self.busy());
         };
+        // The monotonic anchor is captured right next to the wall reading and
+        // BEFORE the slot is reserved: a delay after the reservation (a
+        // descheduled submitter) then counts against the budget instead of
+        // starting a fresh monotonic clock.
+        let budget = Argon2PermitBudget::at_admission(deadline_ns, admitted_ns);
 
         // Bounded, not isolated: the admission cap is twice the semaphore
         // capacity (up to 2,048 with the maximum configured capacity of
@@ -140,7 +157,7 @@ impl ScramDerivationGate {
 
         Ok(AdmissionTicket {
             gate: Arc::clone(self),
-            budget: Argon2PermitBudget::at_admission(deadline_ns, admitted_ns),
+            budget,
         })
     }
 
@@ -156,6 +173,8 @@ impl ScramDerivationGate {
         let Some(_permit) = self.semaphore.acquire_until_admitted(budget) else {
             return Err(self.busy());
         };
+        #[cfg(test)]
+        self.kdf_runs.fetch_add(1, Ordering::Relaxed);
         Ok(kdf())
     }
 }
