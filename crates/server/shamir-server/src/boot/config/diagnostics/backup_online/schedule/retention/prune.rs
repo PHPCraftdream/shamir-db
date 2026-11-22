@@ -1,31 +1,47 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use shamir_private_dir::verify_private_dir;
 
 use crate::config::BackupRetentionConfig;
 use crate::sync::durability::backup::online::progress::CancelFlag;
+use crate::sync::durability::backup::{
+    provision_snapshot_lease, try_snapshot_delete_lease, MANIFEST_FILE_NAME,
+    SNAPSHOT_LEASE_FILE_NAME,
+};
 
+use super::super::retention_pass::{manifest_digest_hex, MAX_MANIFEST};
 use super::budget::{metadata, plain_on_root, Budget, Refusal, ROOT_ENTRIES};
-use super::ownership::{has_tag, is_owned, read_sidecar, tag_fresh};
+use super::ownership::{has_tag, is_owned, read_sidecar, remove_staged_debris_entry, tag_fresh};
 use super::preflight::verified_time;
 use super::RetentionOutcome;
 
-/// Run only after protocol success, holding registry admission until return.
-/// The private root must be the canonical path retained at boot, and the
-/// tree must have no concurrent writers. Same-account operators
-/// may copy out, but must not modify or mount anything inside this tree.
+/// Run only after protocol success, holding the existing registry admission
+/// until return. The private root must be the canonical
+/// path retained at boot, and the tree must have no concurrent writers.
+/// Same-account operators may copy out, but must not modify or mount
+/// anything inside this tree.
 pub(in crate::boot::config::diagnostics::backup_online) fn prune(
     root: &Path,
     fresh_copy: &Path,
     owner: &str,
     policy: &BackupRetentionConfig,
     cancel: &CancelFlag,
+    pending: &BTreeSet<(String, u128, String)>,
 ) -> RetentionOutcome {
     let mut outcome = RetentionOutcome::default();
     let mut budget = Budget::new(cancel);
-    if let Err(error) = prune_inner(root, fresh_copy, owner, policy, &mut budget, &mut outcome) {
+    if let Err(error) = prune_inner(
+        root,
+        fresh_copy,
+        owner,
+        policy,
+        pending,
+        &mut budget,
+        &mut outcome,
+    ) {
         if !matches!(error, Refusal::Cancelled) {
             outcome.failed += 1;
             tracing::warn!(reason = ?error, "scheduled backup retention stopped");
@@ -39,6 +55,7 @@ pub(super) fn prune_inner(
     fresh_copy: &Path,
     owner: &str,
     policy: &BackupRetentionConfig,
+    pending: &BTreeSet<(String, u128, String)>,
     budget: &mut Budget<'_>,
     outcome: &mut RetentionOutcome,
 ) -> Result<(), Refusal> {
@@ -56,40 +73,117 @@ pub(super) fn prune_inner(
     if !timestamp_name(fresh_name) {
         return Err(Refusal::Unverifiable);
     }
+    // Provision the cross-process lease marker BEFORE the scan (after the
+    // root/fresh checks): readers NEVER create it — a root without it has
+    // no managed reads to protect, and this pass must gain it here. Failing
+    // before the scan keeps `untouched` unaccounted (an incomplete scan
+    // leaves the last complete classification intact) and never tags or
+    // deletes; a later repaired pass may retry, but no work is promised.
+    provision_snapshot_lease(&canonical).map_err(|_| Refusal::Incomplete)?;
 
     let mut owned = Vec::new();
     let mut untouched = 0;
     let mut fresh = None;
+    // O(log n) provenance lookups: (name -> set of recorded (manifest
+    // creation time, manifest SHA-256 digest)), built once for the whole
+    // scan.
+    let mut pending_by_name: BTreeMap<String, BTreeSet<(u128, String)>> = BTreeMap::new();
+    for (name, time, digest) in pending {
+        pending_by_name
+            .entry(name.clone())
+            .or_default()
+            .insert((*time, digest.clone()));
+    }
+    // Provenance matches compare a recorded name, manifest creation time and
+    // digest. They bind manifest bytes at post-protocol capture, scan and
+    // late reread, not payload bytes or directory identity. Capture is after
+    // protocol return, so a replacement already present then is what gets
+    // recorded. Adoption assumes one writer owns the root; sharing is not
+    // enforced here. Untagged candidates are tagged only after the late
+    // sidecar check; already-owned matching entries need no new tag.
+    let mut adopt: Vec<(String, u128, PathBuf, String)> = Vec::new();
     let entries = fs::read_dir(&canonical).map_err(|_| Refusal::Incomplete)?;
-    for (index, entry) in entries.enumerate() {
+    let mut index = 0usize;
+    for entry in entries {
         budget.checkpoint()?;
-        if index >= ROOT_ENTRIES {
-            return Err(Refusal::Budget);
-        }
         let entry = entry.map_err(|_| Refusal::Incomplete)?;
         let name = entry.file_name();
         let path = entry.path();
         if path.parent() != Some(canonical.as_path()) {
             return Err(Refusal::Incomplete);
         }
+        // The reserved lease marker is never a candidate: skip it without
+        // advancing the non-marker index, so it neither consumes a visit-cap
+        // slot nor counts as untouched. Selection, checks and budget change
+        // not at all for timestamped entries.
+        if name == SNAPSHOT_LEASE_FILE_NAME {
+            continue;
+        }
+        // Crash-debris cleanup DURING the initial discovery: only a direct,
+        // plain regular file with the reserved exact name shape and age
+        // threshold is removed before the cap. The age rule protects another
+        // runner's live staging file only while its reported modification time
+        // is younger than the threshold; it is not a lock, so one runner must
+        // own the root by contract (sharing is not enforced by this code).
+        if remove_staged_debris_entry(&name, &path, &root_meta) {
+            continue;
+        }
+        if index >= ROOT_ENTRIES {
+            return Err(Refusal::Budget);
+        }
+        index += 1;
         let is_fresh = name == fresh_name;
+        let name_str = name.to_str();
+        let pending_records = name_str.and_then(|name| pending_by_name.get(name));
+        let is_pending = pending_records.is_some();
         let mut classify = || -> Result<_, Refusal> {
             if !timestamp_name(&name) {
                 return Err(Refusal::Unverifiable);
             }
             check_child(&path, &root_meta)?;
             let sidecar = read_sidecar(&path, &root_meta, budget)?;
-            if (!is_fresh || has_tag(&sidecar)) && !is_owned(&sidecar, owner) {
-                return Err(Refusal::Unverifiable);
+            if (!is_fresh && !is_pending) || has_tag(&sidecar) {
+                // A copy already tagged by anyone must be owned by us to
+                // stay a selection candidate; an untagged copy is eligible
+                // only as the fresh output or as an exact provenance match.
+                if !is_owned(&sidecar, owner) {
+                    return Err(Refusal::Unverifiable);
+                }
             }
-            let time = verified_time(&path, &root_meta, budget)?;
-            Ok((time, sidecar))
+            // Digest only for pending names: normal passes pay no SHA.
+            let (time, digest) = verified_time(&path, &root_meta, budget, is_pending)?;
+            Ok((time, sidecar, digest))
         };
         match classify() {
-            Ok((time, sidecar)) if is_fresh => {
+            Ok((time, sidecar, _)) if is_fresh => {
                 fresh = Some((time, path, sidecar));
             }
-            Ok((time, _)) => owned.push((time, path)),
+            // A recorded name/time/digest match means only that the manifest
+            // bytes captured after protocol success still match at scan and
+            // late check. It does not bind payload bytes or directory
+            // identity; unchanged-manifest replacements are outside the
+            // single-writer-root contract. An untagged copy can be tagged
+            // only while both sidecar checks find no tag; a matching entry
+            // already bearing this owner's tag remains a normal selection
+            // candidate and may be reported without a new tag.
+            Ok((time, sidecar, digest)) if is_pending => {
+                let matched = pending_records.is_some_and(|records| {
+                    digest
+                        .as_ref()
+                        .is_some_and(|digest| records.contains(&(time, digest.clone())))
+                });
+                if matched {
+                    // A pending name always verifies with a digest here.
+                    let name = name_str.expect("pending name is valid Unicode");
+                    let digest = digest.expect("pending manifest digest computed");
+                    adopt.push((name.to_owned(), time, path, digest));
+                } else if is_owned(&sidecar, owner) {
+                    owned.push((time, path));
+                } else {
+                    untouched += 1;
+                }
+            }
+            Ok((time, _, _)) => owned.push((time, path)),
             Err(Refusal::Unverifiable) => untouched += 1,
             Err(error) => return Err(error),
         }
@@ -99,7 +193,70 @@ pub(super) fn prune_inner(
     let (time, fresh_path, sidecar) = fresh.ok_or(Refusal::Unverifiable)?;
     check_root(root, &canonical)?;
     check_child(&fresh_path, &root_meta)?;
-    tag_fresh(&fresh_path, sidecar, owner, budget)?;
+    tag_fresh(&canonical, &fresh_path, sidecar, owner, budget)?;
+
+    #[cfg(test)]
+    tracing::trace!(
+        target: "shamir_server::retention_before_adoption",
+        "retention scan verified candidates"
+    );
+
+    // Marker is available and the fresh copy was checked: adopt only the
+    // recorded provenance matches. Before tagging each untagged candidate,
+    // re-check the root/child disposition, sidecar and bounded manifest
+    // bytes. This catches sidecar or manifest changes since scan, but does
+    // not reverify payloads or bind directory identity; those rely on the
+    // single-writer-root contract. Nothing is deleted before this loop.
+    for (name, time, path, digest) in adopt {
+        budget.checkpoint()?;
+        check_root(root, &canonical)?;
+        check_child(&path, &root_meta)?;
+        let sidecar = read_sidecar(&path, &root_meta, budget)?;
+        // Bounded late re-read of the manifest: same cap as the scan
+        // (MAX_MANIFEST) and the same Budget charging. A failed read leaves
+        // this entry untagged; it does not turn the refusal into adoption.
+        let raw = match budget.read(&path.join(MANIFEST_FILE_NAME), &root_meta, MAX_MANIFEST) {
+            Ok(raw) => raw,
+            Err(Refusal::Unverifiable) => {
+                untouched += 1;
+                outcome.untouched = Some(untouched);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let digest_now = manifest_digest_hex(&raw);
+        // Late bounded manifest reread: a refusal keeps this candidate
+        // untagged. The digest covers manifest bytes only; payload bytes and
+        // directory identity rely on the single-writer root contract.
+        if digest_now != digest {
+            untouched += 1;
+            outcome.untouched = Some(untouched);
+            continue;
+        }
+        if has_tag(&sidecar) {
+            if is_owned(&sidecar, owner) {
+                // The matching entry already has our tag; do not write a
+                // second tag, but report this provenance match as retired.
+                outcome.adopted.push((name, time, digest_now));
+                owned.push((time, path));
+            } else {
+                untouched += 1;
+                outcome.untouched = Some(untouched);
+            }
+            continue;
+        }
+        match tag_fresh(&canonical, &path, sidecar, owner, budget) {
+            Ok(()) => {
+                outcome.adopted.push((name, time, digest_now));
+                owned.push((time, path));
+            }
+            Err(Refusal::Unverifiable) => {
+                untouched += 1;
+                outcome.untouched = Some(untouched);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 
     owned.push((time, fresh_path.clone()));
     owned.sort_unstable(); // Creation time, then direct-child name.
@@ -114,12 +271,32 @@ pub(super) fn prune_inner(
         check_root(root, &canonical)?;
         check_child(&path, &root_meta)?;
         budget.checkpoint()?;
-        if let Err(error) = fs::remove_dir_all(path) {
+        // Fail closed on lease errors (account as failure, no delete);
+        // `None` is ordinary contention with a reader: skip, not an error.
+        let lease = match try_snapshot_delete_lease(&canonical) {
+            Ok(Some(lease)) => lease,
+            Ok(None) => {
+                outcome.skipped_in_use += 1;
+                continue;
+            }
+            Err(error) => {
+                outcome.failed += 1;
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    "scheduled backup retention could not take the delete lease"
+                );
+                continue;
+            }
+        };
+        // Hold the exclusive lease through the deletion so no reader can
+        // start between the last check and the recursive remove.
+        if let Err(error) = fs::remove_dir_all(&path) {
             outcome.failed += 1;
             tracing::warn!(kind = ?error.kind(), "scheduled backup retention deletion failed");
         } else {
             outcome.deleted += 1;
         }
+        drop(lease);
     }
     Ok(())
 }

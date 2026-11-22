@@ -43,6 +43,18 @@ pub(super) fn verify_manifest_v2(
     snapshot_dir: &Path,
     raw: &[u8],
 ) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
+    let decoded = decode_manifest_v2(raw)?;
+    verify_decoded_manifest_v2(snapshot_dir, decoded)
+}
+
+/// Decode-and-classify half of [`verify_manifest_v2`]: UTF-8 + JSON decode,
+/// the ORIGINAL format-version behavior: decoded v1 manifests refuse with
+/// [`BackupError::UnsupportedManifestFormatVersion`], while an unknown
+/// version rejected by `manifest::decode` maps to `ManifestInvalid`; then
+/// the online-section presence checks — ALL pure manifest-byte work, no
+/// payload I/O, so a caller can refuse a candidate on `kind` (or format)
+/// before any tree walk. Retention's kind-first preflight stops right here.
+pub(super) fn decode_manifest_v2(raw: &[u8]) -> Result<online_manifest::ManifestV2, BackupError> {
     let text =
         std::str::from_utf8(raw).map_err(|e| BackupError::ManifestInvalid(format!("utf8: {e}")))?;
     let decoded =
@@ -61,7 +73,16 @@ pub(super) fn verify_manifest_v2(
             return Err(BackupError::MissingOnlineSection("wal"));
         }
     }
+    Ok(decoded)
+}
 
+/// Payload half of [`verify_manifest_v2`] over the ALREADY-decoded manifest
+/// from [`decode_manifest_v2`] (one parse, no re-read): stamp agreement,
+/// confinement, tree walk and re-hash, WAL rules, file-set check.
+pub(super) fn verify_decoded_manifest_v2(
+    snapshot_dir: &Path,
+    decoded: online_manifest::ManifestV2,
+) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
     check_stamp_agreement(snapshot_dir, decoded.format_epoch)?;
 
     // Per-repo store_dir paths are manifest-controlled: validate their

@@ -30,6 +30,7 @@ use crate::config::{Config, ResolvedSchedule};
 use crate::connection::{ConnTasks, ConnectionContext};
 use crate::server::boot_error::BootError;
 use crate::server_meta::ServerMetaStore;
+use crate::sync::durability::backup::provision_snapshot_lease;
 use crate::user_directory::FjallUserDirectory;
 
 use crate::bootstrap::BootstrapOutcome;
@@ -42,6 +43,34 @@ pub(super) fn resolve_backup(
     };
     let source = config.data_dir.canonicalize()?;
     let resolved = backup.resolve(&source)?;
+    // R2d-FIX-C: the destination is canonical and verified private after
+    // `resolve`, so provision the reserved snapshot-lease marker now, before
+    // retention can ever consider a deletion. Best-effort: a transient
+    // provisioning failure must not fail server startup (and `resolve`
+    // already made the privacy of the root a hard boot requirement). READERS
+    // never create the marker (an absent marker means an unmanaged export,
+    // read lock-free): only the scheduler provisions it — here, and again
+    // before publishing every scheduled copy. Retention does NOT
+    // repair-and-continue any more: a provisioning failure fails the pass
+    // closed and counts as a retention failure (registry runner), so this
+    // warning is best-effort boot pre-provisioning only.
+    //
+    // DOCUMENTED WINDOW (by design): a reader that started on this root
+    // while the marker was ABSENT is unleased for its WHOLE read, and this
+    // provisioning (first startup or marker repair) can make its in-flight
+    // copy deletion-eligible. Finish or postpone manual verify/restore
+    // before the first startup or repair; after the first successful
+    // scheduled pass the guarantee holds for later readers that hold the
+    // lease while the marker remains.
+    if let Err(error) = provision_snapshot_lease(&resolved.destination) {
+        tracing::warn!(
+            root = %resolved.destination.display(),
+            %error,
+            "could not pre-provision the snapshot lease marker at boot; \
+             the scheduler provisions it before publishing each copy, and \
+             retention fails its pass until it exists"
+        );
+    }
     Ok(Some((resolved, source)))
 }
 
