@@ -28,10 +28,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use shamir_connect::server::audit_chain::{AuditChain, AuditChainWriter};
+use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
+use crate::sync::durability::backup::online::copy_engine::test_seams;
 use crate::sync::durability::backup::online::copy_engine::{CopyError, CopyOptions};
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
@@ -343,6 +348,32 @@ pub(crate) fn run(
         &SealRecopyCap::default(),
     );
     (result, progress)
+}
+
+/// Joins a helper thread on EVERY path: an assertion panic or a bounded
+/// channel timeout must not leave the thread, the audit appender or a temp
+/// dir alive behind the test.
+pub(super) struct JoinOnDrop(Option<std::thread::JoinHandle<()>>);
+
+impl JoinOnDrop {
+    pub(super) fn new(handle: std::thread::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Join eagerly and propagate the helper's panic (if any).
+    pub(super) fn finish(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.join().expect("the helper thread must not panic");
+        }
+    }
+}
+
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// The typed failure cause of a failed run, extracted for exact
@@ -775,4 +806,157 @@ fn g_cancel_inside_end_seal_fails_at_sealing_cleans_up_and_releases_pins() {
         "progress must carry the cancellation"
     );
     assert_source_untouched(&before, &source);
+}
+
+/// Audit chain key of the rotating fixture (never leaves the test).
+const ROTATION_AUDIT_KEY: [u8; 32] = [0x6b; 32];
+
+/// Rendezvous bound: a wedged copy or activity thread fails in two minutes.
+const ROTATION_HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// Active audit log file name inside `data_dir`.
+const ROTATION_AUDIT_LOG: &str = "audit.log";
+
+/// One fixture audit append through the REAL chain writer.
+fn append_rotation_event(writer: &AuditChainWriter, expect: &str) {
+    writer
+        .append(
+            "auth_success",
+            "test",
+            "user",
+            "127.0.0.0/24",
+            [7; 8],
+            "ok",
+            vec![0xc0],
+            42,
+        )
+        .expect(expect);
+}
+
+/// A rotation that lands BETWEEN the pass listing and the anchor-store
+/// capture still yields a copy whose anchor covers its own log.
+///
+/// The copy is paused DETERMINISTICALLY (channel rendezvous, no sleeps) right
+/// after the residual pass's listing, and while it is paused one event is
+/// appended through the REAL appender configured to rotate on every append
+/// (1-byte cap, so `rotate_locked` runs: fsync, rename, reopen a fresh empty
+/// active log, dir sync, THEN both anchors). Its bytes are then opened
+/// through the REAL boot recovery FIRST.
+///
+/// Mutant caught: the single-listing order (audit directory listed once, at
+/// the top of the pass, before the anchor capture). There the new archive is
+/// absent from the listing while the advanced anchor and the fresh empty
+/// active log ARE copied, so recovery refuses with `AnchorPastTail`.
+#[test]
+fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let restored_dir = TempDir::new().expect("restored temp dir");
+    let source = source_dir.path().to_path_buf();
+    let to = to_dir.path().to_path_buf();
+    let restored = restored_dir.path().join("data");
+    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    write_file(&source.join("repos/alpha.shamirwal/00000000.wal"), b"wal-0");
+    write_file(
+        &source.join("repos/alpha.shamirwal/00000000.meta"),
+        b"meta-0",
+    );
+    // Rotation on EVERY append: the append under the pause is a real rotation.
+    let appender = FjallAuditAppender::open_strict_with_rotation(&source, Some(1), 0)
+        .expect("open the rotating audit appender");
+    let writer = AuditChainWriter::new(AuditChain::new(ROTATION_AUDIT_KEY), appender.clone());
+    for _ in 0..2 {
+        append_rotation_event(&writer, "append an audit event");
+    }
+    writer.checkpoint_now().expect("persist the audit anchor");
+
+    let (paused_tx, paused_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let seam = test_seams::set_after_listing(Box::new(move |_root| {
+        // The protocol lists the data dir twice (pass D, then the residual
+        // pass E); the rotation must land in the manifest-defining latter.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
+            return;
+        }
+        paused_tx.send(()).expect("signal the listing pause");
+        let _ = release_rx.recv_timeout(ROTATION_HANG_GUARD);
+    }));
+    let activity = JoinOnDrop::new(
+        std::thread::Builder::new()
+            .name("audit-rotation".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                if paused_rx.recv_timeout(ROTATION_HANG_GUARD).is_ok() {
+                    append_rotation_event(&writer, "append the rotating event");
+                    writer.checkpoint_now().expect("persist the rotated anchor");
+                }
+                let _ = release_tx.send(());
+            })
+            .expect("spawn the audit rotation thread"),
+    );
+    let port = InjectPort::with_repos(&source, &["alpha"]);
+    let (result, _progress) = run(&port, &source, &to, &CancelFlag::default());
+    drop(seam);
+    activity.finish();
+    assert_eq!(listings.load(Ordering::SeqCst), 2, "second listing");
+    let report = result.expect("the copy must succeed");
+    // Inlined plain snapshot-tree copy (`copy_tree` lives in the sibling
+    // `copy_seam_tests`): every snapshot file is copied, nothing skipped.
+    let mut stack = vec![(report.dest_dir.clone(), restored.clone())];
+    while let Some((from, to)) = stack.pop() {
+        fs::create_dir_all(&to).expect("create a restored directory");
+        for entry in fs::read_dir(&from).expect("read a snapshot directory") {
+            let entry = entry.expect("snapshot entry");
+            let path = entry.path();
+            let target = to.join(entry.file_name());
+            if path.is_dir() {
+                stack.push((path, target));
+            } else {
+                fs::copy(&path, &target).expect("copy a snapshot file");
+            }
+        }
+    }
+    // The snapshot omits every Fjall `lock`; the production restore recreates
+    // it before opening a staged store, so the copy gets it back the same way.
+    test_seams::recreate_fjall_locks(&restored);
+    // Recovery FIRST: on the single-listing order the copy lacks the archive
+    // the rotation created while it was paused, and the typed refusal
+    // (`AnchorPastTail`) is what this expectation reports. The recovered
+    // appender holds the checkpoint store exclusively, so it is released
+    // before the anchor is read back through a second open.
+    let position = {
+        let (recovered, position) =
+            FjallAuditAppender::open_recovered_strict(&restored, &ROTATION_AUDIT_KEY, None).expect(
+                "the copied anchor must not be past the copied log tail (no AnchorPastTail)",
+            );
+        drop(recovered);
+        position
+    };
+    let anchor = FjallAuditAppender::load_checkpoint(&restored)
+        .expect("read the restored anchor")
+        .expect("the restored copy must carry the audit anchor");
+    assert!(
+        position.0 >= anchor.0,
+        "recovery resumes at the verified tail {} at or after the anchor {}",
+        position.0,
+        anchor.0
+    );
+    let mut archives = 0usize;
+    for entry in fs::read_dir(&restored).expect("restored directory") {
+        let name = entry.expect("restored entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        if name
+            .strip_prefix(ROTATION_AUDIT_LOG)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            archives += 1;
+        }
+    }
+    assert_eq!(
+        archives, 3,
+        "the copy must carry every rotation archive, including the one created while the copy was paused"
+    );
+    drop(appender);
 }

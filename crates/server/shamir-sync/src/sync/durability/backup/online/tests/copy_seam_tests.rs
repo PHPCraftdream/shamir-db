@@ -48,13 +48,15 @@ use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
 use super::failure_injection_tests::{
-    assert_source_untouched, run, snapshot_dir, write_file, Fixture, InjectPort,
+    assert_source_untouched, run, snapshot_dir, write_file, Fixture, InjectPort, JoinOnDrop,
 };
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
 use crate::sync::durability::backup::online::copy_engine::{run_copy_pass, CopyError, CopyOptions};
+use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{OnlineBackupError, OnlineBackupFailure};
 use crate::sync::durability::backup::verify_manifest;
+use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
 /// Shared cancelled-run assertions: typed cancellation at `stage`,
 /// destination root empty, pins released exactly once, progress
@@ -592,6 +594,10 @@ fn append_cycles(writer: &AuditChainWriter, cycles: usize, events_per_cycle: usi
 /// Plain file-tree copy of the snapshot into a fresh directory: restoring an
 /// online copy moves the snapshot tree into the target `data_dir` (engine
 /// stores are replayed separately; the audit files are carried as bytes).
+/// This is NOT the production restore (`restore_with_probe`): manifest
+/// verification, staging and the swap have their own tests. The audit tests
+/// below compensate by asserting the manifest entry against the bytes they
+/// open.
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).expect("create the restored directory");
     let mut stack = vec![from.to_path_buf()];
@@ -608,6 +614,21 @@ fn copy_tree(from: &Path, to: &Path) {
             }
         }
     }
+    // The snapshot omits every Fjall `lock`; the production restore recreates
+    // it before opening a staged store, so the copy gets it back the same way.
+    test_seams::recreate_fjall_locks(to);
+}
+
+/// The manifest's entry for one snapshot-relative path: (sha256, size).
+fn manifest_entry(dest: &Path, rel: &str) -> (String, u64) {
+    let raw = fs::read_to_string(dest.join(MANIFEST_FILE_NAME)).expect("read the manifest");
+    let decoded = manifest::decode(&raw).expect("decode the manifest");
+    decoded
+        .files
+        .iter()
+        .find(|entry| entry.path == rel)
+        .map(|entry| (entry.sha256.clone(), entry.size_bytes))
+        .unwrap_or_else(|| panic!("the manifest must list {rel}"))
 }
 
 /// A source data dir with one file-backed repo (`alpha`) plus a real audit
@@ -688,32 +709,33 @@ fn audit_log_is_captured_after_its_anchor_store() {
     );
 }
 
-/// A copy taken while audit events keep arriving restores and boots.
+/// A copy taken while audit events keep arriving restores and boots, and its
+/// manifest describes the log bytes the copy actually carries.
 ///
 /// The copy is paused DETERMINISTICALLY (channel rendezvous, no sleeps) right
-/// after the snapshot-defining capture of `audit.log` — exactly the window in
-/// which the old order captured the anchor store afterwards. While it is
-/// paused, three real append + checkpoint cycles run through the real
-/// appender, then the copy is released, the snapshot restored into a fresh
-/// directory and opened through the real boot recovery.
+/// after the destination write of the final `audit.log` copy and BEFORE that
+/// file's snapshot hash. While it is paused three real append + checkpoint
+/// cycles run through the real appender, so the log grows between the copy and
+/// its hash and the pass must re-copy and hash the FINAL bytes. The copy is
+/// then released, its bytes moved into a fresh directory and opened through
+/// the real boot recovery FIRST.
 ///
-/// Mutant caught: the previous capture order (log first, anchor store last).
-/// There the pause-time checkpoint is re-copied by the hash pass AFTER the
-/// captured log, so the transactional copy carries an anchor past the tail of
-/// its own log and this test's recovery call fails with
-/// `AuditRecoveryError::AnchorPastTail`. Mutant caught: a manifest that
-/// records the pre-capture hash — step F re-hashes the destination against
-/// the manifest, so the run itself fails instead of returning `Ok`.
+/// Mutant caught: a manifest (or hash pass) that records the digest read at
+/// copy time, before those appends — either the run's own step-F
+/// self-verification fails or the manifest assertion below does. Mutant
+/// caught: a capture order that leaves the copied anchor past the copied tail
+/// (the pre-round-1 sorted order: log first, anchor stores last) — recovery
+/// refuses with `AnchorPastTail`, observed at the recovery assertion. The
+/// capture order itself is additionally pinned by
+/// `audit_log_is_captured_after_its_anchor_store`.
 #[test]
-fn copy_paused_after_the_audit_log_capture_restores_and_boots() {
+fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let restored_dir = TempDir::new().expect("restored temp dir");
     let source = source_dir.path().to_path_buf();
     let to = to_dir.path().to_path_buf();
     let restored = restored_dir.path().join("data");
-    // Fixture: one file-backed repo plus the real audit store, seeded with
-    // two durable records and one anchor before the copy starts.
     write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
     write_file(&source.join("repos/alpha.shamirwal/00000000.wal"), b"wal-0");
     write_file(
@@ -724,52 +746,59 @@ fn copy_paused_after_the_audit_log_capture_restores_and_boots() {
 
     let (paused_tx, paused_rx) = mpsc::channel::<()>();
     let (release_tx, release_rx) = mpsc::channel::<()>();
-    let captures = Arc::new(AtomicUsize::new(0));
-    let captures_for_hook = captures.clone();
+    let copies = Arc::new(AtomicUsize::new(0));
+    let copies_for_hook = copies.clone();
     let audit_log_path = source.join(AUDIT_LOG_FILE);
-    let seam = test_seams::set_after_capture(Box::new(move |path| {
+    let seam = test_seams::set_after_copy(Box::new(move |path| {
         if path != audit_log_path {
             return;
         }
-        // The protocol captures the data dir twice (the copy pass D and the
+        // The protocol copies the data dir twice (pass D and the
         // snapshot-defining residual pass E); the pause must land in the
-        // latter, the capture the manifest describes.
-        if captures_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
+        // latter, the copy the manifest describes.
+        if copies_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
             return;
         }
-        paused_tx.send(()).expect("signal the capture pause");
-        release_rx
-            .recv_timeout(AUDIT_HANG_GUARD)
-            .expect("the test must release the copy");
+        paused_tx.send(()).expect("signal the copy pause");
+        let _ = release_rx.recv_timeout(AUDIT_HANG_GUARD);
     }));
     // The copy runs on THIS thread (the seams are thread-local); the audit
     // activity runs on a helper thread while the copy is paused.
-    let activity = std::thread::Builder::new()
-        .name("audit-activity".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            paused_rx
-                .recv_timeout(AUDIT_HANG_GUARD)
-                .expect("the copy must reach the capture pause");
-            append_cycles(&writer, 3, 2);
-            release_tx.send(()).expect("release the copy");
-        })
-        .expect("spawn the audit activity thread");
+    let activity = JoinOnDrop::new(
+        std::thread::Builder::new()
+            .name("audit-activity".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                if paused_rx.recv_timeout(AUDIT_HANG_GUARD).is_ok() {
+                    append_cycles(&writer, 3, 2);
+                }
+                let _ = release_tx.send(());
+            })
+            .expect("spawn the audit activity thread"),
+    );
     let port = InjectPort::with_repos(&source, &["alpha"]);
     let cancel = CancelFlag::default();
     let (result, _progress) = run(&port, &source, &to, &cancel);
     drop(seam);
-    activity
-        .join()
-        .expect("the audit activity thread must finish");
+    activity.finish();
     assert_eq!(
-        captures.load(Ordering::SeqCst),
+        copies.load(Ordering::SeqCst),
         2,
-        "the pause must land in the snapshot-defining capture (pass D, then pass E)"
+        "the pause must land in the snapshot-defining copy (pass D, then pass E)"
     );
     let report = result.expect("the copy must succeed");
 
     copy_tree(&report.dest_dir, &restored);
+    // Recovery FIRST: a typed refusal must be observed, never pre-empted. The
+    // recovered appender holds the checkpoint store exclusively, so it is
+    // released before the anchor is read back through a second open.
+    let position = {
+        let (recovered, position) =
+            FjallAuditAppender::open_recovered_strict(&restored, &AUDIT_KEY, None)
+                .expect("the restored copy must pass audit recovery (no AnchorPastTail)");
+        drop(recovered);
+        position
+    };
     let anchor = FjallAuditAppender::load_checkpoint(&restored)
         .expect("read the restored anchor")
         .expect("the restored copy must carry the audit anchor");
@@ -779,9 +808,10 @@ fn copy_paused_after_the_audit_log_capture_restores_and_boots() {
     let tail = entries.last().expect("the restored log must not be empty");
     assert!(
         anchor.0 <= tail.seq + 1,
-        "the captured anchor {:?} must not point past the captured log tail {}",
+        "the captured anchor {:?} must not point past the captured log tail {} (recovery resumed at {})",
         anchor.0,
-        tail.seq + 1
+        tail.seq + 1,
+        position.0
     );
     let covered = entries
         .iter()
@@ -791,16 +821,18 @@ fn copy_paused_after_the_audit_log_capture_restores_and_boots() {
         covered.hmac, anchor.1,
         "the anchor must authenticate the captured log at its own position"
     );
-    let (recovered, position) =
-        FjallAuditAppender::open_recovered_strict(&restored, &AUDIT_KEY, None)
-            .expect("the restored copy must pass audit recovery (no AnchorPastTail)");
     assert!(
         position.0 >= anchor.0,
         "recovery resumes at the verified tail {} at or after the anchor {}",
         position.0,
         anchor.0
     );
-    drop(recovered);
+    let bytes = fs::read(restored.join(AUDIT_LOG_FILE)).expect("restored log bytes");
+    assert_eq!(
+        manifest_entry(&report.dest_dir, AUDIT_LOG_FILE),
+        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64),
+        "the manifest must describe the log bytes the copy carries, not an earlier read"
+    );
     drop(appender);
 }
 
@@ -838,6 +870,12 @@ fn quiet_audit_log_copy_restores_and_boots() {
         fs::read(restored.join(AUDIT_LOG_FILE)).expect("restored log bytes"),
         fs::read(source.join(AUDIT_LOG_FILE)).expect("source log bytes"),
         "a copy with no audit activity must carry the log byte-exact"
+    );
+    let bytes = fs::read(restored.join(AUDIT_LOG_FILE)).expect("restored log bytes");
+    assert_eq!(
+        manifest_entry(&report.dest_dir, AUDIT_LOG_FILE),
+        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64),
+        "the manifest must describe the copied log bytes exactly"
     );
     let entries =
         FjallAuditAppender::read_log_for_verify(&restored).expect("read the restored audit log");

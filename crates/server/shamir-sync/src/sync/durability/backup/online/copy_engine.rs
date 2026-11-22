@@ -18,6 +18,9 @@ use sha2::{Digest, Sha256};
 use super::manifest::BACKUP_META_FILE_NAME;
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
+use crate::sync::durability::audit_chain_files::{
+    audit_capture_is_stable, is_audit_log_file_name, list_audit_files, AUDIT_CAPTURE_ROUNDS,
+};
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
 /// Fixed reused buffer for streaming copies and hashes.
@@ -61,7 +64,9 @@ pub struct CopyPassResult {
 /// Copy failures. Sharing violations exhausted after the bounded retry
 /// surface as `Io` carrying the original error; a tripped seal gate
 /// surfaces as typed `RecopyCap` (the protocol maps it to
-/// `OnlineBackupFailure::RecopyCap` at `Sealing`).
+/// `OnlineBackupFailure::RecopyCap` at `Sealing`). The bounded audit chain
+/// rounds of the data-directory pass fail typed when an archive keeps
+/// appearing behind the copy.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyError {
     #[error("backup copy cancelled")]
@@ -74,6 +79,8 @@ pub enum CopyError {
     },
     #[error("seal re-copy cap exceeded: {0}")]
     RecopyCap(String),
+    #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
+    AuditFilesUnstable { rounds: usize },
 }
 
 /// Cooperative seal-re-copy gate (design Q12): bounds ONE repo's seal
@@ -391,44 +398,22 @@ fn is_regular_file(meta: &fs::Metadata) -> bool {
 /// sharing-violation applies and the file is process state, not data.
 const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 
-/// Top-level data-dir FILES that every copy pass copies and hashes LAST,
-/// after every other file of the pass (including the audit anchor stores'
-/// directories).
-///
-/// `audit.log` is the durable audit chain log. Every anchor that recovery
-/// checks it against — the `audit_checkpoint` row and the `server_meta`
-/// anchor — is written only AFTER the log bytes it covers are fsynced
-/// (`audit_appender::checkpoint_locked` flushes before the checkpoint;
-/// rotation fsyncs, renames, reopens and dir-syncs before
-/// `persist_anchor_and_meta`), and the log is append-only. So a pass that
-/// captures the anchor stores FIRST and the log LAST can only produce a
-/// snapshot with `anchor.next_seq <= captured log tail`: whatever anchor
-/// the snapshot carries was already durable in the log before the log's
-/// own copy and final hash were taken. Plain sorted order puts
-/// `audit.log` before `audit_checkpoint/` and `server_meta/`
-/// ('-' < '_' < 's'), so a flush plus checkpoint landing between the
-/// log's capture and an anchor's capture would yield a snapshot whose
-/// anchor is past the captured tail — a copy of a healthy server that
-/// refuses its first boot with `AnchorPastTail`. Rotated archives
-/// (`audit.log.<suffix>`) are immutable once renamed and need no
-/// deferral. The name mirrors `audit_appender::AUDIT_LOG_FILENAME` (a
-/// documented `data_dir` layout fact, like [`SKIP_FILE_NAMES`]);
-/// shamir-sync carries no config for it.
-const DEFER_TO_PASS_END_FILE_NAMES: &[&str] = &["audit.log"];
-
 /// Deterministic listing of every regular file under `source_root`
 /// (sorted per directory), skipping top-level directories named in
 /// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
 /// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
-/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above). With
-/// a gate, cancel and the clock are checked at every directory iteration
-/// — the listing is inside the re-copy budget.
+/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
+/// Top-level audit chain files are skipped when `skip_audit_files` is set
+/// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
+/// clock are checked at every directory iteration — the listing is inside
+/// the re-copy budget.
 fn list_files(
     source_root: &Path,
     skip_top_level_dirs: &[&str],
     skip_top_level_files: &[&str],
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
+    skip_audit_files: bool,
 ) -> Result<Vec<PathBuf>, CopyError> {
     let mut out = Vec::new();
     let mut stack = vec![source_root.to_path_buf()];
@@ -477,6 +462,10 @@ fn list_files(
                 {
                     continue;
                 }
+                if skip_audit_files && dir.as_path() == source_root && is_audit_log_file_name(name)
+                {
+                    continue;
+                }
                 if !skip_top_level_files.is_empty()
                     && dir.as_path() == source_root
                     && skip_top_level_files
@@ -515,7 +504,7 @@ pub fn run_copy_pass(
         &PassRules {
             skip_top_level_dirs,
             skip_top_level_files: &[],
-            defer_to_pass_end: &[],
+            audit_files: AuditFiles::InOrder,
             exclude_dirs,
             cancel,
             options,
@@ -526,9 +515,41 @@ pub fn run_copy_pass(
 }
 
 /// Data-dir pass: everything outside `exclude_dirs`, skipping the private
-/// `cache` subtree and the manifest's own files. Audit log files are
-/// captured LAST ([`DEFER_TO_PASS_END_FILE_NAMES`]) so the snapshot's
-/// audit anchor never points past the captured log tail.
+/// `cache` subtree and the manifest's own files, in TWO phases.
+///
+/// Phase 1 captures every other file of the pass — including both audit
+/// anchor stores (`audit_checkpoint/`, `server_meta/`) — and leaves the
+/// audit chain files (the active `audit.log` and its rotation archives)
+/// out. Phase 2 begins only after phase 1 has finished, lists the audit
+/// chain files freshly and captures them, archives first and the active
+/// log last.
+///
+/// That order is what makes the copy audit-consistent: an anchor can only
+/// name log positions that were already durable, and therefore already
+/// present in the audit files, before the audit listing of phase 2.
+/// `checkpoint_locked` flushes the log before it writes the
+/// `audit_checkpoint` row, and `rotate_locked` fsyncs, renames, reopens,
+/// dir-syncs and only then persists both anchors; the log is append-only
+/// and a rotation only ADDS an archive, never rewrites one. So every byte
+/// a captured anchor covers is in the files phase 2 lists — including a
+/// rotation that lands between phase 1's listing and its anchor capture,
+/// whose new archive phase 2 lists afterwards. A single pass that lists
+/// once cannot close that window: its listing predates the anchor capture,
+/// so a rotation in between hides the archive holding exactly the bytes
+/// the captured anchor names.
+///
+/// Phase 2 re-lists the audit directory after each capture round and
+/// re-captures what appeared, up to [`AUDIT_CAPTURE_ROUNDS`] rounds; the
+/// active log is re-captured in every round because a rotation can move
+/// its bytes into a new archive. Reaching the bound fails the pass with a
+/// typed [`CopyError::AuditFilesUnstable`] — never a silently inconsistent
+/// copy. The manifest describes exactly the bytes of the last round.
+///
+/// Not covered, by design: retention may DELETE an archive between the
+/// listing and its copy — a vanished file is excluded exactly as any other
+/// deleted source file — and retention never removes the newest archive,
+/// the only one that can hold the tail an anchor persisted just before
+/// names.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -536,20 +557,52 @@ pub(super) fn run_data_dir_copy_pass(
     cancel: &CancelFlag,
     options: &CopyOptions,
 ) -> Result<CopyPassResult, CopyError> {
-    run_copy_pass_inner(
-        source_root,
-        dest_root,
-        &PassRules {
-            skip_top_level_dirs: &["cache"],
-            skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
-            defer_to_pass_end: DEFER_TO_PASS_END_FILE_NAMES,
-            exclude_dirs,
-            cancel,
-            options,
-            gate: None,
-            preauth: &BTreeMap::new(),
-        },
-    )
+    let rules = PassRules {
+        skip_top_level_dirs: &["cache"],
+        skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
+        audit_files: AuditFiles::AfterAnchor,
+        exclude_dirs,
+        cancel,
+        options,
+        gate: None,
+        preauth: &BTreeMap::new(),
+    };
+    // Phase 1: every other file, both anchor stores included.
+    let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
+    // Phase 2: the audit chain files, listed only now.
+    for _ in 0..AUDIT_CAPTURE_ROUNDS {
+        let audit = run_copy_pass_inner(
+            source_root,
+            dest_root,
+            &PassRules {
+                audit_files: AuditFiles::Only,
+                ..rules
+            },
+        )?;
+        if audit_capture_is_stable(source_root, &audit, cancel)? {
+            result.files.extend(audit.files);
+            result.changed_files += audit.changed_files;
+            result.missing_files += audit.missing_files;
+            return Ok(result);
+        }
+    }
+    Err(CopyError::AuditFilesUnstable {
+        rounds: AUDIT_CAPTURE_ROUNDS,
+    })
+}
+
+/// How one pass treats the audit chain files of its source root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditFiles {
+    /// Ordinary pass (repo, WAL, gated re-copy): audit files are captured
+    /// with everything else, in sorted order.
+    InOrder,
+    /// Data-directory phase 1: the audit chain files are left to phase 2,
+    /// which runs only after this pass has captured every anchor store.
+    AfterAnchor,
+    /// Data-directory phase 2: the audit chain files ARE the listing,
+    /// archives first and the active log last.
+    Only,
 }
 
 /// Engine-internal pass rules shared by the copy loops (keeps argument
@@ -562,9 +615,8 @@ struct PassRules<'a> {
     options: &'a CopyOptions,
     gate: Option<&'a SealGate>,
     preauth: &'a BTreeMap<String, (String, u64)>,
-    /// Top-level file names this pass captures LAST (see
-    /// [`DEFER_TO_PASS_END_FILE_NAMES`]).
-    defer_to_pass_end: &'a [&'a str],
+    /// Which audit chain files this pass captures (see [`AuditFiles`]).
+    audit_files: AuditFiles,
 }
 
 /// Same pass, GATED and INCREMENTAL (seal re-copy): `gate` bounds the
@@ -595,7 +647,7 @@ pub(crate) fn run_copy_pass_gated(
         &PassRules {
             skip_top_level_dirs: &[],
             skip_top_level_files: &[],
-            defer_to_pass_end: &[],
+            audit_files: AuditFiles::InOrder,
             exclude_dirs: &[],
             cancel,
             options,
@@ -626,7 +678,7 @@ pub(crate) fn authenticate_dest(
     {
         return Ok(BTreeMap::new());
     }
-    let listing = list_files(dest_root, &[], &[], cancel, gate)?;
+    let listing = list_files(dest_root, &[], &[], cancel, gate, false)?;
     let mut out = BTreeMap::new();
     for path in listing {
         if let Some(gate) = gate {
@@ -649,38 +701,37 @@ pub(crate) fn authenticate_dest(
     Ok(out)
 }
 
-/// Stable reorder of one pass's listing: top-level files whose name is in
-/// `names` move to the END, which is the order BOTH the copy loop and the
-/// snapshot-defining hash pass follow. Every other path keeps its sorted
-/// position, so the manifest's file order stays deterministic.
-fn defer_named_files(listing: &mut Vec<PathBuf>, source_root: &Path, names: &[&str]) {
-    if names.is_empty() {
-        return;
-    }
-    let (deferred, rest): (Vec<PathBuf>, Vec<PathBuf>) =
-        std::mem::take(listing).into_iter().partition(|path| {
-            path.parent() == Some(source_root)
-                && path
-                    .file_name()
-                    .is_some_and(|name| names.iter().any(|candidate| name == OsStr::new(candidate)))
-        });
-    *listing = rest;
-    listing.extend(deferred);
-}
-
 fn run_copy_pass_inner(
     source_root: &Path,
     dest_root: &Path,
     rules: &PassRules<'_>,
 ) -> Result<CopyPassResult, CopyError> {
-    let mut listing = list_files(
-        source_root,
-        rules.skip_top_level_dirs,
-        rules.skip_top_level_files,
-        rules.cancel,
-        rules.gate,
-    )?;
-    defer_named_files(&mut listing, source_root, rules.defer_to_pass_end);
+    let listing = match rules.audit_files {
+        AuditFiles::Only => list_audit_files(source_root, rules.cancel, rules.gate)?,
+        AuditFiles::AfterAnchor => {
+            let listing = list_files(
+                source_root,
+                rules.skip_top_level_dirs,
+                rules.skip_top_level_files,
+                rules.cancel,
+                rules.gate,
+                true,
+            )?;
+            // Test-only seam: the pass listing is fixed and it names no
+            // audit chain file; the anchor stores are captured from here on.
+            #[cfg(test)]
+            test_seams::fire_after_listing(source_root);
+            listing
+        }
+        AuditFiles::InOrder => list_files(
+            source_root,
+            rules.skip_top_level_dirs,
+            rules.skip_top_level_files,
+            rules.cancel,
+            rules.gate,
+            false,
+        )?,
+    };
     let &PassRules {
         exclude_dirs,
         cancel,
