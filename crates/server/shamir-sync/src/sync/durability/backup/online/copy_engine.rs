@@ -391,6 +391,31 @@ fn is_regular_file(meta: &fs::Metadata) -> bool {
 /// sharing-violation applies and the file is process state, not data.
 const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 
+/// Top-level data-dir FILES that every copy pass copies and hashes LAST,
+/// after every other file of the pass (including the audit anchor stores'
+/// directories).
+///
+/// `audit.log` is the durable audit chain log. Every anchor that recovery
+/// checks it against — the `audit_checkpoint` row and the `server_meta`
+/// anchor — is written only AFTER the log bytes it covers are fsynced
+/// (`audit_appender::checkpoint_locked` flushes before the checkpoint;
+/// rotation fsyncs, renames, reopens and dir-syncs before
+/// `persist_anchor_and_meta`), and the log is append-only. So a pass that
+/// captures the anchor stores FIRST and the log LAST can only produce a
+/// snapshot with `anchor.next_seq <= captured log tail`: whatever anchor
+/// the snapshot carries was already durable in the log before the log's
+/// own copy and final hash were taken. Plain sorted order puts
+/// `audit.log` before `audit_checkpoint/` and `server_meta/`
+/// ('-' < '_' < 's'), so a flush plus checkpoint landing between the
+/// log's capture and an anchor's capture would yield a snapshot whose
+/// anchor is past the captured tail — a copy of a healthy server that
+/// refuses its first boot with `AnchorPastTail`. Rotated archives
+/// (`audit.log.<suffix>`) are immutable once renamed and need no
+/// deferral. The name mirrors `audit_appender::AUDIT_LOG_FILENAME` (a
+/// documented `data_dir` layout fact, like [`SKIP_FILE_NAMES`]);
+/// shamir-sync carries no config for it.
+const DEFER_TO_PASS_END_FILE_NAMES: &[&str] = &["audit.log"];
+
 /// Deterministic listing of every regular file under `source_root`
 /// (sorted per directory), skipping top-level directories named in
 /// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
@@ -490,6 +515,7 @@ pub fn run_copy_pass(
         &PassRules {
             skip_top_level_dirs,
             skip_top_level_files: &[],
+            defer_to_pass_end: &[],
             exclude_dirs,
             cancel,
             options,
@@ -499,6 +525,10 @@ pub fn run_copy_pass(
     )
 }
 
+/// Data-dir pass: everything outside `exclude_dirs`, skipping the private
+/// `cache` subtree and the manifest's own files. Audit log files are
+/// captured LAST ([`DEFER_TO_PASS_END_FILE_NAMES`]) so the snapshot's
+/// audit anchor never points past the captured log tail.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -512,6 +542,7 @@ pub(super) fn run_data_dir_copy_pass(
         &PassRules {
             skip_top_level_dirs: &["cache"],
             skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
+            defer_to_pass_end: DEFER_TO_PASS_END_FILE_NAMES,
             exclude_dirs,
             cancel,
             options,
@@ -531,6 +562,9 @@ struct PassRules<'a> {
     options: &'a CopyOptions,
     gate: Option<&'a SealGate>,
     preauth: &'a BTreeMap<String, (String, u64)>,
+    /// Top-level file names this pass captures LAST (see
+    /// [`DEFER_TO_PASS_END_FILE_NAMES`]).
+    defer_to_pass_end: &'a [&'a str],
 }
 
 /// Same pass, GATED and INCREMENTAL (seal re-copy): `gate` bounds the
@@ -561,6 +595,7 @@ pub(crate) fn run_copy_pass_gated(
         &PassRules {
             skip_top_level_dirs: &[],
             skip_top_level_files: &[],
+            defer_to_pass_end: &[],
             exclude_dirs: &[],
             cancel,
             options,
@@ -614,18 +649,38 @@ pub(crate) fn authenticate_dest(
     Ok(out)
 }
 
+/// Stable reorder of one pass's listing: top-level files whose name is in
+/// `names` move to the END, which is the order BOTH the copy loop and the
+/// snapshot-defining hash pass follow. Every other path keeps its sorted
+/// position, so the manifest's file order stays deterministic.
+fn defer_named_files(listing: &mut Vec<PathBuf>, source_root: &Path, names: &[&str]) {
+    if names.is_empty() {
+        return;
+    }
+    let (deferred, rest): (Vec<PathBuf>, Vec<PathBuf>) =
+        std::mem::take(listing).into_iter().partition(|path| {
+            path.parent() == Some(source_root)
+                && path
+                    .file_name()
+                    .is_some_and(|name| names.iter().any(|candidate| name == OsStr::new(candidate)))
+        });
+    *listing = rest;
+    listing.extend(deferred);
+}
+
 fn run_copy_pass_inner(
     source_root: &Path,
     dest_root: &Path,
     rules: &PassRules<'_>,
 ) -> Result<CopyPassResult, CopyError> {
-    let listing = list_files(
+    let mut listing = list_files(
         source_root,
         rules.skip_top_level_dirs,
         rules.skip_top_level_files,
         rules.cancel,
         rules.gate,
     )?;
+    defer_named_files(&mut listing, source_root, rules.defer_to_pass_end);
     let &PassRules {
         exclude_dirs,
         cancel,
@@ -804,6 +859,8 @@ fn run_copy_pass_inner(
                 (hash, size)
             }
         };
+        #[cfg(test)]
+        test_seams::fire_after_capture(&source_path);
         files.push(CopiedFile {
             rel_path: rel_slash,
             sha256: hash,

@@ -15,6 +15,11 @@ pub type IoHook = Box<dyn FnMut(&Path) -> std::io::Result<()> + 'static>;
 /// synced): used for deterministic post-listing source mutation and
 /// between-file cancellation.
 pub type CopyHook = Box<dyn FnMut(&Path) + 'static>;
+/// Fired once per file, after that file's snapshot entry is final in a
+/// copy pass (bytes on the destination, second-pass hash settled): the
+/// moment the pass's view of that file is fixed. Used to rendezvous with
+/// the real audit appender between two files' captures.
+pub type CaptureHook = Box<dyn FnMut(&Path) + 'static>;
 /// Overrides `hash_file` for matching paths: returning `Some(result)`
 /// supplies the hash, `None` falls through to the real `hash_file`.
 /// Used to force a persistent re-pass hash mismatch.
@@ -38,6 +43,7 @@ use crate::sync::durability::backup::online::progress::BackupStage;
 thread_local! {
     static AFTER_FIRST_WRITE: RefCell<Option<IoHook>> = RefCell::new(None);
     static AFTER_COPY: RefCell<Option<CopyHook>> = RefCell::new(None);
+    static AFTER_CAPTURE: RefCell<Option<CaptureHook>> = RefCell::new(None);
     static HASH_FILE: RefCell<Option<HashHook>> = RefCell::new(None);
     static BEFORE_BOUNDARY: RefCell<Option<BoundaryHook>> = RefCell::new(None);
     static MONOTONIC_NOW: RefCell<Option<NowHook>> = RefCell::new(None);
@@ -50,6 +56,7 @@ impl Drop for SeamGuard {
     fn drop(&mut self) {
         AFTER_FIRST_WRITE.with(|slot| *slot.borrow_mut() = None);
         AFTER_COPY.with(|slot| *slot.borrow_mut() = None);
+        AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = None);
         HASH_FILE.with(|slot| *slot.borrow_mut() = None);
         BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = None);
         MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None);
@@ -63,6 +70,11 @@ pub fn set_after_first_write(hook: IoHook) -> SeamGuard {
 
 pub fn set_after_copy(hook: CopyHook) -> SeamGuard {
     AFTER_COPY.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard
+}
+
+pub fn set_after_capture(hook: CaptureHook) -> SeamGuard {
+    AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(hook));
     SeamGuard
 }
 
@@ -99,6 +111,14 @@ pub fn fire_after_first_write(source: &Path) -> std::io::Result<()> {
 
 pub fn fire_after_copy(source: &Path) {
     AFTER_COPY.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(source);
+        }
+    });
+}
+
+pub fn fire_after_capture(source: &Path) {
+    AFTER_CAPTURE.with(|slot| {
         if let Some(hook) = slot.borrow_mut().as_mut() {
             hook(source);
         }
