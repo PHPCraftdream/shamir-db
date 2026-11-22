@@ -9,6 +9,7 @@
 pub(in crate::shell) mod access;
 pub(in crate::shell) mod activity;
 pub(in crate::shell) mod catalogue;
+pub(in crate::shell) mod selector;
 pub(in crate::shell) mod state;
 
 pub(in crate::shell) use access::AccessCommand;

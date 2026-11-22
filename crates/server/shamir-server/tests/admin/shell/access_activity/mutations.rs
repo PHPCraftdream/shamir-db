@@ -124,7 +124,9 @@ fn create_catalogue_group(fixture: &ShellFixture, name: &str) -> u64 {
         let id = result.records[0]
             .get_value_u64("group_id")
             .expect("server-minted `group_id` on create_group");
-        client.close().await;
+        timeout(BOUND, client.close())
+            .await
+            .expect("group creator close hang bound");
         id
     })
 }
@@ -405,7 +407,9 @@ fn signed_chmod_over_the_wire_is_accepted_and_a_wrong_tag_is_refused() {
         batch.op("chmod", unknown);
         let unknown_code = execute_code(&client, batch.build()).await;
 
-        client.close().await;
+        timeout(BOUND, client.close())
+            .await
+            .expect("wire chmod close hang bound");
         (0o705u16, wrong_code, unknown_code)
     });
 

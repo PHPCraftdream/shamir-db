@@ -395,6 +395,13 @@ fn server_code(code: &str) -> ShellError {
         "unknown_table" => ShellError::UnknownTable,
         "resync_required" => ShellError::ResyncRequired,
         "result_too_large" => ShellError::ResultTooLarge,
+        // Read-only follower write refusal (§6 "follower behavior": the
+        // stable diagnostic is surfaced, never retried or redirected).
+        "read_only_replica" => ShellError::ReadOnlyReplica,
+        // The VICTIM side of a cooperative cancellation: this session's own
+        // batch was cancelled by another operator. Its effects may be partial,
+        // so it is its own typed refusal, not a generic server failure.
+        "cancelled" => ShellError::Cancelled,
         _ => ShellError::Server,
     }
 }

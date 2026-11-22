@@ -156,8 +156,18 @@ fn activity_sessions_lists_own_session() {
 }
 
 /// `activity requests --limit 1` reports the requests registry with the two
-/// scalar paging markers; the row set may be empty, but every returned row
-/// must carry the documented request shape and a documented state word.
+/// scalar paging markers; every returned row must carry the documented request
+/// shape and a documented state word.
+///
+/// What this proves: the registry name, the own scope, the marker types and
+/// the exact row key set through a real shell run. What it does NOT prove: a
+/// healthy request ROW. The listing excludes its own `ListActivity` request,
+/// and this fixture cannot park a request deterministically (the server inside
+/// the shell fixture does not hand the test its `ShamirDb`, and the client
+/// cannot hold an interactive transaction across the wire), so an empty
+/// `rows` array with `rows_truncated: false` passes every assertion here. The
+/// row PROJECTION — including every real `op_kind` label — is pinned by
+/// `shell/commands/tests/activity_field_tests.rs`.
 #[test]
 fn activity_requests_reports_paging_marker() {
     let secure = boot_secure("activity_requests_reports_paging_marker");
@@ -543,16 +553,20 @@ fn activity_all_lists_another_actors_session_and_own_scope_does_not() {
     close_session(fixture, other);
 }
 
-/// The paging on REAL rows: `--limit` is the WIRE PAGE SIZE, not a total cap,
-/// so the shell follows the server's continuation until the listing is
-/// exhausted. With two live sessions and `--limit 1` (one row per page) both
-/// rows must come back across two pages and the listing is complete.
+/// The paging walk on REAL rows: with two live sessions and `--limit 1` both
+/// rows must come back in one result, exactly once each, with no false
+/// truncation marker.
 ///
-/// Mutants caught: a shell that stops after the first page (it would return
-/// one row), a continuation that is not forwarded (the same row twice, so the
-/// foreign session is missing) and a marker hardcoded to `true` (the
-/// exhausted listing would claim truncation). The truncation marker itself
-/// is pinned against a fake listing in `commands/tests/access_deadline_tests.rs`.
+/// What this proves: the listed row SET is complete across the walk, no page
+/// is repeated, `rows_returned` matches the rows, and an exhausted listing
+/// does not claim truncation. What it does NOT prove: that the outgoing
+/// `--limit` was 1. Replacing the wire page size with 50 still returns both
+/// rows in ONE page and passes every assertion below — the server sees one
+/// request either way and the fixture has no seam to observe the outgoing
+/// `limit`. The page-size and continuation rules themselves are pinned against
+/// a counting fake in `commands/tests/access_deadline_tests.rs`
+/// (`collect_pages`), which fails if the cap check or the continuation
+/// forwarding is removed.
 #[test]
 fn activity_sessions_paging_follows_the_server_continuation() {
     let secure = boot_secure("activity_sessions_paging_follows_the_server_continuation");

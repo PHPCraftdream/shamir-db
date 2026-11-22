@@ -30,6 +30,8 @@ use shamir_query_types::admin::activity::{
     ListActivityReq, RequestExecId,
 };
 
+use shamir_connect::common::types::limits::USERNAME_MAX_BYTES;
+
 use super::super::output::{self, ShellError};
 use crate::shell::connect::SessionClient;
 
@@ -55,13 +57,34 @@ const MAX_ID_DIGITS: usize = 20;
 /// `user`, `transport`, `db` or `op_kind`.
 const INVALID_FIELD: &str = "<invalid>";
 
-/// Longest accepted principal / database name in bytes. The engine's own
-/// rule for a name component is `[A-Za-z0-9_-]`; the cap only bounds what a
-/// listing cell has to render.
-const MAX_NAME_BYTES: usize = 64;
+/// Longest accepted principal name in bytes: exactly the engine's own login
+/// limit, `USERNAME_MAX_BYTES` = 255
+/// (`crates/net/shamir-connect/src/common/model/types.rs`, applied after
+/// PRECIS `UsernameCaseMapped` normalisation in
+/// `common/user/username.rs`), so a login the server accepts is never hidden
+/// by the shell. A longer value is the fixed placeholder.
+const MAX_USER_NAME_BYTES: usize = USERNAME_MAX_BYTES;
+
+/// Longest accepted database name in bytes. The engine's own component rule
+/// (`validate_name_component`,
+/// `crates/engine/shamir-db/src/shamir_db/execute/core/helpers.rs`) imposes no
+/// length cap, so the shell's profile caps a ROUTING database at 64 bytes
+/// (`connect/profile.rs::MAX_NAME_LEN`) while a row routed by an SDK client
+/// may be longer. 255 bytes is the fjall/OS name ceiling the engine's own
+/// generated store names obey; the cap only bounds what a listing cell has to
+/// render, and one byte over it is the placeholder.
+const MAX_DB_NAME_BYTES: usize = 255;
 
 /// Longest accepted `op_kind` in bytes (a wire `BatchOp` discriminant name).
-const MAX_OP_KIND_BYTES: usize = 32;
+///
+/// The server derives these labels from the parsed operation discriminant
+/// only (`crates/query/shamir-query-types/src/admin/activity/op_name.rs`); the
+/// longest static one is `admin:apply_application_schema_migration` (40
+/// bytes), plus the three non-`admin:` labels `read`, `write` and `tx_open`
+/// the server mints. 64 leaves headroom for a new label while still bounding
+/// the cell, and every label of that file must pass (see
+/// `tests/activity_field_tests.rs`, which pins the whole list).
+const MAX_OP_KIND_BYTES: usize = 64;
 
 /// Exactly the transports `transport_label` in the server emits.
 const TRANSPORTS: [&str; 3] = ["tcp", "ws", "ipc"];
@@ -289,7 +312,7 @@ fn project_session(row: &ActivityRow) -> Result<Value, ShellError> {
         } => Ok(json!({
             "kind": "session",
             "session_handle": session_handle.to_string(),
-            "user": output::sanitize(&name_field(user)),
+            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
             "transport": output::sanitize(&transport_field(transport)),
             "created_at_ns": created_at_ns.to_string(),
             "idle_ns": idle_ns.to_string(),
@@ -315,8 +338,8 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
             "kind": "request",
             "request_exec_id": request_exec_id.0.to_string(),
             "session_handle": (*session_handle).map(|handle| handle.to_string()),
-            "user": output::sanitize(&name_field(user)),
-            "db": output::sanitize(&name_field(db)),
+            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
+            "db": output::sanitize(&name_field(db, MAX_DB_NAME_BYTES)),
             "op_kind": output::sanitize(&op_kind_field(op_kind)),
             "state": request_state_name(*state),
             "elapsed_ns": elapsed_ns.to_string(),
@@ -326,12 +349,13 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
 }
 
 /// One free-text principal or database name, projected ONLY when it matches
-/// the engine's own name rule for such a component (`[A-Za-z0-9_-]`, at
-/// most [`MAX_NAME_BYTES`] bytes); anything else becomes the fixed
-/// [`INVALID_FIELD`] placeholder.
-fn name_field(raw: &str) -> String {
+/// the engine's own component rule (`[A-Za-z0-9_-]`) and fits `cap` bytes;
+/// anything else becomes the fixed [`INVALID_FIELD`] placeholder. The charset
+/// is the engine's (`validate_name_component`), so a non-ASCII PRECIS login
+/// name the server accepts still renders as the placeholder.
+fn name_field(raw: &str, cap: usize) -> String {
     let allowed = !raw.is_empty()
-        && raw.len() <= MAX_NAME_BYTES
+        && raw.len() <= cap
         && raw
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');

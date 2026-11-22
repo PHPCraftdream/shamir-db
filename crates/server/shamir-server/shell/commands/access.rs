@@ -16,6 +16,11 @@
 //!   batch the read commands send, and then call the typed
 //!   `Client::chmod` / `chown` / `chgrp` signing methods. The server decides
 //!   authorization; the shell sends no privilege material.
+//! - The selector itself lives in `selector.rs`: `root`/`/` is the synthetic
+//!   root, `db:NAME` is always the database `NAME` (this is how a database
+//!   named `root` is addressed), `function:NAME` is a stored function whose
+//!   name may contain `/`, and a bare path is one to three resource
+//!   components.
 //!
 //! Errors: server failures route through `crate::shell::connect::request_error`
 //! (allowlisted stable codes only, never a verbatim server string). A local
@@ -34,6 +39,7 @@ use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_types::types::value::QueryValue;
 
 use super::super::output::{self, value, ShellError};
+use super::selector::{normalized_path, parse_selector, Selector, RESOURCE_KINDS};
 use crate::shell::connect::{request_error, SessionClient};
 
 /// Response alias of the `user list` batch entry.
@@ -45,15 +51,14 @@ const TREE_ALIAS: &str = "tree";
 /// Deepest resource node level the shell projects (the root is level 1).
 const MAX_NODE_LEVELS: usize = 8;
 
-/// Most nodes the shell projects across one resource tree.
+/// Most nodes the shell projects across one resource tree. The cap applies to
+/// the whole-tree renderings only (`group tree`, `group members`); `rights
+/// show` projects ONE selected node and is therefore unaffected by a large
+/// catalogue.
 const MAX_NODES: usize = 2000;
 
-/// Longest accepted `rights show` function name or resource path segment, in
-/// bytes.
-const MAX_SEGMENT_BYTES: usize = 256;
-
-/// The resource kinds of the three supported resource-path depths.
-const RESOURCE_KINDS: [&str; 3] = ["database", "store", "table"];
+/// Longest accepted owner / group NAME token, in bytes.
+const MAX_PRINCIPAL_BYTES: usize = 256;
 
 /// R5 step 4 rights commands.
 #[derive(Debug, Clone)]
@@ -382,20 +387,13 @@ fn field<'a>(node: &'a QueryValue, key: &str) -> Result<&'a QueryValue, ShellErr
     }
 }
 
-/// Project one access-tree node (and, recursively, its children). `level` is
-/// the node's depth with the root at 1; deeper than [`MAX_NODE_LEVELS`] or
-/// more than [`MAX_NODES`] nodes in total is the typed `Server` refusal.
-/// `children` may be absent (function nodes omit it) and is then projected
-/// as an empty list; `builtin` is accepted on function nodes. Any other key
-/// is a shape mismatch and is refused, never echoed.
-fn project_node(node: &QueryValue, level: usize, nodes: &mut usize) -> Result<Value, ShellError> {
-    if level > MAX_NODE_LEVELS {
-        return Err(ShellError::Server);
-    }
-    *nodes = nodes.checked_add(1).ok_or(ShellError::Server)?;
-    if *nodes > MAX_NODES {
-        return Err(ShellError::Server);
-    }
+/// Project the LEAVES of one access-tree node, without its `children`: every
+/// resource node carries `name`, `kind`, `owner`, `owner_name`, `group`,
+/// `group_name`, `mode` and `setuid`, and a function node also carries its
+/// `builtin` flag (the engine sends it; dropping it would hide the difference
+/// between a built-in and a stored function). Any other key is a shape
+/// mismatch and is refused, never echoed.
+fn node_fields(node: &QueryValue) -> Result<serde_json::Map<String, Value>, ShellError> {
     let QueryValue::Map(fields) = node else {
         return Err(ShellError::Server);
     };
@@ -420,32 +418,46 @@ fn project_node(node: &QueryValue, level: usize, nodes: &mut usize) -> Result<Va
         QueryValue::Bool(flag) => *flag,
         _ => return Err(ShellError::Server),
     };
-    let mut children = Vec::new();
-    if let Some(item) = fields.get("children") {
-        let QueryValue::List(items) = item else {
+    let mut projected = serde_json::Map::new();
+    projected.insert(String::from("name"), name);
+    projected.insert(String::from("kind"), kind);
+    projected.insert(String::from("owner"), Value::String(owner));
+    projected.insert(String::from("owner_name"), owner_name);
+    projected.insert(String::from("group"), group);
+    projected.insert(String::from("group_name"), group_name);
+    projected.insert(String::from("mode"), Value::String(mode));
+    projected.insert(String::from("setuid"), Value::Bool(setuid));
+    if let Some(item) = fields.get("builtin") {
+        let QueryValue::Bool(builtin) = item else {
             return Err(ShellError::Server);
         };
-        children.reserve(items.len());
-        for child in items {
-            children.push(project_node(child, level + 1, nodes)?);
-        }
+        projected.insert(String::from("builtin"), Value::Bool(*builtin));
     }
-    if let Some(item) = fields.get("builtin") {
-        if !matches!(item, QueryValue::Bool(_)) {
-            return Err(ShellError::Server);
-        }
+    Ok(projected)
+}
+
+/// Project one access-tree node (and, recursively, its children). `level` is
+/// the node's depth with the root at 1; deeper than [`MAX_NODE_LEVELS`] or
+/// more than [`MAX_NODES`] nodes in total is the typed
+/// [`ShellError::TreeTooLarge`] refusal, whose fixed message names the limit
+/// and the `--db` remedy. `children` may be absent (function nodes omit it)
+/// and is then projected as an empty list. Any other key is a shape mismatch
+/// and is refused, never echoed.
+fn project_node(node: &QueryValue, level: usize, nodes: &mut usize) -> Result<Value, ShellError> {
+    if level > MAX_NODE_LEVELS {
+        return Err(ShellError::TreeTooLarge);
     }
-    Ok(json!({
-        "name": name,
-        "kind": kind,
-        "owner": owner,
-        "owner_name": owner_name,
-        "group": group,
-        "group_name": group_name,
-        "mode": mode,
-        "setuid": setuid,
-        "children": children,
-    }))
+    *nodes = nodes.checked_add(1).ok_or(ShellError::TreeTooLarge)?;
+    if *nodes > MAX_NODES {
+        return Err(ShellError::TreeTooLarge);
+    }
+    let mut projected = node_fields(node)?;
+    let mut children = Vec::new();
+    for child in raw_children(node)? {
+        children.push(project_node(child, level + 1, nodes)?);
+    }
+    projected.insert(String::from("children"), Value::Array(children));
+    Ok(Value::Object(projected))
 }
 
 /// The tree map of an `AccessTree` result. The engine wraps the tree under
@@ -592,75 +604,6 @@ fn project_members(qv: &QueryValue) -> Result<Value, ShellError> {
     Ok(json!({ "groups": project_list(groups, project_group)? }))
 }
 
-/// The result of a locally parsed `rights show` selector.
-enum Selector {
-    /// The resource root (`root` or `/`).
-    Root,
-    /// One entry of the `functions` list, selected by exact name.
-    Function(String),
-    /// One `database` / `store` / `table` path of one, two or three segments.
-    Resource(Vec<String>),
-}
-
-/// Whether one DATABASE or STORE name component passes the engine's own
-/// name rule. MIRRORS `validate_name_component`
-/// (`crates/engine/shamir-db/src/shamir_db/execute/core/helpers.rs`), which
-/// is `pub(super)` inside `shamir-db` and therefore not reachable from this
-/// crate: only `[A-Za-z0-9_-]`, and never empty or `.` / `..`. The shell
-/// applies it to the first two resource-path components, which are the
-/// names that gate the storage path a mutation addresses; the TABLE and
-/// function components keep the length / emptiness rule only, so the server
-/// stays the authority for those.
-fn valid_name_component(text: &str) -> bool {
-    !text.is_empty()
-        && text != "."
-        && text != ".."
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
-/// Parse the `rights show` path selector. `root` and `/` name the resource
-/// root; `function:NAME` names a function by exact name (NAME non-empty, at
-/// most [`MAX_SEGMENT_BYTES`] bytes, and containing neither `/` nor `:`);
-/// otherwise the path is split on `/` into exactly one, two or three
-/// non-empty segments selecting a `database`, `store` or `table` node. An
-/// empty or oversized segment, or any other segment count, is
-/// `ShellError::Usage`.
-/// A first or second segment (database, store) that the engine's name rule rejects is also `ShellError::Usage`, before any request.
-fn parse_selector(path: &str) -> Result<Selector, ShellError> {
-    if path == "root" || path == "/" {
-        return Ok(Selector::Root);
-    }
-    if let Some(name) = path.strip_prefix("function:") {
-        if name.is_empty()
-            || name.len() > MAX_SEGMENT_BYTES
-            || name.contains('/')
-            || name.contains(':')
-        {
-            return Err(ShellError::Usage);
-        }
-        return Ok(Selector::Function(name.to_string()));
-    }
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.is_empty() || segments.len() > RESOURCE_KINDS.len() {
-        return Err(ShellError::Usage);
-    }
-    for (depth, segment) in segments.iter().enumerate() {
-        if segment.is_empty() || segment.len() > MAX_SEGMENT_BYTES {
-            return Err(ShellError::Usage);
-        }
-        // The database and store components must satisfy the engine's own
-        // name rule before they can become a wire target.
-        if depth < 2 && !valid_name_component(segment) {
-            return Err(ShellError::Usage);
-        }
-    }
-    Ok(Selector::Resource(
-        segments.into_iter().map(str::to_string).collect(),
-    ))
-}
-
 /// The `name` leaf of one raw tree node, as a string.
 fn raw_name(node: &QueryValue) -> Option<&str> {
     match node {
@@ -683,14 +626,17 @@ fn raw_kind(node: &QueryValue) -> Option<&str> {
     }
 }
 
-/// The children of one raw tree node (absent → no children).
-fn raw_children(node: &QueryValue) -> &[QueryValue] {
+/// The children of one raw tree node: absent → no children; a present
+/// `children` that is not a list is a shape mismatch (`Server`), never a
+/// silently empty subtree.
+fn raw_children(node: &QueryValue) -> Result<&[QueryValue], ShellError> {
     match node {
         QueryValue::Map(fields) => match fields.get("children") {
-            Some(QueryValue::List(items)) => items.as_slice(),
-            _ => &[],
+            Some(QueryValue::List(items)) => Ok(items.as_slice()),
+            Some(_) => Err(ShellError::Server),
+            None => Ok(&[]),
         },
-        _ => &[],
+        _ => Ok(&[]),
     }
 }
 
@@ -703,6 +649,18 @@ fn select_node<'a>(qv: &'a QueryValue, selector: &Selector) -> Result<&'a QueryV
             QueryValue::Map(_) => Ok(resources),
             _ => Err(ShellError::Server),
         },
+        Selector::Database(name) => {
+            if !matches!(resources, QueryValue::Map(_)) {
+                return Err(ShellError::Server);
+            }
+            raw_children(resources)?
+                .iter()
+                .find(|child| {
+                    raw_kind(child) == Some(RESOURCE_KINDS[0])
+                        && raw_name(child) == Some(name.as_str())
+                })
+                .ok_or(ShellError::NotFound)
+        }
         Selector::Function(name) => {
             let QueryValue::List(entries) = functions else {
                 return Err(ShellError::Server);
@@ -719,7 +677,7 @@ fn select_node<'a>(qv: &'a QueryValue, selector: &Selector) -> Result<&'a QueryV
             };
             for (depth, segment) in segments.iter().enumerate() {
                 let kind = RESOURCE_KINDS[depth];
-                current = raw_children(current)
+                current = raw_children(current)?
                     .iter()
                     .find(|child| {
                         raw_kind(child) == Some(kind) && raw_name(child) == Some(segment.as_str())
@@ -731,15 +689,6 @@ fn select_node<'a>(qv: &'a QueryValue, selector: &Selector) -> Result<&'a QueryV
     }
 }
 
-/// The normalized `path` output of a selector.
-fn normalized_path(selector: &Selector) -> String {
-    match selector {
-        Selector::Root => "/".to_string(),
-        Selector::Function(name) => format!("function:{name}"),
-        Selector::Resource(segments) => segments.join("/"),
-    }
-}
-
 /// The `ResourceRef` addressed by an already-parsed mutation selector. The
 /// root is the fixed `RootMutation` refusal; a function is `Function`; one,
 /// two or three segments are `Database`, `Store` and `Table`. Any other
@@ -747,6 +696,9 @@ fn normalized_path(selector: &Selector) -> String {
 fn mutation_resource(selector: &Selector) -> Result<ResourceRef, ShellError> {
     match selector {
         Selector::Root => Err(ShellError::RootMutation),
+        Selector::Database(database) => Ok(ResourceRef::Database {
+            database: database.clone(),
+        }),
         Selector::Function(function) => Ok(ResourceRef::Function {
             function: function.clone(),
         }),
@@ -783,10 +735,10 @@ fn parse_mode(text: &str) -> Result<u16, ShellError> {
 }
 
 /// Whether one owner / group NAME token is acceptable: non-empty, at most
-/// [`MAX_SEGMENT_BYTES`] bytes, and free of control bytes.
+/// [`MAX_PRINCIPAL_BYTES`] bytes, and free of control bytes.
 fn valid_principal(text: &str) -> bool {
     !text.is_empty()
-        && text.len() <= MAX_SEGMENT_BYTES
+        && text.len() <= MAX_PRINCIPAL_BYTES
         && !text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
 }
 
@@ -835,25 +787,26 @@ fn group_id(qv: &QueryValue, name: &str) -> Result<u64, ShellError> {
     Err(ShellError::UnknownPrincipal)
 }
 
-/// Project the `rights show` result: the selected node WITHOUT its
-/// `children`, plus the sanitized normalized path.
+/// Project the `rights show` result: the SELECTED node's own leaves (its
+/// descendants are never needed, so they are never projected, never counted
+/// and never able to trip the whole-tree cap) plus the sanitized normalized
+/// path. Mutant: projecting the selected node through [`project_node`], which
+/// walks the subtree and refuses a healthy large catalogue.
 fn project_rights(qv: &QueryValue, selector: &Selector) -> Result<Value, ShellError> {
     let node = select_node(qv, selector)?;
-    let mut nodes = 0usize;
-    let projected = project_node(node, 1, &mut nodes)?;
-    let Value::Object(mut fields) = projected else {
-        return Err(ShellError::Server);
-    };
-    fields.remove("children");
     let mut out = serde_json::Map::new();
     out.insert(
-        "path".to_string(),
+        String::from("path"),
         Value::String(output::sanitize(&normalized_path(selector))),
     );
-    out.extend(fields);
+    out.extend(node_fields(node)?);
     Ok(Value::Object(out))
 }
 
 #[cfg(test)]
 #[path = "tests/access_deadline_tests.rs"]
 mod access_deadline_tests;
+
+#[cfg(test)]
+#[path = "tests/access_projection_tests.rs"]
+mod access_projection_tests;

@@ -26,6 +26,13 @@ use super::harness::{profile_text, ShellFixture, ShellRun, DB_NAME, PLAIN_TABLE,
 /// Hard hang bound — a hang DETECTOR, not a latency assertion.
 pub(super) const BOUND: Duration = Duration::from_secs(120);
 
+/// Wall-clock lifetime of ONE counting relay. It must outlive every SERIAL
+/// child it fronts — the token-refusal probes run seven commands, each with its
+/// own [`BOUND`] — while [`BOUND`] still bounds each individual step. A relay
+/// that shared a single [`BOUND`] would fail its own join on a slow runner
+/// even though every child stayed inside its bound.
+pub(super) const RELAY_LIFETIME: Duration = Duration::from_secs(900);
+
 /// The fixed token-subset refusal message (§3.3; identical to the PR2
 /// `refusals` suite — the message is fixed, not per-command).
 pub(super) const TOKEN_SUBSET: &str =
@@ -329,7 +336,7 @@ impl Relay {
             let addr = listener.local_addr().expect("relay bound address");
             let (stop, mut stopped) = oneshot::channel();
             let task = tokio::spawn(async move {
-                timeout(BOUND, async {
+                timeout(RELAY_LIFETIME, async {
                     let accepted = tokio::select! {
                         accepted = listener.accept() => Some(accepted),
                         _ = &mut stopped => None,

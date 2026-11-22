@@ -96,6 +96,15 @@ pub(crate) enum ShellError {
     HmacRequired,
     /// A mutation addressed a database that does not exist (`unknown_db`).
     UnknownDb,
+    /// The access tree is larger than the shell's whole-tree projection
+    /// budget (`group tree` / `group members`); `rights show` is unaffected.
+    TreeTooLarge,
+    /// The node is a read-only replica and refuses this write
+    /// (`read_only_replica`).
+    ReadOnlyReplica,
+    /// The request was cancelled by another operator before it finished
+    /// (`cancelled`): its effects may be partial.
+    Cancelled,
 }
 
 impl ShellError {
@@ -144,6 +153,9 @@ impl ShellError {
             ShellError::HmacMismatch => "hmac_mismatch",
             ShellError::HmacRequired => "hmac_required",
             ShellError::UnknownDb => "unknown_db",
+            ShellError::TreeTooLarge => "tree_too_large",
+            ShellError::ReadOnlyReplica => "read_only_replica",
+            ShellError::Cancelled => "cancelled",
         }
     }
 
@@ -160,7 +172,7 @@ impl ShellError {
             ShellError::Authentication => "authentication failed",
             ShellError::Denied => "permission denied by the server",
             ShellError::Server => "the operation failed on the server",
-            ShellError::NotFound => "the addressed record or table was not found",
+            ShellError::NotFound => "the addressed resource was not found",
             ShellError::UnknownTable => "the addressed table does not exist",
             ShellError::ResyncRequired => "the repository is in replication quarantine; a reseed is required",
             ShellError::ResultTooLarge => "the encoded response exceeds the server's result-size cap",
@@ -241,6 +253,15 @@ impl ShellError {
             ShellError::UnknownDb => {
                 "the addressed resource does not exist on this server"
             }
+            ShellError::TreeTooLarge => {
+                "the access tree exceeds the shell's 2000-node projection limit; narrow it with group tree --db DATABASE"
+            }
+            ShellError::ReadOnlyReplica => {
+                "this node is a read-only replica and refuses writes; repeat the change on the leader"
+            }
+            ShellError::Cancelled => {
+                "the request was cancelled before it finished; its earlier effects may already be applied"
+            }
         }
     }
 
@@ -265,7 +286,10 @@ impl ShellError {
             | ShellError::InvalidOwner
             | ShellError::HmacMismatch
             | ShellError::HmacRequired
-            | ShellError::UnknownDb => 5,
+            | ShellError::UnknownDb
+            | ShellError::TreeTooLarge
+            | ShellError::ReadOnlyReplica
+            | ShellError::Cancelled => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
