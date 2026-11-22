@@ -64,6 +64,7 @@ const ERR_ANCHOR: &str = "audit anchor or metadata write failed at shutdown";
 const ERR_FLUSH_TASK: &str = "audit flush task did not complete";
 const ERR_SCHEDULER_STOP: &str = "scheduler did not stop within";
 const ERR_FINAL_CLOSE_SKIPPED: &str = "audit final close not attempted";
+const ERR_REFUSAL_DRAIN: &str = "refusal audit drain expired";
 
 /// The three audit owners a shutdown must drain, in teardown order.
 pub(crate) struct AuditTeardown<'a> {
@@ -105,6 +106,13 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
     let drained = drain_refusal(refusal).await;
     if !drained {
         refusal.discard_queued();
+        // Accepted refusal events may just have been discarded: a clean report
+        // would hide it (the drop counter keeps the number).
+        report.add_error(format!(
+            "{ERR_REFUSAL_DRAIN}: accepted refusal audit events that had not started were \
+             discarded and the ones already running are no longer awaited"
+        ));
+        complete = false;
     }
 
     // Join the scheduler BEFORE the flusher join and the final flush: a
