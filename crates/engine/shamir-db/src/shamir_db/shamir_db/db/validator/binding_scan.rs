@@ -2,9 +2,12 @@
 //! and 2): the set of databases that bind a validator is derived from the
 //! tables' OWN persisted bindings at admission/refusal time.
 //!
-//! The reverse cache is consulted only to fail closed when an existing
-//! table is missing its binding envelope; ghost references are ignored,
-//! and existing-table reads bypass wrapper-created stores. Existing metadata
+//! The reverse cache is NOT consulted: a configured table whose binding
+//! envelope or info store is absent counts as unbound (a table that was never
+//! bound legitimately has none, and a reverse reference to an earlier
+//! incarnation of the same name must not decide for a new table). Known
+//! limit: an envelope lost by storage damage is therefore not detected here.
+//! Reads use an existing-only lookup that creates no store. Existing metadata
 //! reads use only the mapped `__info__` store; no `TableManager` is
 //! constructed, no `__data__`/`__history__` store is touched, no index
 //! recovery runs, no row data is loaded. This read-only scan never drains or
@@ -76,11 +79,6 @@ impl ShamirDb {
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
-        let reverse_refs: BTreeSet<String> = self
-            .validators
-            .bound_tables(validator_id)
-            .into_iter()
-            .collect();
         let mut dbs = BTreeSet::new();
         let mut tables = Vec::new();
         for (db_name, instance) in instances {
@@ -95,15 +93,8 @@ impl ShamirDb {
                     )));
                 };
                 for table_name in instance.list_tables(&repo_name)? {
-                    let table_ref = Self::table_ref_str(&db_name, &repo_name, &table_name);
                     let bound = repo.table_validator_bindings_metadata(&table_name).await?;
                     let Some(bound) = bound else {
-                        if reverse_refs.contains(&table_ref) {
-                            return Err(DbError::Validation(format!(
-                                "cannot inspect validator bindings: metadata for existing table \
-                                 '{table_ref}' is missing"
-                            )));
-                        }
                         continue;
                     };
                     if bound
@@ -111,7 +102,7 @@ impl ShamirDb {
                         .iter()
                         .any(|binding| &binding.validator_id == validator_id)
                     {
-                        tables.push(table_ref);
+                        tables.push(Self::table_ref_str(&db_name, &repo_name, &table_name));
                         dbs.insert(db_name.clone());
                     }
                 }
@@ -120,19 +111,11 @@ impl ShamirDb {
         // The internal system store: scanned through its own handle, added
         // to the DROP refusal evidence but NEVER to the reservation set.
         let system_repo = self.system_store.system_repo()?;
-        let system_table_refs = system_repo.list_table_names();
-        for table_name in system_table_refs {
-            let table_ref = Self::table_ref_str(SYSTEM_DB_NAME, system_repo.name(), &table_name);
+        for table_name in system_repo.list_table_names() {
             let bound = system_repo
                 .table_validator_bindings_metadata(&table_name)
                 .await?;
             let Some(bound) = bound else {
-                if reverse_refs.contains(&table_ref) {
-                    return Err(DbError::Validation(format!(
-                        "cannot inspect validator bindings: metadata for existing table \
-                         '{table_ref}' is missing"
-                    )));
-                }
                 continue;
             };
             if bound
@@ -140,7 +123,11 @@ impl ShamirDb {
                 .iter()
                 .any(|binding| &binding.validator_id == validator_id)
             {
-                tables.push(table_ref);
+                tables.push(Self::table_ref_str(
+                    SYSTEM_DB_NAME,
+                    system_repo.name(),
+                    &table_name,
+                ));
             }
         }
         tables.sort();

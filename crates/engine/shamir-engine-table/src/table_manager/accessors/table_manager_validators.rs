@@ -41,7 +41,8 @@ impl TableManager {
     ///
     /// cancel-safe: NO — once a binding has been saved, cancellation while
     /// flushing can leave the durable metadata ahead of the in-memory snapshot;
-    /// retry or repository reopen reconciles the committed envelope.
+    /// retry or repository reopen reconciles the committed envelope. A flush
+    /// error restores the previous envelope and reports the bind as not done.
     pub async fn add_validator_binding(
         &self,
         binding: ValidatorBinding,
@@ -61,7 +62,8 @@ impl TableManager {
         self.write_domain.debug_check_permit(permit);
         self.ensure_attached()?;
         let _guard = self.bindings_lock.lock().await;
-        let mut bindings = (**self.validator_bindings.load()).clone();
+        let previous = self.validator_bindings.load_full();
+        let mut bindings = (*previous).clone();
         if let Some(pos) = bindings
             .iter()
             .position(|b| b.validator_id == binding.validator_id)
@@ -77,7 +79,17 @@ impl TableManager {
         // metadata write before publishing the live snapshot, so buffered
         // wrappers cannot hide an acknowledged binding or expose a stale
         // unbinding to that independent read handle.
-        self.info_store.flush().await?;
+        if let Err(error) = self.info_store.flush().await {
+            // A failed flush must not leave a binding that the caller is told
+            // was never made (its rollback may remove the validator): put the
+            // previous envelope back so a later flush persists the old state.
+            let _ = crate::validator_bound::persistence::save_validators_metadata(
+                &previous,
+                &self.info_store,
+            )
+            .await;
+            return Err(error);
+        }
         self.validator_bindings.store(Arc::new(bindings));
         Ok(())
     }
@@ -86,9 +98,11 @@ impl TableManager {
     /// the in-memory snapshot. Returns whether the binding existed.
     ///
     /// Once persistence succeeds, the live snapshot is swapped before the
-    /// flush. Cancellation or a flush error can therefore leave durable
-    /// metadata conservatively retaining the old binding, but cannot expose
-    /// its removal while the validator is still live in this manager.
+    /// flush. Cancellation can therefore leave durable metadata
+    /// conservatively retaining the old binding, but cannot expose its
+    /// removal while the validator is still live in this manager. A flush
+    /// error restores the previous live snapshot and envelope and reports the
+    /// unbind as not done.
     pub async fn remove_validator_binding(
         &self,
         validator_id: &RecordId,
@@ -108,7 +122,8 @@ impl TableManager {
         self.write_domain.debug_check_permit(permit);
         self.ensure_attached()?;
         let _guard = self.bindings_lock.lock().await;
-        let mut bindings = (**self.validator_bindings.load()).clone();
+        let previous = self.validator_bindings.load_full();
+        let mut bindings = (*previous).clone();
         let before = bindings.len();
         bindings.retain(|b| b.validator_id != *validator_id);
         let removed = bindings.len() < before;
@@ -120,9 +135,21 @@ impl TableManager {
             .await?;
             self.validator_bindings.store(Arc::new(bindings));
             // Keep independent existing-only readers coherent for this rare
-            // DDL write. Publish first so cancellation or a flush error cannot
-            // leave persisted metadata unbound while this manager runs it.
-            self.info_store.flush().await?;
+            // DDL write. Publish first so cancellation cannot leave persisted
+            // metadata unbound while this manager runs it.
+            if let Err(error) = self.info_store.flush().await {
+                // A failed flush reports the unbind as not done: restore the
+                // live snapshot and the previous envelope, so an identical
+                // retry still finds the binding and finishes the removal.
+                self.validator_bindings.store(previous);
+                let restored = self.validator_bindings.load_full();
+                let _ = crate::validator_bound::persistence::save_validators_metadata(
+                    &restored,
+                    &self.info_store,
+                )
+                .await;
+                return Err(error);
+            }
         }
         Ok(removed)
     }

@@ -246,9 +246,10 @@ impl ShamirAdminExecutor {
 
     /// System-edge scoped variant for explicit wire validator Bind/Unbind:
     /// NO name exemption — the fence reservation resolves the SAME identity
-    /// the bind itself resolves (a user `__system__` in `dbs`), so the
-    /// internal system store's ACL behavior is untouched but an explicit
-    /// wire bind can no longer slip past the reservation by name.
+    /// the bind itself resolves. A user database named `__system__` cannot
+    /// exist (the name is reserved at create, rename and seed publication),
+    /// so this is defence in depth: the internal system store's ACL behavior
+    /// is untouched and a bind can never slip past the reservation by name.
     pub(super) async fn authorize_admin_binding_target_write(
         &self,
         db: Option<&str>,

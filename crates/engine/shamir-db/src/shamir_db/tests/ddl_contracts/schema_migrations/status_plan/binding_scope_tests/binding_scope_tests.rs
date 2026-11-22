@@ -118,7 +118,8 @@ async fn create_with_table(db: &ShamirDb, root: &Path, name: &str, suffix: &str)
     bounded(db.execute(name, &request)).await.unwrap();
 }
 
-/// Buffered in-memory fixture; no background drain occurs during the test.
+/// Buffered in-memory fixture; the background flusher may drain at any time,
+/// so the tests rely on the bind/unbind flush, never on a drain happening.
 async fn create_with_buffered_table(db: &ShamirDb, name: &str) {
     bounded(db.create_db(name)).await.unwrap();
     bounded(db.add_repo(
@@ -570,8 +571,8 @@ fn bound_validator_admission_survives_a_missing_reverse_row() {
         );
         drop(gate);
 
-        // The repository backing for this target is a buffered, in-memory
-        // backend; it has no pending binding writes after unbind returns.
+        // Unbind flushes the table's info record before it returns, so the
+        // drop-time scan reads the unbound state from the backing store.
         refused_still_bound(
             &db,
             SERVING,
