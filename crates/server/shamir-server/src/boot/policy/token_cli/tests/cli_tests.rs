@@ -136,7 +136,14 @@ async fn existing_secret_file_is_refused_before_data_open() {
     });
     assert!(run_with_io(&c, a, &mut io).await.is_err());
     assert_eq!(std::fs::read(p).expect("file"), b"untouched");
-    assert!(!c.data_dir.exists());
+    // Lock-first: the data directory and its lock file exist, but no store
+    // was opened before the refusal.
+    for store in ["users", "server_meta", "audit.log"] {
+        assert!(
+            !c.data_dir.join(store).exists(),
+            "{store} must not be created by a refused create"
+        );
+    }
 }
 #[test]
 fn secret_file_is_exclusive_and_unix_mode_0600() {

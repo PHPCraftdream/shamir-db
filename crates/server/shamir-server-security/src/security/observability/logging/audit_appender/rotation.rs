@@ -282,14 +282,16 @@ pub(super) fn rotate_locked(
 ///   comparison against `Duration::from_secs(retention_days * 86400)` —
 ///   no nanosecond arithmetic, no saturation.
 ///
-/// Known limitation, accepted by the contiguous-prefix rule: an archive
-/// created under a future (skewed) clock carries a future modification
-/// time permanently, so it — and every strictly later archive — stays
-/// pinned until real time passes that timestamp; the configured age bound
-/// resumes from there rather than being enforced independently per
-/// archive. This preserves contiguity (nothing younger than a retained
-/// archive is removed) and always removes the eligible prefix in front of
-/// the blocker, but is not a per-archive guarantee.
+/// An archive written while the clock was ahead carries a future
+/// modification time. It is not eligible and, by the contiguous-prefix
+/// rule, it and every strictly later archive stay until it ages out; the
+/// sweep therefore clamps that modification time to the present once
+/// ([`clamp_future_mtime`], metadata only: the HMAC chain and both anchors
+/// do not depend on it), so the delay is `retention_days` from the first
+/// sweep that sees it, not the size of the clock error. This preserves
+/// contiguity (nothing younger than a retained archive is removed) and
+/// always removes the eligible prefix in front of the blocker, but is not
+/// a per-archive guarantee.
 ///
 /// Directory reads, classification problems, unreadable candidates and
 /// unlink/sync failures log at `warn` and stop the sweep — retention is
@@ -341,13 +343,12 @@ fn sweep_retention(
                 break;
             }
         };
-        // A future mtime (archive created under a skewed clock) is NOT
-        // eligible and, for contiguity, blocks everything after it.
+        // A future mtime (archive written while the clock was ahead) is NOT
+        // eligible and, for contiguity, blocks everything after it. Clamp it
+        // to the present so the delay is bounded by `retention_days` from
+        // this observation instead of by the skewed clock.
         let Ok(age) = now.duration_since(modified) else {
-            tracing::warn!(
-                file = %path.display(),
-                "audit retention sweep: candidate has a future modification time"
-            );
+            clamp_future_mtime(&path, now);
             break;
         };
         if age < max_age {
@@ -379,5 +380,28 @@ fn sweep_retention(
                 break;
             }
         }
+    }
+}
+
+/// Sets the modification time of an archive that lies in the future to
+/// `now` (opened for write without truncation: the content is untouched).
+/// A failure only logs: the sweep stops at this archive either way.
+fn clamp_future_mtime(path: &Path, now: SystemTime) {
+    let clamped = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(now));
+    match clamped {
+        Ok(()) => tracing::warn!(
+            file = %path.display(),
+            "audit retention sweep: archive had a future modification time; \
+             clamped to now so retention is bounded"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            file = %path.display(),
+            "audit retention sweep: archive has a future modification time \
+             and could not be clamped"
+        ),
     }
 }

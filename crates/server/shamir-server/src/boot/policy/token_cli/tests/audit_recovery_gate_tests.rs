@@ -437,6 +437,30 @@ async fn create_refuses_audit_log_output_when_active_is_missing_and_archive_is_v
     );
 }
 
+/// Round-3 regression: a healthy `--out-file` create delivers the secret at
+/// exactly the requested path. A miscomputed validated destination once
+/// pointed below the data directory, so every file-delivered create failed.
+#[tokio::test]
+async fn create_with_out_file_delivers_the_secret_at_the_requested_path() {
+    let (tmp, c) = seeded_dir(&["one"]).await;
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let out = outside.join("secret.out");
+    let (result, o, _e) = run(&c, create_args_with_out("alice", "to-file", &out), true).await;
+    result.expect("create with a fresh out file must succeed");
+    let secret = std::fs::read_to_string(&out).expect("secret file at the requested path");
+    assert!(
+        secret.starts_with("shk1."),
+        "the secret must be delivered to the file: {secret:?}"
+    );
+    assert!(
+        !String::from_utf8(o)
+            .expect("stdout")
+            .contains(secret.trim_end()),
+        "the secret must not also reach stdout"
+    );
+}
+
 /// Round-3 finding 3: with a REAL held maintenance lock, the refusal must
 /// come before any output creation. The strong oracle is the ALREADY
 /// EXISTING destination: `prepare` would fail it with an exclusive-create

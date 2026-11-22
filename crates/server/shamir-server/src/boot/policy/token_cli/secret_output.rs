@@ -67,12 +67,12 @@ fn reserved_under(path: &Path, dir: &Path) -> bool {
 /// the maintenance lock; canonicalization is best-effort resolution, not a
 /// defense against a concurrent adversary outside the audited directories.
 fn lexical_candidate(path: &Path) -> Result<PathBuf, OutputPathError> {
-    let total = path.components().count();
     let mut last_missing: Option<std::io::Error> = None;
     for ancestor in path.ancestors().skip(1) {
         match std::fs::canonicalize(ancestor) {
             Ok(canonical_ancestor) => {
-                let skip = total - ancestor.components().count();
+                // The remainder is what follows the resolved ancestor.
+                let skip = ancestor.components().count();
                 let mut candidate = canonical_ancestor;
                 for component in path.components().skip(skip) {
                     candidate.push(component);

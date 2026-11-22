@@ -854,7 +854,8 @@ async fn retention_enabled_no_prune_rotation_reads_no_archive_body() {
 /// NAME, and a future-dated archive blocks only the contiguous suffix
 /// behind it (s1/s2 old, s3 future blocker, s4 old behind it). One append
 /// through the recovered rotating writer mints the newest archive and
-/// sweeps. Red: aging by name deletes nothing.
+/// sweeps. Red: aging by name deletes nothing; without the clamp the
+/// blocker keeps its future mtime.
 #[tokio::test(flavor = "current_thread")]
 async fn retention_ages_by_mtime_not_by_far_future_names() {
     let dir = TempDir::new().unwrap();
@@ -905,6 +906,12 @@ async fn retention_ages_by_mtime_not_by_far_future_names() {
     let kept = archive_suffixes(dir.path());
     assert_eq!(&kept[..2], &[names[2], names[3]]);
     assert_eq!(kept.len(), 3);
+    // The future-dated blocker was clamped to the present: its delay is
+    // bounded by retention_days from now, not by the 30-day clock error.
+    let blocker = dir.path().join(format!("audit.log.{:020}", names[2]));
+    let clamped = fs::metadata(&blocker).unwrap().modified().unwrap();
+    assert!(clamped <= SystemTime::now());
+    assert!(clamped > old);
     let newest = kept[2];
     assert!(newest > names[3]);
     drop(appender);
