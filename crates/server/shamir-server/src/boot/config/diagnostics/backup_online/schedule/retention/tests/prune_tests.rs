@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -22,10 +23,12 @@ use crate::sync::durability::backup::online::manifest::{
 };
 use crate::sync::durability::backup::online::progress::CancelFlag;
 use crate::sync::durability::backup::{
-    verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME, SNAPSHOT_LEASE_FILE_NAME,
+    try_snapshot_delete_lease, verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME,
+    SNAPSHOT_LEASE_FILE_NAME,
 };
 
 use super::super::budget::{Budget, Refusal, ROOT_ENTRIES};
+use super::super::ownership::tag_fresh_with_seam;
 use super::super::prune::prune_inner;
 use super::super::{prune, RetentionOutcome};
 
@@ -106,6 +109,24 @@ fn sidecar(dir: &Path) -> Value {
 }
 
 fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
+    retain_pending(root, fresh, keep_last, &[])
+}
+
+fn tracked_name(dir: &Path) -> String {
+    dir.file_name()
+        .expect("snapshot dir name")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn retain_pending(
+    root: &Path,
+    fresh: &Path,
+    keep_last: usize,
+    pending: &[(String, u128)],
+) -> RetentionOutcome {
+    let pending: BTreeSet<(String, u128)> = pending.iter().cloned().collect();
+
     prune(
         root,
         fresh,
@@ -115,6 +136,7 @@ fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
             max_age_days: Some(1),
         },
         &CancelFlag::default(),
+        &pending,
     )
 }
 
@@ -144,13 +166,14 @@ fn retention_skips_snapshot_while_verify_is_reading() {
     let old = copy(&root, "20200101_000001", 1, Some(OWNER));
     let fresh = copy(&root, "20200101_000002", 2, None);
 
+    // Scheduler semantics (readers never create the marker): retention
+    // provisions the marker BEFORE the reader starts, so the reader leases
+    // the snapshot instead of reading it lock-free as an export.
     let marker = root.join(SNAPSHOT_LEASE_FILE_NAME);
-    assert!(
-        !marker.exists(),
-        "no marker before the reader provisions it"
-    );
+    crate::sync::durability::backup::provision_snapshot_lease(&root).expect("provision the marker");
+    assert!(marker.is_file(), "marker exists before the reader");
 
-    let (first, reader_saw_marker, report) = thread::scope(|scope| {
+    let (first, report) = thread::scope(|scope| {
         let (loaded_tx, loaded_rx) = mpsc::sync_channel(1);
         let (resume_tx, resume_rx) = mpsc::sync_channel(1);
         let snapshot = &old;
@@ -162,18 +185,17 @@ fn retention_skips_snapshot_while_verify_is_reading() {
             tracing::subscriber::with_default(subscriber, || verify_manifest(snapshot))
         });
 
-        let first = loaded_rx.recv_timeout(VERIFY_TIMEOUT).map(|()| {
-            let reader_saw_marker = marker.is_file();
-            (retain(&root, &fresh, 1), reader_saw_marker)
-        });
+        let first = loaded_rx
+            .recv_timeout(VERIFY_TIMEOUT)
+            .map(|()| retain(&root, &fresh, 1));
         let resumed = resume_tx.try_send(());
         drop(resume_tx);
         let report = reader.join();
 
-        let (first, reader_saw_marker) = first.expect("verifier loaded the manifest before prune");
+        let first = first.expect("verifier loaded the manifest before prune");
         resumed.expect("release paused verifier");
         let report = report.expect("verifier thread panicked");
-        (first, reader_saw_marker, report)
+        (first, report)
     });
 
     assert_eq!(
@@ -182,7 +204,6 @@ fn retention_skips_snapshot_while_verify_is_reading() {
         "retention must skip the snapshot while verification is paused"
     );
     assert_eq!(report.expect("snapshot still verifies").files_checked, 1);
-    assert!(reader_saw_marker, "reader provisioned the missing marker");
     assert!(marker.is_file(), "marker remains after the skip");
 
     let next = retain(&root, &fresh, 1);
@@ -347,6 +368,7 @@ fn pass_budget_charges_unknown_regular_files_before_classification() {
             keep_last: 1,
             max_age_days: None,
         },
+        &BTreeSet::new(),
         &mut budget,
         &mut outcome,
     );
@@ -374,6 +396,7 @@ fn cancellation_before_scan_does_not_tag_or_delete() {
             max_age_days: None,
         },
         &cancel,
+        &BTreeSet::new(),
     );
     assert_eq!(
         (outcome.deleted, outcome.failed, outcome.untouched),
@@ -425,4 +448,225 @@ fn rejects_linked_trees_control_files_and_sockets() {
         .is_symlink());
     assert!(outside.exists());
     drop(listener);
+}
+
+#[test]
+fn broken_marker_fails_the_pass_and_records_provenance_for_repair() {
+    let (_temp, root) = private_root();
+    let tracked = copy(&root, "20200101_000001", 1, None);
+    let foreign = copy(&root, "20200101_000002", 2, None);
+    let fresh = copy(&root, "20200101_000003", 3, None);
+    // A DIRECTORY at the marker path: provisioning fails for the pass.
+    let obstruction = root.join(SNAPSHOT_LEASE_FILE_NAME);
+    fs::create_dir(&obstruction).expect("obstruction directory");
+
+    let outcome = retain_pending(&root, &fresh, 1, &[(tracked_name(&tracked), 1)]);
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.skipped_in_use),
+        (0, 1, 0),
+        "a marker error is a retention failure and deletes nothing"
+    );
+    assert!(outcome.adopted.is_empty(), "nothing is adopted");
+    assert_eq!(outcome.untouched, None, "the scan never completed");
+    assert!(tracked.exists(), "the tracked output stays untagged");
+    assert!(sidecar(&tracked).get("scheduled_retention").is_none());
+    assert!(sidecar(&fresh).get("scheduled_retention").is_none());
+    assert!(foreign.exists());
+
+    // Repair: after the obstruction is removed the next pass adopts the
+    // exact tracked output (tags it, deletes it under the unchanged
+    // keep_last selection) and never touches the foreign untagged copy.
+    fs::remove_dir_all(&obstruction).expect("remove obstruction");
+    let repaired = retain_pending(&root, &fresh, 1, &[(tracked_name(&tracked), 1)]);
+    assert_eq!(
+        (repaired.deleted, repaired.failed, repaired.untouched),
+        (1, 0, Some(1)),
+        "exactly the tracked output is adopted and pruned; the foreign copy is untouched"
+    );
+    assert_eq!(
+        repaired.adopted,
+        [(tracked_name(&tracked), 1)],
+        "the exact recorded (name, creation time) pair is reported adopted"
+    );
+    assert!(!tracked.exists());
+    assert!(
+        foreign.exists(),
+        "an unrecorded untagged copy is never adopted"
+    );
+    assert!(fresh.is_dir());
+    assert_eq!(
+        sidecar(&fresh)
+            .get("scheduled_retention")
+            .expect("fresh copy tagged"),
+        &json!({"version": 1, "owner": OWNER})
+    );
+}
+
+#[test]
+fn stale_provenance_with_swapped_foreign_tag_is_never_adopted() {
+    let (_temp, root) = private_root();
+    let old = copy(&root, "20200101_000001", 1, Some(OWNER));
+    let tracked = copy(&root, "20200101_000002", 2, None);
+    // Another writer tagged the recorded copy between the record and the
+    // repaired pass: ownership is decided on a FRESH sidecar read, so a
+    // foreign tag refuses adoption and the copy stays untouched.
+    let mut swapped = sidecar(&tracked);
+    swapped["scheduled_retention"] = json!({"version": 1, "owner": "someone-else"});
+    fs::write(
+        tracked.join(BACKUP_META_FILE_NAME),
+        serde_json::to_vec(&swapped).expect("encode sidecar"),
+    )
+    .expect("write swapped tag");
+    // A DIFFERENT output under a recorded name: recorded time 9, actual
+    // manifest creation time 4 — never adoptable, and being untagged not
+    // owned either, so untouched.
+    let mismatch = copy(&root, "20200101_000004", 4, None);
+    let fresh = copy(&root, "20200101_000003", 3, None);
+
+    // keep_last=2 so the owned `old` copy is inside the floor and the
+    // oracle isolates the provenance outcomes (deleted = 0).
+    let outcome = retain_pending(
+        &root,
+        &fresh,
+        2,
+        &[(tracked_name(&tracked), 2), (tracked_name(&mismatch), 9)],
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (0, 0, Some(2)),
+        "foreign-tagged and time-mismatched copies untouched; nothing deleted"
+    );
+    assert!(outcome.adopted.is_empty());
+    assert!(tracked.exists());
+    assert_eq!(
+        sidecar(&tracked).get("scheduled_retention"),
+        Some(&json!({"version": 1, "owner": "someone-else"})),
+        "the foreign tag is preserved"
+    );
+    assert!(mismatch.exists());
+    assert!(old.exists());
+}
+
+#[test]
+fn already_tagged_provenance_match_reports_adopted_without_retagging() {
+    let (_temp, root) = private_root();
+    let tracked = copy(&root, "20200101_000001", 1, None);
+    // Tag it with OUR owner out of band (an earlier repaired pass did it
+    // before failing later): the next pass reports it adopted, keeps the
+    // tag byte-identical, and treats it as a normal candidate.
+    let mut tagged = sidecar(&tracked);
+    tagged["scheduled_retention"] = json!({"version": 1, "owner": OWNER});
+    fs::write(
+        tracked.join(BACKUP_META_FILE_NAME),
+        serde_json::to_vec(&tagged).expect("encode sidecar"),
+    )
+    .expect("write our tag");
+    let original = fs::read(tracked.join(BACKUP_META_FILE_NAME)).expect("read tag");
+    let fresh = copy(&root, "20200101_000002", 2, None);
+
+    let outcome = retain_pending(&root, &fresh, 2, &[(tracked_name(&tracked), 1)]);
+    assert_eq!((outcome.deleted, outcome.failed), (0, 0));
+    assert_eq!(
+        outcome.adopted,
+        [(tracked_name(&tracked), 1)],
+        "the exact recorded (name, creation time) pair is reported adopted"
+    );
+    assert_eq!(
+        fs::read(tracked.join(BACKUP_META_FILE_NAME)).expect("tag unchanged"),
+        original
+    );
+    assert!(tracked.exists());
+}
+
+/// Finding: `tag_fresh` staged its sidecar INSIDE the snapshot, so a
+/// verifier holding the shared lease saw it on the final walk and reported
+/// `UnmanifestedFile` for a valid snapshot. The staging file now lives in
+/// the ROOT (outside every leased child). Deterministic interlock:
+/// retention provisions the marker BEFORE the reader starts (readers never
+/// create it), the reader pauses after loading the manifest (its shared
+/// lease is then held for the whole walk), and the test thread runs the
+/// tagging WITH the staged file present. Inside the seam callback — before
+/// the persist — the test proves the staged file exists, that the reader's
+/// shared lease is actually held (an independent exclusive attempt fails),
+/// releases the verifier and waits for its verdict: it must complete
+/// WITHOUT seeing the staged file. Without the fix the resumed verifier's
+/// final walk runs over the staged file and fails, and the callback's
+/// parent/inside-snapshot assertions fail even earlier.
+#[test]
+fn tagging_under_held_read_lease_completes_without_visible_staged_file() {
+    let (_temp, root) = private_root();
+    let fresh = copy(&root, "20200101_000002", 2, None);
+    let cancel = CancelFlag::default();
+
+    // Scheduler semantics: the marker exists before any reader.
+    crate::sync::durability::backup::provision_snapshot_lease(&root).expect("provision the marker");
+
+    let (loaded_tx, loaded_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let (verified_tx, verified_rx) = mpsc::sync_channel::<bool>(1);
+
+    let reader_snapshot = fresh.clone();
+    thread::scope(|scope| {
+        let reader = scope.spawn(move || {
+            let subscriber = tracing_subscriber::registry().with(PauseAfterManifest {
+                loaded: loaded_tx,
+                resume: Mutex::new(resume_rx),
+            });
+            let report =
+                tracing::subscriber::with_default(subscriber, || verify_manifest(&reader_snapshot));
+            verified_tx
+                .send(report.is_ok())
+                .expect("report the verifier verdict");
+        });
+
+        // The verifier has loaded the manifest: its shared lease is held
+        // for the whole walk still to come.
+        loaded_rx
+            .recv_timeout(VERIFY_TIMEOUT)
+            .expect("verifier loaded the manifest (lease held)");
+
+        let sidecar_map = sidecar(&fresh).as_object().expect("sidecar object").clone();
+        let mut on_staged = |staged: &Path| {
+            assert!(
+                staged.is_file(),
+                "the staged sidecar file exists before the persist"
+            );
+            assert_eq!(
+                staged.parent(),
+                Some(root.as_path()),
+                "staged in the ROOT, never inside the snapshot"
+            );
+            assert!(
+                !fresh
+                    .join(staged.file_name().expect("staged name"))
+                    .exists(),
+                "no staged file inside the leased snapshot"
+            );
+            match try_snapshot_delete_lease(&root) {
+                Ok(None) => {}
+                other => {
+                    panic!("the reader's shared lease must be held across the staging: {other:?}")
+                }
+            }
+            resume_tx.send(()).expect("release the verifier");
+            let verified = verified_rx
+                .recv_timeout(VERIFY_TIMEOUT)
+                .expect("verifier verdict while the staged file exists");
+            assert!(
+                verified,
+                "verifier completes without seeing the staged file"
+            );
+        };
+        tag_fresh_with_seam(
+            &root,
+            &fresh,
+            sidecar_map,
+            OWNER,
+            &Budget::new(&cancel),
+            &mut on_staged,
+        )
+        .expect("tagging succeeds under the held read lease");
+
+        reader.join().expect("verifier thread");
+    });
 }

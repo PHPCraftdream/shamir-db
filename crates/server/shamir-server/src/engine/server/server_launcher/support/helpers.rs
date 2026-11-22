@@ -46,16 +46,21 @@ pub(super) fn resolve_backup(
     // R2d-FIX-C: the destination is canonical and verified private after
     // `resolve`, so provision the reserved snapshot-lease marker now, before
     // retention can ever consider a deletion. Best-effort: a transient
-    // provisioning failure must not fail server startup — both readers and
-    // retention provision the same marker lazily before any read or delete
-    // (and `resolve` already made the privacy of the root a hard boot
-    // requirement), so a warning keeps boot semantics unchanged.
+    // provisioning failure must not fail server startup (and `resolve`
+    // already made the privacy of the root a hard boot requirement). READERS
+    // never create the marker (an absent marker means an unmanaged export,
+    // read lock-free): only the scheduler provisions it — here, and again
+    // before publishing every scheduled copy. Retention does NOT
+    // repair-and-continue any more: a provisioning failure fails the pass
+    // closed and counts as a retention failure (registry runner), so this
+    // warning is best-effort boot pre-provisioning only.
     if let Err(error) = provision_snapshot_lease(&resolved.destination) {
         tracing::warn!(
             root = %resolved.destination.display(),
             %error,
             "could not pre-provision the snapshot lease marker at boot; \
-             it will be created lazily"
+             the scheduler provisions it before publishing each copy, and \
+             retention fails its pass until it exists"
         );
     }
     Ok(Some((resolved, source)))

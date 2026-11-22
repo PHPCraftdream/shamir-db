@@ -4,8 +4,13 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::backup::{verify_manifest, Manifest, MANIFEST_FILE_NAME};
+use crate::backup::{BackupError, Manifest, ManifestVerifyReport, MANIFEST_FILE_NAME};
 use shamir_sync::format_stamp::{decode, FormatStamp, STAMP_FILE_NAME};
+
+/// Typed verification mode of the backup gate: the no-lock `--plan` gate
+/// passes `verify_exported_manifest`, the actual execute passes
+/// `verify_manifest` — both share this signature.
+pub(crate) type VerifySnapshot = fn(&Path) -> Result<ManifestVerifyReport, BackupError>;
 
 /// Successful evidence from a verified, fresh, nonempty pre-migration backup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,12 +25,19 @@ pub(crate) fn assess_backup(
     live_stamp: Option<&FormatStamp>,
     max_age_hours: u64,
     configured_log_name: Option<&Path>,
+    verify: VerifySnapshot,
 ) -> Result<BackupEvidence, String> {
     let live_stamp = live_stamp.ok_or_else(|| {
         "a stampless data directory has no copied stamp to compare; the default backup gate cannot prove it. Use --i-have-a-backup only after verifying a backup yourself".to_owned()
     })?;
 
-    let verify = verify_manifest(backup_dir).map_err(|error| error.to_string())?;
+    let verify_report = verify(backup_dir).map_err(|error| match error {
+        BackupError::ManagedSnapshotNotExported(snapshot) => format!(
+            "{} is a managed scheduled snapshot still owned by retention, not an export; take a separate offline backup with `backup --to <dir>` and pass that directory to --from-backup instead",
+            snapshot.display()
+        ),
+        error => error.to_string(),
+    })?;
     let manifest_path = backup_dir.join(MANIFEST_FILE_NAME);
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|error| format!("read {}: {error}", manifest_path.display()))?;
@@ -116,7 +128,7 @@ pub(crate) fn assess_backup(
     }
 
     Ok(BackupEvidence {
-        files_checked: verify.files_checked,
+        files_checked: verify_report.files_checked,
     })
 }
 

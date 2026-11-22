@@ -6,6 +6,9 @@
 //! error. Listing comparison only — no re-hash: the staged bytes are the
 //! copy of the already-verified bytes. `symlink_metadata` is deliberately
 //! non-following, so a staged symlink is refused rather than dereferenced.
+//! The typed [`RestoreError::StagedFileMissing`] carries ONLY the
+//! manifest-relative file name — never the joined staging path, which
+//! would leak the restore's absolute scratch root into CLI output.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -28,11 +31,13 @@ pub(super) fn verify_staged_files(
         let staged = staged_path(temp_dir, &entry.path)?;
         match fs::symlink_metadata(&staged) {
             Ok(meta) if meta.is_file() => {}
-            Ok(_) => return Err(RestoreError::StagedFileMissing(staged)),
+            // The error names the MANIFEST-RELATIVE entry path only — the
+            // joined staging path would expose the absolute scratch root.
+            Ok(_) => return Err(RestoreError::StagedFileMissing(PathBuf::from(&entry.path))),
             // A vanished parent directory surfaces as NotADirectory on both
             // platforms; anything else is not proof of absence.
             Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::NotADirectory => {
-                return Err(RestoreError::StagedFileMissing(staged))
+                return Err(RestoreError::StagedFileMissing(PathBuf::from(&entry.path)))
             }
             Err(e) => return Err(RestoreError::Io(e)),
         }

@@ -114,7 +114,8 @@ pub(super) fn verified_time(
     }
 
     budget.checkpoint()?;
-    let verified = verify_retention_candidate(dir);
+    // The verifier verifies the exact bounded bytes `raw` (no re-read).
+    let verified = verify_retention_candidate(dir, &raw);
     budget.checkpoint()?;
     verified.map_err(|error| match error {
         BackupError::Io(_) => Refusal::Incomplete,

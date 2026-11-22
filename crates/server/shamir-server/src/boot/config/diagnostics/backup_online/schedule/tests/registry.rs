@@ -198,3 +198,110 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
     }
     drop(db);
 }
+
+/// Marker-provisioning defect, real registry: a DIRECTORY at the marker
+/// path must keep the copy succeeding while retention reports the failure
+/// (+1 retention-failure metric, no deletions, no scan so the
+/// `untouched` gauge keeps its previous value) and the published copy stays
+/// untagged and intact. The repair/adoption half is exercised
+/// deterministically with fixed dates by the prune-level regression
+/// (`broken_marker_fails_the_pass_and_records_provenance_for_repair`),
+/// which feeds the exact recorded provenance pairs the registry
+/// publishes; the registry-level pending list itself is private state with
+/// no observation seam, and adding one (or a production clock seam to
+/// separate same-second run names) would widen the surface for no extra
+/// proof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
+    let guard = FlakeGuard::with_watchdog(
+        "marker_obstruction_counts_retention_failure_and_records_provenance",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    let source = tempfile::tempdir().expect("source tempdir");
+    let dest = tempfile::tempdir().expect("destination tempdir");
+    let to = dest.path().join("private");
+    create_private_dir(&to).expect("private destination");
+    let to = to.canonicalize().expect("canonical destination");
+    let root = source.path();
+    let deadline = Instant::now() + Duration::from_secs(170);
+    let db = tokio::time::timeout(WAIT, async {
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(root.join("system")))
+            .await
+            .expect("init durable engine");
+        db.create_db("app").await.expect("create database");
+        db.add_repo(
+            "app",
+            RepoConfig::new("main", BoxRepoFactory::fjall_raw(root.join("repos/main")))
+                .add_table(TableConfig::new("rows")),
+        )
+        .await
+        .expect("add durable repo");
+        db.flush_all_waiting().await.expect("flush engine");
+        db
+    })
+    .await
+    .expect("fixture within deadline");
+    guard.mark("durable engine ready");
+    let db = Arc::new(db);
+    let registry = OnlineBackupRegistry::new(
+        Arc::clone(&db),
+        root.to_path_buf(),
+        tokio::runtime::Handle::current(),
+    );
+    // A foreign untagged directory: never adopted, never deleted.
+    fs::create_dir(to.join("foreign")).expect("foreign directory");
+    // The obstruction: a directory exactly at the marker path. It stays in
+    // place for the whole test: repair and adoption are covered at the
+    // prune level (see the test comment).
+    let obstruction = to.join(SNAPSHOT_LEASE_FILE_NAME);
+    fs::create_dir(&obstruction).expect("obstruction directory");
+
+    // Nextest gives this test its own process for the process-wide metrics.
+    let before = backup_metrics_snapshot();
+    assert_eq!(before.retention_untouched, 0);
+
+    // --- Pass 1: copy succeeds, retention reports the marker failure.
+    let policy = || BackupRetentionConfig {
+        keep_last: 1,
+        max_age_days: None,
+    };
+    let completion = registry
+        .start_scheduled(to.clone(), OWNER.to_owned(), policy())
+        .expect("admit scheduled run");
+    guard.mark("run 1 admitted");
+    let completed = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()).min(WAIT),
+        completion,
+    )
+    .await
+    .expect("run 1 within deadline")
+    .expect("run 1 reports completion");
+    assert!(completed, "the copy itself must succeed");
+    let status = registry.status();
+    let dir1 = status.dest_dir.clone().expect("run 1 published a copy");
+    guard.mark("run 1 finished");
+    let after1 = backup_metrics_snapshot();
+    assert_eq!(
+        after1.retention_failed_total,
+        before.retention_failed_total + 1
+    );
+    assert_eq!(
+        after1.retention_deleted_total,
+        before.retention_deleted_total
+    );
+    assert_eq!(after1.retention_untouched, before.retention_untouched);
+    assert!(dir1.is_dir());
+    let sidecar1: Value =
+        serde_json::from_slice(&fs::read(dir1.join(BACKUP_META_FILE_NAME)).expect("read sidecar"))
+            .expect("decode sidecar");
+    assert!(
+        sidecar1.get("scheduled_retention").is_none(),
+        "a copy published without a marker must stay untagged"
+    );
+    assert!(to.join("foreign").is_dir());
+    // The run's own provenance is in-memory registry state with no
+    // observation seam; the repair/adopt half of the defect is covered
+    // deterministically at the prune level (see the module comment above).
+    drop(db);
+}

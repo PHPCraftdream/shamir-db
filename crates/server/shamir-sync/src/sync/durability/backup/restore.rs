@@ -6,15 +6,28 @@
 //! of scope (beta roadmap).
 //!
 //! Procedure:
-//! 1. **Liveness probe** (unless `force`): invoke the supplied probe against
-//!    `data_dir`. The retained server wrapper opens the server metadata store —
+//! 1. **Liveness probe** (LEGACY kind only, unless `force`; moved AFTER the
+//!    staged presence re-check of step 3b — finding 6, R2d-FIX-C review): the
+//!    supplied probe opens the server metadata store —
 //!    the same store opened at boot. fjall already takes an exclusive OS-level
 //!    advisory file lock per keyspace directory on open, so a lock-
 //!    contention error (`MetaError::Fjall(fjall::Error::Locked)`) means a
 //!    real server process is running against `data_dir` — refuse. ANY
 //!    other open error (corruption, etc.) also refuses by default
 //!    (fail-closed: a probe failure could equally mean genuine corruption,
-//!    not liveness). `--force` skips this probe entirely.
+//!    not liveness). `--force` skips this probe entirely. The probe is the
+//!    ONLY supplied step that can MUTATE the target (`open_or_init`
+//!    persists `last_started_at`), so on the legacy path it now runs only
+//!    after verification, the stamp gate, the copy and the staged presence
+//!    re-check have ALL succeeded — a missing staged file refuses before the
+//!    probe can write anything, leaving the target untouched. A probe that
+//!    RUNS (all earlier checks passed) and then refuses has already persisted
+//!    `last_started_at` in the original `data_dir` (the swap never ran, so
+//!    no rename moved it away); the restore itself cleans the staged copy
+//!    and adds nothing to the target beyond that probe write.
+//!    ONLINE snapshots bypass this probe in favor of the READ-ONLY
+//!    `backup::probe_source_stopped` source-lock probes (early, after
+//!    verify, and final, just before the swap).
 //! 2. **Verify the SOURCE snapshot's manifest** (`backup::verify_manifest`)
 //!    BEFORE touching `data_dir` at all. A checksum mismatch or missing
 //!    manifest aborts the whole restore with no side effects.
@@ -169,7 +182,8 @@ pub enum RestoreError {
     /// is absent from (or not a regular file under) the staged copy — the
     /// snapshot's source tree lost it between verification and enumeration.
     /// Publishing would produce an INCOMPLETE target, so the restore refuses
-    /// (staged copy cleaned up, `data_dir` untouched). Names the staged path.
+    /// (staged copy cleaned up, `data_dir` untouched). Names ONLY the
+    /// manifest-relative file (finding 6: never the joined staging path).
     #[error(
         "staged copy is missing a file listed in the verified manifest: {0} — \
          the snapshot changed between verification and the copy; refusing to \
@@ -202,7 +216,7 @@ pub struct RestoreReport {
 /// Run the canonical restore procedure using the supplied liveness probe.
 ///
 /// See the module doc for the full step-by-step procedure. `force` skips
-/// the supplied probe in step 1 — use only when certain no server process
+/// the supplied probe entirely — use only when certain no server process
 /// holds `data_dir`.
 ///
 /// Kind-aware (design `online-backup.md` §5): a v2 ONLINE manifest runs
@@ -211,8 +225,10 @@ pub struct RestoreReport {
 /// `backup::probe_source_stopped` source-lock probe, because the caller's
 /// probe (the server's liveness wrapper) can MUTATE the target on refusal
 /// and must not touch `data_dir` for a valid online snapshot. For a v1 or
-/// v2-offline manifest the supplied probe is invoked exactly as before,
-/// first, byte-for-byte today's order.
+/// v2-offline manifest the supplied probe still runs, but AFTER the staged
+/// presence re-check succeeds (finding 6: the probe's `open_or_init`
+/// persists `last_started_at` in the target, so a missing staged file must
+/// refuse before the probe can write anything).
 ///
 /// Operator prerequisites, holding for the WHOLE command: `data_dir`'s
 /// server stays STOPPED (no handler is ever started against the live
@@ -258,13 +274,28 @@ where
 {
     // Shared cross-process read lease on a MANAGED-root snapshot (no-op for
     // an exported copy): held from before the first read of the snapshot
-    // through its last source read, so scheduled retention skips it.
-    let source_lease = snapshot_lease::read_snapshot(from).map_err(BackupError::Io)?;
+    // through its last source read, so scheduled retention skips it. The
+    // call makes the ONE canonical-source decision: a snapshot ABSENT at
+    // this point refuses (a child that appears afterwards is never read
+    // unleased by re-opening the original pathname), and every later read
+    // consumes ONLY the resolved canonical path — no second lookup.
+    let (source, source_lease) = match snapshot_lease::read_snapshot(from)
+        .map_err(BackupError::Io)?
+    {
+        snapshot_lease::SourceSnapshot::Missing => {
+            return Err(RestoreError::ManifestVerification(
+                BackupError::ManifestMissing(from.join(backup::MANIFEST_FILE_NAME)),
+            ));
+        }
+        snapshot_lease::SourceSnapshot::Unmanaged { canonical } => (canonical, None),
+        snapshot_lease::SourceSnapshot::Managed { canonical, lease } => (canonical, Some(lease)),
+    };
 
     // ---- Step 0: classify the snapshot kind from the raw manifest (pure
     // read, FAIL-CLOSED). A recognized v1 or v2-offline header stays on the
-    // v1 path below with EXACTLY today's order — probe first, verify second.
-    // An online v2 manifest runs the online procedure: full verify FIRST
+    // v1 path below — the supplied liveness probe moved AFTER the staged
+    // presence re-check (finding 6, R2d-FIX-C review). An online v2 manifest
+    // runs the online procedure: full verify FIRST
     // (read-only; includes the manifest/stamp epoch cross-check), then a
     // READ-ONLY source-lock probe — the caller-supplied probe is bypassed
     // because the server's liveness wrapper MUTATES the target on refusal
@@ -274,9 +305,9 @@ where
     // version/kind header — refuses with the verify-side error semantics
     // BEFORE any probe callback runs, so a corrupt snapshot can never
     // trigger the legacy probe's target mutation (P1, R2a 3b-2 review).
-    let online_classified = matches!(classify_snapshot_kind(from)?, SnapshotKind::Online);
+    let online_classified = matches!(classify_snapshot_kind(&source)?, SnapshotKind::Online);
 
-    // ---- Step 1: liveness probe ----
+    // ---- Step 1: verify the manifest consumed by the chosen path ----
     // ONLINE (classified from the raw manifest): verify FIRST and consume
     // ONLY the manifest this verification returns — the classifier's decode
     // is never trusted beyond the boolean probe-path choice. The source
@@ -285,7 +316,7 @@ where
     // restored); the staged bytes are the copy of those verified bytes and
     // are NOT re-hashed; its file list drives the staged presence re-check.
     let verified_manifest: VerifiedManifest = if online_classified {
-        let (report, manifest) = backup::verify_manifest_for_restore(from)?;
+        let (report, manifest) = backup::verify_manifest_for_restore(&source)?;
         if !matches!(report.kind, BackupKind::Online) {
             // Classified online but verified as something else: the
             // classification decode is stale — refuse as corrupt rather
@@ -310,10 +341,9 @@ where
         }
         manifest
     } else {
-        if !force {
-            probe(data_dir)?;
-        }
-
+        // The legacy probe NO LONGER runs here (finding 6): it MUTATES the
+        // target, so it now waits until the staged presence re-check below
+        // has succeeded. Verification is the first source-consuming step.
         // ---- Step 2: verify the SOURCE snapshot's manifest, before touching
         // data_dir at all — and KEEP the exact verified manifest: the staged
         // presence re-check (step 3b) needs its file list, so the source is
@@ -321,7 +351,7 @@ where
         // legacy-classified snapshot that verifies as ONLINE — refuses with
         // the same typed error instead of letting the replay pipeline run
         // against a target that was only guarded by the legacy probe. ----
-        let (report, manifest) = backup::verify_manifest_for_restore(from)?;
+        let (report, manifest) = backup::verify_manifest_for_restore(&source)?;
         if matches!(report.kind, BackupKind::Online) {
             return Err(RestoreError::ManifestVerification(
                 BackupError::ManifestInvalid(
@@ -336,7 +366,7 @@ where
     // Newer, corrupt or newer-layout refuses; absent or older is allowed
     // (rollback must work). The copy brings its own stamp; nothing is
     // written here. ----
-    restore_snapshot_gate(from, &EpochPolicy::compiled())?;
+    restore_snapshot_gate(&source, &EpochPolicy::compiled())?;
 
     // ---- Test seam: runs after verification and the stamp gate, before the
     // step-3 source walk. Production no-op (see `restore_impl`'s doc). ----
@@ -377,7 +407,7 @@ where
     }
     let mut bytes = 0u64;
     let mut files = 0u64;
-    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files, false, true) {
+    if let Err(e) = copy_dir_recursive(&source, &temp_dir, &mut bytes, &mut files, false, true) {
         // N-6: the error message for this failure gives the operator no
         // reference to `temp_dir` at all — clean it up best-effort (log,
         // don't let a cleanup failure mask the original error) rather than
@@ -413,6 +443,25 @@ where
     // target silently. Refusal cleans the staged copy; `data_dir` is
     // untouched. ----
     if let Err(e) = staged_listing::verify_staged_files(&temp_dir, verified_manifest.files()) {
+        cleanup_staged_temp_dir(&temp_dir);
+        return Err(e);
+    }
+
+    // ---- Step 3b' (LEGACY kind only, unless force): liveness probe, run
+    // ONLY after the staged presence re-check succeeded (finding 6, R2d-FIX-C
+    // review). The CLI probe's `server_meta::open_or_init` persists
+    // `last_started_at` in the target, so a missing staged file now refuses
+    // BEFORE the probe can write anything. A probe failure at this point
+    // cleans the staged copy and leaves `data_dir` untouched by the restore
+    // itself. The ONLINE path bypasses this probe entirely and keeps its
+    // read-only `probe_source_stopped` probes (early, after verify; final,
+    // before the swap). ----
+    let probe_result = if !online_classified && !force {
+        probe(data_dir)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = probe_result {
         cleanup_staged_temp_dir(&temp_dir);
         return Err(e);
     }
@@ -576,8 +625,9 @@ enum SnapshotKind {
     /// v2 manifest with `kind = "online"`: run the online pipeline, bypass
     /// the supplied probe.
     Online,
-    /// v1 manifest, or a v2 manifest with `kind = "offline"`: today's
-    /// legacy order (probe first, verify second).
+    /// v1 manifest, or a v2 manifest with `kind = "offline"`: the legacy
+    /// pipeline, with the supplied probe moved AFTER the staged presence
+    /// re-check (finding 6).
     Legacy,
 }
 
