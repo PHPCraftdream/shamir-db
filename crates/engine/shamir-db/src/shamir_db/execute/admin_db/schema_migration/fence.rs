@@ -420,8 +420,15 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
     }
     let id = shamir.database_identity_for_fence(db_name)?;
     let code = shamir.schema_migration_refusal_code(id)?;
+    // Preorder: the most recent depth-0 alias is the enclosing top-level
+    // entry of any deeper leaf; master classified that container as a write
+    // and named it, so keep naming it (one borrowed &str per walk).
+    let mut top_alias: Option<&str> = None;
     for visit in BatchTreeVisitor::new(&request.queries) {
         let op = &visit.entry.op;
+        if visit.depth == 0 {
+            top_alias = Some(visit.alias);
+        }
         // Visit leaves only. A leaf whose EXPLICIT target equals the serving
         // database is classified as serving and refused here with the old
         // batch-entry code, before the first effect of the batch (admin
@@ -440,13 +447,15 @@ pub(in crate::shamir_db) fn maintenance_fence_refusal(
             continue;
         }
         if op.is_write() || matches!(op, BatchOp::Call(_)) {
+            // Name the enclosing TOP-LEVEL alias (the leaf's own alias when
+            // it is top-level), matching the pre-fence classification.
+            let alias = top_alias.unwrap_or(visit.alias);
             return Some(BatchError::QueryError {
-                alias: visit.alias.to_string(),
+                alias: alias.to_string(),
                 message: format!(
-                    "query '{}': an application-schema migration holds the maintenance \
+                    "query '{alias}': an application-schema migration holds the maintenance \
                      fence for database '{db_name}'; writes, DDL and stored-procedure \
                      calls are refused until it completes",
-                    visit.alias
                 ),
                 code: Some(code.to_string()),
             });

@@ -19,7 +19,7 @@ use shamir_engine::validator::{
 };
 use shamir_types::types::record_id::RecordId;
 
-use super::super::{ArtifactKind, FunctionSource, ShamirDb, SYSTEM_DB_NAME};
+use crate::shamir_db::shamir_db::{ArtifactKind, FunctionSource, ShamirDb};
 
 /// Target-admission mode of a validator registration replace or rename
 /// (review finding 3). Every mode holds the replication-control lock from
@@ -95,19 +95,6 @@ impl ValidatorRegistrationError {
             Self::Db(error) => error,
         }
     }
-}
-
-/// Distinct, sorted database components of `db/repo/table` binding refs,
-/// minus the system database — the target-admission set.
-fn bound_table_target_dbs(tables: &[String]) -> Vec<String> {
-    let mut dbs: Vec<String> = tables
-        .iter()
-        .map(|table| table.split('/').next().unwrap_or_default().to_string())
-        .collect();
-    dbs.retain(|db| db != SYSTEM_DB_NAME);
-    dbs.sort();
-    dbs.dedup();
-    dbs
 }
 
 /// A registration whose candidate artifact is fully built (compiled,
@@ -447,6 +434,14 @@ impl ShamirDb {
         admission: &ValidatorTargetAdmission,
         _control: &ReplicationControlGuard<'_>,
     ) -> Result<RecordId, ValidatorRegistrationError> {
+        // Namespace gate (brief 84): refuse while a validator-rename
+        // migration is in progress. Sole exemption: a migration-owned
+        // FRESH create (its `FenceExcept` admission proves it); a replace
+        // never bypasses the gate (HMAC replace stays forbidden upstream).
+        match admission {
+            ValidatorTargetAdmission::FenceExcept(_) if !prepared.replace => {}
+            _ => self.refuse_concurrent_validator_namespace_mutation("create")?,
+        }
         // Under the caller's lock: a non-replace must not overwrite an
         // existing durable/live name with a fresh id (the unlocked native /
         // wasm prechecks were moved here).
@@ -472,8 +467,13 @@ impl ShamirDb {
                         ValidatorTargetAdmission::FenceExcept(exempt) => *exempt,
                         _ => None,
                     };
+                    // AUTHORITATIVE (round 3, findings 1+2): derive the
+                    // holder set from the tables' own persisted bindings,
+                    // never from the best-effort reverse snapshot in
+                    // `bound_in`.
+                    let holders = self.validator_binding_holders(&id, _control).await?;
                     Some(self.reserve_validator_target_identities_locked(
-                        &bound_table_target_dbs(&bound_in),
+                        holders.dbs(),
                         exempt,
                         _control,
                     )?)
@@ -539,7 +539,10 @@ impl ShamirDb {
         // Phase 0 parity plumbing: tag the artifact origin. The field
         // defaults to `Wasm` on read for any pre-existing row without it
         // (see `ArtifactKind::from_record`).
-        m.insert(super::super::KIND_FIELD.to_string(), kind.as_query_value());
+        m.insert(
+            crate::shamir_db::shamir_db::KIND_FIELD.to_string(),
+            kind.as_query_value(),
+        );
         let record = shamir_types::types::value::QueryValue::Map(m);
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
@@ -568,7 +571,10 @@ impl ShamirDb {
     /// holds replication control (no reacquire), identities are captured,
     /// reserved and re-verified under it, one at a time, fail-fast in the
     /// caller's stable sorted order.
-    fn reserve_validator_target_identities_locked<'a>(
+    /// `pub(super)`: shared with `migration_admission.rs` (brief 84 item 3
+    /// preflight) and `validator_drop.rs` — one reservation/error-mapping
+    /// implementation, no drift.
+    pub(in crate::shamir_db) fn reserve_validator_target_identities_locked<'a>(
         &'a self,
         dbs: &[String],
         exempt: Option<DatabaseIdentity>,
@@ -641,118 +647,6 @@ impl ShamirDb {
             return Ok((id, bound_in, true));
         }
         Ok((RecordId::new(), Vec::new(), false))
-    }
-
-    /// Drop a validator by name.
-    ///
-    /// Returns `Ok(true)` if the validator existed and was removed.
-    /// Returns `Err` if the validator is still bound to tables.
-    pub async fn drop_validator(&self, name: &str) -> DbResult<bool> {
-        self.drop_validator_as(name, Actor::System).await
-    }
-
-    /// Like [`drop_validator`] but with an explicit [`Actor`]. The
-    /// replication-control lock closes the race where a bind makes the
-    /// validator bound between the bound-refusal check and the removal
-    /// (review finding 3 follow-up).
-    pub async fn drop_validator_as(&self, name: &str, _actor: Actor) -> DbResult<bool> {
-        let _control = self.lock_replication_control().await;
-        let id = match self.validators.id_for_name(name) {
-            Some(id) => id,
-            None => return Ok(false),
-        };
-
-        // Refuse if bound.
-        if self.validators.is_bound(&id) {
-            let tables = self.validators.bound_tables(&id);
-            return Err(DbError::Validation(format!(
-                "cannot drop validator '{}': still bound to tables: {}",
-                name,
-                tables.join(", ")
-            )));
-        }
-
-        // Durable removal FIRST (RV-DB-6540DC7B): a persistence error on
-        // this PREWRITE delete propagates and leaves the live registry
-        // binding intact, so a retry still sees the validator. (A remove
-        // that commits and then fails at flush can also surface here; no
-        // restart-visibility guarantee is claimed for that case.) No
-        // durable row — the delete matches nothing and succeeds
-        // idempotently.
-        self.system_store.remove_validator(name).await?;
-        let existed = self.validators.remove(&id);
-        Ok(existed)
-    }
-
-    /// Rename a validator. The underlying WASM module is not recompiled.
-    /// Id and bindings are unchanged.
-    pub async fn rename_validator(&self, from: &str, to: &str) -> DbResult<()> {
-        self.rename_validator_as(from, to, Actor::System).await
-    }
-
-    /// Like [`rename_validator`] but with an explicit [`Actor`].
-    pub async fn rename_validator_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
-        self.rename_validator_admitted(from, to, ValidatorTargetAdmission::ExclusionOnly)
-            .await
-            .map_err(|e| e.into_db_error("rename"))
-    }
-
-    /// Admission-carrying rename (review finding 3): rename re-keys the
-    /// durable catalogue record of the ID bound tables invoke, so every
-    /// binding holder takes the same target admission as replace. One
-    /// replication-control acquisition spans the authoritative binding
-    /// snapshot, the reservations, the registry name swap and the durable
-    /// re-key.
-    pub(in crate::shamir_db) async fn rename_validator_admitted(
-        &self,
-        from: &str,
-        to: &str,
-        admission: ValidatorTargetAdmission,
-    ) -> Result<(), ValidatorRegistrationError> {
-        let control = self.lock_replication_control().await;
-        let _guards = match admission {
-            ValidatorTargetAdmission::ExclusionOnly => None,
-            mode => {
-                let exempt = match mode {
-                    ValidatorTargetAdmission::FenceExcept(exempt) => exempt,
-                    _ => None,
-                };
-                let dbs = self
-                    .validators
-                    .id_for_name(from)
-                    .map(|id| bound_table_target_dbs(&self.validators.bound_tables(&id)))
-                    .unwrap_or_default();
-                Some(self.reserve_validator_target_identities_locked(&dbs, exempt, &control)?)
-            }
-        };
-
-        // Load the old catalogue record to re-key it.
-        let old_record = self.system_store.load_validator(from).await?;
-
-        // Rename in the live registry first.
-        self.validators
-            .rename(from, to)
-            .map_err(|e| DbError::Validation(e.to_string()))?;
-
-        // If there was a durable record, re-key it, preserving the
-        // existing owner/group/mode. Write the durable new record BEFORE
-        // removing the old one (a crash between the two leaves the new row
-        // resolvable and the old row inert).
-        if let Some(mut rec) = old_record {
-            let existing_meta = ResourceMeta::from_record(&rec);
-            if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
-                map.insert(
-                    "name".to_string(),
-                    shamir_types::types::value::QueryValue::Str(to.to_string()),
-                );
-            }
-            self.system_store
-                .save_validator(to, &rec, &existing_meta)
-                .await?;
-            self.system_store.remove_validator(from).await?;
-        }
-
-        Ok(())
     }
 
     /// Resolve a validator name to its `RecordId`.
@@ -847,6 +741,11 @@ impl ShamirDb {
         // concurrent registration commit can never snapshot a half-landed
         // binding.
         let _control = self.lock_replication_control().await;
+        // Namespace gate (brief 84): a NEW bind must refuse while a
+        // validator-rename migration is in progress (it would add a holder
+        // the preflight never reserved); direct binds check it too — a
+        // conservative conflict. Unbind deliberately does not.
+        self.refuse_concurrent_validator_namespace_mutation("bind")?;
         // 1. Resolve name → id.
         let validator_id = self.validators.id_for_name(validator_name).ok_or_else(|| {
             DbError::Validation(format!("validator '{}' not found", validator_name))
@@ -955,7 +854,14 @@ impl ShamirDb {
     /// catalogue record. Logged on failure — does not propagate errors
     /// (the live registry is the source of truth; the catalogue is
     /// durability insurance for `init` reload).
-    pub(super) async fn persist_validator_bound_in(&self, name: &str, id: &RecordId) {
+    /// Scoped to the moved `db` module tree: only the bind/unbind paths
+    /// here and `drop_table_cleaning_validators_locked` in
+    /// `table_management.rs` call it.
+    pub(in crate::shamir_db::shamir_db::db) async fn persist_validator_bound_in(
+        &self,
+        name: &str,
+        id: &RecordId,
+    ) {
         let tables = self.validators.bound_tables(id);
         let bound_list: Vec<shamir_types::types::value::QueryValue> = tables
             .into_iter()

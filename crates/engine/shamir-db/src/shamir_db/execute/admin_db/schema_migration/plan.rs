@@ -28,7 +28,7 @@ use shamir_types::types::common::new_map;
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
-use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, MigrationHistory};
+use crate::shamir_db::system_store::{DatabaseIdentity, MigrationHistory};
 use crate::types::value::QueryValue;
 
 use super::super::admin_dispatch::ShamirAdminExecutor;
@@ -36,6 +36,7 @@ use super::super::helpers::admin_result;
 use super::function_family::admission::{
     is_function_family, preflight_checks, preflight_dependencies, validate_binding_scope,
 };
+use super::schema_migration::schema_migration_state_code;
 
 /// §5.2 authorization for the plan arm: `Manage` on the database through the
 /// normal `authorize_access` path — no bypass — before any journal byte is
@@ -82,41 +83,36 @@ pub(in crate::shamir_db::execute) async fn plan_application_schema(
         .read_schema_migration_history(serving)
         .await
         .map_err(map_store_error)?;
-    if let Some(event) = history.unresolved.last() {
-        // §4.2: a journal with only `started` durably holds no effect yet —
-        // an owned fence is reported in progress; once an operation intent
-        // exists the migration is inside the uncertain window and is
-        // reported in doubt.
-        let code = match event.kind {
-            JournalEventKind::Started => "schema_migration_in_progress",
-            _ => "schema_migration_in_doubt",
-        };
-        return Err(coded(
-            code,
-            format!(
+    // ONE shared classification with STATUS and APPLY (brief 84, finding 6),
+    // called ONCE for the whole pending state. The process-local fence slot
+    // is sampled first and decides in progress vs in doubt over the journal
+    // tail — a failed post-commit `started` tail under a slot marker reports
+    // in doubt (STATUS and the marker agree) and a live runner past its last
+    // intent reports in progress (STATUS and APPLY agree). A vacant slot
+    // falls through to the durable journal rules: an interrupted (in-doubt)
+    // history reports in doubt — INCLUDING a journal-only `started` tail,
+    // where the plan arm's legacy §4.2 mapping said in progress; the shared
+    // code is the stricter refusal and agrees with STATUS, so nothing is
+    // weakened — and an `Applied` tail without `FenceReleased` reports in
+    // doubt because the completed migration still durably owns the fence.
+    let fence_code = schema_migration_state_code(
+        executor.shamir.schema_migration_refusal_code(serving),
+        &history,
+    );
+    if let Some(code) = fence_code {
+        // The unresolved metadata is optional: it names the interrupted
+        // migration when there is one; an `Applied` tail has none.
+        let reason = match history.unresolved.last() {
+            Some(event) => format!(
                 "migration {} (ordinal {}) is unresolved; no plan is issued",
                 event.migration.id, event.migration.ordinal
             ),
-        ));
-    }
-    // A journal tail of `Applied` without `FenceReleased` still holds the
-    // durable fence: the applied migration owns it until release.
-    let applied_tail = history
-        .events
-        .last()
-        .is_some_and(|event| event.kind == JournalEventKind::Applied);
-    let fence_code = executor
-        .shamir
-        .schema_migration_refusal_code(serving)
-        .or(applied_tail.then_some("schema_migration_in_doubt"));
-    if let Some(code) = fence_code {
-        return Err(coded(
-            code,
-            format!(
+            None => format!(
                 "database '{}' still holds a migration fence; no plan is issued",
                 executor.db_name
             ),
-        ));
+        };
+        return Err(coded(code, reason));
     }
     let head = applied_head(&history);
     let predecessor = SchemaMigrationPredecessor {

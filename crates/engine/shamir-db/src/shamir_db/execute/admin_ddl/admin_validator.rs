@@ -6,7 +6,7 @@ use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::shamir_db::{
-    FunctionSource, ValidatorRegistrationError, ValidatorTargetAdmission,
+    FunctionSource, ValidatorRegistrationError, ValidatorRenameMigration, ValidatorTargetAdmission,
 };
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
@@ -153,35 +153,33 @@ impl ShamirAdminExecutor {
             })));
         }
 
+        // Ordinary wire drop: Fence admission reserves the binding
+        // holders first, so a fenced holder surfaces its exact stable
+        // refusal code; an unfenced bound validator still refuses with the
+        // previous still-bound message (mapped as a plain Db error here).
         let existed = self
             .shamir
-            .drop_validator_as(&op.drop_validator, self.actor.clone())
+            .drop_validator_admitted(
+                &op.drop_validator,
+                self.actor.clone(),
+                ValidatorTargetAdmission::Fence,
+            )
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(|e| e.into_batch_error(|e| err(e.to_string())))?;
         Ok(admin_result(mpack!({
             "dropped_validator": @(QueryValue::Str(op.drop_validator.clone())),
             "existed": @(QueryValue::Bool(existed)),
         })))
     }
 
-    /// Migration-owned entry: see `handle_create_validator` — same own-
-    /// identity exemption for the rename's durable re-key admission.
-    pub(super) async fn handle_rename_validator(
-        &self,
-        batch_op: &BatchOp,
-    ) -> Result<QueryResult, BatchError> {
-        let exempt = self.shamir.database_identity_for_fence(&self.db_name);
-        self.rename_validator(batch_op, ValidatorTargetAdmission::FenceExcept(exempt))
-            .await
-    }
-
+    /// Ordinary wire rename dispatch: Fence admission (every binding
+    /// holder reserved; the namespace gate refuses under a migration).
     pub(super) async fn rename_validator(
         &self,
         batch_op: &BatchOp,
-        admission: ValidatorTargetAdmission,
     ) -> Result<QueryResult, BatchError> {
         let BatchOp::RenameValidator(op) = batch_op else {
-            unreachable!("handle_rename_validator called with non-RenameValidator op");
+            unreachable!("rename_validator called with non-RenameValidator op");
         };
 
         let err = |msg: String| BatchError::QueryError {
@@ -189,13 +187,9 @@ impl ShamirAdminExecutor {
             message: msg,
             code: None,
         };
-        let err_code = |code: &str, msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: Some(code.to_string()),
+        let err_access = |e: shamir_types::access::AccessError| {
+            BatchError::query_coded("", "access_denied", e.to_string())
         };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         self.shamir
             .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::Write)
@@ -206,7 +200,61 @@ impl ShamirAdminExecutor {
         // the same way as for replace — under the same single exclusion
         // domain inside the admitted commit.
         self.shamir
-            .rename_validator_admitted(&op.rename_validator, &op.to, admission)
+            .rename_validator_admitted(
+                &op.rename_validator,
+                &op.to,
+                ValidatorTargetAdmission::Fence,
+            )
+            .await
+            .map_err(|e: ValidatorRegistrationError| e.into_batch_error(|e| err(e.to_string())))?;
+        Ok(admin_result(mpack!({
+            "renamed_validator": @(QueryValue::Str(op.rename_validator.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+        })))
+    }
+
+    /// Migration-owned entry (brief 84 item 3): the apply runner hands the
+    /// `ValidatorRenameMigration` guard its step-10 preflight returned as
+    /// the gate-ownership proof. `None` is REFUSED — an ordinary (non-
+    /// migration) rename dispatches through `rename_validator` with the
+    /// `Fence` admission instead; there is no blind bypass. Normal ACL
+    /// (FunctionNamespace Write) is reused unchanged; the proof only
+    /// replaces the target-admission reservation inside ShamirDb.
+    pub(super) async fn handle_rename_validator(
+        &self,
+        batch_op: &BatchOp,
+        rename: Option<&ValidatorRenameMigration<'_>>,
+    ) -> Result<QueryResult, BatchError> {
+        let BatchOp::RenameValidator(op) = batch_op else {
+            unreachable!("handle_rename_validator called with non-RenameValidator op");
+        };
+
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_access = |e: shamir_types::access::AccessError| {
+            BatchError::query_coded("", "access_denied", e.to_string())
+        };
+
+        let Some(proof) = rename else {
+            return Err(err(
+                "rename_validator in a migration body requires the migration's \
+                 validator-rename capability (missing preflight proof)"
+                    .to_string(),
+            ));
+        };
+
+        // Reuse the ordinary rename ACL unchanged.
+        self.shamir
+            .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::Write)
+            .await
+            .map_err(err_access)?;
+        // The proof verifies every CURRENT binding-holder identity against
+        // its retained reservations inside ShamirDb before the re-key.
+        self.shamir
+            .rename_validator_for_migration(&op.rename_validator, &op.to, proof)
             .await
             .map_err(|e: ValidatorRegistrationError| e.into_batch_error(|e| err(e.to_string())))?;
         Ok(admin_result(mpack!({
@@ -251,7 +299,7 @@ impl ShamirAdminExecutor {
         };
         let path = ResourcePath::table(&op.db, &op.repo, &op.table);
         let _reservation = if reserve_target {
-            self.authorize_admin_target_write(
+            self.authorize_admin_binding_target_write(
                 explicit_migration_target(batch_op),
                 &path,
                 Action::Write,
@@ -306,7 +354,7 @@ impl ShamirAdminExecutor {
         };
         let path = ResourcePath::table(&op.db, &op.repo, &op.table);
         let _reservation = if reserve_target {
-            self.authorize_admin_target_write(
+            self.authorize_admin_binding_target_write(
                 explicit_migration_target(batch_op),
                 &path,
                 Action::Write,

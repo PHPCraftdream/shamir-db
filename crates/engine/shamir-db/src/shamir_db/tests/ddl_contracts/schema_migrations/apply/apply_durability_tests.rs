@@ -112,7 +112,7 @@ fn fresh_acquire_tail_failure_keeps_the_fence_in_doubt() {
 /// append's preflush = 7, its POST-commit durable flush = 8. Arming
 /// `after(7, 1)` therefore fails exactly the completion append's post-commit
 /// durable flush: after the DDL effect ran and after the completion row
-/// committed to the journal table, before any of it is durable. With the
+/// committed to the journal table, before the explicit post-commit sync completed. With the
 /// intent already durable, `durability_error(.., true)` reports
 /// `schema_migration_in_doubt`, never a plain unavailability code.
 #[test]
@@ -206,19 +206,23 @@ async fn post_effect_sync_failure() {
 /// the pre-publication flush; park the ACTUAL retry inside apply after its
 /// identity read and before its history read (task-local rendezvous);
 /// re-park the original on the post-commit flush so the tail event is
-/// visible while nothing synced it; then the retry must refuse with the
-/// stable in-progress code (without the fix it returned `applied` on
-/// visibility alone). The journal has a default buffered WAL, so a
-/// published-but-unsynced row is the real window.
+/// visible while its explicit durability tail has not returned; then the
+/// retry must refuse with the stable in-progress code (without the fix it
+/// returned `applied` on visibility alone). The rendezvous does NOT prove
+/// the tail row is still unsynced on disk: the journal's background
+/// auto-sync timer may already have flushed it. What it proves is refusal
+/// strictly BEFORE THE RUNNER'S EXPLICIT DURABILITY TAIL RETURNS;
+/// "durable" in these names and comments means "its explicit tail has
+/// returned".
 #[test]
-fn an_identical_retry_never_acks_an_applied_event_before_it_is_durable() {
+fn an_identical_retry_never_acks_an_applied_event_before_the_runners_explicit_sync() {
     super::super::helpers::on_big_stack(|| async {
         tokio::time::timeout(
             Duration::from_secs(180),
             Box::pin(retry_races_the_tail_park(
                 9,
                 JournalEventKind::Applied,
-                "an_identical_retry_never_acks_an_applied_event_before_it_is_durable",
+                "an_identical_retry_never_acks_an_applied_event_before_the_runners_explicit_sync",
             )),
         )
         .await
@@ -227,14 +231,14 @@ fn an_identical_retry_never_acks_an_applied_event_before_it_is_durable() {
 }
 
 #[test]
-fn an_identical_retry_never_acks_a_visible_release_before_it_is_durable() {
+fn an_identical_retry_never_acks_a_visible_release_before_the_runners_explicit_sync() {
     super::super::helpers::on_big_stack(|| async {
         tokio::time::timeout(
             Duration::from_secs(180),
             Box::pin(retry_races_the_tail_park(
                 11,
                 JournalEventKind::FenceReleased,
-                "an_identical_retry_never_acks_a_visible_release_before_it_is_durable",
+                "an_identical_retry_never_acks_a_visible_release_before_the_runners_explicit_sync",
             )),
         )
         .await
@@ -296,7 +300,7 @@ async fn retry_races_the_tail_park(
     assert_eq!(
         history.events.last().map(|event| event.kind),
         Some(expected_tail),
-        "the parked window is exactly publish-before-durability: {history:?}"
+        "the parked window is exactly publish-before-the-explicit-tail: {history:?}"
     );
     assert_eq!(db.schema_migration_gate_generation("testdb"), Some(1));
 
@@ -305,7 +309,7 @@ async fn retry_races_the_tail_park(
     let error = retry
         .await
         .expect("retry task joins")
-        .expect_err("a retry must not acknowledge before the observed event is durable");
+        .expect_err("a retry must not acknowledge before the runner's explicit sync returns");
     assert_code(error, "schema_migration_in_progress");
     guard.mark("retry refused while the tail is parked");
 
@@ -350,10 +354,14 @@ async fn retry_races_the_tail_park(
 /// explicit durable tail, the same `flush_system_repo_durable` seam as
 /// every other tail. Arming `arm_durability_tail_faults_after(1, 1)` lets
 /// the retry's first tail (its identity read) pass and faults the SECOND —
-/// the explicit journal tail — so the retry refuses with the stable
-/// in-doubt code and keeps the marker; the next retry, with the tail
-/// available, acknowledges while the marker stays for reopen
-/// reconciliation.
+/// the explicit pre-ack journal tail — so the retry refuses with the
+/// stable in-doubt code and keeps the marker; the next retry, with the
+/// tail available, acknowledges while the marker stays for reopen
+/// reconciliation. Note this does not prove the release row's bytes were
+/// still volatile: the identity flush may already sync the same repo.
+/// What the test proves is that apply attempts an ADDITIONAL explicit
+/// pre-ack sync and honors an injected error there, refusing instead of
+/// acknowledging.
 #[test]
 fn a_retry_after_a_failed_release_tail_syncs_before_it_acks() {
     super::super::helpers::on_big_stack(|| async {

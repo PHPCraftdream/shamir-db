@@ -150,6 +150,28 @@ impl RepoInstance {
         self.core.list_table_names()
     }
 
+    /// Metadata-only read of a table's persisted validator bindings (the
+    /// validators `MetaEnvelope` under the mapped `__info__` store).
+    ///
+    /// The trusted open paths (`get_table` / `get_table_unfenced`) construct
+    /// a full `TableManager`: they open `__data__` and `__history__`, attach
+    /// MVCC and can trigger index recovery. This read opens ONLY the mapped
+    /// `__info__` store and decodes the one validators metadata key, so a
+    /// cross-crate caller can derive persisted bindings without touching row
+    /// data or managers. `Ok(None)` for a table that is not configured in
+    /// this repo or has never saved bindings. Read-only: no admission, no
+    /// interner, no fence.
+    pub async fn table_validator_bindings_metadata(
+        &self,
+        table_name: &str,
+    ) -> DbResult<Option<shamir_engine_validator::validator::PersistedValidators>> {
+        let Some((_data, info, _history)) = self.core.mapped_table_store_names(table_name) else {
+            return Ok(None);
+        };
+        let store = self.core.repo.store_get(info).await?;
+        crate::validator::persistence::load_validators_metadata(&store).await
+    }
+
     /// Catalogue read; see `TableCatalog`.
     pub fn has_table(&self, name: &str) -> bool {
         self.core.has_table(name)

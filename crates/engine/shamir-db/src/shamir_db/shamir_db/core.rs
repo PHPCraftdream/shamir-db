@@ -183,6 +183,9 @@ pub struct ShamirDb {
     pub(super) durability_policy: DurabilityPolicy,
     /// Shared by clones; serializes function-family migration runners server-wide.
     pub(in crate::shamir_db) function_family_migration_gate: Arc<std::sync::atomic::AtomicBool>,
+    /// Round-3 finding 4: set while a migration-owned RenameValidator body
+    /// holds its foreign fence reservations (`validator/migration_admission.rs`).
+    pub(in crate::shamir_db) validator_rename_migration: Arc<std::sync::atomic::AtomicBool>,
     /// R1c §4.3 — stable-identity fence state; vacant means free.
     pub(in crate::shamir_db) schema_migration_fences:
         Arc<DashMap<DatabaseIdentity, FenceState, THasher>>,
@@ -372,6 +375,7 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
             function_family_migration_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            validator_rename_migration: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_migration_fences: Arc::new(DashMap::with_hasher(THasher::default())),
             schema_migration_fence_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             database_identities: Arc::new(DashMap::with_hasher(THasher::default())),

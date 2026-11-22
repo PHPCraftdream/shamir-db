@@ -128,10 +128,13 @@ impl AdminExecutor for ShamirAdminExecutor {
             // Review finding 3: ordinary replace / rename of a validator
             // with bindings takes the target admission of every binding
             // holder inside the admitted commit; the migration-owned
-            // handlers reserve every holder EXCEPT their own database
-            // (its fence the runner already holds). Drop of a bound
-            // validator mutates nothing (the facade refuses while bound;
-            // an absent artifact is a no-op), so it stays unreserved.
+            // create handler reserves every holder EXCEPT its own
+            // database (its fence the runner already holds). Drop of a
+            // bound validator reserves the holders first under its Fence
+            // admission so a fenced holder surfaces its exact refusal
+            // code, then still refuses while bound; every validator
+            // mutation also honours the validator-rename migration
+            // namespace gate inside ShamirDb (see admin_validator.rs).
             // Global function DDL has no single target and deliberately
             // does not participate.
             op @ BatchOp::CreateValidator(_) | op @ BatchOp::RenameValidator(_) => {
@@ -236,6 +239,31 @@ impl ShamirAdminExecutor {
         action: Action,
     ) -> Result<Option<SchemaMigrationLifecycleGuard<'_>>, BatchError> {
         let db = db.filter(|db| *db != SYSTEM_DB_NAME);
+        self.authorize_admin_target_write_identity(db, path, action)
+            .await
+    }
+
+    /// System-edge scoped variant for explicit wire validator Bind/Unbind:
+    /// NO name exemption — the fence reservation resolves the SAME identity
+    /// the bind itself resolves (a user `__system__` in `dbs`), so the
+    /// internal system store's ACL behavior is untouched but an explicit
+    /// wire bind can no longer slip past the reservation by name.
+    pub(super) async fn authorize_admin_binding_target_write(
+        &self,
+        db: Option<&str>,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<Option<SchemaMigrationLifecycleGuard<'_>>, BatchError> {
+        self.authorize_admin_target_write_identity(db, path, action)
+            .await
+    }
+
+    async fn authorize_admin_target_write_identity(
+        &self,
+        db: Option<&str>,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<Option<SchemaMigrationLifecycleGuard<'_>>, BatchError> {
         let _control = if db.is_some() {
             Some(self.shamir.lock_replication_control().await)
         } else {
@@ -283,12 +311,14 @@ impl ShamirAdminExecutor {
     }
 
     /// Review finding 3: ordinary wire dispatch for validator registration
-    /// replace and rename. The admitted commit inside ShamirDb compiles
-    /// first, then holds ONE replication-control acquisition across the
+    /// replace and rename (plain Fence admission; rename rejects a
+    /// migration-body rename without the preflight proof — that goes
+    /// through `handle_rename_validator` in execution.rs). The admitted
+    /// commit inside ShamirDb compiles first, then holds ONE
+    /// replication-control acquisition across the namespace gate, the
     /// authoritative binding snapshot, the target reservations and the
-    /// persist + registry swap. The migration-owned handlers reserve every
-    /// holder EXCEPT their own database (see admin_validator.rs). Boxed for
-    /// the same Windows nested-Batch stack reason as `dispatch_target_admin`.
+    /// persist + registry swap. Boxed for the same Windows nested-Batch
+    /// stack reason as `dispatch_target_admin`.
     #[inline(never)]
     pub(super) fn dispatch_validator_registration<'a>(
         &'a self,
@@ -300,10 +330,7 @@ impl ShamirAdminExecutor {
                     self.create_validator(op, ValidatorTargetAdmission::Fence)
                         .await
                 }
-                BatchOp::RenameValidator(_) => {
-                    self.rename_validator(op, ValidatorTargetAdmission::Fence)
-                        .await
-                }
+                BatchOp::RenameValidator(_) => self.rename_validator(op).await,
                 _ => {
                     unreachable!(
                         "dispatch_validator_registration called with a non-registration op"

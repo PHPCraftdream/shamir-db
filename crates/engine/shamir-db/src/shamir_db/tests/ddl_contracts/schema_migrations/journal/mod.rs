@@ -5,4 +5,4 @@ mod fence_tests;
 mod isolation_tests;
 mod journal_tests;
 mod lifecycle_refusal_tests;
-mod startup_tests;
+mod system_metadata_tests;

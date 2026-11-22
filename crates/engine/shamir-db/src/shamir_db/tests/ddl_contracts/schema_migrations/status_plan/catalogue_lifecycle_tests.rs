@@ -361,7 +361,10 @@ async fn assert_foreign_effects(
             .await
             .expect_err("the nested local write must refuse the whole mixed batch");
         assert_eq!(error.code(), Some(code), "{error}");
-        assert!(matches!(error, BatchError::QueryError { alias, .. } if alias == "local_write"));
+        // The offending leaf sits inside the nested `mixed` batch; the
+        // refusal names the enclosing TOP-LEVEL alias, as a pre-fence
+        // whole-batch write classification would.
+        assert!(matches!(error, BatchError::QueryError { alias, .. } if alias == "mixed"));
         assert_binding(db, SERVING, OLD_GUARD, NEW_GUARD).await;
         assert_sentinel(db, SERVING, SERVING).await;
     }
@@ -606,5 +609,100 @@ fn same_target_explicit_ddl_refuses_whole_batch_before_first_effect() {
                 if suffix == "in-doubt" { Some(7) } else { None }
             );
         }
+    });
+}
+
+/// Regression for the whole-batch refusal behind the TRANSACTIONAL single
+/// entry and the INTERACTIVE-tx execute entry (`tx_begin` + `tx_execute`):
+/// both must refuse a same-target offending leaf before any leaf effect, with
+/// the serving fence's own code, leaving an earlier leaf in the same request
+/// unapplied. Without the `db_tx.rs` gate the interactive batch would run its
+/// DDL against the fenced serving database.
+#[test]
+fn same_target_ddl_refuses_transactional_and_interactive_transactions_before_first_effect() {
+    on_big_stack(|| async {
+        let watchdog = FlakeGuard::with_watchdog(
+            "same_target_ddl_refuses_transactional_and_interactive_transactions_before_first_effect",
+            Duration::from_secs(600),
+        );
+        let (dir, db) = bounded(persistent_db()).await;
+        create_with_sentinel(&db, dir.path(), SERVING, "fixture").await;
+
+        for (suffix, code) in [("reserved", IN_PROGRESS), ("in-doubt", IN_DOUBT)] {
+            watchdog.mark(suffix);
+            let fresh = format!("tx_fresh_{suffix}");
+            let mut serving = Some(db.reserve_schema_migration_gate(SERVING).unwrap());
+            if suffix == "in-doubt" {
+                let mut guard = serving.take().unwrap();
+                guard.hold(9);
+                drop(guard);
+                assert_eq!(
+                    db.schema_migration_gate_in_doubt_generation(SERVING),
+                    Some(9)
+                );
+            }
+
+            // Transactional single-call batch: a foreign CREATE first, then
+            // one same-target CHMOD leaf — refused at entry with the serving
+            // state code; the earlier CREATE must not appear anywhere.
+            let mut batch = Batch::new();
+            batch.transactional();
+            batch.op("create_c", ddl::create_db(&fresh).build());
+            batch.op(
+                "chmod_b",
+                ddl::chmod(ddl::res::database(SERVING), 0o750)
+                    .hmac(HMAC)
+                    .build()
+                    .unwrap(),
+            );
+            let error = execute(&db, SERVING, &batch)
+                .await
+                .expect_err("transactional batch with a same-target write must refuse");
+            assert_eq!(
+                error.code(),
+                Some(code),
+                "transactional ({suffix}): {error}"
+            );
+            assert!(
+                matches!(&error, BatchError::QueryError { alias: a, .. } if a == "chmod_b"),
+                "transactional ({suffix}): {error}"
+            );
+            assert_absent(&db, &fresh).await;
+            assert_sentinel(&db, SERVING, SERVING).await;
+
+            // Interactive tx: BEGIN stays available (opening a tx is not a
+            // write); tx_execute of the same shape refuses with the same code
+            // before any leaf runs, and the tx is dropped uncommitted.
+            let (mut tx, guard) = bounded(db.tx_begin(SERVING, REPO, "snapshot"))
+                .await
+                .expect("BEGIN must stay available while the fence is held");
+            let mut batch = Batch::new();
+            batch.op("create_c", ddl::create_db(&fresh).build());
+            batch.op("drop_b", drop_db(SERVING, false));
+            let request = batch.to_request_via_msgpack().unwrap();
+            let error = bounded(db.tx_execute(SERVING, &request, &mut tx))
+                .await
+                .expect_err("interactive tx execute of a same-target write must refuse");
+            assert_eq!(error.code(), Some(code), "interactive ({suffix}): {error}");
+            assert!(
+                matches!(&error, BatchError::QueryError { alias: a, .. } if a == "drop_b"),
+                "interactive ({suffix}): {error}"
+            );
+            drop(tx);
+            drop(guard);
+            assert_absent(&db, &fresh).await;
+            assert_sentinel(&db, SERVING, SERVING).await;
+
+            if let Some(guard) = serving.as_mut() {
+                guard.mark_succeeded();
+            }
+            drop(serving);
+            assert!(db.schema_migration_gate_generation(SERVING).is_none());
+        }
+        assert_eq!(
+            db.schema_migration_gate_in_doubt_generation(SERVING),
+            Some(9),
+            "the in-doubt marker of the last round must survive the test"
+        );
     });
 }

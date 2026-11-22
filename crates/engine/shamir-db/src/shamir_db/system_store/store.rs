@@ -625,9 +625,9 @@ impl SystemStore {
     /// tests exercise exactly the final `flush()` line.
     pub(crate) async fn flush_system_repo_durable(&self, table: &TableManager) -> DbResult<()> {
         self.durability_tail_fault_gate()?;
-        // Test rendezvous: after the fault gate and before the sync, so a
-        // parked caller has published its committed rows while none of them
-        // is durable yet.
+        // Test rendezvous: parks this caller after the fault gate and before
+        // its explicit sync, so a parked caller has published its committed
+        // rows without establishing any background WAL sync state.
         #[cfg(test)]
         self.durability_tail_rendezvous_gate().await;
         self.system_repo()?.sync_wal().await?;

@@ -178,6 +178,12 @@ async fn status_with_an_owned_fence_reports_the_in_flight_owner() {
     assert_eq!(field(in_flight, "ordinal").as_i64(), Some(1));
     assert_eq!(field(in_flight, "fence_generation").as_i64(), Some(1));
     assert_eq!(str_field(in_flight, "status"), "started");
+    // LEGACY journal-only mapping preserved (brief 84, finding 6): no
+    // process-local slot is held (the fence was acquired directly through
+    // the journal API) and the journal's only unresolved event is `started`
+    // — the durable history is nevertheless interrupted, so STATUS reports
+    // in doubt, exactly as before the shared classification; PLAN now
+    // reports the SAME code through the shared helper.
     assert_eq!(str_field(&value, "error"), "schema_migration_in_doubt");
     assert_eq!(field(&value, "fence_generation").as_i64(), Some(1));
 }

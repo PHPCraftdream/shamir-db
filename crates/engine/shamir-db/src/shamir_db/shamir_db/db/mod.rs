@@ -7,8 +7,6 @@ mod function;
 pub(in crate::shamir_db::shamir_db) use function::FunctionDdlLocks;
 pub use function::{FunctionDescription, FunctionExport, FunctionState};
 pub(crate) mod schema_management;
-pub(in crate::shamir_db) use validator_management::{
-    ValidatorRegistrationError, ValidatorTargetAdmission,
-};
+pub(in crate::shamir_db) mod validator;
+pub(in crate::shamir_db) use validator::{ValidatorRegistrationError, ValidatorTargetAdmission};
 mod table_management;
-mod validator_management;

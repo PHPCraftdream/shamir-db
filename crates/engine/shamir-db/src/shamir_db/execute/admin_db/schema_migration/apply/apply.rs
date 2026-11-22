@@ -40,7 +40,14 @@
 //!    dependencies and before the durable CAS;
 //! 10. the durable fence CAS with `expected_fence_generation` (recovery
 //!     takes over the OWNED fence at the journal's current generation)
-//!     plus the in-process per-database gate (§4.3).
+//!     plus the in-process per-database gate (§4.3). Under the same
+//!     replication-control scope, AFTER the serving-slot reservation (its
+//!     refusal keeps precedence), a body containing `RenameValidator`
+//!     preflights the binding holders of every DISTINCT source name
+//!     (brief 84 item 3): a foreign admission conflict is returned as the
+//!     foreign target's code before any Started/Intent journal event is
+//!     written (identity lookup has already synced), and the returned
+//!     capability guard is retained for the whole run.
 //!
 //! Any admission refusal writes nothing. Journal write/sync/read-back
 //! failures stop the run before the next effect and are reported in doubt —
@@ -53,6 +60,8 @@ use shamir_query_types::admin::types::schema_migration::{
     canonical_body_checksum, SchemaMigrationApplyRequest, SchemaMigrationOp,
     SchemaMigrationPredecessor,
 };
+
+use std::collections::BTreeSet;
 
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
@@ -292,8 +301,14 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     // mismatch is refused with the fresh-path stable codes, writing nothing.
     let mut resume = false;
     if let Some(event) = history.unresolved.last() {
-        if executor.shamir.schema_migration_refusal_code(serving)
-            == Some("schema_migration_in_progress")
+        // The SAME classification STATUS and PLAN use (brief 84, finding 6):
+        // only a LIVE in-process runner yields `in_progress`, so the
+        // takeover refusal here is unchanged — a retained in-doubt marker
+        // falls through to the identity/checksum resume checks below.
+        if super::super::schema_migration::schema_migration_state_code(
+            executor.shamir.schema_migration_refusal_code(serving),
+            &history,
+        ) == Some("schema_migration_in_progress")
         {
             return Err(coded(
                 "schema_migration_in_progress",
@@ -481,10 +496,10 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
     } else {
         request.expected_fence_generation
     };
-    let mut gate = {
+    let (mut gate, rename_migration) = {
         let _control = executor.shamir.lock_replication_control().await;
         validate_serving_identity(executor, &db, serving)?;
-        executor
+        let gate = executor
             .shamir
             .reserve_schema_migration_run(serving, resume.then_some(expected_generation))
             .map_err(|code| {
@@ -495,7 +510,39 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
                          for database '{db}'"
                     ),
                 )
-            })?
+            })?;
+        // Brief 84 item 3: a body containing RenameValidator reserves every
+        // foreign binding holder of its distinct rename sources under this
+        // replication-control scope, before the fence's first journal write;
+        // the guard is released with the run (`FencedRun::rename`).
+        let rename_migration = if body
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, SchemaMigrationOp::RenameValidator(_)))
+        {
+            let sources: Vec<String> = body
+                .operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    SchemaMigrationOp::RenameValidator(op) => Some(op.rename_validator.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(
+                Box::pin(executor.shamir.begin_validator_rename_migration(
+                    &sources,
+                    Some(serving),
+                    &_control,
+                ))
+                .await
+                .map_err(|error| error.into_batch_error(|e| plain(e.to_string())))?,
+            )
+        } else {
+            None
+        };
+        (gate, rename_migration)
     };
     let context = SchemaMigrationContext::new(executor.actor.clone(), FormatEpoch::Unknown);
     let generation = Box::pin(store.acquire_schema_migration_fence_tracked(
@@ -521,6 +568,7 @@ pub(in crate::shamir_db::execute) async fn apply_application_schema(
             generation,
             resume,
             context: &context,
+            rename: rename_migration,
         },
         gate,
     ))
