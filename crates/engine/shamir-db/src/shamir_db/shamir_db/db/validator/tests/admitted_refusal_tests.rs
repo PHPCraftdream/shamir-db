@@ -147,3 +147,40 @@ async fn admitted_rename_refuses_an_in_doubt_holder() {
     );
     assert_eq!(db.validator_id("v2"), None);
 }
+
+/// Round 8: the migration rename PREFLIGHT refuses an in-doubt holder before
+/// any reservation, and a refusal leaves the rename gate untouched. Refusing
+/// only when the rename executes would first fence the serving database in
+/// doubt and journal the intent.
+#[tokio::test]
+async fn migration_rename_preflight_refuses_an_in_doubt_holder_and_frees_the_gate() {
+    let (db, id) = fixture().await;
+
+    let control = db.lock_replication_control().await;
+    let Err(error) = db
+        .begin_validator_rename_migration(&["v1".to_string()], None, &control)
+        .await
+    else {
+        panic!("the preflight must refuse a rename while a holder table is in doubt");
+    };
+    let message = in_doubt_message(error);
+    assert!(message.contains("in doubt"), "{message}");
+    assert!(
+        !message.contains("events"),
+        "the refusal must not disclose the table: {message}"
+    );
+
+    // The gate is free: a preflight over a source that resolves to nothing
+    // passes and publishes the gate (a held gate would refuse it as "already
+    // in progress").
+    let guard = db
+        .begin_validator_rename_migration(&["no_such_validator".to_string()], None, &control)
+        .await;
+    assert!(
+        guard.is_ok(),
+        "a refused preflight must not leave the rename gate held"
+    );
+    drop(guard);
+    drop(control);
+    assert_eq!(db.validator_id("v1"), Some(id));
+}

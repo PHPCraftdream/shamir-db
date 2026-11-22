@@ -197,6 +197,13 @@ impl ShamirDb {
                 continue;
             };
             let holders = self.validator_binding_holders(&id, control).await?;
+            // Round 8: a doubtful binding record refuses the migration rename
+            // HERE, in the preflight, before any foreign reservation and before
+            // the runner acquires the serving fence durably and journals the
+            // intent. Refusing only at execution would leave the serving
+            // database fenced in doubt by a rename the evidence never allowed.
+            // Same shared decision and fixed text as replace, rename and drop.
+            holders.refuse_in_doubt()?;
             targets.extend(holders.dbs().iter().cloned());
         }
         Ok(targets.into_iter().collect())
