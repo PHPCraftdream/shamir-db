@@ -40,7 +40,7 @@ pub use record_counter::RecordCounter;
 pub use support::model::names::{new_table_store_id, table_store_names};
 #[doc(hidden)]
 pub use support::storage::catalog::TableCatalog;
-pub use table_config::TableConfig;
+pub use table_config::{TableConfig, TableRegistration};
 #[doc(hidden)]
 pub use table_manager::MigrationFreezeError;
 pub use table_manager::{

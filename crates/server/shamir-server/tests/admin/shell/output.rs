@@ -790,7 +790,7 @@ fn in_process_shell_run_help_is_reachable_and_exits_zero() {
 
 // `run_scripted` drives the REAL interactive loop in-process: scripted
 // stdin, captured stderr, the [`FakeTerminal`], an injected profile root.
-/// A scripted stderr for [`crate::shell::parser::run_scripted`]: captures
+/// A scripted stderr for [`crate::shell::parser::run::run_scripted`]: captures
 /// every byte AND logs each write into the SHARED [`ScriptLog`] (exact
 /// `password: ` prompt → `prompt-write`, its flush → `prompt-flush`,
 /// REPL prompt → `repl-prompt`, else `stderr-write`).
@@ -860,7 +860,7 @@ fn scripted_session(
     let mut stderr = ScriptedStderr::new(log.clone(), false);
     let terminal = fake_terminal(log.clone(), read, restore);
     let mut input = Cursor::new(lines.as_bytes().to_vec());
-    let exit = crate::shell::parser::run_scripted(
+    let exit = crate::shell::parser::run::run_scripted(
         ["--profile".into(), harness::PROFILE_NAME.into()],
         &mut input,
         &mut stderr,

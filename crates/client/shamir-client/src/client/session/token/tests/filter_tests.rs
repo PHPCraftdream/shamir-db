@@ -140,3 +140,28 @@ async fn refused_request_sends_nothing() {
     assert_eq!(received, 0);
     client.close().await;
 }
+
+#[test]
+fn operator_status_and_point_read_are_denied_token_requests() {
+    // Admin-shell R5 PR3: the new top-level variants are not token
+    // surfaces; the client filter refuses them before any request is
+    // sent, for every payload scope.
+    let denied = [
+        shamir_query_builder::wire::admin::status(),
+        shamir_query_builder::wire::admin::get_record(
+            "db",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+        shamir_query_builder::wire::admin::get_record(
+            "outside",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+    ];
+    for req in &denied {
+        assert_eq!(code_of(check_request_allowed(req)), "token_request_denied");
+    }
+}
