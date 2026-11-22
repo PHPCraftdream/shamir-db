@@ -75,6 +75,8 @@ const ALLOWLIST: &[&str] = &[
     "indexes_uniq", // MetaKey::BaseIndexIndexesUnique, truncated from "indexes_unique"
     "sorted_index", // MetaKey::SortedIndexes, truncated from "sorted_indexes"
     "_m.idx",
+    // "_m.val" (`MetaKey::Validators`) is static table configuration;
+    // binding metadata must remain available for existing-only reads.
     "_m.val",
     "buffer_confi", // MetaKey::BufferConfig, truncated from "buffer_config"
     "internals",

@@ -156,6 +156,55 @@ impl RepoInstance {
         self.core.list_table_names()
     }
 
+    /// Metadata-only read of a table's persisted validator bindings (the
+    /// validators `MetaEnvelope` under the mapped `__info__` store).
+    ///
+    /// The trusted open paths (`get_table` / `get_table_unfenced`) construct
+    /// a full `TableManager`: they open `__data__` and `__history__`, attach
+    /// MVCC and can trigger index recovery. This read opens ONLY the mapped
+    /// `__info__` store and decodes the one validators metadata key, so a
+    /// cross-crate caller can derive persisted bindings without touching row
+    /// data or managers. Missing configured stores and tables that have never
+    /// saved bindings return `Ok(None)`. Existing-only store lookup is
+    /// read-only even for lazy tables and creates no keyspace. Read-only: no
+    /// admission, no interner, no fence.
+    pub async fn table_validator_bindings_metadata(
+        &self,
+        table_name: &str,
+    ) -> DbResult<Option<shamir_engine_validator::validator::PersistedValidators>> {
+        let Some((_data, info, _history)) = self.core.mapped_table_store_names(table_name) else {
+            return Ok(None);
+        };
+        let Some(store) = self.core.repo.store_get_existing(&info).await? else {
+            return Ok(None);
+        };
+        crate::validator::persistence::load_validators_metadata(&store).await
+    }
+
+    /// Round 6 — whether an ALREADY-OPEN table's persisted validator binding
+    /// record is IN DOUBT: a failed binding write could not be written back and
+    /// flushed, so the live snapshot and the backing envelope may disagree.
+    ///
+    /// The flag expresses UNCERTAINTY, not guaranteed exclusion. It is also
+    /// raised when the forward write fails, and a future dropped (cancelled) at
+    /// the forward set/flush or at a compensation step leaves it raised; the
+    /// backing record may then hold the previous value, the new one or a partial
+    /// compensating write, and a visible old value after a failed sync proves
+    /// nothing about durability.
+    ///
+    /// Non-instantiating and cheap: a table whose manager is dormant (or which
+    /// has no manager) reports `false`, which is correct by definition — a fresh
+    /// process has no doubt state. A restart RESETS the flag; it does not repair
+    /// the records, so the residual states the operations guide documents can
+    /// survive a reopen. Read by the validator holder scan and by the facade
+    /// refusals (schema activation, table rename).
+    pub fn table_validator_bindings_in_doubt(&self, table_name: &str) -> bool {
+        self.core
+            .catalog
+            .initialized_table(table_name)
+            .is_some_and(|table| table.validator_bindings_in_doubt())
+    }
+
     /// Catalogue read; see `TableCatalog`.
     pub fn has_table(&self, name: &str) -> bool {
         self.core.has_table(name)

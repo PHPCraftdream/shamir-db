@@ -11,6 +11,9 @@ use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
+use super::admin_db_schema_migration::{
+    schema_migration_lifecycle_code, schema_migration_lifecycle_refusal_message,
+};
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, repl_guard_error_to_batch, validate_name_component};
 
@@ -23,6 +26,11 @@ impl ShamirAdminExecutor {
             alias: String::new(),
             message: msg,
             code: Some(code.to_string()),
+        };
+        let err_validation = |message: String| BatchError::QueryError {
+            alias: String::new(),
+            message,
+            code: None,
         };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
@@ -41,7 +49,6 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &ResourcePath::Root, Action::Create)
             .await
             .map_err(err_access)?;
-
         // TOCTOU close (task #546): hold `db_create_lock` across the WHOLE
         // exists-check -> create sequence, so two concurrent
         // `CREATE DATABASE` (or `IF NOT EXISTS`) calls for the SAME name
@@ -69,11 +76,12 @@ impl ShamirAdminExecutor {
         self.shamir
             .create_db_as_checked(&op.create_db, self.actor.clone())
             .await
-            .map_err(|e| {
-                err_code(
+            .map_err(|error| match error {
+                crate::DbError::Validation(message) => err_validation(message),
+                other => err_code(
                     "persist_failed",
-                    format!("failed to persist database '{}': {}", op.create_db, e),
-                )
+                    format!("failed to persist database '{}': {}", op.create_db, other),
+                ),
             })?;
         Ok(admin_result(mpack!({
             "created": true,
@@ -93,6 +101,11 @@ impl ShamirAdminExecutor {
         };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // Lock order: namespace -> replication control -> migration slot.
+        // Keep the authorized name stable through child enumeration and DROP.
+        let _create_guard = self.shamir.db_create_lock().lock().await;
+        let control = self.shamir.lock_replication_control().await;
 
         // Auth runs BEFORE the if_exists existence probe (#995): an
         // unauthorized caller must not be able to learn whether a database
@@ -118,24 +131,13 @@ impl ShamirAdminExecutor {
             })));
         }
 
-        // P1-A cascade interlock: hold the replication control lock ONCE
-        // across the binding check AND every destructive step below, so a
-        // concurrent CREATE SUBSCRIPTION can never bind the destination
-        // mid-cascade.
-        let _control = self.shamir.lock_replication_control().await;
-
-        // R1c-4 FINAL follow-up 3, decision 2: refuse DROP of a target with
-        // ANY live fence state (gate or marker; the batch-entry fence only
-        // inspects the SESSION database) inside the control lock, before
-        // the binding guard and any CASCADE teardown; wire code stays
-        // `schema_migration_in_doubt`.
+        // Preserve the initial fence refusal before checking bindings. This
+        // read is not admission: a migration can still win before reservation.
         if self.shamir.schema_migration_lifecycle_blocked(&op.drop_db) {
-            return Err(err_code(
-                super::admin_db_schema_migration::schema_migration_lifecycle_code(),
-                super::admin_db_schema_migration::schema_migration_lifecycle_refusal_message(
-                    "drop",
-                    &op.drop_db,
-                ),
+            return Err(BatchError::query_coded(
+                "",
+                schema_migration_lifecycle_code(),
+                schema_migration_lifecycle_refusal_message("drop", &op.drop_db),
             ));
         }
 
@@ -169,78 +171,71 @@ impl ShamirAdminExecutor {
             self.shamir.cascade_release.notified().await;
         }
 
-        // Referential integrity: check for child repositories.
-        if let Some(db) = self.shamir.get_db(&op.drop_db) {
-            let repos = db.list_repos();
-            if !repos.is_empty() {
-                if !op.cascade {
-                    return Err(err_code(
-                        "still_referenced",
-                        format!(
-                            "cannot drop database '{}': still has repositories: {:?}",
-                            op.drop_db, repos
-                        ),
-                    ));
-                }
-                // Cascade: remove every repo (and its tables) first.
-                // Per-table drop errors are collected (every drop is
-                // attempted); the removal steps below run only if none
-                // failed.
-                let mut table_failures: Vec<String> = Vec::new();
-                for repo_name in &repos {
-                    // Remove tables within each repo. B1 fix (round 5):
-                    // tables belong to the database being DROPPED
-                    // (`op.drop_db`), NOT the executor's session database
-                    // (`self.db_name`) — dropping the session db's same-named
-                    // tables here was master data loss.
-                    if let Ok(tables) = db.list_tables(repo_name) {
-                        for table_name in &tables {
-                            if let Err(e) = self
-                                .shamir
-                                .drop_table_cleaning_validators_locked(
-                                    &op.drop_db,
-                                    repo_name,
-                                    table_name,
-                                    &_control,
-                                )
-                                .await
-                            {
-                                table_failures.push(format!(
-                                    "{}/{}/{}: {}",
-                                    op.drop_db, repo_name, table_name, e
-                                ));
-                            }
-                        }
-                    }
-                    if !table_failures.is_empty() {
-                        // Skip repo removal when its table drops failed.
-                        break;
-                    }
-                    // S5c-X PR8b-2: the binding guard's typed refusal must
-                    // propagate before the database row is removed. The
-                    // control lock is already held, so use the _locked
-                    // variants.
-                    let _ = self
-                        .shamir
-                        .remove_repo_locked(&op.drop_db, repo_name, &_control)
-                        .await
-                        .map_err(repl_guard_error_to_batch)?;
-                }
-                if !table_failures.is_empty() {
-                    return Err(err_code(
-                        "cascade_drop_failed",
-                        format!(
-                            "cannot drop database '{}': cascade table drops failed: {}",
-                            op.drop_db,
-                            table_failures.join("; ")
-                        ),
+        let db = self.shamir.get_db(&op.drop_db);
+        let repos = db.as_ref().map_or_else(Vec::new, |db| db.list_repos());
+        let children: Vec<_> = if let Some(db) = db.filter(|_| op.cascade) {
+            repos
+                .iter()
+                .map(|repo| (repo, db.list_tables(repo).unwrap_or_default()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Reserve after enumerating all children and before the first mutation.
+        // Keep ownership through the final live and durable database removal.
+        let reservation = self
+            .shamir
+            .reserve_database_lifecycle(&op.drop_db, &control)
+            .map_err(|error| {
+                error.into_batch_error("drop", &op.drop_db, repl_guard_error_to_batch)
+            })?;
+        if !op.cascade && !repos.is_empty() {
+            return Err(err_code(
+                "still_referenced",
+                format!(
+                    "cannot drop database '{}': still has repositories: {:?}",
+                    op.drop_db, repos
+                ),
+            ));
+        }
+        for (repo_name, tables) in children {
+            let mut table_failures = Vec::new();
+            for table_name in &tables {
+                if let Err(e) = self
+                    .shamir
+                    .drop_table_cleaning_validators_locked(
+                        &op.drop_db,
+                        repo_name,
+                        table_name,
+                        &control,
+                    )
+                    .await
+                {
+                    table_failures.push(format!(
+                        "{}/{}/{}: {}",
+                        op.drop_db, repo_name, table_name, e
                     ));
                 }
             }
+            if !table_failures.is_empty() {
+                // Attempt all tables in this repo, then stop before removing it.
+                return Err(err_code(
+                    "cascade_drop_failed",
+                    format!(
+                        "cannot drop database '{}': cascade table drops failed: {}",
+                        op.drop_db,
+                        table_failures.join("; ")
+                    ),
+                ));
+            }
+            self.shamir
+                .remove_repo_locked(&op.drop_db, repo_name, &control)
+                .await
+                .map_err(repl_guard_error_to_batch)?;
         }
         let removed = self
             .shamir
-            .remove_db_locked(&op.drop_db, &_control)
+            .remove_db_locked(&op.drop_db, &control, reservation)
             .await
             .map_err(repl_guard_error_to_batch)?;
         Ok(admin_result(mpack!({
@@ -639,6 +634,10 @@ impl ShamirAdminExecutor {
 
         validate_name_component(&op.rename_db, "db_name")?;
         validate_name_component(&op.to, "db_name")?;
+        // Match direct RENAME's lock order and authorize the name that will
+        // actually be re-keyed, not a previous registration of that name.
+        let _create_guard = self.shamir.db_create_lock().lock().await;
+        let control = self.shamir.lock_replication_control().await;
 
         // Auth: Write on the source database (rename mutates the db's
         // identity). Mirrors handle_drop_db's auth path (db-level), but
@@ -652,28 +651,12 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // R1c-4 FINAL follow-up 3, decision 2: refuse RENAME of a target
-        // with ANY live fence state (gate or marker; the batch-entry fence
-        // only inspects the SESSION database) — the re-key would strand the
-        // name-keyed state away from the identity-keyed journal; wire code
-        // stays `schema_migration_in_doubt`.
-        if self
-            .shamir
-            .schema_migration_lifecycle_blocked(&op.rename_db)
-        {
-            return Err(err_code(
-                super::admin_db_schema_migration::schema_migration_lifecycle_code(),
-                super::admin_db_schema_migration::schema_migration_lifecycle_refusal_message(
-                    "rename",
-                    &op.rename_db,
-                ),
-            ));
-        }
-
         self.shamir
-            .rename_db_as(&op.rename_db, &op.to, self.actor.clone())
+            .rename_db_locked(&op.rename_db, &op.to, &control)
             .await
-            .map_err(repl_guard_error_to_batch)?;
+            .map_err(|error| {
+                error.into_batch_error("rename", &op.rename_db, repl_guard_error_to_batch)
+            })?;
 
         Ok(admin_result(mpack!({
             "renamed_db": @(QueryValue::Str(op.rename_db.clone())),

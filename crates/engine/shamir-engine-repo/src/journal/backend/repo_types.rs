@@ -127,6 +127,25 @@ impl HybridRepoComposite {
             .cloned()
     }
 
+    /// Existing-only routed counterpart to `store_get_routed`. It never
+    /// populates the route cache or creates an underlying disk keyspace. Hybrid
+    /// `__info__` validator metadata is mirrored, so read from the durable
+    /// backing rather than an unhydrated or stale memoized primary.
+    #[cfg(feature = "fjall")]
+    async fn store_get_existing_routed(&self, name: &str) -> DbResult<Option<Arc<dyn Store>>> {
+        if name == "__interner__" || name.starts_with("__info__") {
+            return self.disk.store_get_existing(name).await;
+        }
+        if name.starts_with("__history__")
+            || name.starts_with("__data__")
+            || name == "__tx__"
+            || name == "__changelog__"
+        {
+            return self.mem.store_get_existing(name).await;
+        }
+        Ok(None)
+    }
+
     /// Construct the actual `Store` for `name` per the routing table.
     ///
     /// | Name pattern       | Backing | Why                                |
@@ -258,6 +277,21 @@ impl Repo for BoxRepo {
             }
             #[cfg(feature = "fjall")]
             BoxRepo::Hybrid(c) => c.store_get_routed(name.as_ref()).await,
+        }
+    }
+
+    /// Existing-only counterpart to `store_get`; wrapper layers are stripped
+    /// so metadata reads avoid workers, hydration and stale cache views. The
+    /// DDL binding writers flush metadata before returning.
+    async fn store_get_existing(&self, name: &str) -> DbResult<Option<Arc<dyn Store>>> {
+        match self {
+            BoxRepo::InMemory(repo) => repo.store_get_existing(name).await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Fjall(repo) => repo.store_get_existing(name).await,
+            BoxRepo::MemBuffer(c) => c.inner.store_get_existing(name).await,
+            BoxRepo::Cached(c) => c.inner.store_get_existing(name).await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(c) => c.store_get_existing_routed(name).await,
         }
     }
 

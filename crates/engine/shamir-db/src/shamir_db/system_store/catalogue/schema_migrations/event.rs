@@ -267,12 +267,30 @@ pub(super) fn event_row(event: &JournalEvent) -> DbResult<crate::types::value::Q
     Ok(crate::types::value::QueryValue::Map(row))
 }
 
-pub(super) fn decode_event(bytes: &[u8], row_id: &str) -> DbResult<JournalEvent> {
-    let event: JournalEvent = rmp_serde::from_slice(bytes).map_err(|error| {
+pub(super) fn decode_event_row(
+    row_id: &str,
+    value: &crate::types::value::QueryValue,
+) -> DbResult<JournalEvent> {
+    let Some(crate::types::value::QueryValue::Bin(bytes)) = value.get("event") else {
+        return Err(DbError::Internal(format!(
+            "schema migration journal row {row_id}: missing or non-binary event payload"
+        )));
+    };
+    decode_event(bytes, row_id)
+}
+
+fn decode_event(bytes: &[u8], row_id: &str) -> DbResult<JournalEvent> {
+    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
+    let event = JournalEvent::deserialize(&mut decoder).map_err(|error| {
         DbError::Internal(format!(
             "schema migration journal row {row_id}: event decode failed: {error}"
         ))
     })?;
+    if decoder.position() != bytes.len() as u64 {
+        return Err(DbError::Internal(format!(
+            "schema migration journal row {row_id}: trailing bytes after event payload"
+        )));
+    }
     event.validate_envelope(row_id)?;
     Ok(event)
 }

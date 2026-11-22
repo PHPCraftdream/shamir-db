@@ -27,7 +27,7 @@ Count every folder you add to with `ls` (many are at 7 entries: `python -I scrip
 
 ## Rules that bind the change
 
-* Machine memory: at most ONE cargo command at a time machine-wide (other executors run: if a cargo run is already in progress wait for its notification, never poll), ALWAYS as `bash /d/system_artefact/orch/cg.sh env RUSTC_WRAPPER= wnice -p idle -c 50 -t 8 -m 50 -- cargo ... -j 1 > <logfile OUTSIDE the repository> 2>&1` (the wrapper serializes cargo across executors; never `-j 2`; never piped through `tail`/`head`; `cargo fmt` rejects `-j`: run it with `CARGO_BUILD_JOBS=1` under the same wrapper); every worker you spawn must be told the same, and no worker may run cargo at all except `check`/`clippy`/`fmt` under these rules.
+* Machine memory: at most ONE cargo command at a time machine-wide (other executors run: if a cargo run is already in progress wait for its notification, never poll), ALWAYS as `bash <orch>/cg.sh env RUSTC_WRAPPER= wnice -p idle -c 50 -t 8 -m 50 -- cargo ... -j 1 > <logfile OUTSIDE the repository> 2>&1` (the wrapper serializes cargo across executors; never `-j 2`; never piped through `tail`/`head`; `cargo fmt` rejects `-j`: run it with `CARGO_BUILD_JOBS=1` under the same wrapper); every worker you spawn must be told the same, and no worker may run cargo at all except `check`/`clippy`/`fmt` under these rules.
 * Leave no scratch files in the tree and none outside it (edit only paths inside this worktree).
 * Wrap-up: by 150 minutes bring the change to a compiling, formatted, clippy-clean state and stop; say in the final report what is missing.
 

@@ -13,16 +13,19 @@
 //!   synchronous batch-entry refusal helper.
 
 mod apply;
-pub(in crate::shamir_db::execute) mod fence;
+mod fence;
 mod function_family;
 mod plan;
 mod schema_migration;
 
 #[cfg(test)]
 pub(in crate::shamir_db) use apply::apply_journal;
+#[cfg(test)]
+pub(in crate::shamir_db) use apply::{AppliedRetryPause, APPLIED_RETRY_PAUSE};
 pub(in crate::shamir_db::execute) use fence::maintenance_fence_refusal;
 pub(in crate::shamir_db) use fence::{
-    schema_migration_lifecycle_code, schema_migration_lifecycle_refusal_message,
+    schema_migration_lifecycle_code, schema_migration_lifecycle_refusal_message, FenceState,
+    SchemaMigrationLifecycleGuard,
 };
 
 #[cfg(test)]

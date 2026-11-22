@@ -469,6 +469,31 @@ pub fn schema_validator_name(db: &str, repo: &str, table: &str) -> String {
 // ── ShamirDb integration ────────────────────────────────────────────────
 
 impl ShamirDb {
+    /// Round 7 (G4): refuse schema activation on an IN-DOUBT table BEFORE any
+    /// artifact is replaced — both activation entries swap the live artifact
+    /// (`replace_artifact`) and only later bind it, whose bind refuses on the
+    /// flag and restores, so a concurrent validated write could run against the
+    /// not-yet-admitted artifact in between.
+    ///
+    /// No schema-activation barrier is taken for this one-shot read: the flag is
+    /// only raised by that table's binding DDL under the same replication
+    /// control, and `REMOVE SCHEMA RULE` takes no such barrier at all.
+    fn refuse_schema_activation_in_doubt(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<()> {
+        let in_doubt = self
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name))
+            .is_some_and(|repo| repo.table_validator_bindings_in_doubt(table_name));
+        if in_doubt {
+            return Err(crate::engine::table::TableManager::binding_in_doubt_error());
+        }
+        Ok(())
+    }
+
     /// Compile and register a declarative schema validator for one table.
     ///
     /// Called from:
@@ -504,6 +529,9 @@ impl ShamirDb {
         schema_validator_id: RecordId,
         rules: Vec<FieldRule>,
     ) -> DbResult<()> {
+        // Round 7 (G4): the artifact swap below must not run on a doubtful
+        // table — see `refuse_schema_activation_in_doubt`.
+        self.refuse_schema_activation_in_doubt(db_name, repo_name, table_name)?;
         let name = schema_validator_name(db_name, repo_name, table_name);
         // DDL path: the admitted twin rebuilds from `rules`, so clone here.
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules.clone()));
@@ -603,6 +631,9 @@ impl ShamirDb {
         rules: Vec<FieldRule>,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
+        // Round 7 (G4): the artifact swap below must not run on a doubtful
+        // table — see `refuse_schema_activation_in_doubt`.
+        self.refuse_schema_activation_in_doubt(db_name, repo_name, table_name)?;
         let name = schema_validator_name(db_name, repo_name, table_name);
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
 
@@ -888,5 +919,81 @@ impl ShamirDb {
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.repo_interner().await
+    }
+}
+
+impl ShamirDb {
+    /// Re-key the durable `bound_in` snapshots after a database rename —
+    /// caller holds replication control (review finding 3 follow-up).
+    /// Every catalogue validator row is scanned, so pending rows (native
+    /// artifacts no live registry entry names) are covered the same way as
+    /// live ones; names-only registry tracking is not the sole authority.
+    /// Affected rows are updated in place (same catalogue key) with their
+    /// resource meta preserved.
+    pub(in crate::shamir_db) async fn rekey_validator_bound_in_catalogue(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> DbResult<()> {
+        let old_prefix = format!("{from}/");
+        let new_prefix = format!("{to}/");
+        let validators = self.system_store.load_validators().await?;
+        for rec in validators {
+            let stale = rec
+                .get("bound_in")
+                .and_then(|v| v.as_array())
+                .map(|bound| {
+                    bound
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|table| table.starts_with(&old_prefix))
+                })
+                .unwrap_or(false);
+            if !stale {
+                continue;
+            }
+            let mut new_rec = rec.clone();
+            let rekeyed = if let shamir_types::types::value::QueryValue::Map(map) = &mut new_rec {
+                let list: Vec<shamir_types::types::value::QueryValue> = map
+                    .get("bound_in")
+                    .and_then(|v| v.as_array())
+                    .map(|bound| {
+                        bound
+                            .iter()
+                            .map(|v| match v.as_str() {
+                                Some(table) if table.starts_with(&old_prefix) => {
+                                    shamir_types::types::value::QueryValue::Str(format!(
+                                        "{}{}",
+                                        new_prefix,
+                                        &table[old_prefix.len()..]
+                                    ))
+                                }
+                                _ => v.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                map.insert(
+                    "bound_in".to_string(),
+                    shamir_types::types::value::QueryValue::List(list),
+                );
+                new_rec
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            } else {
+                log::warn!(
+                    "shamir_db::rekey_validator_bound_in_catalogue: validator record with \
+                     stale bound_in for '{from}/…' is not a map (skipping)"
+                );
+                None
+            };
+            let Some(name) = rekeyed else { continue };
+            let meta = crate::access::ResourceMeta::from_record(&rec);
+            self.system_store
+                .save_validator(&name, &new_rec, &meta)
+                .await?;
+        }
+        Ok(())
     }
 }
