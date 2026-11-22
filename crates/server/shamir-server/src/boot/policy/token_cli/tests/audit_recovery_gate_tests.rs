@@ -13,10 +13,15 @@
 //!
 //! Every fixture uses the real persistent stores (server_meta, users, token
 //! store, audit checkpoint keyspace, audit.log) built through the CLI itself.
+//! Round 3 adds lock-first, output-alias and lock-error-classification
+//! regressions for `83-audit-chain-round3.md` finding 3.
 
 use super::super::{
     args::{CreateArgs, ListArgs},
-    run_with_io, CliIo, TokenAction,
+    lock::{is_lock_contention, LockFailure},
+    run_with_io,
+    secret_output::OutputPathError,
+    CliIo, TokenAction,
 };
 use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
 use crate::config::Config;
@@ -29,6 +34,8 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory as _;
 use shamir_connect::server::audit_chain::AuditChain;
 use shamir_connect::server::user_record::UserRecord;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -355,5 +362,253 @@ async fn healthy_history_still_works_across_repeated_cli_reopens() {
         std::fs::read(log_path(&c)).expect("reread audit.log"),
         before,
         "repeated healthy lists must not touch the log"
+    );
+}
+
+fn create_args_with_out(user: &str, label: &str, out: &std::path::Path) -> TokenAction {
+    TokenAction::Create(CreateArgs {
+        user: user.into(),
+        label: label.into(),
+        ttl: Some(7200),
+        read_write: false,
+        channels: "both".into(),
+        databases: vec![],
+        out_file: Some(out.to_path_buf()),
+    })
+}
+
+fn typed_output_error(err: &AnyError, what: &str) {
+    assert!(
+        err.chain()
+            .any(|cause| cause.downcast_ref::<OutputPathError>().is_some()),
+        "{what} must fail with the typed output-path error, got {err:#}"
+    );
+}
+
+/// Round-3 finding 3: `--out-file` equal to the MISSING active audit log.
+/// The valid archive stays, the active log stays missing (recovery may
+/// recreate an empty active only AFTER the typed refusal), and no secret is
+/// ever written into the audit namespace. Old behavior failed here because
+/// `prepare` created the missing `audit.log` BEFORE the lock and recovery:
+/// recovery then accepted the empty active file over the valid archive and
+/// the created token appended and delivered its secret into `audit.log`.
+#[tokio::test]
+async fn create_refuses_audit_log_output_when_active_is_missing_and_archive_is_valid() {
+    let (_tmp, c) = seeded_dir(&["one", "two"]).await;
+    let bytes = std::fs::read(log_path(&c)).expect("read audit.log");
+    let lines = split_lines(&bytes);
+    assert_eq!(lines.len(), 2, "fixture sanity: two records");
+    let key = {
+        let meta = ServerMetaStore::open_or_init(c.data_dir.join("server_meta"))
+            .expect("open server_meta");
+        let key = meta.audit_chain_key().expect("audit chain key");
+        drop(meta);
+        key
+    };
+    let entries = FjallAuditAppender::read_log_for_verify(&c.data_dir).expect("log parses");
+    AuditChain::verify_chain(&key, &entries).expect("fixture history must authenticate");
+    // Simulate an interrupted rotation: valid archive, no active file.
+    let archive = c.data_dir.join("audit.log.00000000000000009999");
+    std::fs::rename(log_path(&c), &archive).expect("rename active to archive");
+    assert!(!log_path(&c).exists(), "fixture sanity: active is missing");
+
+    let (result, o, e) = run(
+        &c,
+        create_args_with_out("alice", "after", &log_path(&c)),
+        true,
+    )
+    .await;
+    let err = result.expect_err("create must refuse an output path equal to the audit log");
+    typed_output_error(&err, "create");
+    let stdout = String::from_utf8(o).expect("stdout");
+    assert!(!stdout.contains("shk1."), "no secret on stdout: {stdout:?}");
+    assert!(
+        !String::from_utf8(e).expect("stderr").contains("shk1."),
+        "no secret on stderr"
+    );
+    assert!(
+        !log_path(&c).exists(),
+        "the typed refusal must not recreate the missing active log"
+    );
+    assert_eq!(
+        std::fs::read(&archive).expect("archive still present"),
+        bytes,
+        "the valid archive must be byte-identical after the refusal"
+    );
+}
+
+/// Round-3 finding 3: with a REAL held maintenance lock, the refusal must
+/// come before any output creation. The strong oracle is the ALREADY
+/// EXISTING destination: `prepare` would fail it with an exclusive-create
+/// error, so a lock message proves the lock won first. Old behavior failed
+/// the occupied case outright (it reported the output error) and it
+/// mislabeled every lock failure as a plain string with no typed split.
+#[tokio::test]
+async fn held_lock_refuses_create_before_any_output_file_is_created() {
+    let (_tmp, c) = seeded_dir(&["one"]).await;
+    let log_before = std::fs::read(log_path(&c)).expect("read audit.log");
+    let _guard = crate::maintenance_lock::acquire(&c.data_dir).expect("hold the lock");
+
+    let occupied = c.data_dir.join("occupied.out");
+    std::fs::write(&occupied, b"keep").expect("existing destination");
+    let (result, _o, _e) = run(&c, create_args_with_out("alice", "held", &occupied), true).await;
+    let err = result.expect_err("a held lock must refuse create");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("requires a stopped server"),
+        "contention must be reported as such: {text}"
+    );
+    assert!(
+        !text.contains("exclusively create"),
+        "the lock refusal must win before output creation: {text}"
+    );
+    assert_eq!(
+        std::fs::read(&occupied).expect("occupied file intact"),
+        b"keep",
+        "an existing destination must never be clobbered"
+    );
+
+    let fresh = c.data_dir.join("fresh.out");
+    let (result, _o, _e) = run(&c, create_args_with_out("alice", "held", &fresh), true).await;
+    let err = result.expect_err("a held lock must refuse a fresh destination too");
+    assert!(
+        format!("{err:#}").contains("requires a stopped server"),
+        "got {err:#}"
+    );
+    assert!(!fresh.exists(), "a lock refusal must not create the output");
+    assert_eq!(
+        std::fs::read(log_path(&c)).expect("reread audit.log"),
+        log_before,
+        "a lock refusal must not touch the audit log"
+    );
+}
+
+/// Round-3 finding 3: permission failures at the lock are classified
+/// separately from contention and keep the IO error detail. Deterministic
+/// via the production classifier and `fs4`'s own contended-error oracle;
+/// real filesystem permission behavior differs between CI privilege levels.
+#[test]
+fn lock_error_classification_distinguishes_permission_from_contention() {
+    let contended = fs4::lock_contended_error();
+    assert!(
+        is_lock_contention(&contended),
+        "fs4's own contended error must classify as contention"
+    );
+    assert!(
+        !is_lock_contention(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        "permission denial is not contention"
+    );
+    // Raw os error 5 is a denial on Windows; on Unix it is a different
+    // non-contention error, so either way it must not be contention.
+    assert!(
+        !is_lock_contention(&std::io::Error::from_raw_os_error(5)),
+        "arbitrary raw errors are not contention"
+    );
+    assert_eq!(
+        LockFailure::Contention.to_string(),
+        "offline token command requires a stopped server"
+    );
+    let denied = LockFailure::LockOther(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    let text = denied.to_string();
+    assert!(
+        !text.contains("requires a stopped server"),
+        "a permission error must not read as contention: {text}"
+    );
+    assert!(
+        text.contains("denied"),
+        "the IO detail must survive: {text}"
+    );
+    let open_failed = LockFailure::Open(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert!(
+        open_failed.to_string().contains("cannot open"),
+        "an open failure must say so: {open_failed}"
+    );
+}
+
+/// Round-3 finding 3: every alias into the reserved `audit.log*` namespace
+/// is refused with the typed error and the real audit log is untouched.
+/// Old behavior created or failed on the alias itself instead of typing the
+/// refusal, and the dotdot and reserved-directory descendants were not
+/// checked at all.
+#[tokio::test]
+async fn create_refuses_every_reserved_audit_namespace_alias() {
+    let (_tmp, c) = seeded_dir(&["one"]).await;
+    let before = std::fs::read(log_path(&c)).expect("read audit.log");
+    std::fs::create_dir_all(c.data_dir.join("audit.log.dir").join("grand"))
+        .expect("reserved-named directory tree");
+    std::fs::create_dir_all(c.data_dir.join("sub")).expect("dotdot base directory");
+    // ASCII case variants are reserved on EVERY platform (Windows and macOS
+    // defaults are case-insensitive; Linux can mount case-insensitive
+    // filesystems), so the uppercase archive shape is refused everywhere.
+    // No entry with that spelling exists in the fixture.
+    let aliases: Vec<std::path::PathBuf> = vec![
+        log_path(&c),
+        c.data_dir.join("audit.log.00000000000000000042"),
+        c.data_dir.join("AUDIT.LOG.00000000000000000042"),
+        c.data_dir
+            .join("audit.log.dir")
+            .join("grand")
+            .join("secret.txt"),
+        c.data_dir.join("sub").join("..").join("audit.log"),
+    ];
+    for alias in &aliases {
+        let (result, _o, _e) = run(&c, create_args_with_out("alice", "alias", alias), true).await;
+        let err = result.expect_err("a reserved alias must be refused");
+        typed_output_error(&err, "create");
+    }
+    assert!(
+        !c.data_dir.join("AUDIT.LOG.00000000000000000042").exists(),
+        "the refusal must not create a case-variant archive name"
+    );
+    assert_eq!(
+        std::fs::read(log_path(&c)).expect("reread audit.log"),
+        before,
+        "no alias attempt may touch the audit log"
+    );
+    let archive_alias = c.data_dir.join("audit.log.00000000000000000042");
+    assert!(
+        !archive_alias.exists(),
+        "the refusal must not create an archive-named file"
+    );
+}
+
+/// Round-3 follow-up: final symlink aliases are typed-refused without being
+/// followed for creation. Unix only: symlink creation needs privileges on
+/// Windows CI. A dangling link with a harmless name whose target is a
+/// missing reserved name is refused through its bounded target check; a
+/// reserved final name is refused even when the link points OUT of the data
+/// directory. Old behavior reported the plain exclusive-create error
+/// instead of the typed refusal and never inspected the target at all.
+#[cfg(unix)]
+#[tokio::test]
+async fn create_typed_refuses_symlink_aliases_named_or_pointing_into_audit_namespace() {
+    let (_tmp, c) = seeded_dir(&["one"]).await;
+    let before = std::fs::read(log_path(&c)).expect("read audit.log");
+    // Dangling link with a harmless name into a missing protected name.
+    let into = c.data_dir.join("secret.out");
+    symlink(c.data_dir.join("audit.log.00000000000000000042"), &into)
+        .expect("dangling link into the reserved namespace");
+    // Reserved final name pointing OUT of the data directory.
+    let outside = c
+        .data_dir
+        .parent()
+        .unwrap_or(c.data_dir.as_path())
+        .join("outside.txt");
+    std::fs::write(&outside, b"out").expect("outside file");
+    let named = c.data_dir.join("audit.log.00000000000000000077");
+    symlink(&outside, &named).expect("reserved name pointing out");
+    for alias in [&into, &named] {
+        let (result, _o, _e) = run(&c, create_args_with_out("alice", "alias", alias), true).await;
+        let err = result.expect_err("a symlink alias into the audit namespace must be refused");
+        typed_output_error(&err, "create");
+    }
+    assert_eq!(
+        std::fs::read(log_path(&c)).expect("reread audit.log"),
+        before,
+        "no symlink attempt may touch the audit log"
+    );
+    assert!(
+        !c.data_dir.join("audit.log.00000000000000000042").exists(),
+        "nothing may be created through the dangling link's target"
     );
 }

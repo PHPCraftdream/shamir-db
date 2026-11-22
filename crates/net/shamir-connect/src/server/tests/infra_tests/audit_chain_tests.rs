@@ -876,3 +876,75 @@ fn writer_refuses_oversized_record_without_latching() {
     writer.checkpoint_now().expect("manual checkpoint succeeds");
     assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
 }
+
+/// The sequence boundary at `u64::MAX - 1` and above: the direct chain
+/// refuses BEFORE consuming the sequence, predecessor HMAC or retained
+/// history; `u64::MAX - 2` is still admitted, the refusal repeats
+/// without latching and leaves the checkpoint state untouched. A
+/// public `from_checkpoint` can also start at `u64::MAX` directly;
+/// `MAX` must not be consumed either. Without the fix the old code
+/// consumed the sequence and published the entry (saturating
+/// arithmetic left a `MAX` start pinned there), so the durable
+/// appender's refusal of a `MAX - 1` record surfaced only afterwards
+/// as a latching persistence failure, not a typed stateless refusal.
+#[test]
+fn chain_refuses_sequence_exhaustion_before_consuming_state() {
+    // Positive control: MAX - 2 is admitted, landing at the boundary.
+    let chain = AuditChain::from_checkpoint(key(), u64::MAX - 2, [7; 32]);
+    let last = chain
+        .append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0)
+        .expect("MAX - 2 must be admitted");
+    assert_eq!(last.seq, u64::MAX - 2);
+    assert_eq!(chain.checkpoint(), (u64::MAX - 1, last.hmac));
+    for _ in 0..2 {
+        assert!(matches!(
+            chain.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ));
+    }
+    // The refusals consumed nothing: state is as after MAX - 2.
+    assert_eq!(chain.checkpoint(), (u64::MAX - 1, last.hmac));
+    let retained = chain.snapshot();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].seq, u64::MAX - 2);
+    assert_eq!(retained[0].hmac, last.hmac);
+    // A chain constructed directly at `MAX` is refused too.
+    let at_max = AuditChain::from_checkpoint(key(), u64::MAX, [7; 32]);
+    assert!(matches!(
+        at_max.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+        Err(AuditError::SequenceExhausted { next }) if next == u64::MAX
+    ));
+    assert_eq!(at_max.checkpoint(), (u64::MAX, [7; 32]));
+}
+
+/// The writer path at the same boundary: the refusal is a typed input
+/// refusal raised inside the durable-gate + chain synchronization
+/// before publication, so nothing reaches the appender, the checkpoint
+/// state is untouched, the refusal repeats, and persistence is not
+/// latched (an explicit `checkpoint_now` afterwards still succeeds).
+/// Without the fix the writer consumed the sequence and published the
+/// entry: `CountingAppender` accepted it without latching, but the
+/// real Fjall adapter refuses a `MAX - 1` record itself — a defect
+/// this seam cannot expose, so the refusal must be in-chain.
+#[test]
+fn writer_refuses_sequence_exhaustion_without_latching_or_appending() {
+    let shared = Arc::new(AuditChain::from_checkpoint(key(), u64::MAX - 1, [9; 32]));
+    let concrete = Arc::new(CountingAppender::default());
+    let appender = Arc::clone(&concrete) as Arc<dyn AuditAppender>;
+    let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
+    for _ in 0..2 {
+        assert!(matches!(
+            writer.append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ));
+    }
+    assert!(concrete.appends.lock().unwrap().is_empty());
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
+    // No fail-closed latch: chain state unchanged, manual checkpoint
+    // still persists it.
+    assert_eq!(writer.chain().checkpoint(), (u64::MAX - 1, [9; 32]));
+    writer
+        .checkpoint_now()
+        .expect("input refusal must not latch persistence");
+    assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
+}

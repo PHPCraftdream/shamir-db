@@ -186,9 +186,25 @@ async fn hmac_chain_is_intact_across_rotation() {
 //
 // The sweep runs piggyback on rotation: when a new rotated file is created,
 // sibling rotated files older than `retention_days` are deleted. File age is
-// determined from the embedded `unix_nanos` suffix in the filename (same
-// format `rotate_locked` produces), not from filesystem mtime.
+// determined from the filesystem mtime of each rotated file, not from the
+// embedded `unix_nanos` suffix in the filename; the fixtures below seed
+// explicit mtimes with `std::fs::FileTimes` so old/young ages are
+// independent of the (legacy, backwards-named) archive names.
 // ---------------------------------------------------------------------------
+
+/// Set the filesystem modified time of `path` to `age_ns` nanoseconds ago,
+/// cross-platform via `std::fs::FileTimes`.
+fn set_mtime_age(path: &std::path::Path, age_ns: u64) {
+    let modified = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_nanos(age_ns))
+        .expect("mtime before now");
+    let f = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open archive to set mtime");
+    f.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .expect("set archive mtime");
+}
 
 fn now_unix_nanos() -> u64 {
     std::time::SystemTime::now()
@@ -235,6 +251,10 @@ fn seed_archive(
         dir.join(format!("audit.log.{archive_ns:020}")),
     )
     .expect("rename active log to archive");
+    set_mtime_age(
+        &dir.join(format!("audit.log.{archive_ns:020}")),
+        now_unix_nanos().saturating_sub(archive_ns),
+    );
 }
 
 /// Append genuinely chain-linked entries (continuing the archive chain's
@@ -309,6 +329,10 @@ async fn retention_zero_means_no_sweep() {
         b"ancient-should-survive-when-retention-is-0",
     )
     .unwrap();
+    set_mtime_age(
+        &dir.join(format!("audit.log.{ancient_ns:020}")),
+        now - ancient_ns,
+    );
 
     // retention_days = 0: the documented off-switch — no sweep ever.
     let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 0).unwrap();
@@ -329,6 +353,7 @@ async fn retention_zero_means_no_sweep() {
 async fn retention_sweep_failure_does_not_break_writes() {
     // A rotated-file-shaped entry that `remove_file` cannot delete (a
     // directory) must NOT propagate an error to the write/rotation caller.
+    // Its mtime is age-eligible, yet the sweep must never unlink it.
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
 
@@ -413,12 +438,13 @@ async fn retention_sweep_preserves_backwards_named_archive_when_earlier_sequence
     // Regression: the sweep may prune only the oldest contiguous
     // age-eligible prefix in first-content-sequence order. Here the
     // archive holding the EARLIER sequences (1-10) carries a YOUNG name
-    // (1 day ago), while a later-sequence archive (11-20) carries an
-    // older, backwards rotation name (10 days ago) that is age-eligible
-    // on its own. Because the earlier-sequence archive is still inside
-    // the retention window, the eligible prefix is empty and the
-    // backwards named archive must be preserved — its eligible
-    // timestamp alone must not cause deletion.
+    // and a YOUNG mtime (1 day ago), while a later-sequence archive
+    // (11-20) carries an older, backwards rotation name (10 days ago) with
+    // an explicitly seeded OLD mtime (10 days ago) that is age-eligible on
+    // its own. Because the earlier-sequence archive is still inside the
+    // retention window, the eligible prefix is empty and the backwards
+    // named archive must be preserved — its eligible name and mtime alone
+    // must not cause deletion.
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
 
@@ -430,6 +456,16 @@ async fn retention_sweep_preserves_backwards_named_archive_when_earlier_sequence
     let chain = AuditChain::new(key);
     seed_archive(dir, &chain, 1..11u64, young_ns);
     seed_archive(dir, &chain, 11..21u64, backwards_old_ns);
+    // Independent mtimes, decoupled from the legacy suffix names: the
+    // earlier-sequence archive stays young, the backwards named one is old.
+    set_mtime_age(
+        &dir.join(format!("audit.log.{young_ns:020}")),
+        NANOS_PER_DAY,
+    );
+    set_mtime_age(
+        &dir.join(format!("audit.log.{backwards_old_ns:020}")),
+        10 * NANOS_PER_DAY,
+    );
 
     let appender = FjallAuditAppender::open_strict_with_rotation(dir, Some(1024), 5).unwrap();
     append_chain_entries(appender.as_ref(), &chain, 21..31u64);

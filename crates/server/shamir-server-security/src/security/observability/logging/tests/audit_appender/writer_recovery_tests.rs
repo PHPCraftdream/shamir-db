@@ -22,7 +22,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 type Position = (u64, [u8; 32]);
@@ -34,6 +34,8 @@ const ACTIVE: &str = "audit.log";
 const ARCHIVE_PREFIX: &str = "audit.log.";
 const EVENT: &str = "auth_success";
 const NANOS_PER_DAY: u64 = 86_400_000_000_000;
+/// Generous bound for a batched shutdown await (slow Windows runner).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Far-future rotation name seed: current wall clock plus ~3.17 years, far
 /// below `u64::MAX` (~584 years in nanos).
@@ -139,6 +141,61 @@ fn archive_suffixes(dir: &Path) -> Vec<u64> {
 
 fn archive_path(dir: &Path, suffix: u64) -> PathBuf {
     dir.join(format!("{ARCHIVE_PREFIX}{suffix:020}"))
+}
+
+/// Backdate `path`'s modification time `days` days behind the wall clock —
+/// fixture for an age source that does not depend on the archive NAME
+/// (round-3 item 1): the sweep must be able to age an archive by its mtime.
+fn set_mtime_days_ago(path: &Path, days: u64) {
+    let mtime = SystemTime::now() - Duration::from_secs(days * 86_400);
+    let file = fs::File::options().append(true).open(path).unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(mtime))
+        .unwrap();
+}
+
+/// Open the checkpoint store under `dir` directly (raw fixture access for
+/// planted rows). The database handle is dropped before returning so
+/// Windows never holds a fjall lock across an appender reopen.
+fn checkpoint_store(dir: &Path) -> (fjall::Database, fjall::Keyspace) {
+    let db = fjall::Database::builder(dir.join(super::super::super::CHECKPOINT_DB_DIRNAME))
+        .open()
+        .unwrap();
+    let ks = db
+        .keyspace(
+            super::super::super::CHECKPOINT_KEYSPACE,
+            fjall::KeyspaceCreateOptions::default,
+        )
+        .unwrap();
+    (db, ks)
+}
+
+/// Plant raw checkpoint bytes (possibly malformed or an invalid tuple).
+fn plant_checkpoint_row(dir: &Path, bytes: &[u8]) {
+    let (db, ks) = checkpoint_store(dir);
+    ks.insert(super::super::super::CHECKPOINT_KEY, bytes)
+        .unwrap();
+    db.persist(fjall::PersistMode::SyncAll).unwrap();
+}
+
+/// The raw checkpoint bytes exactly as stored, `None` when the row is
+/// absent.
+fn raw_checkpoint_row(dir: &Path) -> Option<Vec<u8>> {
+    let (db, ks) = checkpoint_store(dir);
+    let row = ks
+        .get(super::super::super::CHECKPOINT_KEY)
+        .unwrap()
+        .map(|value| value.to_vec());
+    drop(ks);
+    drop(db);
+    row
+}
+
+/// Pack `(next_seq, hmac)` into the on-disk 40-byte row layout.
+fn pack_row(next_seq: u64, hmac: [u8; 32]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(40);
+    packed.extend_from_slice(&next_seq.to_be_bytes());
+    packed.extend_from_slice(&hmac);
+    packed
 }
 
 /// Build a history of `count` chained entries in `dir` (strict appender, no
@@ -284,6 +341,7 @@ async fn directory_sync_failure_latches_before_anchor_meta_and_sweep() {
     let mut entries = strict_history(dir.path(), 4);
     let old_suffix = now_unix_nanos() - 10 * NANOS_PER_DAY;
     split_off_archive(dir.path(), old_suffix, 2);
+    set_mtime_days_ago(&archive_path(dir.path(), old_suffix), 10);
 
     let order: OrderLog = Arc::new(Mutex::new(Vec::new()));
     let holder: Arc<Mutex<Option<Weak<FjallAuditAppender>>>> = Arc::new(Mutex::new(None));
@@ -400,6 +458,7 @@ async fn retention_prunes_old_prefix_and_leaves_a_bootable_anchored_suffix() {
     let entries = strict_history(dir.path(), 4);
     let old_suffix = now_unix_nanos() - 10 * NANOS_PER_DAY;
     split_off_archive(dir.path(), old_suffix, 2);
+    set_mtime_days_ago(&archive_path(dir.path(), old_suffix), 10);
 
     let order: OrderLog = Arc::new(Mutex::new(Vec::new()));
     let holder: Arc<Mutex<Option<Weak<FjallAuditAppender>>>> = Arc::new(Mutex::new(None));
@@ -615,4 +674,189 @@ async fn anchor_writes_are_monotonic_lower_and_conflict_refused() {
         FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
         Some(tail)
     );
+}
+
+/// Round-3 item 4 (raw parity), fresh store — a raw checkpoint write
+/// refuses an invalid tuple (zero next sequence, or genesis position with a
+/// non-genesis digest) BEFORE any comparison with the stored row, and
+/// writes no row; a valid post-genesis tuple succeeds (healthy control).
+/// Each refusal runs on its own fresh appender: the first refusal latches
+/// fail-closed (existing policy), so the typed observation must be the
+/// FIRST failure of that instance; the identical retry then fails latched.
+///
+/// Parent counterfactual: the raw write lands unconditionally, so every
+/// invalid attempt succeeds and `raw_checkpoint_row` is `Some` afterwards.
+#[test]
+fn raw_checkpoint_refuses_invalid_tuple_on_fresh_store() {
+    for (next_seq, hmac) in [(0u64, GENESIS.1), (GENESIS.0, [0xff_u8; 32])] {
+        let dir = TempDir::new().unwrap();
+        let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+        let error = AuditAppender::checkpoint(&*appender, next_seq, &hmac)
+            .expect_err("an invalid tuple must be refused even on a fresh store");
+        let cause = error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<AppenderError>())
+            .expect("first refusal must retain the typed AppenderError as io source");
+        assert!(
+            matches!(cause, AppenderError::InvalidAnchor { next_seq: found } if *found == next_seq),
+            "{cause:?}"
+        );
+        // Identical retry on the latched appender fails too; nothing written.
+        assert!(AuditAppender::checkpoint(&*appender, next_seq, &hmac).is_err());
+        assert_eq!(persisted_anchor(&appender), None);
+        drop(appender);
+        assert_eq!(raw_checkpoint_row(dir.path()), None);
+    }
+
+    // Healthy control (own store): a valid post-genesis anchor is accepted
+    // and stored, on the write and after a reopen of the raw row.
+    let dir = TempDir::new().unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+    let control = (2u64, [7u8; 32]);
+    AuditAppender::checkpoint(&*appender, control.0, &control.1).unwrap();
+    assert_eq!(persisted_anchor(&appender), Some(control));
+    drop(appender);
+    assert_eq!(
+        raw_checkpoint_row(dir.path()),
+        Some(pack_row(control.0, control.1))
+    );
+}
+
+/// Round-3 item 4 — a malformed stored row (wrong length) or a stored
+/// invalid tuple is a typed error from `load_checkpoint` and from a raw
+/// checkpoint write, which cannot overwrite it: the exact bad bytes survive
+/// unchanged. A valid row loads unchanged (healthy control).
+///
+/// Parent counterfactual: `decode_checkpoint` maps bad bytes to `None`, so
+/// `load_checkpoint` returns `Ok(None)` and the next raw checkpoint
+/// silently OVERWRITES the preserved row.
+#[test]
+fn raw_checkpoint_preserves_malformed_row_and_invalid_tuple() {
+    // Case 1: malformed (wrong-length) row.
+    let dir = TempDir::new().unwrap();
+    let bad_bytes = vec![0xAA_u8; 39];
+    plant_checkpoint_row(dir.path(), &bad_bytes);
+    let error = FjallAuditAppender::load_checkpoint(dir.path())
+        .expect_err("a malformed stored row must be a typed error, never silent None");
+    assert!(
+        matches!(&error, AppenderError::MalformedCheckpoint { length } if *length == 39),
+        "{error:?}"
+    );
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+    let error = AuditAppender::checkpoint(&*appender, 5, &[7u8; 32])
+        .expect_err("a raw write must refuse a malformed existing row");
+    let cause = error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<AppenderError>())
+        .expect("first refusal must retain the typed AppenderError as io source");
+    assert!(
+        matches!(cause, AppenderError::MalformedCheckpoint { length } if *length == 39),
+        "{cause:?}"
+    );
+    drop(appender);
+    assert_eq!(raw_checkpoint_row(dir.path()), Some(bad_bytes));
+
+    // Healthy control on the same store: planting a VALID row loads it
+    // unchanged and a matching checkpoint write succeeds.
+    let control = (2u64, [7u8; 32]);
+    plant_checkpoint_row(dir.path(), &pack_row(control.0, control.1));
+    assert_eq!(
+        FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
+        Some(control)
+    );
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+    AuditAppender::checkpoint(&*appender, control.0, &control.1).unwrap();
+    drop(appender);
+    assert_eq!(
+        raw_checkpoint_row(dir.path()),
+        Some(pack_row(control.0, control.1))
+    );
+
+    // Case 2: a stored invalid genesis tuple (genesis position, non-genesis
+    // digest) is refused with the same rule recovery applies at boot.
+    let dir = TempDir::new().unwrap();
+    let bad_row = pack_row(GENESIS.0, [0xff_u8; 32]);
+    plant_checkpoint_row(dir.path(), &bad_row);
+    let error = FjallAuditAppender::load_checkpoint(dir.path())
+        .expect_err("an invalid genesis tuple must be a typed error, never silent None");
+    assert!(
+        matches!(&error, AppenderError::InvalidAnchor { next_seq } if *next_seq == GENESIS.0),
+        "{error:?}"
+    );
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+    assert!(AuditAppender::checkpoint(&*appender, 5, &[7u8; 32]).is_err());
+    drop(appender);
+    assert_eq!(raw_checkpoint_row(dir.path()), Some(bad_row));
+}
+
+/// Deferred shutdown-reporting item — a failing final server-meta hook at
+/// batched shutdown latches fail-closed exactly as before (no change to
+/// shutdown execution), the persisted appender anchor is still durable, and
+/// the failure is OBSERVABLE through the new `last_failure` stored-error
+/// getter so the ordered-shutdown task can report it.
+///
+/// Parent counterfactual: shutdown latches and logs the error but returns
+/// `()` and exposes nothing — the getter does not exist, so the observation
+/// below is impossible and the executable can exit cleanly on a stale
+/// second anchor.
+#[tokio::test]
+async fn shutdown_meta_hook_failure_is_observable_through_getter() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2);
+    let order: OrderLog = Arc::new(Mutex::new(Vec::new()));
+    let (calls, hook) = {
+        let order = Arc::clone(&order);
+        let calls: Arc<Mutex<Vec<()>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_for_hook = Arc::clone(&calls);
+        let hook = move |_seq: u64, _hmac: [u8; 32]| {
+            calls_for_hook.lock().unwrap().push(());
+            push(&order, "meta");
+            Err(io::Error::other("injected meta hook failure"))
+        };
+        (calls, hook)
+    };
+    let (appender, position) = FjallAuditAppender::open_recovered_batched_with_meta(
+        dir.path(),
+        &KEY,
+        None,
+        FLUSH_INTERVAL,
+        None,
+        0,
+        hook,
+    )
+    .unwrap();
+    assert_eq!(position, after(&entries[1]));
+
+    let writer = resume_writer(position, &appender);
+    let third = append(&writer, vec![0xc0]);
+    let tail = after(&third);
+    // Bounded: never hang the runner on a lost flusher notification.
+    tokio::time::timeout(SHUTDOWN_TIMEOUT, appender.shutdown())
+        .await
+        .expect("shutdown must finish within the bound");
+
+    // The hook ran exactly once.
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    // Postcondition: the anchor write itself is durable despite the hook
+    // failure (the hook does not observe the anchor; the persisted row is
+    // asserted after shutdown).
+    assert_eq!(persisted_anchor(&appender), Some(tail));
+    // The failure is observable: typed latch message naming the hook error.
+    let failure = appender
+        .last_failure()
+        .expect("a failed final meta hook must be observable through the getter");
+    assert!(failure.contains("injected meta hook failure"), "{failure}");
+    // Identical retry: the latch keeps every later close attempt failing.
+    tokio::time::timeout(SHUTDOWN_TIMEOUT, appender.shutdown())
+        .await
+        .expect("retry shutdown must finish within the bound");
+    assert!(appender.last_failure().is_some());
+    drop(writer);
+    drop(appender);
+    // The anchor write itself is durable despite the hook failure.
+    assert_eq!(
+        FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
+        Some(tail)
+    );
+    drop(order);
 }

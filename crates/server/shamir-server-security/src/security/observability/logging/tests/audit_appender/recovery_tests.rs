@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 type Position = (u64, [u8; 32]);
@@ -476,8 +476,7 @@ async fn unrelated_prefixed_file_is_ignored() {
     let (appender, position) = recover(dir.path(), &KEY, None).unwrap();
     assert_eq!(position, after(&entries[1]));
     drop(appender);
-    // The diagnostic reader includes only exact-pattern archives and the
-    // active log — never the ignored files.
+    // The diagnostic reader includes only exact-pattern archives.
     assert_full_history(dir.path(), &entries);
 }
 
@@ -515,16 +514,12 @@ async fn empty_exact_pattern_archive_is_refused() {
     assert_full_history(dir.path(), &entries);
 }
 
-// Finding 7 — the recovery-side directory-sync seam. Production passes the
-// real `rotation::sync_parent`; these tests substitute closures to prove the
-// sync is issued only AFTER the verified truncation and the `audit.log`
-// reopen/create, and that a sync failure is a typed refusal that leaves the
-// prior persisted checkpoint untouched.
+// Finding 7 — the recovery-side directory-sync seam: closures prove the
+// sync runs only AFTER the verified truncation and the active reopen/create,
+// and that a sync failure is a typed refusal that anchors nothing.
 
-/// A torn active tail is truncated before the seam: the closure sees exactly
-/// the recovered active bytes, then runs the REAL parent-directory sync.
-/// Parent counterfactual: `recover` called `sync_parent` before
-/// `set_len`/`open_log`, so the closure would observe the torn byte.
+/// A torn active tail is truncated before the seam, then the REAL parent
+/// sync runs. Red: a sync before `set_len`/`open_log` would see the torn byte.
 #[tokio::test]
 async fn recovery_syncs_directory_after_truncation_and_reopen() {
     let dir = TempDir::new().unwrap();
@@ -539,8 +534,7 @@ async fn recovery_syncs_directory_after_truncation_and_reopen() {
     let recovered =
         recovery::recover_with_dir_sync(dir.path(), &KEY, Some(GENESIS), move |log_path| {
             assert_eq!(log_path, active);
-            // Truncation already applied and the writable handle already
-            // reopened: the active file holds exactly the verified prefix.
+            // Truncation and the writable reopen already happened.
             assert_eq!(fs::read(log_path).unwrap(), expected_in_sync);
             rotation::sync_parent(log_path)
         })
@@ -551,9 +545,8 @@ async fn recovery_syncs_directory_after_truncation_and_reopen() {
     assert_eq!(fs::read(&path).unwrap(), expected);
 }
 
-/// A missing active log is recreated (zero length) before the seam: the
-/// closure sees the fresh empty file, then runs the REAL sync.
-/// Parent counterfactual: a sync issued before `open_log` would see no file.
+/// A missing active log is recreated (zero length) before the REAL sync.
+/// Red: a sync before `open_log` would see no file.
 #[tokio::test]
 async fn recovery_syncs_directory_after_creating_the_active_log() {
     let dir = TempDir::new().unwrap();
@@ -572,11 +565,9 @@ async fn recovery_syncs_directory_after_creating_the_active_log() {
     assert_eq!(fs::metadata(&active).unwrap().len(), 0);
 }
 
-/// An injected sync failure after a verified truncation is a typed refusal
-/// and leaves the prior persisted checkpoint exactly as it was.
-/// Parent counterfactual: without the seam (or an untyped panic/mask) the
-/// failure would either be unobservable or lose its `AuditRecoveryError::Io`
-/// type, and an anchor write could not be ruled out.
+/// An injected sync failure after a verified truncation is a typed
+/// `AuditRecoveryError::Io` refusal and leaves the prior persisted
+/// checkpoint exactly as it was.
 #[tokio::test]
 async fn recovery_refuses_when_the_directory_sync_fails_and_keeps_the_checkpoint() {
     let dir = TempDir::new().unwrap();
@@ -605,8 +596,7 @@ async fn recovery_refuses_when_the_directory_sync_fails_and_keeps_the_checkpoint
     })
     .err()
     .expect("recovery accepted a failing directory sync");
-    // Typed refusal at the exact active log path, carrying the injected
-    // source — not a panic or a masked generic error.
+    // Typed refusal at the exact active path, source preserved.
     let AuditRecoveryError::Io {
         path: io_path,
         source,
@@ -616,11 +606,343 @@ async fn recovery_refuses_when_the_directory_sync_fails_and_keeps_the_checkpoint
     };
     assert_eq!(io_path, dir.path().join(ACTIVE));
     assert_eq!(source.to_string(), "injected directory sync failure");
-    // The sync runs after the verified truncation, so the on-disk active
-    // file is the truncated verified prefix — but nothing was anchored.
+    // Sync runs after truncation; nothing was anchored.
     assert_eq!(fs::read(&path).unwrap(), &bytes[..torn]);
     assert_eq!(
         FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
         Some(anchor)
     );
+}
+
+/// The largest rotation name has no legal successor: recovery refuses such
+/// a suffix at boot (failure at start, never after new records were
+/// synced), preserving the genuine fixture; `u64::MAX - 1` is the healthy
+/// control extended below. Red: without the refusal both fixtures boot and
+/// auditing latches only at the next rotation.
+#[tokio::test]
+async fn max_suffix_rotation_name_is_refused_and_max_minus_one_recovers() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 3, None);
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let end = first_line_end(&bytes);
+    let control = dir.path().join("audit.log.18446744073709551614");
+    fs::write(&control, &bytes[..end]).unwrap();
+    fs::write(&path, &bytes[end..]).unwrap();
+    let (appender, position) = recover(dir.path(), &KEY, None).unwrap();
+    assert_eq!(position, after(&entries[2]));
+    drop(appender);
+    assert_full_history(dir.path(), &entries);
+
+    // Same genuine bytes under the exhausted suffix are refused at boot,
+    // leaving the active log and the archive exactly as they were.
+    let refused = dir.path().join("audit.log.18446744073709551615");
+    fs::rename(&control, &refused).unwrap();
+    let error = assert_rejected(dir.path(), &KEY, None);
+    assert!(
+        matches!(error, AuditRecoveryError::InvalidRotationName { .. }),
+        "{error:?}"
+    );
+    assert_eq!(fs::read(&refused).unwrap(), &bytes[..end]);
+    assert_eq!(fs::read(&path).unwrap(), &bytes[end..]);
+
+    // With `MAX-1` on disk the rotation skips without minting `MAX` or
+    // latching; a fresh boot still resumes at the verified tail.
+    fs::rename(&refused, &control).unwrap();
+    let (appender, position) = FjallAuditAppender::open_recovered_batched(
+        dir.path(),
+        &KEY,
+        None,
+        FLUSH_INTERVAL,
+        Some(1), // every flush rotates: the exhausted-suffix skip fires
+        1,
+    )
+    .unwrap();
+    assert_eq!(position, after(&entries[2]));
+    let writer = AuditChainWriter::new(
+        AuditChain::from_checkpoint(KEY, position.0, position.1),
+        appender.clone(),
+    );
+    let fourth = append(&writer, DURABLE_EVENT);
+    drop(writer);
+    tokio::time::timeout(HANG_GUARD, appender.flush_now())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(appender);
+    let suffixes = archive_suffixes(dir.path());
+    assert_eq!(suffixes, [u64::MAX - 1]);
+    // The skipped rotation kept the prior active bytes and the flushed
+    // fourth record grew that same file.
+    let active_now = fs::read(&path).unwrap();
+    assert!(
+        active_now.starts_with(&bytes[end..]),
+        "skipped rotation must keep the prior active bytes"
+    );
+    assert!(
+        active_now.len() > bytes.len() - end,
+        "the flushed record must have grown the active file"
+    );
+    let (rebooted, reboot_position) =
+        FjallAuditAppender::open_recovered_batched(dir.path(), &KEY, None, FLUSH_INTERVAL, None, 0)
+            .unwrap();
+    assert_eq!(reboot_position, after(&fourth));
+    drop(rebooted);
+}
+
+/// Legacy wall-clock-rolled-back names step backward while the chain steps
+/// forward: recovery exposes the archive suffixes in verified first-record
+/// order (`legacy_archive_order`) so retention never prunes by suffix on
+/// such a layout; a healthy strictly-increasing layout exposes `None`.
+/// Red: with a suffix-ordered sweep the parent would prune the newest
+/// legacy archive first, destroying the authenticated tail.
+#[tokio::test]
+async fn inverted_suffix_names_expose_the_verified_first_sequence_order() {
+    // Inverted fixture: the same layout as the content-order recovery test.
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 3, None);
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let split = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(1)
+        .map(|(offset, _)| offset + 1)
+        .unwrap();
+    fs::write(
+        dir.path().join("audit.log.00000000000000000099"),
+        &bytes[..split],
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("audit.log.00000000000000000005"),
+        &bytes[split..],
+    )
+    .unwrap();
+    fs::remove_file(&path).unwrap();
+    let recovered =
+        recovery::recover_with_dir_sync(dir.path(), &KEY, None, rotation::sync_parent).unwrap();
+    assert_eq!(recovered.position, after(&entries[2]));
+    assert_eq!(recovered.legacy_archive_order, Some(vec![99, 5]));
+    drop(recovered);
+
+    // Healthy control: suffix order stays authoritative, no order vector.
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 3, None);
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let end = first_line_end(&bytes);
+    fs::write(dir.path().join(ROTATED), &bytes[..end]).unwrap();
+    fs::write(&path, &bytes[end..]).unwrap();
+    let recovered =
+        recovery::recover_with_dir_sync(dir.path(), &KEY, None, rotation::sync_parent).unwrap();
+    assert_eq!(recovered.position, after(&entries[2]));
+    assert_eq!(recovered.legacy_archive_order, None);
+    drop(recovered);
+}
+
+/// An archive whose first row lacks its terminating LF is refused as an
+/// `ArchivedFragment` by the exact framing check. Red: dropping the LF
+/// check would accept a torn archive.
+#[tokio::test]
+async fn unterminated_archive_first_row_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    let invalid = dir.path().join("audit.log.00000000000000000002");
+    let bytes = fs::read(dir.path().join(ACTIVE)).unwrap();
+    let mut row = bytes[..first_line_end(&bytes)].to_vec();
+    row.pop();
+    fs::write(&invalid, &row).unwrap();
+    let error = assert_rejected(dir.path(), &KEY, None);
+    assert!(
+        matches!(
+            error,
+            AuditRecoveryError::ArchivedFragment { offset: 0, .. }
+        ),
+        "{error:?}"
+    );
+    // The refusal preserves the exact invalid fixture byte-for-byte.
+    assert_eq!(fs::read(&invalid).unwrap(), row);
+    fs::remove_file(&invalid).unwrap();
+    assert_full_history(dir.path(), &entries);
+}
+
+/// A first row with no tab inside the probe bound falls back to the
+/// bounded full-first-row classification and is refused as malformed.
+/// Red: without the fallback boot would panic or sort it arbitrarily.
+#[tokio::test]
+async fn no_tab_archive_first_row_is_refused_as_malformed() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    let invalid = dir.path().join("audit.log.00000000000000000002");
+    fs::write(&invalid, b"not-a-record\n").unwrap();
+    let error = assert_rejected(dir.path(), &KEY, None);
+    assert!(
+        matches!(error, AuditRecoveryError::MalformedRecord { offset: 0, .. }),
+        "{error:?}"
+    );
+    // The refusal preserves the exact invalid fixture byte-for-byte.
+    assert_eq!(fs::read(&invalid).unwrap(), b"not-a-record\n");
+    fs::remove_file(&invalid).unwrap();
+    assert_full_history(dir.path(), &entries);
+}
+
+/// Zero-archive-open seam for the retention path. Boot opens the single
+/// ordinary archive twice (prefix probe + body scan: all-open delta 2,
+/// body delta 1), while a later retention-ENABLED no-prune rotation — the
+/// sweep is metadata-only, it does not even prefix-probe — must not open
+/// any archive (both counters flat). Red: the old full-first-record sweep
+/// would decode every archive's first full row and both counters would
+/// rise.
+#[tokio::test(flavor = "current_thread")]
+async fn retention_enabled_no_prune_rotation_reads_no_archive_body() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 2, None);
+    // Current-time name so the sweep finds it young and prunes nothing.
+    let now_ns = now_unix_nanos();
+    let young = dir.path().join(format!("audit.log.{now_ns:020}"));
+    let path = dir.path().join(ACTIVE);
+    let bytes = fs::read(&path).unwrap();
+    let end = first_line_end(&bytes);
+    fs::write(&young, &bytes[..end]).unwrap();
+    fs::write(&path, &bytes[end..]).unwrap();
+
+    // Boot opens the single archive twice (probe + body scan).
+    let before = recovery::archive_body_opens();
+    let before_opens = recovery::archive_opens();
+    let (appender, position) = FjallAuditAppender::open_recovered_batched(
+        dir.path(),
+        &KEY,
+        None,
+        FLUSH_INTERVAL,
+        Some(1), // every append rotates: the sweep runs on each rotation
+        3_600,   // retention enabled, but both archives are young
+    )
+    .unwrap();
+    assert_eq!(recovery::archive_body_opens() - before, 1);
+    assert_eq!(recovery::archive_opens() - before_opens, 2);
+    assert_eq!(position, after(&entries[1]));
+
+    // No-prune rotation: both open-count deltas must stay zero.
+    let writer = AuditChainWriter::new(
+        AuditChain::from_checkpoint(KEY, position.0, position.1),
+        appender.clone(),
+    );
+    let resumed = append(&writer, DURABLE_EVENT);
+    assert_eq!(resumed.seq, position.0);
+    drop(writer);
+    tokio::time::timeout(HANG_GUARD, appender.flush_now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery::archive_body_opens() - before, 1);
+    assert_eq!(recovery::archive_opens() - before_opens, 2);
+    // No prune: boot archive stays, rotation created one more.
+    assert!(young.exists());
+    let archives = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| recovery::archive_name(&entry.unwrap().path()).unwrap())
+        .count();
+    assert_eq!(archives, 2);
+    drop(appender);
+    assert_eq!(read_entries(dir.path()).len(), 3);
+}
+
+/// Round-3 item 1 — physical rotate → retention → reopen: the sweep ages
+/// every archive by its mtime (std `FileTimes`), never by the far-future
+/// NAME, and a future-dated archive blocks only the contiguous suffix
+/// behind it (s1/s2 old, s3 future blocker, s4 old behind it). One append
+/// through the recovered rotating writer mints the newest archive and
+/// sweeps. Red: aging by name deletes nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn retention_ages_by_mtime_not_by_far_future_names() {
+    let dir = TempDir::new().unwrap();
+    let entries = strict_history(dir.path(), 5, None);
+    let bytes = fs::read(dir.path().join(ACTIVE)).unwrap();
+    let day_ns = 86_400_000_000_000u64;
+    let base = now_unix_nanos();
+    let names: Vec<u64> = (1..=4)
+        .map(|step| base.checked_add(step * day_ns).unwrap())
+        .collect();
+    let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
+    let future = SystemTime::now() + Duration::from_secs(30 * 86_400);
+    let ends: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .take(4)
+        .map(|(offset, _)| offset + 1)
+        .collect();
+    let mut begin = 0usize;
+    for ((name, end), mtime) in names.iter().zip(&ends).zip([old, old, future, old]) {
+        lay_archive(dir.path(), *name, &bytes[begin..*end], mtime);
+        begin = *end;
+    }
+    fs::write(dir.path().join(ACTIVE), &bytes[begin..]).unwrap();
+    assert_full_history(dir.path(), &entries);
+    let (appender, position) = FjallAuditAppender::open_recovered_batched(
+        dir.path(),
+        &KEY,
+        None,
+        FLUSH_INTERVAL,
+        Some(1), // every flush rotates: the sweep runs on the rotation
+        1,       // retention_days: only the 30-day-old mtimes are eligible
+    )
+    .unwrap();
+    assert_eq!(position, after(&entries[4]));
+    let writer = AuditChainWriter::new(
+        AuditChain::from_checkpoint(KEY, position.0, position.1),
+        appender.clone(),
+    );
+    let sixth = append(&writer, DURABLE_EVENT);
+    drop(writer);
+    tokio::time::timeout(HANG_GUARD, appender.flush_now())
+        .await
+        .unwrap()
+        .unwrap();
+    let tail = after(&sixth);
+    let kept = archive_suffixes(dir.path());
+    assert_eq!(&kept[..2], &[names[2], names[3]]);
+    assert_eq!(kept.len(), 3);
+    let newest = kept[2];
+    assert!(newest > names[3]);
+    drop(appender);
+    assert_eq!(
+        FjallAuditAppender::load_checkpoint(dir.path()).unwrap(),
+        Some(tail)
+    );
+    let (strict, strict_position) =
+        FjallAuditAppender::open_recovered_strict(dir.path(), &KEY, None).unwrap();
+    assert_eq!(strict_position, tail);
+    drop(strict);
+    // Genesis was pruned with s1/s2: the retained suffix starts at seq 3.
+    let retained: Vec<u64> = read_entries(dir.path()).iter().map(|e| e.seq).collect();
+    assert_eq!(retained, [3, 4, 5, 6]);
+}
+
+fn now_unix_nanos() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    u64::try_from(elapsed.as_nanos()).unwrap()
+}
+
+/// Lay out a real archive and pin its mtime (age must not depend on name).
+fn lay_archive(dir: &Path, suffix: u64, bytes: &[u8], mtime: SystemTime) {
+    let path = dir.join(format!("audit.log.{suffix:020}"));
+    fs::write(&path, bytes).unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(mtime))
+        .unwrap();
+}
+
+fn archive_suffixes(dir: &Path) -> Vec<u64> {
+    let mut out: Vec<u64> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| recovery::archive_name(&entry.path()).unwrap())
+        .collect();
+    out.sort_unstable();
+    out
 }

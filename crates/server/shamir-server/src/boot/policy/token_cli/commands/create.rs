@@ -1,9 +1,8 @@
-use super::{args::CreateArgs, secret_output};
+use super::{args::CreateArgs, lock, secret_output};
 use crate::{
     audit_appender::FjallAuditAppender,
     config::Config,
     engine::server_meta::ServerMetaStore,
-    maintenance_lock,
     security::tokens::{
         DirectoryOwnerFloors, NewToken, TokenAuditContext, TokenService, TokenServiceOptions,
     },
@@ -28,19 +27,34 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     if a.out_file.is_none() && !io.is_terminal {
         anyhow::bail!("create requires terminal or --out-file; no token was created");
     }
-    let output = secret_output::prepare(a.out_file.as_deref(), io.is_terminal)?;
+    // Lock FIRST: a live server is refused before anything is created.
+    // Held to the end of this function: the lock must outlive every store
+    // handle and cover delivery and cleanup.
+    let _guard = prepare_dir_and_lock(c)?;
+    // Validate the destination while the lock is held, BEFORE recovery can
+    // recreate a missing active log and BEFORE any output file exists; the
+    // returned path is the validated destination used for creation AND
+    // cleanup, so no later link resolution can differ.
+    let validated_out = match a.out_file.as_deref() {
+        Some(path) => {
+            Some(secret_output::validate_out_file(path, &c.data_dir).map_err(anyhow::Error::new)?)
+        }
+        None => None,
+    };
+    let output = secret_output::prepare(validated_out.as_deref(), io.is_terminal)?;
     let setup = async {
-        let (g, m, d, w, app) = open(c)?;
+        let (m, d, w, app) = open_locked(c)?;
         let owner = resolve(&d, &a.user)?;
         let channel = parse_channels(&a.channels)?;
         let svc = service(c, &m, d.clone(), w.clone()).await?;
-        anyhow::Ok((g, m, d, w, app, owner, channel, svc))
+        anyhow::Ok((m, d, w, app, owner, channel, svc))
     }
     .await;
-    let (g, m, d, w, app, owner, channel, svc) = match setup {
+    let (m, d, w, app, owner, channel, svc) = match setup {
         Ok(v) => v,
         Err(e) => {
-            remove_out_file(a.out_file.as_deref());
+            drop(output);
+            remove_out_file(validated_out.as_deref());
             return Err(e);
         }
     };
@@ -85,12 +99,13 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         (created.token, text, id)
     }).map_err(anyhow::Error::from);
     let cp = finish(&w, &app, &m).await;
+    // Drop every store handle BEFORE delivery or cleanup; the lock file is
+    // released only when this function returns.
     drop(svc);
     drop(d);
     drop(m);
     drop(app);
     drop(w);
-    drop(g);
     let (secret, text, token_id) = match (prepared, cp) {
         (Ok(v), Ok(())) => v,
         (Ok((_, _, id)), Err(_)) => {
@@ -99,7 +114,8 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
             ))
         }
         (Err(e), Ok(())) => {
-            remove_out_file(a.out_file.as_deref());
+            drop(output);
+            remove_out_file(validated_out.as_deref());
             return Err(e);
         }
         (Err(e), Err(_)) => return Err(e.context("the audit checkpoint also failed")),
@@ -174,10 +190,28 @@ pub(super) type Opened = (
     Arc<AuditChainWriter>,
     Arc<FjallAuditAppender>,
 );
-pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
+/// Create the data directory if needed (matching the old lock-last layout
+/// on a fresh directory), then take the classified offline maintenance lock.
+pub(super) fn prepare_dir_and_lock(c: &Config) -> anyhow::Result<std::fs::File> {
     std::fs::create_dir_all(&c.data_dir)?;
-    let g = maintenance_lock::acquire(&c.data_dir)
-        .map_err(|_| anyhow::anyhow!("offline token command requires a stopped server"))?;
+    lock::acquire(&c.data_dir).map_err(anyhow::Error::new)
+}
+/// Server meta, user directory, shared audit writer and its appender.
+type Stores = (
+    ServerMetaStore,
+    Arc<FjallUserDirectory>,
+    Arc<AuditChainWriter>,
+    Arc<FjallAuditAppender>,
+);
+pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
+    let guard = prepare_dir_and_lock(c)?;
+    let (m, d, w, app) = open_locked(c)?;
+    Ok((guard, m, d, w, app))
+}
+/// Everything after the maintenance lock is held: the CALLER must hold the
+/// shared offline maintenance lock, and its guard file must stay alive
+/// longer than every returned store handle.
+fn open_locked(c: &Config) -> anyhow::Result<Stores> {
     // Format-stamp gate (design 3.3: Writer — this command creates
     // server_meta in an empty directory).
     check_data_dir(
@@ -207,7 +241,7 @@ pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
         app.clone(),
     ));
     let d = Arc::new(FjallUserDirectory::open(c.data_dir.join("users"))?);
-    Ok((g, m, d, w, app))
+    Ok((m, d, w, app))
 }
 pub(super) async fn service(
     c: &Config,

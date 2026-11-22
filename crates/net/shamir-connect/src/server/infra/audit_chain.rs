@@ -377,6 +377,10 @@ impl AuditChain {
         {
             return Err(AuditError::RecordTooLarge);
         }
+        // The durable format requires a checkpoint successor below u64::MAX.
+        if g.next_seq >= u64::MAX - 1 {
+            return Err(AuditError::SequenceExhausted { next: g.next_seq });
+        }
         canonical[..8].copy_from_slice(&entry.seq.to_be_bytes());
         let prev_at = canonical.len() - 32;
         canonical[prev_at..].copy_from_slice(&entry.prev_hmac);
@@ -385,7 +389,7 @@ impl AuditChain {
         retained.prev_hmac = entry.prev_hmac;
         retained.hmac = entry.hmac;
         g.prev_hmac = entry.hmac;
-        g.next_seq = g.next_seq.saturating_add(1);
+        g.next_seq += 1; // guarded above: at most `MAX - 2` here
         if g.entries.len() >= RETAINED_ENTRIES {
             g.entries.pop_front();
         }
@@ -542,6 +546,14 @@ pub enum AuditError {
         MAX_RECORD_BYTES
     )]
     RecordTooLarge,
+    /// Sequence space is exhausted: the next record would produce a
+    /// checkpoint successor that recovery cannot resume (`u64::MAX` or
+    /// overflow). Refused before publication without latching persistence.
+    #[error("audit sequence space exhausted: refusing to consume sequence {next}")]
+    SequenceExhausted {
+        /// The sequence the append would have consumed.
+        next: u64,
+    },
     /// Entry's `hmac` doesn't match its canonical bytes.
     #[error("audit HMAC mismatch at {at}")]
     HmacMismatch {

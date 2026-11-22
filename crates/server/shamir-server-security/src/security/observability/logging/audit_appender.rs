@@ -19,9 +19,8 @@
 //!
 //! Checkpoint writes are always durable regardless of mode.
 
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use parking_lot::Mutex;
-use shamir_connect::common::crypto::constant_time_eq;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditEntry, AuditError, MAX_RECORD_BYTES,
 };
@@ -32,11 +31,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::{sync::Notify, task::JoinHandle};
 
+mod checkpoint;
 mod format;
 mod recovery;
 mod rotation;
 
 use format::entry_to_line;
+use rotation::RotationState;
 
 #[cfg(test)]
 #[path = "tests/audit_appender_tests_manifest.rs"]
@@ -167,6 +168,19 @@ pub enum AppenderError {
     /// fjall error while opening / committing the checkpoint keyspace.
     #[error("fjall: {0}")]
     Fjall(#[from] fjall::Error),
+    /// A checkpoint row has the wrong byte length.
+    #[error("malformed audit checkpoint row: expected 40 bytes, got {length}")]
+    MalformedCheckpoint {
+        /// Actual stored row length in bytes.
+        length: usize,
+    },
+    /// A checkpoint tuple is not a valid chain position (zero next sequence
+    /// or a genesis position carrying a non-genesis digest).
+    #[error("invalid audit checkpoint at next sequence {next_seq}")]
+    InvalidAnchor {
+        /// Attempted next sequence of the refused tuple.
+        next_seq: u64,
+    },
     /// A checkpoint at an older chain position than the persisted anchor
     /// row was attempted (fail-closed anchor regression refusal).
     #[error(
@@ -227,7 +241,10 @@ pub struct FjallAuditAppender {
     /// every actual rotation and the final batched shutdown, after the
     /// appender anchor is persisted and before retention prunes.
     meta_hook: Option<ServerMetaHook>,
-    rotation: Option<RotationPolicy>,
+    /// Internal rotation state; carries the policy and the precomputed
+    /// legacy archive suffix order the retention sweep emits before
+    /// suffix-ordered post-boot archives.
+    rotation: Option<RotationState>,
     #[cfg(test)]
     after_extract_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -293,15 +310,12 @@ impl FjallAuditAppender {
         let log_file = Self::open_log(&log_path)?;
         let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
         let (checkpoint_db, checkpoint_ks) = Self::open_db(&db_path)?;
+        let rotation = RotationState::raw_policy(dir, max_size_bytes, initial_size, retention_days);
         Ok(Arc::new(Self::new_strict(
             log_path,
             log_file,
             (checkpoint_db, checkpoint_ks),
-            max_size_bytes.map(|max_size_bytes| RotationPolicy {
-                max_size_bytes,
-                current_size: std::sync::atomic::AtomicU64::new(initial_size),
-                retention_days,
-            }),
+            rotation,
             None,
         )))
     }
@@ -313,7 +327,7 @@ impl FjallAuditAppender {
         log_path: PathBuf,
         log_file: File,
         (checkpoint_db, checkpoint_ks): (Arc<Database>, Keyspace),
-        rotation: Option<RotationPolicy>,
+        rotation: Option<RotationState>,
         latest_fsynced: Option<Position>,
     ) -> Self {
         Self {
@@ -340,12 +354,9 @@ impl FjallAuditAppender {
         }
     }
 
-    /// Durable anchor row persisted in the opened checkpoint store, if any.
-    fn stored_position(ks: &Keyspace) -> Result<Option<Position>, AppenderError> {
-        Ok(ks
-            .get(CHECKPOINT_KEY)?
-            .and_then(|value| recovery::decode_checkpoint(value.as_ref())))
-    }
+    // Durable anchor row storage, strict decoding and anchor validation
+    // live in the named sibling `checkpoint` module (round-3 item 4:
+    // raw-path parity with recovery).
 
     /// Open in **batched** mode — entries buffered in memory, flushed every
     /// `flush_every` (≤5s per spec). Checkpoint writes remain immediate.
@@ -371,16 +382,13 @@ impl FjallAuditAppender {
         let log_file = Self::open_log(&log_path)?;
         let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
         let (checkpoint_db, checkpoint_ks) = Self::open_db(&db_path)?;
+        let rotation = RotationState::raw_policy(dir, max_size_bytes, initial_size, retention_days);
         Ok(Self::start_batched_with(
             log_path,
             log_file,
             (checkpoint_db, checkpoint_ks),
             flush_every,
-            max_size_bytes.map(|max_size_bytes| RotationPolicy {
-                max_size_bytes,
-                current_size: std::sync::atomic::AtomicU64::new(initial_size),
-                retention_days,
-            }),
+            rotation,
             None,
             None,
         ))
@@ -391,7 +399,7 @@ impl FjallAuditAppender {
         log_file: File,
         (checkpoint_db, checkpoint_ks): (Arc<Database>, Keyspace),
         flush_every: Duration,
-        rotation: Option<RotationPolicy>,
+        rotation: Option<RotationState>,
         latest_fsynced: Option<Position>,
         meta_hook: Option<ServerMetaHook>,
     ) -> Arc<Self> {
@@ -507,10 +515,17 @@ impl FjallAuditAppender {
             recovered.log_file,
             recovered.checkpoint,
             flush_every,
-            max_size_bytes.map(|max_size_bytes| RotationPolicy {
-                max_size_bytes,
-                current_size: std::sync::atomic::AtomicU64::new(recovered.initial_size),
-                retention_days,
+            max_size_bytes.map(|max_size_bytes| RotationState {
+                policy: RotationPolicy {
+                    max_size_bytes,
+                    current_size: std::sync::atomic::AtomicU64::new(recovered.initial_size),
+                    retention_days,
+                },
+                // Recovered order truncated to `None` when retention is
+                // disabled.
+                legacy_archive_order: (retention_days != 0)
+                    .then_some(recovered.legacy_archive_order)
+                    .flatten(),
             }),
             Some(position),
             meta_hook,
@@ -566,24 +581,6 @@ impl FjallAuditAppender {
             Some(position),
         ));
         Ok((appender, position))
-    }
-
-    /// Read the persisted checkpoint, if any.
-    ///
-    /// Returns `Ok(None)` for fresh deployments (keyspace empty).
-    pub fn load_checkpoint(
-        data_dir: impl AsRef<Path>,
-    ) -> Result<Option<(u64, [u8; 32])>, AppenderError> {
-        let (_log_path, db_path) = Self::paths(data_dir.as_ref());
-        if !db_path.exists() {
-            return Ok(None);
-        }
-        let db = Database::builder(&db_path).open()?;
-        let ks = db.keyspace(CHECKPOINT_KEYSPACE, KeyspaceCreateOptions::default)?;
-        let Some(value) = ks.get(CHECKPOINT_KEY)? else {
-            return Ok(None);
-        };
-        Ok(recovery::decode_checkpoint(value.as_ref()))
     }
 
     /// Re-read the on-disk fixed-format log into [`AuditEntry`]s for
@@ -697,13 +694,14 @@ impl FjallAuditAppender {
             }
             if let Some(rot) = &self.rotation {
                 let new_size = rot
+                    .policy
                     .current_size
                     .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
                     + bytes_written;
-                if new_size >= rot.max_size_bytes {
+                if new_size >= rot.policy.max_size_bytes {
                     // A rotation failure at or after the rename leaves an
                     // unanchored rotated file behind — latch fail-closed.
-                    rotation::rotate_locked(self, &mut f)?;
+                    rotation::rotate_locked(self, &mut f, rot.legacy_archive_order.as_deref())?;
                 }
             }
             Ok::<(), AppenderError>(())
@@ -732,35 +730,15 @@ impl FjallAuditAppender {
         *self.latest_fsynced.lock() = Some((next_seq, entry.hmac));
         if let Some(rot) = &self.rotation {
             let new_size = rot
+                .policy
                 .current_size
                 .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
                 + bytes_written;
-            if new_size >= rot.max_size_bytes {
+            if new_size >= rot.policy.max_size_bytes {
                 // A rotation failure at or after the rename leaves an
                 // unanchored rotated file behind — latch fail-closed.
-                rotation::rotate_locked(self, &mut f)?;
+                rotation::rotate_locked(self, &mut f, rot.legacy_archive_order.as_deref())?;
             }
-        }
-        Ok(())
-    }
-
-    /// Persist checkpoint while holding the same gate as every log drain.
-    fn checkpoint_locked(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), AppenderError> {
-        self.flush_buffer_locked()?;
-        self.write_checkpoint(next_seq, prev_hmac)
-    }
-
-    /// Persist the fsynced anchor and run the optional server-meta hook
-    /// (rotation boundaries and final shutdown). Caller owns the gate.
-    fn persist_anchor_and_meta(&self) -> Result<(), AppenderError> {
-        // No fsynced position observed (raw empty close): write nothing —
-        // a fresh deployment must not invent a genesis anchor here.
-        let Some(position) = *self.latest_fsynced.lock() else {
-            return Ok(());
-        };
-        self.write_checkpoint(position.0, &position.1)?;
-        if let Some(hook) = &self.meta_hook {
-            hook(position.0, position.1).map_err(AppenderError::Io)?;
         }
         Ok(())
     }
@@ -777,32 +755,17 @@ impl FjallAuditAppender {
         rotation::sync_parent(log_path)
     }
 
-    /// Persist checkpoint metadata. Caller owns the persistence gate.
-    /// Monotonicity is checked against the ACTUAL persisted anchor row
-    /// (`stored_position`), never the fsynced position, so a legacy opener
-    /// facing a newer on-disk anchor cannot lower it at rotation or final
-    /// close. Refuses regressions / same-position digest conflicts
-    /// ([`AppenderError::AnchorRegression`] / [`AppenderError::AnchorConflict`],
-    /// digest compared through `constant_time_eq`). Never touches
-    /// `latest_fsynced` — that field tracks observed log fsyncs only.
-    fn write_checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), AppenderError> {
-        if let Some(stored) = Self::stored_position(&self.checkpoint_ks)? {
-            if next_seq < stored.0 {
-                return Err(AppenderError::AnchorRegression {
-                    persisted: stored.0,
-                    attempted: next_seq,
-                });
-            }
-            if next_seq == stored.0 && !constant_time_eq(&stored.1, prev_hmac) {
-                return Err(AppenderError::AnchorConflict { next_seq });
-            }
-        }
-        let mut packed = [0u8; 40];
-        packed[..8].copy_from_slice(&next_seq.to_be_bytes());
-        packed[8..].copy_from_slice(prev_hmac);
-        self.checkpoint_ks.insert(CHECKPOINT_KEY, &packed[..])?;
-        self.checkpoint_db.persist(PersistMode::SyncAll)?;
-        Ok(())
+    // Checkpoint persistence, strict row decoding, anchor validation and
+    // the fsynced-anchor + meta-hook path live in the named sibling
+    // `checkpoint` module impl block (round-3 item 4).
+
+    /// The message latched by the fail-closed path, if any. Exposed so the
+    /// ordered-shutdown task can observe a failed final anchor write or
+    /// server-meta hook (deferred shutdown-reporting item); `shutdown()`
+    /// execution and reporting are unchanged, and the first failure still
+    /// retains its type as the trait io error's source.
+    pub fn last_failure(&self) -> Option<String> {
+        self.failed.lock().clone()
     }
 
     /// Acquire the sync gate, exposing only actual contention to the tests.
