@@ -70,47 +70,44 @@ fn slash_named_function_is_addressable() {
     ));
 }
 
-/// The engine's function-name rules, mirrored: every NON-final segment is a
-/// function-folder segment (the engine's `validate_name_component`), while the
-/// final segment is the function name itself, which the engine stores as
-/// given and therefore never restricts to the component charset.
+/// The engine stores a function name verbatim and validates nothing about it,
+/// so the shell refuses only what it cannot address: an empty name or a
+/// control byte. Dots, colons, doubled and leading or trailing slashes are all
+/// legal registered names and must stay addressable. Mutant: validating the
+/// folder segments or the leaf with the component charset.
 #[test]
-fn function_name_segments_follow_the_engine_rules() {
-    for path in [
-        // empty name
-        "function:",
-        // empty folder segment
-        "function:/abs",
-        // empty middle segment
-        "function:math//abs",
-        // empty leaf
-        "function:math/",
-        // a folder segment outside [A-Za-z0-9_-]
-        "function:ma.th/abs",
-        // `.` / `..` folder segments
-        "function:math..x/abs",
-        // the form's own separator inside the name
-        "function:math/ab:s",
-    ] {
+fn function_names_are_addressable_as_the_engine_stores_them() {
+    for path in ["function:", "function:ab\u{1}c", "function:ab\u{7f}"] {
         assert!(
             matches!(parse_selector(path), Err(ShellError::Usage)),
             "path `{path}` must be a local usage refusal"
         );
     }
-    // The leaf keeps the engine's permissiveness: a dot is a legal function
-    // name character because the engine validates none.
-    assert!(matches!(
-        parse_selector("function:math/my.func").expect("a dotted leaf parses"),
-        Selector::Function(name) if name == "math/my.func"
-    ));
+    for name in [
+        "math.v2/abs",
+        "math//abs",
+        "math/abs:v2",
+        "/abs",
+        "math/",
+        "math/my.func",
+        "ma..th/abs",
+    ] {
+        let selector = parse_selector(&format!("function:{name}"))
+            .unwrap_or_else(|_| panic!("`{name}` is a legal stored function name"));
+        assert!(
+            matches!(&selector, Selector::Function(stored) if stored == name),
+            "the registered name is kept verbatim"
+        );
+    }
 }
 
 /// The function-name length cap is exactly [`MAX_FUNCTION_NAME_BYTES`]: the
-/// engine caps nothing, so the shell's bound is a wire/OS bound and one byte
-/// over it is a local refusal.
+/// engine caps nothing, so the shell's bound is a sanity bound and one byte
+/// over it is a local refusal; a 256-byte name must still parse.
 #[test]
 fn function_name_length_boundary() {
     let name = |len: usize| format!("function:{}", "a".repeat(len));
+    assert!(parse_selector(&name(256)).is_ok());
     assert!(parse_selector(&name(MAX_FUNCTION_NAME_BYTES)).is_ok());
     assert!(
         matches!(
@@ -121,14 +118,24 @@ fn function_name_length_boundary() {
     );
 }
 
-/// The TABLE component is bounded by the physical store name the engine
-/// generates (`MAX_TABLE_NAME_BYTES`): a longer component can never be created
-/// by the server, so the shell refuses it instead of signing a request for an
-/// impossible target. Mutant: the generic 256-byte ceiling.
+/// The TABLE component is bounded by the loosest physical store name the
+/// engine can hold (`MAX_TABLE_NAME_BYTES`, 255 minus the `__history__`
+/// prefix): a longer component can never exist, so the shell refuses it
+/// instead of signing a request for an impossible target, while every length
+/// the engine might accept (a 221-byte table with a short id suffix) is still
+/// sent. Mutant: the generic 256-byte ceiling, or a conservative worst-case
+/// bound that hides creatable tables.
 #[test]
 fn table_component_boundary_is_the_physical_name_rule() {
-    assert_eq!(MAX_TABLE_NAME_BYTES, 220);
+    assert_eq!(MAX_TABLE_NAME_BYTES, 244);
     let path = |len: usize| format!("db1/store1/{}", "t".repeat(len));
+    assert!(
+        matches!(
+            parse_selector(&path(221)).expect("a 221-byte table the engine may accept parses"),
+            Selector::Resource(_)
+        ),
+        "a name longer than the worst-case id suffix allows is still sent"
+    );
     assert!(matches!(
         parse_selector(&path(MAX_TABLE_NAME_BYTES)).expect("the exact maximum parses"),
         Selector::Resource(_)

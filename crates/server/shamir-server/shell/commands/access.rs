@@ -404,6 +404,14 @@ fn node_fields(node: &QueryValue) -> Result<serde_json::Map<String, Value>, Shel
             _ => return Err(ShellError::Server),
         }
     }
+    // The node's own `children` must be a list when present, also for a node
+    // projected WITHOUT its descendants (`rights show`): a malformed field is
+    // a shape mismatch, never silently ignored.
+    if let Some(children) = fields.get("children") {
+        if !matches!(children, QueryValue::List(_)) {
+            return Err(ShellError::Server);
+        }
+    }
     let name = text(field(node, "name")?)?;
     let kind = text(field(node, "kind")?)?;
     let owner = decimal(field(node, "owner")?)?;

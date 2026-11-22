@@ -254,7 +254,7 @@ impl ShellError {
                 "the addressed resource does not exist on this server"
             }
             ShellError::TreeTooLarge => {
-                "the access tree exceeds the shell's 2000-node projection limit; narrow it with group tree --db DATABASE"
+                "the access tree exceeds the shell's 2000-node projection limit; narrow the databases with group tree --db DATABASE (functions are never filtered)"
             }
             ShellError::ReadOnlyReplica => {
                 "this node is a read-only replica and refuses writes; repeat the change on the leader"

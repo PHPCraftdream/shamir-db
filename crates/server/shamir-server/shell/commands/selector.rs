@@ -15,14 +15,16 @@
 //!
 //! The name rules are MIRRORS of engine rules the shell cannot call without
 //! a new dependency, so each one names its source:
-//! - database and store components, and every non-final function-name
-//!   segment, mirror `validate_name_component`
+//! - database and store components mirror `validate_name_component`
 //!   (`crates/engine/shamir-db/src/shamir_db/execute/core/helpers.rs`), which
-//!   the engine applies to database/repository names and to function-folder
-//!   segments (`execute/admin_meta/admin_function.rs`, `CreateFunctionFolder`);
-//! - the table component mirrors the PHYSICAL store-name length rule
+//!   the engine applies to database/repository names;
+//! - a stored FUNCTION name is NOT validated by the engine at all (it is
+//!   persisted verbatim, `shamir_db/db/function/management.rs`): the shell
+//!   refuses only what it cannot address (empty, control bytes, past a
+//!   generous length bound);
+//! - the table component mirrors the loosest PHYSICAL store-name length rule
 //!   (`crates/engine/shamir-engine-table/src/support/model/names.rs`,
-//!   `validate_table_store_name`).
+//!   `validate_table_store_name`): it refuses only names no table can have.
 //!
 //! The server stays the authority for everything the shell does not mirror.
 
@@ -33,27 +35,27 @@ pub(in crate::shell) const RESOURCE_KINDS: [&str; 3] = ["database", "store", "ta
 
 /// Longest accepted stored FUNCTION name, in bytes.
 ///
-/// The engine imposes NO length cap and no charset cap on a function name: it
+/// The engine imposes NO length cap and no charset rule on a function name: it
 /// persists the registered name as given (`create_function_with_opts_as`,
-/// `shamir_db/db/function/management.rs`), and only the folder segments it
-/// creates implicitly pass [`valid_folder_segment`]. 255 bytes is therefore a
-/// shell-side bound (the fjall/OS name limit the engine's own generated store
-/// names obey), not a mirrored engine rule.
-pub(in crate::shell) const MAX_FUNCTION_NAME_BYTES: usize = 255;
+/// `shamir_db/db/function/management.rs`), with no folder or segment check on
+/// the name itself. 1024 bytes is therefore a shell-side sanity bound for a
+/// path-like name, not a mirrored engine rule.
+pub(in crate::shell) const MAX_FUNCTION_NAME_BYTES: usize = 1024;
 
-/// Longest accepted TABLE component, in bytes.
+/// Longest accepted TABLE component, in bytes: the LOOSEST bound that still
+/// refuses only impossible names.
 ///
-/// Derived from the physical store names the engine generates for a created
-/// table (`crates/engine/shamir-engine-table/src/support/model/names.rs`,
-/// `table_store_names`, checked by `validate_table_store_name` against
-/// fjall's 255-byte store limit before a table is created):
-/// `255 - "__history__" (11) - "--" (2) - 22` = **220**, where 22 is the
-/// longest base58btc encoding of a 16-byte `RecordId` (the `--{id}` suffix;
-/// `log2(256^16) / log2(58) = 21.85`, so at most 22 digits). `__history__` is
-/// the longest of the three prefixes. A longer table component can never be
-/// created by the server, so the shell refuses it instead of signing a
-/// request for an impossible target.
-pub(in crate::shell) const MAX_TABLE_NAME_BYTES: usize = 220;
+/// Derived from the physical store names the engine generates for a table
+/// (`crates/engine/shamir-engine-table/src/support/model/names.rs`,
+/// `table_store_names`, checked by `validate_table_store_name` against fjall's
+/// 255-byte store limit): `255 - "__history__" (11)` = **244**, the case of a
+/// legacy table whose store name carries no `--{id}` suffix. A table created
+/// today also carries the suffix (two bytes of `--` plus the encoded id), so
+/// the engine's real maximum is lower and depends on the id length: the
+/// server stays the authority for names between the guaranteed-fit length and
+/// this bound. A longer component can never exist, so the shell refuses it
+/// instead of signing a request for an impossible target.
+pub(in crate::shell) const MAX_TABLE_NAME_BYTES: usize = 244;
 
 /// The target a `rights show` / mutation path selector resolved to.
 pub(in crate::shell) enum Selector {
@@ -83,37 +85,21 @@ fn valid_name_component(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-/// Whether one FUNCTION-FOLDER segment passes the engine's rule: the engine
-/// validates every `CreateFunctionFolder` segment with `validate_name_component`
-/// ("folder segment", `execute/admin_meta/admin_function.rs`).
-fn valid_folder_segment(text: &str) -> bool {
-    valid_name_component(text)
-}
-
-/// Whether the FINAL segment of a `function:NAME` is addressable. The engine
-/// stores the function name as given and validates no charset for it, so the
-/// shell only refuses what it cannot represent: an empty name, a `:` (the
-/// form's own separator) or a control byte.
-fn valid_function_leaf(text: &str) -> bool {
-    !text.is_empty() && !text.contains(':') && !text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-}
-
 /// Whether one TABLE component can exist as a physical store name
 /// ([`MAX_TABLE_NAME_BYTES`]).
 fn valid_table_component(text: &str) -> bool {
     !text.is_empty() && text.len() <= MAX_TABLE_NAME_BYTES
 }
 
-/// Parse a `function:NAME` payload: slash-separated segments, every non-final
-/// segment a function-folder segment and the final one a stored function
-/// name, the whole at most [`MAX_FUNCTION_NAME_BYTES`] bytes.
+/// Parse a `function:NAME` payload. The engine stores a function name verbatim
+/// (a path-like `math/abs` is ONE name; `:`, `.` and empty path segments are
+/// all legal), so the shell refuses only what it cannot represent: an empty
+/// name, a control byte, or a name past [`MAX_FUNCTION_NAME_BYTES`].
 fn parse_function_name(name: &str) -> Result<(), ShellError> {
-    if name.is_empty() || name.len() > MAX_FUNCTION_NAME_BYTES {
-        return Err(ShellError::Usage);
-    }
-    let segments: Vec<&str> = name.split('/').collect();
-    let (leaf, folders) = segments.split_last().ok_or(ShellError::Usage)?;
-    if folders.iter().any(|segment| !valid_folder_segment(segment)) || !valid_function_leaf(leaf) {
+    if name.is_empty()
+        || name.len() > MAX_FUNCTION_NAME_BYTES
+        || name.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+    {
         return Err(ShellError::Usage);
     }
     Ok(())
