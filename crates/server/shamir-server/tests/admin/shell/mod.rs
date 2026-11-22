@@ -1,10 +1,19 @@
-//! Integration tests for the administrative shell (R5 PR1–PR2).
+//! Integration tests for the administrative shell (R5 PR1–PR4).
 //!
 //! Declarations only: the harness owns shared fixtures, `output` covers the
 //! output contract, and `transport`, `secure_transports`, and `refusals` cover
 //! the live transport and refusal scenarios.
+//!
+//! `core/` holds the harness and output-contract files as ONE folder entry;
+//! `#[path]` keeps their Rust module names (and every `super::` path inside
+//! those files) exactly as before the move.
 
+// `core/` groups the harness and the output contract; `#[path]` keeps the
+// module names `harness` and `output` unchanged, so no inner `super::` path
+// moved. Do NOT add `core/mod.rs`: these are plain file declarations only.
+#[path = "core/harness.rs"]
 mod harness;
+#[path = "core/output.rs"]
 mod output;
 // `secure/` holds the transport-policy refusal scenarios; `#[path]` keeps
 // the Rust module tree (and every `super::` path inside the file) exactly
@@ -26,6 +35,17 @@ mod state_data_goldens;
 mod state_data_subscriptions;
 #[path = "state_data/token_subset.rs"]
 mod state_data_token_subset;
+// R5 PR4: the rights views and the rights mutations (`user list`,
+// `group tree`, `group members`, `rights show`, `chmod`, `chown`,
+// `chgrp`) plus the activity views and cancellation. The topic folder is
+// ONE entry, the same `#[path]` convention as `state_data/`; shared
+// helpers are reused from `state_data_common`.
+#[path = "access_activity/access.rs"]
+mod access_activity_access;
+#[path = "access_activity/activity.rs"]
+mod access_activity_activity;
+#[path = "access_activity/mutations.rs"]
+mod access_activity_mutations;
 mod transport;
 
 use harness::secure_fixture;

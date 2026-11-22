@@ -59,6 +59,10 @@ pub enum BuilderError {
     /// the builder now fails closed client-side (RV-QUERY-BUILDER-E6F53E38).
     #[error("this op is HMAC-gated — call .hmac(tag) before .build()")]
     MissingHmac,
+    /// An HMAC-gated builder's `sign()` could not canonicalise the operation
+    /// (the canonical v2 encoder does not cover this op, or encoding failed).
+    #[error("this op could not be canonicalised for HMAC signing")]
+    HmacSigning,
     /// [`crate::ddl::check_function().build()`] was called with both (or
     /// neither) of `wasm`/`source` set. The wire contract requires exactly
     /// one module payload (`CheckFunctionSpec`).

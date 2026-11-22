@@ -223,3 +223,71 @@ impl Client {
         }
     }
 }
+
+impl Client {
+    /// Change mode bits on a securable resource (admin-shell R5 PR4).
+    /// SCRAM sessions only; the request is signed with the session HMAC key
+    /// for `db`, and the server remains authoritative (superuser + `Manage`
+    /// on the target + tag verification). The tag is never returned or logged.
+    pub async fn chmod(
+        &self,
+        db: &str,
+        resource: shamir_query_types::admin::ResourceRef,
+        mode: u16,
+    ) -> Result<shamir_query_types::batch::BatchResponse, ClientError> {
+        self.require_scram()?;
+        let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+        let op = shamir_query_builder::ddl::chmod(resource, mode)
+            .sign(&key, db)
+            .map_err(|_| ClientError::Protocol("chmod signing failed".into()))?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op("chmod", op);
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        self.execute(db, batch).await
+    }
+
+    /// Change owner on a securable resource (admin-shell R5 PR4); see
+    /// [`Self::chmod`] for the signing and authorization contract.
+    pub async fn chown(
+        &self,
+        db: &str,
+        resource: shamir_query_types::admin::ResourceRef,
+        owner: u64,
+    ) -> Result<shamir_query_types::batch::BatchResponse, ClientError> {
+        self.require_scram()?;
+        let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+        let op = shamir_query_builder::ddl::chown(resource, owner)
+            .sign(&key, db)
+            .map_err(|_| ClientError::Protocol("chown signing failed".into()))?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op("chown", op);
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        self.execute(db, batch).await
+    }
+
+    /// Change group on a securable resource, or clear it with `None`
+    /// (admin-shell R5 PR4); see [`Self::chmod`] for the signing and
+    /// authorization contract.
+    pub async fn chgrp(
+        &self,
+        db: &str,
+        resource: shamir_query_types::admin::ResourceRef,
+        group: Option<u64>,
+    ) -> Result<shamir_query_types::batch::BatchResponse, ClientError> {
+        self.require_scram()?;
+        let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+        let op = shamir_query_builder::ddl::chgrp(resource, group)
+            .sign(&key, db)
+            .map_err(|_| ClientError::Protocol("chgrp signing failed".into()))?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op("chgrp", op);
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        self.execute(db, batch).await
+    }
+}

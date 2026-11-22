@@ -1,6 +1,8 @@
 //! Tests for Access tree, chmod / chown / chgrp, Group DDL, Auth users / roles,
 //! and `res` helpers.
 
+use shamir_query_types::batch::BatchOp;
+use shamir_query_types::hmac;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -548,4 +550,102 @@ fn res_function() {
 fn res_function_namespace() {
     let r = ddl::res::function_namespace();
     assert_eq!(res_to_wire(&r), mpack!({"function_namespace": true}));
+}
+
+// ============================================================================
+// sign(): shared canonical v2 HMAC sealing for chmod / chown / chgrp
+// ============================================================================
+
+/// Extract the attached tag from any of the three signed access ops.
+fn signed_tag(op: &BatchOp) -> String {
+    match op {
+        BatchOp::Chmod(o) => o.hmac.clone().expect("signed chmod"),
+        BatchOp::Chown(o) => o.hmac.clone().expect("signed chown"),
+        BatchOp::Chgrp(o) => o.hmac.clone().expect("signed chgrp"),
+        _ => panic!("expected an access op"),
+    }
+}
+
+#[test]
+fn chmod_sign_tag_covers_payload_not_tag_field() {
+    let key = [0x11u8; 32];
+    let resource = ddl::res::table("mydb", "main", "a");
+    let builder = ddl::chmod(resource.clone(), 0o640);
+    let signed = builder.sign(&key, "mydb").unwrap();
+    let tag = signed_tag(&signed);
+    // The canonical v2 encoder ignores the `hmac` field, so a separately
+    // built op carrying a deliberately wrong tag yields exactly the bytes
+    // the server verifies.
+    let wrong = ddl::chmod(resource.clone(), 0o640).hmac("0".repeat(64));
+    let separate = wrong.build().unwrap();
+    let canonical = hmac::canonical_batch_op("mydb", &separate).unwrap();
+    assert_eq!(tag, hmac::compute_tag_hex(&key, &canonical));
+    assert!(hmac::verify_tag_hex(&key, &canonical, &tag));
+    // An altered resource or mode changes the tag.
+    let other = ddl::chmod(ddl::res::table("mydb", "main", "b"), 0o640);
+    assert_ne!(tag, signed_tag(&other.sign(&key, "mydb").unwrap()));
+    let mode = ddl::chmod(resource.clone(), 0o600);
+    assert_ne!(tag, signed_tag(&mode.sign(&key, "mydb").unwrap()));
+    // The canonical v2 encoder for these three ops covers the resource (which
+    // names the db) and the payload, not the routing `db` argument itself, so
+    // a different `db` string yields the same tag — the tag comes from the
+    // shared helper, not a local re-encoding.
+    let db = ddl::chmod(resource, 0o640);
+    assert_eq!(tag, signed_tag(&db.sign(&key, "otherdb").unwrap()));
+    // A different session key does not verify.
+    assert!(!hmac::verify_tag_hex(&[0x22u8; 32], &canonical, &tag));
+}
+
+#[test]
+fn chown_sign_tag_covers_payload_not_tag_field() {
+    let key = [0x33u8; 32];
+    let resource = ddl::res::database("testdb");
+    let builder = ddl::chown(resource.clone(), 7);
+    let signed = builder.sign(&key, "testdb").unwrap();
+    let tag = signed_tag(&signed);
+    let wrong = ddl::chown(resource.clone(), 7).hmac("0".repeat(64));
+    let separate = wrong.build().unwrap();
+    let canonical = hmac::canonical_batch_op("testdb", &separate).unwrap();
+    assert_eq!(tag, hmac::compute_tag_hex(&key, &canonical));
+    assert!(hmac::verify_tag_hex(&key, &canonical, &tag));
+    // An altered resource or owner changes the tag.
+    let other = ddl::chown(ddl::res::function("f"), 7);
+    assert_ne!(tag, signed_tag(&other.sign(&key, "testdb").unwrap()));
+    let owner = ddl::chown(resource.clone(), 8);
+    assert_ne!(tag, signed_tag(&owner.sign(&key, "testdb").unwrap()));
+    // The canonical v2 encoder for these three ops covers the resource (which
+    // names the db) and the payload, not the routing `db` argument itself, so
+    // a different `db` string yields the same tag.
+    let db = ddl::chown(resource, 7);
+    assert_eq!(tag, signed_tag(&db.sign(&key, "otherdb").unwrap()));
+    // A different session key does not verify.
+    assert!(!hmac::verify_tag_hex(&[0x44u8; 32], &canonical, &tag));
+}
+
+#[test]
+fn chgrp_sign_tag_covers_payload_not_tag_field() {
+    let key = [0x55u8; 32];
+    let resource = ddl::res::store("testdb", "main");
+    let builder = ddl::chgrp(resource.clone(), Some(3));
+    let signed = builder.sign(&key, "testdb").unwrap();
+    let tag = signed_tag(&signed);
+    let wrong = ddl::chgrp(resource.clone(), Some(3)).hmac("0".repeat(64));
+    let separate = wrong.build().unwrap();
+    let canonical = hmac::canonical_batch_op("testdb", &separate).unwrap();
+    assert_eq!(tag, hmac::compute_tag_hex(&key, &canonical));
+    assert!(hmac::verify_tag_hex(&key, &canonical, &tag));
+    // An altered resource or group (including clearing it) changes the tag.
+    let other = ddl::chgrp(ddl::res::store("testdb", "other"), Some(3));
+    assert_ne!(tag, signed_tag(&other.sign(&key, "testdb").unwrap()));
+    let group = ddl::chgrp(resource.clone(), Some(4));
+    assert_ne!(tag, signed_tag(&group.sign(&key, "testdb").unwrap()));
+    let cleared = ddl::chgrp(resource.clone(), None);
+    assert_ne!(tag, signed_tag(&cleared.sign(&key, "testdb").unwrap()));
+    // The canonical v2 encoder for these three ops covers the resource (which
+    // names the db) and the payload, not the routing `db` argument itself, so
+    // a different `db` string yields the same tag.
+    let db = ddl::chgrp(resource, Some(3));
+    assert_eq!(tag, signed_tag(&db.sign(&key, "otherdb").unwrap()));
+    // A different session key does not verify.
+    assert!(!hmac::verify_tag_hex(&[0x66u8; 32], &canonical, &tag));
 }

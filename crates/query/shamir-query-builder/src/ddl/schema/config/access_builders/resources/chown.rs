@@ -28,6 +28,22 @@ impl Chown {
         self
     }
 
+    /// Sign this operation for `db` (the routing database it will execute on)
+    /// with the session-derived HMAC key, using the shared canonical v2
+    /// encoding. The session key never leaves the caller; nothing is printed.
+    pub fn sign(self, key: &[u8; 32], db: &str) -> Result<BatchOp, BuilderError> {
+        let mut op = ChownOp {
+            chown: self.resource,
+            owner: self.owner,
+            hmac: None,
+        };
+        let canonical =
+            shamir_query_types::hmac::canonical_batch_op(db, &BatchOp::Chown(op.clone()))
+                .map_err(|_| BuilderError::HmacSigning)?;
+        op.hmac = Some(shamir_query_types::hmac::compute_tag_hex(key, &canonical));
+        Ok(BatchOp::Chown(op))
+    }
+
     /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
     /// when no `.hmac(tag)` was attached.
     pub fn build(self) -> Result<BatchOp, BuilderError> {

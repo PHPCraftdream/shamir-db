@@ -7,17 +7,22 @@ use std::io::Write;
 use serde_json::{json, Value as Json};
 
 use super::grammar::{
-    command_id, AuthKind, Command, DbCommand, FunctionCommand, IndexCommand, Mode, Outcome,
-    ProfileCommand, RepoCommand, ShellArgs, TableCommand,
+    command_id, ActivityCli, AuthKind, Command, DbCommand, FunctionCommand, GroupCommand,
+    IndexCommand, Mode, Outcome, ProfileCommand, RepoCommand, RightsCommand, ShellArgs,
+    TableCommand, UserCommand,
 };
 use super::session::{
     check_secret_conflict, establish_profile, guarded, with_session, Ctx, Session,
 };
 use super::state_args::{DataCommand, ReplicationCommand, VersionCommand};
-use crate::shell::commands::{Catalogue, StateCommand};
+use crate::shell::commands::{AccessCommand, ActivityCommand, Catalogue, StateCommand};
 use crate::shell::connect;
 use crate::shell::connect::{Profile, SessionClient};
 use crate::shell::output::{self, ShellError};
+
+/// Fixed interactive confirmation prompt for `activity cancel` and the
+/// rights mutations (stderr only; never argv-derived).
+const CONFIRM_PROMPT: &str = "type yes to confirm: ";
 
 /// Closed §3.3 policy. Connect is lifecycle, not a remote data command.
 fn allowed_with_token(command: &Command) -> bool {
@@ -55,7 +60,17 @@ fn allowed_with_token(command: &Command) -> bool {
         | Command::Replication { .. }
         | Command::Data {
             action: DataCommand::Get { .. },
-        } => false,
+        }
+        // §3.3: the rights commands are SCRAM only.
+        | Command::User { .. }
+        | Command::Group { .. }
+        | Command::Rights { .. }
+        // §3.3: the rights mutations are SCRAM only.
+        | Command::Chmod { .. }
+        | Command::Chown { .. }
+        | Command::Chgrp { .. }
+        // §3.3: the activity commands are SCRAM only.
+        | Command::Activity { .. } => false,
     }
 }
 
@@ -204,6 +219,106 @@ pub(super) fn dispatch(
                 },
             )
         }
+        Command::User {
+            action: UserCommand::List,
+        } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                AccessCommand::Users,
+                None,
+            )
+        }
+        Command::Group { action } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                match action {
+                    GroupCommand::Tree { db } => AccessCommand::GroupTree { db },
+                    GroupCommand::Members => AccessCommand::GroupMembers,
+                },
+                None,
+            )
+        }
+        Command::Rights {
+            action: RightsCommand::Show { path },
+        } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                AccessCommand::RightsShow { path },
+                None,
+            )
+        }
+        Command::Chmod {
+            path,
+            mode: file_mode,
+            yes,
+        } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                AccessCommand::Chmod {
+                    path,
+                    mode: file_mode,
+                },
+                Some(yes),
+            )
+        }
+        Command::Chown { path, owner, yes } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                AccessCommand::Chown { path, owner },
+                Some(yes),
+            )
+        }
+        Command::Chgrp { path, group, yes } => {
+            return access_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                AccessCommand::Chgrp { path, group },
+                Some(yes),
+            )
+        }
+        Command::Activity { action } => {
+            return activity_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                match action {
+                    ActivityCli::Sessions { all, limit } => {
+                        ActivityCommand::Sessions { all, limit }
+                    }
+                    ActivityCli::Requests { all, limit } => {
+                        ActivityCommand::Requests { all, limit }
+                    }
+                    ActivityCli::Cancel { request, yes } => {
+                        ActivityCommand::Cancel { request, yes }
+                    }
+                },
+            )
+        }
     };
     catalogue(shell, mode, session, runtime, ctx, which)
 }
@@ -234,6 +349,102 @@ fn state_outcome(
         },
     );
     (id, Some(action.op()), outcome)
+}
+
+/// Rights commands (design §4.3), delegated to the access worker
+/// (`shell/commands/access.rs`). The §3.3 token gate has already run above;
+/// the worker's `validate` (the selector parse, MODE and principal-token
+/// checks) runs HERE, before any dial or secret read. For the three rights
+/// mutations, the `--yes` answer in `yes` is confirmed HERE as well, so an
+/// unconfirmed mutation returns BEFORE [`with_session`]: nothing is sent and
+/// no request tag is computed. Every rights command carries the profile
+/// routing-database floor, which must be present.
+fn access_outcome(
+    shell: &ShellArgs,
+    mode: Mode,
+    session: &mut Option<Session>,
+    runtime: &tokio::runtime::Runtime,
+    ctx: &mut Ctx<'_>,
+    action: AccessCommand,
+    yes: Option<bool>,
+) -> Outcome {
+    let id = action.id();
+    if let Err(err) = action.validate() {
+        return (id, None, Err(err));
+    }
+    if action.wants_confirm() {
+        if let Err(err) = confirm_mutation(mode, yes.unwrap_or_default(), ctx) {
+            return (id, None, Err(err));
+        }
+    }
+    let routing_db_required = action.requires_routing_db();
+    let outcome = with_session(shell, mode, session, runtime, routing_db_required, ctx).and_then(
+        |(profile, client)| {
+            let routing_db = profile.database.as_deref().ok_or(ShellError::Usage)?;
+            runtime.block_on(guarded(action.execute(client, Some(routing_db))))
+        },
+    );
+    (id, Some(action.op()), outcome)
+}
+
+/// Activity commands (design §4.5), delegated to the activity worker
+/// (`shell/commands/activity.rs`). The §3.3 token gate has already run
+/// above; the activity commands are SCRAM only. The worker's `validate`
+/// (the `--limit` and request-id checks) runs HERE, before any dial, and so
+/// does the `activity cancel` confirmation: a batch-mode refusal without
+/// `--yes` is the typed `ConfirmationRequired` refusal and returns BEFORE
+/// [`with_session`], so no request is sent at all.
+fn activity_outcome(
+    shell: &ShellArgs,
+    mode: Mode,
+    session: &mut Option<Session>,
+    runtime: &tokio::runtime::Runtime,
+    ctx: &mut Ctx<'_>,
+    action: ActivityCommand,
+) -> Outcome {
+    let id = action.id();
+    if let Err(err) = action.validate() {
+        return (id, None, Err(err));
+    }
+    if action.wants_confirm() {
+        if let Err(err) = confirm_cancel(mode, &action, ctx) {
+            return (id, None, Err(err));
+        }
+    }
+    let routing_db_required = action.requires_routing_db();
+    let outcome = with_session(shell, mode, session, runtime, routing_db_required, ctx).and_then(
+        |(profile, client)| {
+            let routing_db = profile.database.as_deref().ok_or(ShellError::Usage)?;
+            runtime.block_on(guarded(action.execute(client, routing_db)))
+        },
+    );
+    (id, Some(action.op()), outcome)
+}
+
+/// Local confirmation for one destructive command. An explicit `--yes` is
+/// taken as given; batch mode has no confirmation source, so an unconfirmed
+/// `activity cancel` is the fixed typed `ConfirmationRequired` refusal
+/// BEFORE any dial or request; interactive mode writes one fixed prompt,
+/// reads one bounded line and accepts ONLY an exact `yes` (anything else,
+/// including EOF or an invalid line, is the same refusal).
+fn confirm_cancel(
+    mode: Mode,
+    action: &ActivityCommand,
+    ctx: &mut Ctx<'_>,
+) -> Result<(), ShellError> {
+    ctx.confirm(
+        mode,
+        matches!(action, ActivityCommand::Cancel { yes: true, .. }),
+        CONFIRM_PROMPT,
+    )
+}
+
+/// Local confirmation for one rights mutation `chmod` / `chown` / `chgrp`:
+/// the same shared [`Ctx::confirm`] and the same fixed prompt as
+/// `activity cancel`, so an unconfirmed mutation is refused before any dial
+/// and nothing is sent.
+fn confirm_mutation(mode: Mode, yes: bool, ctx: &mut Ctx<'_>) -> Result<(), ShellError> {
+    ctx.confirm(mode, yes, CONFIRM_PROMPT)
 }
 
 /// cancel-safe: NO — the request may already be sent; the caller drops the session.

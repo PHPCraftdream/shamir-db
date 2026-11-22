@@ -74,6 +74,17 @@ pub(crate) enum ShellError {
     SecretSourceConflict,
     Timeout,
     Interrupted,
+    /// `chmod`/`chown`/`chgrp` addressed the resource root, which the shell
+    /// never mutates.
+    RootMutation,
+    /// A state-changing command was answered neither with `--yes` nor with
+    /// an interactive `yes`.
+    ConfirmationRequired,
+    /// `chmod` MODE is not a one-to-four digit octal literal at most
+    /// `0o7777`.
+    InvalidMode,
+    /// The named owner or group does not exist in the observed directory.
+    UnknownPrincipal,
 }
 
 impl ShellError {
@@ -114,6 +125,10 @@ impl ShellError {
             ShellError::SecretSourceConflict => "secret_source_conflict",
             ShellError::Timeout => "timeout_outcome_unknown",
             ShellError::Interrupted => "interrupted",
+            ShellError::RootMutation => "root_mutation_refused",
+            ShellError::ConfirmationRequired => "confirmation_required",
+            ShellError::InvalidMode => "invalid_mode",
+            ShellError::UnknownPrincipal => "unknown_principal",
         }
     }
 
@@ -187,6 +202,18 @@ impl ShellError {
                 "the operation timed out after send; its outcome is unknown and it may still be running"
             }
             ShellError::Interrupted => "interrupted",
+            ShellError::RootMutation => {
+                "the root resource cannot be modified from the shell; address a database, store, table or function"
+            }
+            ShellError::ConfirmationRequired => {
+                "this command changes state or cancels work; confirm interactively or pass --yes in batch mode"
+            }
+            ShellError::InvalidMode => {
+                "MODE must be an octal mode (1 to 4 digits, 0-7 only, at most 7777)"
+            }
+            ShellError::UnknownPrincipal => {
+                "the named owner or group does not exist on this server"
+            }
         }
     }
 
@@ -196,7 +223,8 @@ impl ShellError {
             ShellError::Usage
             | ShellError::OutputVersion
             | ShellError::MissingTty
-            | ShellError::InvalidRecordId => 1,
+            | ShellError::InvalidRecordId
+            | ShellError::InvalidMode => 1,
             ShellError::Connection => 2,
             ShellError::Authentication => 3,
             ShellError::Denied | ShellError::TokenRequestDenied => 4,
@@ -205,7 +233,8 @@ impl ShellError {
             | ShellError::NotFound
             | ShellError::UnknownTable
             | ShellError::ResyncRequired
-            | ShellError::ResultTooLarge => 5,
+            | ShellError::ResultTooLarge
+            | ShellError::UnknownPrincipal => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
@@ -220,7 +249,9 @@ impl ShellError {
             | ShellError::ArgvSecret
             | ShellError::SecretTerminal
             | ShellError::SecretTooLong
-            | ShellError::SecretSourceConflict => 6,
+            | ShellError::SecretSourceConflict
+            | ShellError::RootMutation
+            | ShellError::ConfirmationRequired => 6,
             #[cfg(windows)]
             ShellError::SecretFdWindows => 6,
             ShellError::Timeout | ShellError::HeadWallTime => 7,

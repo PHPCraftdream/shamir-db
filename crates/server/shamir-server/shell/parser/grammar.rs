@@ -157,6 +157,99 @@ pub(super) enum Command {
         #[command(subcommand)]
         action: DataCommand,
     },
+    /// Principal directory (rights §4.3).
+    User {
+        #[command(subcommand)]
+        action: UserCommand,
+    },
+    /// Groups and their members (rights §4.3).
+    Group {
+        #[command(subcommand)]
+        action: GroupCommand,
+    },
+    /// Access rights of one tree node (rights §4.3).
+    Rights {
+        #[command(subcommand)]
+        action: RightsCommand,
+    },
+    /// Operator activity view and cooperative cancellation (activity §4.5).
+    Activity {
+        #[command(subcommand)]
+        action: ActivityCli,
+    },
+    /// `chmod PATH MODE`: change the mode bits of one resource (rights
+    /// §4.3); SCRAM only and confirmation required.
+    Chmod {
+        path: String,
+        mode: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// `chown PATH OWNER`: change the owner of one resource (rights §4.3);
+    /// SCRAM only and confirmation required.
+    Chown {
+        path: String,
+        owner: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// `chgrp PATH GROUP`: change the group of one resource (rights §4.3);
+    /// SCRAM only and confirmation required.
+    Chgrp {
+        path: String,
+        group: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// `activity` grammar: the shell-side command type is
+/// [`crate::shell::commands::ActivityCommand`]; this is its argv shape.
+#[derive(clap::Subcommand)]
+pub(super) enum ActivityCli {
+    /// List the live sessions.
+    Sessions {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// List the in-flight request executions.
+    Requests {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Request cooperative cancellation of one request execution.
+    Cancel {
+        request: String,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum UserCommand {
+    /// List the principal directory rows.
+    List,
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum GroupCommand {
+    /// Show the access tree, optionally restricted to one database.
+    Tree {
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Show the groups with their members.
+    Members,
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum RightsCommand {
+    /// Show one access-tree node selected by `PATH`.
+    Show { path: String },
 }
 
 #[derive(clap::Subcommand)]
@@ -242,5 +335,23 @@ pub(super) fn command_id(command: &Command) -> &'static str {
             DataCommand::Head { .. } => "data head",
             DataCommand::Get { .. } => "data get",
         },
+        Command::User {
+            action: UserCommand::List,
+        } => "user list",
+        Command::Group { action } => match action {
+            GroupCommand::Tree { .. } => "group tree",
+            GroupCommand::Members => "group members",
+        },
+        Command::Rights {
+            action: RightsCommand::Show { .. },
+        } => "rights show",
+        Command::Activity { action } => match action {
+            ActivityCli::Sessions { .. } => "activity sessions",
+            ActivityCli::Requests { .. } => "activity requests",
+            ActivityCli::Cancel { .. } => "activity cancel",
+        },
+        Command::Chmod { .. } => "chmod",
+        Command::Chown { .. } => "chown",
+        Command::Chgrp { .. } => "chgrp",
     }
 }

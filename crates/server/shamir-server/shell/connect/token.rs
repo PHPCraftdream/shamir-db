@@ -15,6 +15,10 @@ use shamir_client::{
     ApiToken, Client, ClientError, TokenEndpoint, TokenHttpClient, TokenHttpOptions, TokenTrust,
     TokenWsOptions,
 };
+use shamir_query_types::admin::activity::{
+    ActivityPage, CancelOutcome, ListActivityReq, RequestExecId,
+};
+use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use tokio::time::{timeout_at, Instant};
 use zeroize::Zeroizing;
@@ -161,6 +165,101 @@ impl SessionClient {
         match self {
             Self::Scram(client) => client
                 .get_record(db, repo, table, key)
+                .await
+                .map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Operator activity view (admin-shell PR4; design §4.5). SCRAM sessions
+    /// only: §3.3 puts `activity` OUTSIDE the token read-only subset, so a
+    /// token session is refused HERE with the fixed typed denial BEFORE any
+    /// request is sent (zero requests policy; the parser gates it too, and
+    /// the server perimeter denies it as well).
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn list_activity(
+        &self,
+        db: &str,
+        request: ListActivityReq,
+    ) -> Result<ActivityPage, ShellError> {
+        match self {
+            Self::Scram(client) => client
+                .list_activity(db, request)
+                .await
+                .map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Cooperative cancellation of one request execution (admin-shell PR4;
+    /// design §4.5). SCRAM sessions only: a token session is refused HERE
+    /// with the fixed typed denial BEFORE any request is sent (zero
+    /// requests policy; the parser gates it too, and the server perimeter
+    /// denies it as well).
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn cancel_request(
+        &self,
+        db: &str,
+        id: RequestExecId,
+    ) -> Result<CancelOutcome, ShellError> {
+        match self {
+            Self::Scram(client) => client.cancel_request(db, id).await.map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Change mode bits on one securable resource (admin-shell R5 PR4;
+    /// design §4.3). SCRAM sessions only: §3.3 puts the rights commands
+    /// OUTSIDE the token read-only subset, so a token session is refused
+    /// HERE with the fixed typed denial BEFORE any request is sent (zero
+    /// requests policy; the parser gates it too, and the server perimeter
+    /// denies it as well).
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn chmod(
+        &self,
+        db: &str,
+        resource: ResourceRef,
+        mode: u16,
+    ) -> Result<BatchResponse, ShellError> {
+        match self {
+            Self::Scram(client) => client
+                .chmod(db, resource, mode)
+                .await
+                .map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Change owner on one securable resource (admin-shell R5 PR4; design
+    /// §4.3); SCRAM sessions only, as for [`Self::chmod`].
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn chown(
+        &self,
+        db: &str,
+        resource: ResourceRef,
+        owner: u64,
+    ) -> Result<BatchResponse, ShellError> {
+        match self {
+            Self::Scram(client) => client
+                .chown(db, resource, owner)
+                .await
+                .map_err(request_error),
+            Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
+        }
+    }
+
+    /// Change or clear the group of one securable resource (admin-shell R5
+    /// PR4; design §4.3); SCRAM sessions only, as for [`Self::chmod`].
+    /// cancel-safe: NO — a cancelled request may remain in flight.
+    pub(in crate::shell) async fn chgrp(
+        &self,
+        db: &str,
+        resource: ResourceRef,
+        group: Option<u64>,
+    ) -> Result<BatchResponse, ShellError> {
+        match self {
+            Self::Scram(client) => client
+                .chgrp(db, resource, group)
                 .await
                 .map_err(request_error),
             Self::TokenWs(_) | Self::TokenRest(_) => Err(ShellError::TokenRequestDenied),
