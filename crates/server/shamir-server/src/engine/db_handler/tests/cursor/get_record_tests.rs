@@ -461,6 +461,38 @@ async fn get_record_denied_when_table_read_denied() {
     expect_error(resp, "access_denied", "db allowed, table Read denied");
 }
 
+/// PARITY (pins the CURRENT documented behaviour; it does not change the
+/// ACL policy): with Database Read granted and Table Read restricted, the
+/// SAME principal can tell a CONFIGURED private table from an ABSENT name.
+///
+/// The two outcomes are deliberately paired because the deny-then-resolve
+/// order makes them different: `authorize_cursor_read` authorizes the Table
+/// NAME, and the ACL default is open for a name with no catalogue record,
+/// so an absent name passes the Table check and name resolution then fails
+/// with `unknown_table`. Pinning both here keeps a future re-order from
+/// silently widening or narrowing the accepted disclosure.
+#[tokio::test]
+async fn get_record_denied_present_table_and_absent_name_are_distinguishable() {
+    let handler = build_handler(QueryLimitsCap::UNLIMITED).await;
+    open_db_and_store_only(&handler, 0o777).await;
+    let bob = bob_session();
+    let key = RecordId([1u8; 16]);
+
+    // Present private table: Database+Store Read pass, Table Read denied.
+    let resp = send(&handler, &bob, get_record_req(key)).await;
+    expect_error(resp, "access_denied", "db allowed, table Read denied");
+
+    // Absent name: no catalogue record, so the Table ACL default is open
+    // and name resolution is what refuses.
+    let resp = send(
+        &handler,
+        &bob,
+        get_record("app", "main", "no_such_table", key),
+    )
+    .await;
+    expect_error(resp, "unknown_table", "db allowed, absent table name");
+}
+
 /// Same request as `get_record_denied_when_table_read_denied` with all
 /// three levels opened: bob's point read SUCCEEDS — the ACL state, not
 /// the handler, was the refuser.
@@ -507,6 +539,48 @@ async fn get_record_quarantined_repo_is_resync_required() {
     )
     .await;
     expect_error(resp, "not_found", "non-replicated repo unaffected");
+}
+
+/// The point read's `resync_required` refusal must NOT carry the stored
+/// quarantine reason verbatim: `mark_subscription_resync_required(sub, 7, 3)`
+/// stores `journal gap at 7, requested from 3`, that reason stays in the
+/// engine/cache (and in the shared batch path), while `GetRecord` answers
+/// with the fixed text.
+///
+/// WITHOUT the fixed text the wire message is the shared
+/// `BatchError::ResyncRequired` Display, which includes the stored reason.
+#[tokio::test]
+async fn get_record_quarantine_refusal_does_not_carry_the_stored_reason() {
+    let handler = build_handler(QueryLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let storage_id = insert_row_and_get_storage_id(&handler, "k007").await;
+    quarantine(&handler, "sub", "prof", "main").await;
+
+    let reason = handler
+        .db()
+        .read_quarantine_reason("app", "main")
+        .expect("the quarantine cache must carry the reason the mark stored");
+    assert!(
+        reason.contains("journal gap"),
+        "the stored reason is the journal-gap text, got {reason:?}"
+    );
+
+    let resp = send(&handler, &session, get_record_req(storage_id)).await;
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "resync_required", "quarantined point read");
+            assert_eq!(
+                message, "repository is quarantined; resynchronize before reading",
+                "the point read must carry the fixed refusal text"
+            );
+            assert!(
+                !message.contains("journal gap"),
+                "the stored quarantine reason must never be echoed verbatim, got {message:?}"
+            );
+        }
+        other => panic!("expected the fixed resync_required refusal, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

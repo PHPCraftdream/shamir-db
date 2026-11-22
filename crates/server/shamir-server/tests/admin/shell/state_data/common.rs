@@ -196,6 +196,63 @@ pub(super) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
     })
 }
 
+/// Insert TWO real records with DISTINCT stored values (and distinct `n`)
+/// into the fixture's plain table over the REAL pinned wire, returning
+/// their server-minted Base58 `RecordId` strings as `(first, second)`.
+/// The point-read golden needs both: a reply that carries the second row
+/// must never satisfy an assertion written for the first.
+pub(super) fn insert_distinct_pair(fixture: &ShellFixture) -> (String, String) {
+    fixture.guard.mark("seed: state_data distinct pair");
+    let addr = fixture.tls_addr;
+    let pin = fixture.pin;
+    let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
+    fixture.rt.run(async move {
+        let client = timeout(
+            BOUND,
+            super::harness::connect_tls_owned(addr, pin, password),
+        )
+        .await
+        .expect("distinct-pair connect hang bound")
+        .expect("distinct-pair verified TLS connect");
+        let mut batch = Batch::new();
+        batch.id("state_data_distinct_pair");
+        batch.insert(
+            "ins",
+            shamir_query_builder::write::Insert::with_repo(REPO_NAME, PLAIN_TABLE).rows([
+                doc! { "n" => 101_i64, "tag" => "state_data_first" },
+                doc! { "n" => 202_i64, "tag" => "state_data_second" },
+            ]),
+        );
+        let response = timeout(BOUND, client.execute(DB_NAME, batch.build()))
+            .await
+            .expect("distinct-pair insert hang bound")
+            .expect("distinct-pair insert executes");
+        let result = response
+            .results
+            .get("ins")
+            .expect("insert result alias present");
+        // ORACLE: same decode path as `insert_rows` — the server serialises
+        // a write-result row as a msgpack map carrying the storage id under
+        // `_id` (Base58 string).
+        let ids: Vec<String> = result
+            .records
+            .iter()
+            .map(|record| {
+                record
+                    .get_value_str("_id")
+                    .expect("server-minted `_id` on inserted row")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "insert echoes one id per inserted row");
+        client.close().await;
+        let [first, second] = ids.as_slice() else {
+            panic!("distinct-pair insert did not echo exactly two ids");
+        };
+        (first.clone(), second.clone())
+    })
+}
+
 /// Insert ONE real record with the given string field (builder-only
 /// wire), returning its server-minted Base58 id. Used by the hostile-value
 /// and credential-reflection probes; authorized defensive content only.

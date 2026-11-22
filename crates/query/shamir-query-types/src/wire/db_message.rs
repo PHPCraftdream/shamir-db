@@ -747,9 +747,19 @@ pub struct StatusRepository {
     pub wal: StatusWal,
 }
 
-/// Operator state snapshot ([`DbResponse::Status`]). Everything the
-/// server observed about itself at boot plus live telemetry; no disk
-/// read happens at request time.
+/// Operator state snapshot ([`DbResponse::Status`]). Built from the
+/// launcher's boot capture (server version, on-disk format epoch, boot
+/// stamp outcome, configured node id, configured role), the replication
+/// owner's process-global observations, each open repository's live
+/// durability / WAL telemetry, and ONE stored durability-override
+/// catalogue read of the RUNNING system store — that catalogue read
+/// happens at REQUEST time, so `status` (and `version show`, which reads
+/// the same snapshot) can fail with a typed code when it fails; only the
+/// boot stamp is never reread.
+///
+/// The reply is capped like the batch path: the encoded `DbResponse` is
+/// measured once and refused whole with `result_too_large` when it
+/// exceeds the server's result-size limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct OperatorStatus {

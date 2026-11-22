@@ -273,16 +273,16 @@ impl StateCommand {
                 // head deadline (projection + guard, one budget, no
                 // retry — a sent request is never resent on expiry). The
                 // deadline is consulted BEFORE the projection result is
-                // unwrapped: an already-elapsed budget is the typed
+                // unwrapped, and it is re-checked AFTER the credential
+                // scan: an already-elapsed budget is the typed
                 // `head_wall_time` refusal even when a projection error
-                // is what the projection returned.
+                // is what the projection returned, and even when the
+                // scan itself came back clean (exit 0) or refused
+                // (exit 5).
                 let projected = project_head(&result, requested, limit, deadline);
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(ShellError::HeadWallTime);
-                }
-                let payload = projected?;
-                client.check_catalogue_output(&payload)?;
-                Ok(payload)
+                Ok(head_tail(deadline, projected, |payload| {
+                    client.check_catalogue_output(payload)
+                })?)
             }
             StateCommand::Get {
                 db,
@@ -428,8 +428,9 @@ fn subscription_field(field: &str, element: &QueryValue) -> Result<Value, ShellE
 }
 
 /// `Option<RepoIdentity>` → `Null`, or a map with EXACTLY `lineage_id`
-/// (16 non-negative integers) and `history_epoch` (a non-negative
-/// integer). Extra nested fields are a shape mismatch, not data.
+/// (16 non-negative integers) and `history_epoch` (PRESENT and a
+/// non-negative version leaf — the engine always emits a number there,
+/// never `Null`). Extra nested fields are a shape mismatch, not data.
 fn identity_field(element: &QueryValue) -> Result<Value, ShellError> {
     match element {
         QueryValue::Null => Ok(Value::Null),
@@ -437,10 +438,14 @@ fn identity_field(element: &QueryValue) -> Result<Value, ShellError> {
             let Some(lineage) = fields.get("lineage_id") else {
                 return Err(ShellError::Server);
             };
-            let Some(QueryValue::Int(epoch)) = fields.get("history_epoch") else {
+            let Some(epoch) = fields.get("history_epoch") else {
                 return Err(ShellError::Server);
             };
-            if fields.len() != 2 || *epoch < 0 || !is_lineage_id(lineage) {
+            if fields.len() != 2
+                || !is_optional_version(epoch)
+                || matches!(epoch, QueryValue::Null)
+                || !is_lineage_id(lineage)
+            {
                 return Err(ShellError::Server);
             }
             render_field(element)
@@ -449,7 +454,8 @@ fn identity_field(element: &QueryValue) -> Result<Value, ShellError> {
     }
 }
 
-/// `Option<[u8; 16]>` → `Null`, or exactly 16 non-negative integers.
+/// `Option<[u8; 16]>` → `Null`, or exactly 16 integer bytes
+/// (`0..=255`).
 fn lineage_field(element: &QueryValue) -> Result<Value, ShellError> {
     match element {
         QueryValue::Null => Ok(Value::Null),
@@ -458,12 +464,30 @@ fn lineage_field(element: &QueryValue) -> Result<Value, ShellError> {
     }
 }
 
-/// `Option<u64>` version / bookmark / gap endpoint → `Null` or a
-/// non-negative integer.
-fn version_field(element: &QueryValue) -> Result<Value, ShellError> {
+/// One version / epoch / bookmark leaf as the batch wire delivers it:
+/// `Null` (absent), a non-negative `Int`, a non-negative `QueryValue::Big`
+/// (the in-process engine shape) or the canonical decimal text a `u64`
+/// above `i64::MAX` becomes on the wire. Arbitrary text is NOT that shape:
+/// `"abc"`, `"007"`, `"+1"`, `"-1"` and anything above `u64::MAX` are
+/// refused.
+fn is_optional_version(element: &QueryValue) -> bool {
     match element {
-        QueryValue::Null | QueryValue::Int(0..) => render_field(element),
-        _ => Err(ShellError::Server),
+        QueryValue::Null | QueryValue::Int(0..) => true,
+        QueryValue::Big(value) => !value.to_string().starts_with('-'),
+        QueryValue::Str(text) => text
+            .parse::<u64>()
+            .is_ok_and(|parsed| parsed.to_string() == *text),
+        _ => false,
+    }
+}
+
+/// `Option<u64>` version / bookmark / gap endpoint → `Null` or a
+/// non-negative version leaf ([`is_optional_version`]).
+fn version_field(element: &QueryValue) -> Result<Value, ShellError> {
+    if is_optional_version(element) {
+        render_field(element)
+    } else {
+        Err(ShellError::Server)
     }
 }
 
@@ -481,15 +505,16 @@ fn optional_text_field(element: &QueryValue) -> Result<Value, ShellError> {
     }
 }
 
-/// A lineage id is a list of exactly [`LINEAGE_ID_BYTES`] non-negative
-/// integers (`[u8; 16]` through the engine's `to_qv`).
+/// A lineage id is a list of exactly [`LINEAGE_ID_BYTES`] integers, each a
+/// real byte (`0..=255`): a `[u8; 16]` through the engine's `to_qv` can
+/// never carry `256`, so such a leaf is a shape mismatch.
 fn is_lineage_id(element: &QueryValue) -> bool {
     match element {
         QueryValue::List(items) => {
             items.len() == LINEAGE_ID_BYTES
                 && items
                     .iter()
-                    .all(|item| matches!(item, QueryValue::Int(0..)))
+                    .all(|item| matches!(item, QueryValue::Int(0..=255)))
         }
         _ => false,
     }
@@ -594,6 +619,27 @@ fn head_error(deadline: tokio::time::Instant, error: ShellError) -> ShellError {
     } else {
         error
     }
+}
+
+/// The `data head` tail after the response arrived: project the rows under
+/// the shared deadline, then run the SYNCHRONOUS credential-reflection scan
+/// and consult the deadline ONE LAST TIME afterwards — an elapsed budget is
+/// the typed `head_wall_time` refusal (exit 7) even when the scan came back
+/// clean (which would otherwise exit 0) or refused (which would otherwise
+/// exit 5). The scan itself is not interruptible: this is ordering, not
+/// preemption.
+fn head_tail(
+    deadline: tokio::time::Instant,
+    projected: Result<Value, ShellError>,
+    scan: impl FnOnce(&Value) -> Result<(), ShellError>,
+) -> Result<Value, ShellError> {
+    let payload = projected?;
+    let scanned = scan(&payload);
+    if tokio::time::Instant::now() >= deadline {
+        return Err(ShellError::HeadWallTime);
+    }
+    scanned?;
+    Ok(payload)
 }
 
 /// Project the `data count` result. The count row is exactly one direct

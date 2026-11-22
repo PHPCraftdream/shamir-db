@@ -11,8 +11,8 @@ use super::harness::{
 };
 use super::secure_fixture::{boot_secure, run_with_secret};
 use super::state_data_common::{
-    data, insert_doc, insert_rows, leaf_u64, mentions_lag, refusal, scram_profile, STAMP_OUTCOMES,
-    STATUS_FIELDS,
+    data, insert_distinct_pair, insert_doc, insert_rows, leaf_u64, mentions_lag, refusal,
+    scram_profile, STAMP_OUTCOMES, STATUS_FIELDS,
 };
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -357,17 +357,18 @@ fn data_count_head_get_goldens_and_refusals() {
         "a row-clamped head must not claim byte truncation"
     );
 
-    // data get with a REAL inserted id: the projection is EXACTLY the seeded
-    // row — asserted UNCONDITIONALLY, no "any record will do" fallback.
-    // `ids[0]` is the FIRST row of `insert_rows`, whose stored payload is
-    // exactly the fixture's `{ n: 0, tag: "state_data_probe" }` map (the P2
-    // point read returns the stored record body, so no extra system fields
-    // appear), and the per-row `n` value pins the row's IDENTITY: every
-    // seeded row carries a different `n`.
+    // data get with a REAL inserted id: the projection is EXACTLY the
+    // requested row — asserted UNCONDITIONALLY, no "any record will do"
+    // fallback. The two rows seeded for this probe carry DISTINCT stored
+    // values (`n` 101/202, tags `state_data_first`/`state_data_second`),
+    // so a reply carrying the OTHER row fails the assertions below.
+    // `real_id` stays the first row of `insert_rows` for the later typed
+    // not_found / unknown_table probes.
     let real_id = &ids[0];
+    let (first_id, _second_id) = insert_distinct_pair(fixture);
     let get_run = run_shell(
         fixture,
-        &["data", "get", DB_NAME, REPO_NAME, PLAIN_TABLE, real_id],
+        &["data", "get", DB_NAME, REPO_NAME, PLAIN_TABLE, &first_id],
     );
     assert!(!get_run.contains_canary(fixture.canary.as_str()));
     let got = data(&get_run, "get");
@@ -381,13 +382,28 @@ fn data_count_head_get_goldens_and_refusals() {
     );
     assert_eq!(
         leaf_u64(&got["n"]),
-        Some(0),
-        "data get returned a DIFFERENT record than the seeded row 0"
+        Some(101),
+        "data get returned a DIFFERENT record than the requested first row"
     );
     assert_eq!(
         got["tag"].as_str(),
-        Some("state_data_probe"),
-        "data get lost the seeded payload value"
+        Some("state_data_first"),
+        "data get lost the requested row's payload value"
+    );
+    // The OTHER seeded row must never satisfy this golden: a value-only
+    // comparison is not enough, so assert EXPLICITLY that the reply does
+    // not carry the second row's distinct values.
+    let second_payload = serde_json::json!({ "n": 202, "tag": "state_data_second" });
+    let got_text = serde_json::to_string(&got).expect("data get payload serializes");
+    let second_text = serde_json::to_string(&second_payload).expect("second row serializes");
+    assert!(
+        got_text != second_text && !got_text.contains("state_data_second"),
+        "data get returned the SECOND seeded row instead of the requested one"
+    );
+    assert_ne!(
+        leaf_u64(&got["n"]),
+        Some(202),
+        "data get returned the SECOND seeded row's distinct `n`"
     );
 
     // HOSTILE-VALUE probe (real fixture record, real output): a record

@@ -11,10 +11,13 @@
 
 use std::time::Duration;
 
+use num_bigint::BigInt;
 use shamir_query_types::read::{PaginationInfo, QueryRecord, QueryResult, QueryStats};
 use shamir_types::types::value::QueryValue;
 
-use super::super::state::{head_error, project_count, project_head, project_subscriptions};
+use super::super::state::{
+    head_error, head_tail, project_count, project_head, project_subscriptions,
+};
 use crate::shell::output::ShellError;
 
 /// A direct map record with one large string field of `chars` characters.
@@ -118,6 +121,66 @@ fn head_error_prefers_an_elapsed_deadline() {
     assert_eq!(
         head_error(live, ShellError::ProjectionLimit),
         ShellError::ProjectionLimit
+    );
+}
+
+/// The `data head` tail runs the SYNCHRONOUS credential scan and only then
+/// consults the shared deadline: an already-elapsed budget is
+/// `HeadWallTime` whether the scan came back clean or refused, and it also
+/// wins over the projection result itself; a live budget preserves both
+/// the clean payload and the scan refusal.
+#[test]
+fn head_tail_checks_the_deadline_after_the_credential_scan() {
+    let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+    let live = tokio::time::Instant::now() + Duration::from_secs(60);
+    let payload = serde_json::json!({ "rows": [] });
+
+    assert_eq!(
+        head_tail(expired, Ok(payload.clone()), |_| Ok(())),
+        Err(ShellError::HeadWallTime),
+        "an elapsed budget refuses even a clean scan"
+    );
+    assert_eq!(
+        head_tail(expired, Ok(payload.clone()), |_| Err(ShellError::Server)),
+        Err(ShellError::HeadWallTime),
+        "an elapsed budget wins over a refusing scan"
+    );
+    assert_eq!(
+        head_tail(expired, Err(ShellError::Server), |_| Ok(())),
+        Err(ShellError::HeadWallTime),
+        "an elapsed budget wins over the projection result"
+    );
+    assert_eq!(
+        head_tail(live, Ok(payload.clone()), |_| Ok(())),
+        Ok(payload.clone())
+    );
+    assert_eq!(
+        head_tail(live, Ok(payload), |_| Err(ShellError::Server)),
+        Err(ShellError::Server),
+        "a live budget keeps the scan refusal"
+    );
+}
+
+/// The oracle for the ORDERING: a deadline that expires DURING the
+/// synchronous credential scan must be the typed `head_wall_time` refusal.
+/// The old ordering (deadline consulted before the scan) returned the
+/// payload for this case, so this test fails against it — unlike the
+/// already-elapsed cases above, which both orderings refuse.
+#[test]
+fn head_tail_deadline_crossed_by_the_credential_scan_is_head_wall_time() {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+    let payload = serde_json::json!({ "rows": [] });
+    // A real sleep, NOT synchronisation: it only has to guarantee that the
+    // deadline has PASSED when the scan returns, and it overshoots it by
+    // design (no upper-bound timing assumption is made).
+    let out = head_tail(deadline, Ok(payload), |_| {
+        std::thread::sleep(Duration::from_millis(40));
+        Ok(())
+    });
+    assert_eq!(
+        out,
+        Err(ShellError::HeadWallTime),
+        "an expiry crossed by the scan must beat a clean scan result"
     );
 }
 
@@ -317,4 +380,86 @@ fn subscriptions_render_a_present_but_empty_identity() {
     assert!(entry["recorded_identity"].is_null(), "null must stay null");
     assert!(entry["observed_identity"].is_null());
     assert_eq!(entry["upstream_bookmark"].as_str(), Some("7"));
+}
+
+/// A `u64` identity epoch above `i64::MAX` is `QueryValue::Big` in-process
+/// and canonical decimal TEXT on the wire; the real named codec round trip
+/// must keep it projectable and exact (no float, no wraparound).
+#[test]
+fn subscriptions_project_a_large_unsigned_identity_through_the_wire_codec() {
+    let mut recorded_identity = identity(lineage(16));
+    let QueryValue::Map(identity_fields) = &mut recorded_identity else {
+        panic!("identity is a map");
+    };
+    identity_fields.insert(
+        String::from("history_epoch"),
+        QueryValue::Big(BigInt::from(u64::MAX)),
+    );
+    let result = subscriptions_result(recorded_identity);
+
+    let record = result.records.into_iter().next().expect("one record");
+    let bytes = rmp_serde::to_vec_named(&record).expect("encode");
+    let decoded: QueryRecord = rmp_serde::from_slice(&bytes).expect("decode");
+    let out = project_subscriptions(&result_with(vec![decoded]))
+        .expect("the wire-decoded identity renders");
+    let recorded = &out["subscriptions"][0]["recorded_identity"];
+    assert_eq!(
+        recorded["history_epoch"].as_str(),
+        Some("18446744073709551615"),
+        "u64::MAX must survive as its exact canonical decimal text"
+    );
+    assert_eq!(
+        recorded["lineage_id"].as_array().map(Vec::len),
+        Some(16),
+        "the lineage bytes are untouched by the epoch swap"
+    );
+}
+
+/// The typed subscription shapes refuse what the engine can never emit: a
+/// lineage byte above 255 (not a `[u8; 16]` byte) and NON-canonical decimal
+/// text in a version leaf; the canonical `u64::MAX` text still renders
+/// exactly.
+#[test]
+fn subscriptions_refuse_an_impossible_lineage_byte_and_non_canonical_text() {
+    let impossible = QueryValue::List((0..16).map(|_| QueryValue::Int(256)).collect());
+    assert_eq!(
+        project_subscriptions(&subscriptions_result(identity(impossible)))
+            .expect_err("a lineage byte above 255 is refused"),
+        ShellError::Server
+    );
+
+    let with_bookmark = |text: &str| {
+        let mut result = subscriptions_result(identity(lineage(16)));
+        let QueryRecord::Direct(QueryValue::Map(root)) = &mut result.records[0] else {
+            panic!("subscription result is one direct map record");
+        };
+        let QueryValue::List(entries) = root.get_mut("subscriptions").expect("subscriptions list")
+        else {
+            panic!("subscriptions is a list");
+        };
+        let QueryValue::Map(entry) = &mut entries[0] else {
+            panic!("one subscription entry is a map");
+        };
+        entry.insert(
+            String::from("upstream_bookmark"),
+            QueryValue::Str(String::from(text)),
+        );
+        result
+    };
+
+    for text in ["abc", "007", "-1"] {
+        assert_eq!(
+            project_subscriptions(&with_bookmark(text))
+                .expect_err("non-canonical version text is refused"),
+            ShellError::Server,
+            "{text:?} is not a canonical u64"
+        );
+    }
+
+    let out = project_subscriptions(&with_bookmark("18446744073709551615"))
+        .expect("canonical u64::MAX text renders");
+    assert_eq!(
+        out["subscriptions"][0]["upstream_bookmark"].as_str(),
+        Some("18446744073709551615")
+    );
 }

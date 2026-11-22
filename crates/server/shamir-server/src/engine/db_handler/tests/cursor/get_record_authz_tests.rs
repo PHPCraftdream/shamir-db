@@ -68,6 +68,12 @@ const SMALL_BUDGET: usize = 64;
 const PARKED_RESULT_CAP: usize = 1024;
 /// Payload value of the seeded control row.
 const SEEDED_V: i64 = 42;
+/// Payload value of the row seeded in the REPLACEMENT table.
+const REPLACEMENT_V: i64 = 99;
+/// The fixed-text refusal of a table whose authorized registration changed
+/// while the read was parked. Asserted exactly, so a payload can never
+/// satisfy it.
+const REGISTRATION_CHANGED: &str = "the authorized table registration changed during the request";
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -251,13 +257,51 @@ async fn chmod_items_table(handler: &ShamirDbHandler, mode: u16) {
     .expect("admin chmod must succeed");
 }
 
+/// The LIVE registration of `app.main.items`: its `store_id` (as carried by
+/// the repository catalogue) and whether the name is registered at all.
+///
+/// Read through the repository handle the request would resolve, never from
+/// the request itself, so the assertions below observe the real state a
+/// parked read compares against.
+fn items_registration(handler: &ShamirDbHandler) -> (Option<RecordId>, bool) {
+    let repo = handler
+        .db()
+        .get_db("app")
+        .and_then(|db| db.get_repo("main"))
+        .expect("app.main must be registered");
+    let store_id = repo
+        .table_config("items")
+        .expect("items must be registered")
+        .store_id;
+    (store_id, repo.has_table("items"))
+}
+
 /// Drop `app.main.items` and create a fresh `items` in the same repo, as
-/// alice, through the REAL handler dispatch. A second handler over the SAME
+/// alice, through the REAL handler dispatch; then seed one row in the
+/// REPLACEMENT table with a unique payload. A second handler over the SAME
 /// `ShamirDb` is used with an unbounded budget: dispatching the DDL on the
 /// bounded handler would park it on the very reservation the test holds (its
 /// upfront reserve is `batch.limits.max_result_size`, 10 MB by default), which
 /// would deadlock the rendezvous.
-async fn replace_items_table(handler: &ShamirDbHandler) {
+///
+/// Returns the live `store_id` read BEFORE the drop, the one read back AFTER
+/// the create, the unbounded handler (so the caller can drive the control
+/// read) and the replacement row's storage `RecordId`. The id assertions are
+/// made HERE: a silently no-op DDL would otherwise leave the parked read
+/// comparing the table with itself and the test would pass vacuously.
+async fn replace_items_table(
+    handler: &ShamirDbHandler,
+) -> (
+    Option<RecordId>,
+    Option<RecordId>,
+    ShamirDbHandler,
+    RecordId,
+) {
+    let (pre_drop_store_id, _) = items_registration(handler);
+    assert!(
+        pre_drop_store_id.is_some(),
+        "the fixture's table must carry a live store id before the drop"
+    );
     // DROP TABLE and CREATE TABLE through the handler require a superuser
     // session. It shares the session id, hence the confirmation-tag key, with
     // the reading alice.
@@ -320,6 +364,81 @@ async fn replace_items_table(handler: &ShamirDbHandler) {
         matches!(create_resp, DbResponse::Batch { .. }),
         "create through the handler must succeed, got {create_resp:?}"
     );
+
+    let (post_create_store_id, has_table) = items_registration(handler);
+    assert!(
+        post_create_store_id.is_some(),
+        "the recreated table must carry a live store id"
+    );
+    assert!(has_table, "the recreated table must be registered");
+    assert_ne!(
+        pre_drop_store_id, post_create_store_id,
+        "the DDL must actually replace the table registration"
+    );
+
+    // Seed one row in the REPLACEMENT table with a UNIQUE payload: the
+    // caller's control read returns THIS row, so it can only pass when a
+    // NON-admin alice really holds the ACL to read the replacement.
+    let mut seed_batch = Batch::new();
+    seed_batch.insert(
+        "replacement",
+        insert("items").row(doc! { "id" => "replacement", "v" => REPLACEMENT_V }),
+    );
+    let seeded = tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &seed_batch.build()),
+    )
+    .await
+    .expect("the replacement insert must complete within the 120s bound")
+    .expect("the replacement insert must succeed");
+    let replacement_id = match seeded
+        .results
+        .get("replacement")
+        .expect("insert alias returned")
+        .records
+        .first()
+    {
+        Some(QueryRecord::Inserted(record)) => {
+            record.id.expect("insert must carry the storage RecordId")
+        }
+        other => panic!("expected an Inserted write-result row, got {other:?}"),
+    };
+
+    (
+        pre_drop_store_id,
+        post_create_store_id,
+        ddl_handler,
+        replacement_id,
+    )
+}
+
+/// Replace the whole `app.main` REGISTRATION with a LEGACY one
+/// (`table_config("items").store_id == None`), minting no store id.
+///
+/// `ShamirDb::add_repo_as` mints a fresh store id for every id-less inline
+/// table (`add_repo_as_with_durability_locked` loops over `config.tables` and
+/// calls `with_new_store_id`), so it can NEVER produce a legacy live
+/// registration. `DbInstance::add_repo` installs the supplied `RepoConfig` as
+/// given and is the route that keeps `store_id: None` — which is what makes
+/// the parked comparison `None == None` before the identity fix. The
+/// `remove_repo` bool is asserted here so a silent no-op removal cannot make
+/// the replacement vacuous.
+async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
+    let removed = tokio::time::timeout(CALL_TIMEOUT, handler.db().remove_repo("app", "main"))
+        .await
+        .expect("remove_repo must complete within the 120s bound")
+        .expect("remove_repo must succeed");
+    assert!(removed, "the fixture's `main` repository must be removed");
+
+    let db = handler.db().get_db("app").expect("app database");
+    let config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    tokio::time::timeout(CALL_TIMEOUT, db.add_repo(config))
+        .await
+        .expect("add_repo must complete within the 120s bound")
+        .expect("the legacy repository registration must succeed");
 }
 
 // ---------------------------------------------------------------------------
@@ -363,12 +482,15 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
 }
 
 /// The read passes the early ACL and parks on the held budget; the table is
-/// then dropped and recreated under the SAME name in the same repo. The name
-/// is configured and the ACL still passes, so only the captured `store_id`
-/// comparison can refuse it — with the same typed `access_denied`.
+/// then dropped and recreated under the SAME name in the same repo, and a row
+/// is seeded in the replacement. The name is configured and the ACL still
+/// passes — the CONTROL below reads the replacement's row back as the SAME
+/// non-admin alice — so only the captured registration comparison can refuse
+/// it, with the fixed typed `access_denied`.
 ///
-/// WITHOUT the fix the read resolves the NEW (empty) table and returns
-/// `not_found` instead of the refusal.
+/// WITHOUT the identity fix the read resolves the NEW table and returns
+/// `not_found` (or the replacement's row once it holds that key), never the
+/// fixed refusal.
 #[tokio::test]
 async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
@@ -388,17 +510,124 @@ async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked()
         .await
         .expect("the read must reach the budget park within the 120s bound");
 
-    replace_items_table(&handler).await;
+    let (pre_store_id, post_store_id, ddl_handler, replacement_id) =
+        replace_items_table(&handler).await;
+    assert_ne!(
+        pre_store_id, post_store_id,
+        "the parked read must be comparing two DIFFERENT registrations"
+    );
+
+    // CONTROL: the same NON-admin alice principal must read the replacement
+    // row, so the parked refusal cannot be attributed to the ACL.
+    let control = send(
+        &ddl_handler,
+        &alice_session(),
+        get_record_req(replacement_id),
+    )
+    .await;
+    match control {
+        DbResponse::Record { record } => assert_eq!(
+            record.get_value_i64("v"),
+            Some(REPLACEMENT_V),
+            "the control must return the replacement's row"
+        ),
+        other => panic!("control: alice must read the replacement row, got {other:?}"),
+    }
+
     drop(held);
 
     let resp = tokio::time::timeout(CALL_TIMEOUT, read)
         .await
         .expect("the released read must complete within the 120s bound");
-    expect_error(
-        resp,
-        "access_denied",
-        "authorized table incarnation replaced while parked",
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "access_denied",
+                "authorized table registration replaced while parked"
+            );
+            assert_eq!(
+                message, REGISTRATION_CHANGED,
+                "the parked refusal must be the fixed registration text, never a payload"
+            );
+        }
+        other => panic!("expected the fixed access_denied refusal, got {other:?}"),
+    }
+}
+
+/// P1 (legacy case): a table replaced by ANOTHER **legacy** registration —
+/// `table_config("items").store_id` is `None` on BOTH sides — must be refused
+/// exactly like an id-bearing replacement.
+///
+/// The fixture is built with `add_repo_as`, which mints a store id, so the
+/// repository is first re-registered through
+/// [`replace_repo_with_legacy_items`] (the only route that installs an
+/// id-less table as-is). While the read is parked the whole registration is
+/// replaced the same legacy way: no store id is ever minted, and the
+/// `None`-before / `None`-after assertions below are what make this
+/// legacy-vs-legacy.
+///
+/// WITHOUT the registration identity the comparison is `None == None`, the
+/// read proceeds into the replacement repository and returns `not_found`, so
+/// this test fails without the fix.
+#[tokio::test]
+async fn get_record_refuses_when_a_legacy_table_is_replaced_by_a_legacy_registration() {
+    let budget = ByteBudget::new(Some(SMALL_BUDGET));
+    let (handler, _seeded) = build_handler(budget.clone(), parked_limits()).await;
+    let store = SessionStore::new();
+    let session = store.insert(ALICE_SID, alice_session());
+
+    // Legacy on the AUTHORIZED side too: the parked read must capture `None`.
+    replace_repo_with_legacy_items(&handler).await;
+    let (authorized_store_id, has_table) = items_registration(&handler);
+    assert_eq!(
+        authorized_store_id, None,
+        "the authorized table must be a LEGACY registration (no store id)"
     );
+    assert!(has_table, "the legacy registration must be registered");
+
+    let held = tokio::time::timeout(CALL_TIMEOUT, budget.acquire(SMALL_BUDGET))
+        .await
+        .expect("the test must reserve the byte budget within the 120s bound");
+    let mut read = Box::pin(send(
+        &handler,
+        &session,
+        get_record_req(RecordId([0x42; 16])),
+    ));
+    tokio::time::timeout(CALL_TIMEOUT, drive_to_capture(&mut read, &session))
+        .await
+        .expect("the read must reach the budget park within the 120s bound");
+
+    replace_repo_with_legacy_items(&handler).await;
+    let (replacement_store_id, has_table) = items_registration(&handler);
+    assert_eq!(
+        replacement_store_id, None,
+        "the replacement must stay LEGACY: no store id may be minted"
+    );
+    assert_eq!(
+        replacement_store_id, authorized_store_id,
+        "legacy-vs-legacy: the captured store ids both stay `None`, so the \
+         store-id comparison alone can never tell the two registrations apart"
+    );
+    assert!(has_table, "the replacement table must be registered");
+
+    drop(held);
+
+    let resp = tokio::time::timeout(CALL_TIMEOUT, read)
+        .await
+        .expect("the released read must complete within the 120s bound");
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "access_denied",
+                "legacy registration replaced while parked"
+            );
+            assert_eq!(
+                message, REGISTRATION_CHANGED,
+                "the legacy replacement must use the fixed registration text"
+            );
+        }
+        other => panic!("expected the fixed access_denied refusal, got {other:?}"),
+    }
 }
 
 /// Control: identical park-and-release with NO mutation returns the seeded

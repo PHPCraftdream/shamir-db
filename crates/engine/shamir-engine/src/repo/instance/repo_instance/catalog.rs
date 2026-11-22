@@ -5,7 +5,7 @@ pub use self::rename_outcome::RenamePersistOutcome;
 use super::RepoInstance;
 use crate::meta::repo_identity::RepoIdentity;
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
-use crate::table::{TableConfig, TableManager};
+use crate::table::{TableConfig, TableManager, TableRegistration};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
 use shamir_types::types::record_id::RecordId;
@@ -164,6 +164,11 @@ impl RepoInstance {
     /// Catalogue read; see `TableCatalog`.
     pub fn table_config(&self, name: &str) -> Option<TableConfig> {
         self.core.catalog.table_config(name)
+    }
+
+    /// Live registration identity; see `TableCatalog::table_registration`.
+    pub fn table_registration(&self, name: &str) -> Option<TableRegistration> {
+        self.core.catalog.table_registration(name)
     }
 
     #[cfg(test)]
