@@ -10,12 +10,16 @@
 
 #![warn(missing_docs)]
 
+mod cancel_cursor;
 mod cancel_request;
+mod cancel_tx;
 mod list_activity;
 mod operator_state;
 
 pub mod token_admin;
 
+pub use cancel_cursor::cancel_cursor_admin;
 pub use cancel_request::cancel_request;
+pub use cancel_tx::cancel_tx;
 pub use list_activity::list_activity;
 pub use operator_state::{get_record, status};

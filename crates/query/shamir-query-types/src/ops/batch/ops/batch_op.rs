@@ -27,6 +27,7 @@ use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
 use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
+use crate::wire::CursorId;
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use super::op_kind::{op_kind, OpKind};
@@ -211,12 +212,29 @@ pub enum BatchOp {
     ListActivity(ListActivityReq),
     /// Cancel an in-flight batch by its server-minted execution id (R4b step 2).
     CancelRequest(RequestExecId),
+    /// Operator cancellation of an open interactive transaction by its
+    /// activity-view handle (R4b step 3).
+    CancelTx(u64),
+    /// Operator cancellation of another session's result cursor (R4b step 3).
+    CancelCursorAdmin(CursorId),
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CancelRequestWire {
     cancel_request: RequestExecId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelTxWire {
+    cancel_tx: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelCursorAdminWire {
+    cancel_cursor_admin: CursorId,
 }
 
 impl Serialize for BatchOp {
@@ -326,6 +344,16 @@ impl Serialize for BatchOp {
                 map.serialize_entry("cancel_request", id)?;
                 map.end()
             }
+            BatchOp::CancelTx(handle) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_tx", handle)?;
+                map.end()
+            }
+            BatchOp::CancelCursorAdmin(id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_cursor_admin", id)?;
+                map.end()
+            }
         }
     }
 }
@@ -342,8 +370,20 @@ impl<'de> Deserialize<'de> for BatchOp {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BatchOp, A::Error> {
                 let mut qv_map = TMap::default();
                 while let Some((key, value)) = map.next_entry::<String, QueryValue>()? {
-                    if key == "cancel_request" && qv_map.contains_key(&key) {
-                        return Err(DeError::duplicate_field("cancel_request"));
+                    // The typed single-key cancel ops must not let a repeated
+                    // discriminator be overwritten before their wire struct
+                    // (and its `deny_unknown_fields`) ever sees the map.
+                    if qv_map.contains_key(&key) {
+                        match key.as_str() {
+                            "cancel_request" => {
+                                return Err(DeError::duplicate_field("cancel_request"))
+                            }
+                            "cancel_tx" => return Err(DeError::duplicate_field("cancel_tx")),
+                            "cancel_cursor_admin" => {
+                                return Err(DeError::duplicate_field("cancel_cursor_admin"))
+                            }
+                            _ => {}
+                        }
                     }
                     qv_map.insert(key, value);
                 }
@@ -560,6 +600,11 @@ impl<'de> Deserialize<'de> for BatchOp {
                     }
                     OpKind::CancelRequest => CancelRequestWire::deserialize(value)
                         .map(|op| BatchOp::CancelRequest(op.cancel_request)),
+                    OpKind::CancelTx => {
+                        CancelTxWire::deserialize(value).map(|op| BatchOp::CancelTx(op.cancel_tx))
+                    }
+                    OpKind::CancelCursorAdmin => CancelCursorAdminWire::deserialize(value)
+                        .map(|op| BatchOp::CancelCursorAdmin(op.cancel_cursor_admin)),
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),

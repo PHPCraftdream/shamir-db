@@ -523,6 +523,16 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "request cancellation",
                 ))
             }
+            BatchOp::CancelTx(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "transaction cancellation",
+                ))
+            }
+            BatchOp::CancelCursorAdmin(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "cursor cancellation",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

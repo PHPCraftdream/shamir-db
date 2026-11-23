@@ -178,7 +178,8 @@ impl ShamirDbHandler {
     /// the static discriminant summary of the batch (homogeneous batches
     /// keep their `activity_name`; heterogeneous ones are conservatively
     /// `write`), derived in the same pre-flight visitor pass that rejects
-    /// `ListActivity` and `CancelRequest` — never from arguments (privacy, D3).
+    /// `ListActivity`, `CancelRequest`, `CancelTx` and `CancelCursorAdmin` —
+    /// never from arguments (privacy, D3).
     pub(super) async fn tx_execute_with_rid(
         &self,
         session: &Session,
@@ -217,6 +218,8 @@ impl ShamirDbHandler {
             let control_op = match &visit.entry.op {
                 BatchOp::ListActivity(_) => Some("ListActivity"),
                 BatchOp::CancelRequest(_) => Some("CancelRequest"),
+                BatchOp::CancelTx(_) => Some("CancelTx"),
+                BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
                 _ => None,
             };
             if let Some(op) = control_op {
@@ -377,11 +380,15 @@ impl ShamirDbHandler {
                     // Measure staged size INSIDE the same lock as the engine call.
                     r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                 }
-                None => Err(BatchError::QueryError {
-                    alias: String::new(),
-                    message: "transaction is already committed or rolled back".into(),
-                    code: None,
-                }),
+                // The context is gone: an operator cancel (or a commit that
+                // already took it) won the race. Same typed answer as a fresh
+                // lookup of the removed handle.
+                None => {
+                    return DbResponse::Error {
+                        code: "tx_not_found".into(),
+                        message: format!("no open transaction for handle {}", tx_handle),
+                    }
+                }
             }
         };
         match exec {

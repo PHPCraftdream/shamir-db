@@ -970,3 +970,17 @@ fn cancel_request_is_not_hmac_gated() {
         Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
     ));
 }
+
+#[test]
+fn cancel_tx_and_cursor_admin_are_not_hmac_gated() {
+    for op in [
+        BatchOp::CancelTx(7),
+        BatchOp::CancelCursorAdmin(crate::wire::CursorId(9)),
+    ] {
+        assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+        assert!(matches!(
+            canonical_batch_op("", &op),
+            Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
+        ));
+    }
+}

@@ -130,6 +130,10 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         // activity (Own) or global operator activity (All).
         | BatchOp::ListActivity(_)
         | BatchOp::CancelRequest(_)
+        // R4b-3: a token endpoint must not cancel another session's
+        // transaction or cursor.
+        | BatchOp::CancelTx(_)
+        | BatchOp::CancelCursorAdmin(_)
         | BatchOp::CancelBackup(_)
         | BatchOp::ReplicationStatus(_) => "admin-denied",
     }
@@ -215,7 +219,7 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
     assert!(!batches.is_empty(), "batch fixtures are complete");
     assert_eq!(
         batches.len(),
-        62,
+        64,
         "one fixture for each current admin BatchOp arm"
     );
 

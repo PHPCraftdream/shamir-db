@@ -95,6 +95,8 @@ define_op_kinds! {
     CancelBackup => "cancel_backup",
     ListActivity => "list_activity",
     CancelRequest => "cancel_request",
+    CancelTx => "cancel_tx",
+    CancelCursorAdmin => "cancel_cursor_admin",
     Call => "call",
     ForEach => "for_each",
     Batch => "batch",
