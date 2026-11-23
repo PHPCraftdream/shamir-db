@@ -10,11 +10,12 @@ use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
-use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
+use shamir_connect::common::time::{ns, UnixNanos};
+use shamir_connect::server::argon2_semaphore::{Argon2PermitBudget, Argon2Semaphore};
 use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
 
@@ -42,6 +43,23 @@ fn dummy_record() -> UserRecord {
         kdf_params: small_kdf(),
         tickets_invalid_before_ns: 0,
     }
+}
+
+/// Budget for a job admitted four seconds ago on the monotonic clock whose
+/// wall deadline is still three seconds ahead.
+///
+/// The wall half alone would accept it (the deadline has not passed), and the
+/// wall budget is the full three seconds; only the monotonic remainder
+/// measured from the stale anchor exceeds that budget. This is the budget a
+/// job that sat in the blocking queue past its admission deadline carries, and
+/// it costs the test no real waiting.
+fn budget_with_stale_monotonic_anchor() -> Argon2PermitBudget {
+    let admitted_ns = UnixNanos::try_now().expect("wall clock").as_u64();
+    Argon2PermitBudget::at_admission_with_anchor(
+        admitted_ns + 3 * ns::SECOND,
+        admitted_ns,
+        Instant::now() - Duration::from_secs(4),
+    )
 }
 
 #[test]
@@ -156,32 +174,36 @@ fn queued_cancel_retains_ticket_until_blocking_job_finishes() {
             .recv_timeout(WATCHDOG)
             .expect("blocking worker reserved by handshake");
 
-        // One manual poll admits and submits the real gated derivation, then
-        // returns Pending because its sole blocking worker remains occupied.
-        let mut future = Box::pin(derive_scram_record_gated(
-            "queued cancellation password".to_string(),
-            small_kdf(),
-            Arc::clone(&gate),
-        ));
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        assert!(matches!(
-            Future::poll(Pin::as_mut(&mut future), &mut context),
-            Poll::Pending
-        ));
-        drop(future);
+        // The job is queued behind the blocker with a budget whose monotonic
+        // anchor predates admission by four seconds while its wall deadline is
+        // still in the future: only the monotonic remainder can refuse it, and
+        // nothing in this test waits for that remainder to be spent.
+        let stale_budget = budget_with_stale_monotonic_anchor();
+        let ticket = gate.admit().expect("queued job admission");
+        let (job_outcome_tx, job_outcome_rx) = mpsc::sync_channel(1);
+        let job_gate = Arc::clone(&gate);
+        let job = tokio::task::spawn_blocking(move || {
+            // The ticket belongs to the blocking job, exactly like the
+            // production closure's ticket, so the caller cannot release it.
+            let _ticket = ticket;
+            let outcome = job_gate.run_with_budget(stale_budget, || ());
+            // The cancelled caller is gone; the typed outcome travels to the
+            // test on a channel so the refusal REASON stays observable.
+            let _ = job_outcome_tx.send(outcome);
+        });
+        // Cancellation: the caller-side handle is dropped and never polled
+        // again. `spawn_blocking` work is not cancelled by that, so the job
+        // still owns its ticket and its already-spent budget.
+        drop(job);
 
         // The queued job still owns its ticket after the caller is cancelled.
         let other_ticket = gate.admit().expect("second admission slot remains");
         let before_overflow = gate.busy_refusals();
         assert!(matches!(gate.admit(), Err(ScramDerivationError::Busy)));
         assert_eq!(gate.busy_refusals(), before_overflow + 1);
-        // The cancelled request's job is still queued and its admission
-        // budget is spent while the sole blocking worker is occupied, so the
-        // expiry outcome it reaches is fixed before it runs.
         let before_job_refusal = gate.busy_refusals();
         let before_job_kdf_runs = gate.kdf_runs();
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        let before_available = gate.semaphore().available();
 
         // FIFO blocking-pool submission makes this sentinel's channel message
         // independent evidence that the earlier cancelled request's job ended.
@@ -206,10 +228,10 @@ fn queued_cancel_retains_ticket_until_blocking_job_finishes() {
             .recv_timeout(WATCHDOG)
             .expect("sentinel confirms queued job completed first");
 
-        // The queued job's outcome is deterministic: its permit budget was
-        // anchored at admission and is spent by the time it runs, so it is
-        // refused as busy exactly once, never reaches the derivation closure
-        // and never takes the free permit.
+        // The queued job's outcome is fixed before it runs: its budget's
+        // monotonic remainder was already spent at admission, so it is refused
+        // as busy exactly once, never reaches the derivation closure and never
+        // takes the free permit.
         assert_eq!(
             gate.busy_refusals(),
             before_job_refusal + 1,
@@ -222,8 +244,15 @@ fn queued_cancel_retains_ticket_until_blocking_job_finishes() {
         );
         assert_eq!(
             gate.semaphore().available(),
-            1,
+            before_available,
             "the expired job must not consume the free permit"
+        );
+        assert!(
+            matches!(
+                job_outcome_rx.recv_timeout(WATCHDOG),
+                Ok(Err(ScramDerivationError::Busy))
+            ),
+            "the refusal reason must be the typed busy outcome"
         );
 
         // The queued job has dropped its ticket; with the other ticket still
@@ -352,9 +381,13 @@ fn busy_display_is_fixed_safe_text() {
 
 /// A job that only reaches the semaphore after its admission budget is spent
 /// must be refused with the typed busy outcome, counted once, without running
-/// the KDF and without consuming the free permit. This drives the PUBLIC
-/// `derive_scram_record_gated` path, so it fails if that job recomputes a
-/// fresh budget instead of reusing the one fixed at admission.
+/// the derivation and without consuming the free permit.
+///
+/// The budget handed to the job anchors the monotonic clock four seconds in
+/// the past while its wall deadline is still in the future, so the refusal can
+/// only come from the monotonic remainder measured from admission. No wall
+/// time has to pass: a check that compares only the wall clock to the deadline
+/// would accept this budget and run the derivation.
 #[test]
 fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -383,20 +416,15 @@ fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
             .recv_timeout(WATCHDOG)
             .expect("blocking worker reserved by handshake");
 
-        // One manual poll is the admission handshake: when it returns Pending
-        // the job has already admitted itself, fixed its budget and been
-        // submitted to the blocking queue. No yield count is involved.
-        let mut job = Box::pin(derive_scram_record_gated(
-            "queued past its admission budget".to_string(),
-            small_kdf(),
-            Arc::clone(&gate),
-        ));
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        assert!(matches!(
-            Future::poll(Pin::as_mut(&mut job), &mut context),
-            Poll::Pending
-        ));
+        // Admission handshake, not a yield count: when the job is submitted it
+        // already owns its ticket and is queued behind the blocker.
+        let ticket = gate.admit().expect("queued job admission");
+        let stale_budget = budget_with_stale_monotonic_anchor();
+        let job_gate = Arc::clone(&gate);
+        let job = tokio::task::spawn_blocking(move || {
+            let _ticket = ticket;
+            job_gate.run_with_budget(stale_budget, || ())
+        });
 
         // Observed, not hoped for: the queued job holds one of the two
         // admission slots of a capacity-one gate.
@@ -407,23 +435,20 @@ fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
         drop(probe);
         let before_refusals = gate.busy_refusals();
         let before_kdf_runs = gate.kdf_runs();
+        let before_available = gate.semaphore().available();
 
-        // Stay queued past the fixed three-second admission budget. The
-        // oracle below does not depend on the wall clock: the monotonic
-        // remainder measured from admission is already spent, so the correct
-        // implementation refuses even if no wall time appears to pass.
-        tokio::time::sleep(Duration::from_secs(4)).await;
-
+        // Releasing the blocker lets the queued job run. Its budget is already
+        // spent on the monotonic clock, so it must refuse before reaching the
+        // derivation even though its wall deadline has not passed.
         release_tx.send(()).expect("blocking worker still waiting");
         tokio::time::timeout(WATCHDOG, blocker)
             .await
             .expect("blocker watchdog")
             .expect("blocker join");
-        // Resuming the future registers the real waker; a job whose blocking
-        // closure already finished returns at once.
         let outcome = tokio::time::timeout(WATCHDOG, job)
             .await
-            .expect("queued job watchdog");
+            .expect("queued job watchdog")
+            .expect("queued job join");
 
         assert!(
             matches!(outcome, Err(ScramDerivationError::Busy)),
@@ -439,7 +464,11 @@ fn queued_public_job_resuming_past_its_admission_budget_is_refused() {
             before_refusals + 1,
             "the queued refusal is counted exactly once"
         );
-        assert_eq!(gate.semaphore().available(), 1, "no permit may be consumed");
+        assert_eq!(
+            gate.semaphore().available(),
+            before_available,
+            "no permit may be consumed"
+        );
         // The ticket is released: both admission slots are free again.
         let first = gate.admit().expect("queued job released its ticket");
         let second = gate.admit().expect("queued job released its ticket");

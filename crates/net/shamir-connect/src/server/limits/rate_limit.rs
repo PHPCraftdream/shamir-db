@@ -8,7 +8,7 @@
 //!
 //! ## Constants (per spec §8 table)
 //!
-//! - `RATE_LIMIT_AUTH_INIT_PER_SUBNET = 10/sec` (token bucket).
+//! - `RATE_LIMIT_AUTH_INIT_PER_SECOND = 10/sec` (token bucket).
 //! - Subnet granularity: `/24 IPv4` or `/64 IPv6` (same as lockout).
 //!
 //! ## Restart warmup window (spec §8.6 NORMATIVE)

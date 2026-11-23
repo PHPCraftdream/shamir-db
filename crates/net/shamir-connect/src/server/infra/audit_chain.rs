@@ -554,6 +554,14 @@ pub enum AuditError {
         /// The sequence the append would have consumed.
         next: u64,
     },
+    /// The writer latched [`AuditError::SequenceExhausted`]: an event was
+    /// refused and never written, so a checkpoint must not certify the
+    /// log as complete. Raised by [`AuditChainWriter::checkpoint_now`].
+    #[error(
+        "audit sequence space is exhausted and an audit event was not written; \
+         the audit checkpoint cannot certify the log"
+    )]
+    SequenceExhaustedUnaudited,
     /// Entry's `hmac` doesn't match its canonical bytes.
     #[error("audit HMAC mismatch at {at}")]
     HmacMismatch {
@@ -598,6 +606,11 @@ pub trait AuditAppender: Send + Sync {
 pub struct AuditChainWriter {
     chain: Arc<AuditChain>,
     appender: Arc<dyn AuditAppender>,
+    /// Latched by [`Self::append`] when the inner chain refuses an event with
+    /// [`AuditError::SequenceExhausted`]: that event was never written, so no
+    /// later checkpoint may report success. Monotonic — never cleared — and
+    /// atomic only, so it adds no lock and no ordering constraint.
+    sequence_exhausted: std::sync::atomic::AtomicBool,
 }
 
 impl AuditChainWriter {
@@ -609,6 +622,7 @@ impl AuditChainWriter {
         Self {
             chain: Arc::new(chain),
             appender,
+            sequence_exhausted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -616,7 +630,11 @@ impl AuditChainWriter {
     /// also be handed to the scheduler so `checkpoint_now` observes the
     /// state mutated by `append`.
     pub fn new_with_shared(chain: Arc<AuditChain>, appender: Arc<dyn AuditAppender>) -> Self {
-        Self { chain, appender }
+        Self {
+            chain,
+            appender,
+            sequence_exhausted: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Snapshot of the shared chain handle — useful when the writer
@@ -650,7 +668,7 @@ impl AuditChainWriter {
                 "audit writer is fail-closed".into(),
             ));
         }
-        let entry = self.chain.append(
+        let entry = match self.chain.append(
             event,
             transport,
             user,
@@ -659,7 +677,18 @@ impl AuditChainWriter {
             result,
             details_canonical_msgpack,
             ts_ns,
-        )?;
+        ) {
+            Ok(entry) => entry,
+            // Sequence exhaustion means THIS event was never written. Latch it
+            // so a later checkpoint cannot certify a log that lost an event;
+            // the refusal itself is unchanged and stays before publication.
+            Err(AuditError::SequenceExhausted { next }) => {
+                self.sequence_exhausted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(AuditError::SequenceExhausted { next });
+            }
+            Err(other) => return Err(other),
+        };
         self.appender.append_entry(&entry).map_err(|error| {
             self.chain
                 .persistence_failed
@@ -683,7 +712,18 @@ impl AuditChainWriter {
 
     /// Force checkpoint NOW (caller schedules this every 60s for
     /// tighter truncation-detection bounds).
+    ///
+    /// Refuses with [`AuditError::SequenceExhaustedUnaudited`] once
+    /// [`Self::append`] has latched a sequence exhaustion: the log is
+    /// missing an event, so reporting a successful checkpoint would let the
+    /// caller treat the audit trail as complete.
     pub fn checkpoint_now(&self) -> Result<(), AuditError> {
+        if self
+            .sequence_exhausted
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AuditError::SequenceExhaustedUnaudited);
+        }
         let _gate = self.chain.durable_gate.lock();
         if self
             .chain

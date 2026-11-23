@@ -20,7 +20,7 @@ use super::super::{
     args::{CreateArgs, ListArgs},
     lock::{is_lock_contention, LockFailure},
     run_with_io,
-    secret_output::OutputPathError,
+    secret_output::{self, OutputPathError},
     CliIo, TokenAction,
 };
 use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
@@ -32,10 +32,14 @@ use anyhow::Error as AnyError;
 use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory as _;
-use shamir_connect::server::audit_chain::AuditChain;
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
+};
 use shamir_connect::server::user_record::UserRecord;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -385,6 +389,29 @@ fn typed_output_error(err: &AnyError, what: &str) {
     );
 }
 
+/// Windows only: pins the EXACT typed refusal for a final component that
+/// contains ':'. `lexical_candidate` refuses it as an unresolvable
+/// destination whose IO source is `InvalidInput`, so the variant and the kind
+/// are both asserted — `typed_output_error` alone would also accept a
+/// `ReservedAuditName` or a `NotFound` resolution failure.
+#[cfg(windows)]
+fn windows_colon_component_error(err: &AnyError, what: &str) {
+    match err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<OutputPathError>())
+    {
+        Some(OutputPathError::Unresolvable(source)) => assert_eq!(
+            source.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{what} must refuse a ':' component as invalid input, got {source:?}"
+        ),
+        other => panic!(
+            "{what} must fail with OutputPathError::Unresolvable for a ':' component, \
+             got {other:?}: {err:#}"
+        ),
+    }
+}
+
 /// Round-3 finding 3: `--out-file` equal to the MISSING active audit log.
 /// The valid archive stays, the active log stays missing (recovery may
 /// recreate an empty active only AFTER the typed refusal), and no secret is
@@ -473,7 +500,7 @@ async fn create_refuses_a_windows_drive_like_final_component() {
     let out = std::path::PathBuf::from(format!("{}\\z:notes", outside.display()));
     let (result, o, _e) = run(&c, create_args_with_out("alice", "ads", &out), true).await;
     let err = result.expect_err("a ':' component must be refused");
-    typed_output_error(&err, "create");
+    windows_colon_component_error(&err, "create");
     assert!(!String::from_utf8(o).expect("stdout").contains("shk1."));
 }
 
@@ -650,5 +677,108 @@ async fn create_typed_refuses_symlink_aliases_named_or_pointing_into_audit_names
     assert!(
         !c.data_dir.join("audit.log.00000000000000000042").exists(),
         "nothing may be created through the dangling link's target"
+    );
+}
+
+/// A trailing separator names a DIRECTORY, never a file. The lexical rebuild
+/// pushes components into a canonical ancestor, which silently DROPS the
+/// trailing separator, so `token.out/` would become a FILE named `token.out`.
+/// The refusal must inspect the ORIGINAL argument bytes, not the rebuilt
+/// destination.
+#[test]
+fn out_file_with_trailing_separator_is_refused() {
+    // `Path::new` keeps the trailing separator in `as_encoded_bytes()`;
+    // a `PathBuf::push` round trip would drop it.
+    let out = Path::new("token.out/");
+    assert_eq!(
+        out.as_os_str().as_encoded_bytes(),
+        b"token.out/".as_slice(),
+        "fixture sanity: the trailing separator must survive in the raw bytes"
+    );
+    // A data directory that does not exist has no reserved namespace, so only
+    // the trailing-separator check can refuse this call.
+    let missing = Path::new("shamir-data-dir-that-does-not-exist");
+    let err = secret_output::validate_out_file(out, missing)
+        .expect_err("a trailing separator names a directory, never a file");
+    assert!(
+        matches!(err, OutputPathError::TrailingSeparator),
+        "the trailing separator must be typed-refused, got {err:?}"
+    );
+}
+
+/// A no-op appender: the writer's shutdown latch must be observable without
+/// any durable store behind it.
+struct NoopAuditAppender;
+
+impl AuditAppender for NoopAuditAppender {
+    fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+/// An event refused for sequence exhaustion was NEVER written, so the writer
+/// must latch that fact: `checkpoint_now` then reports
+/// `SequenceExhaustedUnaudited` instead of `Ok` and cannot certify a log that
+/// lost an event.
+///
+/// Mutant killed: dropping the `AtomicBool` store in `AuditChainWriter::append`
+/// makes `checkpoint_now()` return `Ok(())` — the parent commit's behavior —
+/// and the `expect_err` below fails.
+#[test]
+fn checkpoint_failure_reports_unaudited_token() {
+    let chain = Arc::new(AuditChain::from_checkpoint([5; 32], u64::MAX - 1, [9; 32]));
+    let writer = AuditChainWriter::new_with_shared(chain, Arc::new(NoopAuditAppender));
+    assert!(
+        matches!(
+            writer.append("token_create", "cli", "alice", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ),
+        "the exhausted sequence must be refused with the typed error"
+    );
+    assert_eq!(
+        writer
+            .checkpoint_now()
+            .expect_err("a refused event must latch the checkpoint"),
+        AuditError::SequenceExhaustedUnaudited
+    );
+    assert!(
+        AuditError::SequenceExhaustedUnaudited
+            .to_string()
+            .contains("was not written"),
+        "the typed error must name the missing event"
+    );
+}
+
+/// A failed `create` must not leave the output file `prepare` created behind:
+/// the file never held a secret, and its exclusive name would block the
+/// operator's retry. The unknown owner fails the setup step, which is the
+/// branch that cleans up through the identity-checked `remove_out_file`.
+#[tokio::test]
+async fn create_failure_removes_the_created_out_file() {
+    let (tmp, c) = seeded_dir(&["one"]).await;
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let out = outside.join("failed.out");
+    let (result, o, _e) = run(
+        &c,
+        create_args_with_out("ghost", "no-such-user", &out),
+        true,
+    )
+    .await;
+    let err = result.expect_err("an unknown owner must fail the create");
+    assert!(
+        format!("{err:#}").contains("unknown user"),
+        "unexpected failure: {err:#}"
+    );
+    assert!(
+        !out.exists(),
+        "the created-but-unusable output file must be removed"
+    );
+    assert!(
+        !String::from_utf8(o).expect("stdout").contains("shk1."),
+        "no secret may be delivered by a failed create"
     );
 }

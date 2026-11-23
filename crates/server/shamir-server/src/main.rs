@@ -39,6 +39,7 @@ use zeroize::Zeroizing;
 use shamir_server::backup;
 use shamir_server::config::Config;
 use shamir_server::doctor;
+use shamir_server::logging::SinkMode;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
@@ -376,7 +377,39 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             );
         }
     }
-    let _log_guard = shamir_server::logging::init(&config.logging);
+    // Refuse a diagnostic log sink that would land in the audit-log namespace
+    // (the server path too) — nothing is opened for a refused sink.
+    if let Some(ref f) = config.logging.file {
+        shamir_server::logging::validate_sink_path(std::path::Path::new(f), &config.data_dir)?;
+    }
+    // Offline subcommands take the data-directory lock (or refuse it) and must
+    // not create any file before their preconditions and their lock hold, so
+    // they get no file sink. `FormatMigrate` and `Shell` returned above;
+    // `Run` / `None` are the server path.
+    let offline = matches!(
+        cli.command,
+        Some(
+            Subcmd::Token { .. }
+                | Subcmd::Restore { .. }
+                | Subcmd::Backup { .. }
+                | Subcmd::LogicalExport(_)
+                | Subcmd::LogicalImport(_)
+                | Subcmd::ReplicationSeedExport { .. }
+                | Subcmd::ReplicationSeedInstall { .. }
+                | Subcmd::ReplicationSeedVerify { .. }
+                | Subcmd::AccessTree { .. }
+                | Subcmd::Service { .. }
+                | Subcmd::Doctor { .. }
+        )
+    );
+    let _log_guard = shamir_server::logging::init_for(
+        &config.logging,
+        if offline {
+            SinkMode::StdoutOnly
+        } else {
+            SinkMode::Config
+        },
+    );
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.

@@ -920,14 +920,17 @@ fn chain_refuses_sequence_exhaustion_before_consuming_state() {
 /// The writer path at the same boundary: the refusal is a typed input
 /// refusal raised inside the durable-gate + chain synchronization
 /// before publication, so nothing reaches the appender, the checkpoint
-/// state is untouched, the refusal repeats, and persistence is not
-/// latched (an explicit `checkpoint_now` afterwards still succeeds).
-/// Without the fix the writer consumed the sequence and published the
-/// entry: `CountingAppender` accepted it without latching, but the
-/// real Fjall adapter refuses a `MAX - 1` record itself — a defect
-/// this seam cannot expose, so the refusal must be in-chain.
+/// state is untouched, and the refusal repeats. The append is refused
+/// without consuming a sequence or appending, AND the writer *latches*
+/// that exhaustion: a later `checkpoint_now` refuses with
+/// `SequenceExhaustedUnaudited` instead of certifying the log, because
+/// the event that was refused was never audited. Without the fix the
+/// writer consumed the sequence and published the entry:
+/// `CountingAppender` accepted it without latching, but the real Fjall
+/// adapter refuses a `MAX - 1` record itself — a defect this seam
+/// cannot expose, so the refusal must be in-chain.
 #[test]
-fn writer_refuses_sequence_exhaustion_without_latching_or_appending() {
+fn writer_refuses_sequence_exhaustion_and_latches_the_checkpoint() {
     let shared = Arc::new(AuditChain::from_checkpoint(key(), u64::MAX - 1, [9; 32]));
     let concrete = Arc::new(CountingAppender::default());
     let appender = Arc::clone(&concrete) as Arc<dyn AuditAppender>;
@@ -940,11 +943,16 @@ fn writer_refuses_sequence_exhaustion_without_latching_or_appending() {
     }
     assert!(concrete.appends.lock().unwrap().is_empty());
     assert!(concrete.checkpoints.lock().unwrap().is_empty());
-    // No fail-closed latch: chain state unchanged, manual checkpoint
-    // still persists it.
+    // Chain state unchanged by the refusal itself.
     assert_eq!(writer.chain().checkpoint(), (u64::MAX - 1, [9; 32]));
-    writer
-        .checkpoint_now()
-        .expect("input refusal must not latch persistence");
-    assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
+    // The exhaustion latches: checkpoint_now must NOT certify a log that
+    // is missing the refused event, so nothing is persisted either.
+    assert!(
+        matches!(
+            writer.checkpoint_now(),
+            Err(AuditError::SequenceExhaustedUnaudited)
+        ),
+        "sequence exhaustion latches so an unaudited event cannot be certified"
+    );
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
 }

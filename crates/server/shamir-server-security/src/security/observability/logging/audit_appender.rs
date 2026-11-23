@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditEntry, AuditError, MAX_RECORD_BYTES,
 };
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -53,6 +54,32 @@ const CHECKPOINT_DB_DIRNAME: &str = "audit_checkpoint";
 const CHECKPOINT_KEYSPACE: &str = "last_audit_hmac";
 /// Single key used inside the checkpoint keyspace.
 const CHECKPOINT_KEY: &[u8] = &[0u8];
+
+/// Whether `name` lies in the reserved audit-log namespace inside `data_dir`:
+/// the active `AUDIT_LOG_FILENAME` itself or an `audit.log.<digits>` rotation
+/// archive (recovery's `ROTATED_PREFIX` names the archives with 20 digits; any
+/// non-empty digit run is reserved here).
+///
+/// Matching is ASCII-case-insensitive on Windows only (`cfg!(windows)`);
+/// elsewhere it is byte-exact, because the appender writes the exact lowercase
+/// name and on a case-sensitive filesystem `AUDIT.LOG` is a different entry.
+pub fn is_reserved_audit_name(name: &OsStr) -> bool {
+    let raw = name.as_encoded_bytes();
+    let folded;
+    let bytes: &[u8] = if cfg!(windows) {
+        folded = raw.to_ascii_lowercase();
+        &folded
+    } else {
+        raw
+    };
+    let Some(suffix) = bytes.strip_prefix(AUDIT_LOG_FILENAME.as_bytes()) else {
+        return false;
+    };
+    suffix.is_empty()
+        || suffix
+            .strip_prefix(b".")
+            .is_some_and(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+}
 
 // Allow a full post-auth protocol frame of details (plus base64 expansion),
 // maximum escaped text lengths from canonical_bytes, and the fixed columns
