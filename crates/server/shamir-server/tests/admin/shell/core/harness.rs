@@ -50,7 +50,9 @@ use shamir_test_diag::FlakeGuard;
 
 use crate::common;
 
-#[path = "secure/secure_fixture.rs"]
+// The fixture stayed in `secure/` when this file moved to `core/`; a
+// `#[path]` in a non-`mod.rs` file resolves against THIS file's directory.
+#[path = "../secure/secure_fixture.rs"]
 pub(super) mod secure_fixture;
 
 // ── Named constants ──────────────────────────────────────────────────

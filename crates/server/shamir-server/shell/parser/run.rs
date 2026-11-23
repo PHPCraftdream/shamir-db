@@ -35,7 +35,7 @@ use crate::shell::terminal;
 use crate::shell::terminal::secret::Terminal;
 
 /// Fixed interactive help (stderr only; never argv-derived).
-const INTERACTIVE_HELP: &str = "commands:\n  connect [NAME] [--auth scram|token]\n  ping\n  profile list | profile show NAME\n  db list\n  repo list | repo describe REPO\n  table list REPO | table describe REPO TABLE | table schema REPO TABLE\n  index list REPO TABLE\n  function list [FOLDER]\n  status\n  version show\n  replication subscriptions\n  data count DATABASE REPO TABLE | data head DATABASE REPO TABLE N | data get DATABASE REPO TABLE KEY\n  quit | exit\nsecret source flags: --secret-stdin | --secret-fd N (Unix only) | --secret-env NAME | --secret-prompt\ncaution: --secret-env NAME accepts only SHAMIR_SHELL_PASSWORD for SCRAM or SHAMIR_SHELL_TOKEN for token auth; an environment variable's value can be visible to other processes on the host and to shell history, so prefer --secret-stdin or the no-echo --secret-prompt. Profiles are stored in the profile directory (see `profile list`); the pin is never displayed.\n";
+const INTERACTIVE_HELP: &str = "commands:\n  connect [NAME] [--auth scram|token]\n  ping\n  profile list | profile show NAME\n  db list\n  repo list | repo describe REPO\n  table list REPO | table describe REPO TABLE | table schema REPO TABLE\n  index list REPO TABLE\n  function list [FOLDER]\n  status\n  version show\n  replication subscriptions\n  data count DATABASE REPO TABLE | data head DATABASE REPO TABLE N | data get DATABASE REPO TABLE KEY\n  user list\n  group tree [--db DB] | group members\n  rights show PATH\n  chmod PATH MODE [--yes] | chown PATH OWNER [--yes] | chgrp PATH GROUP [--yes]\n  activity sessions [--all] [--limit N] | activity requests [--all] [--limit N] | activity cancel REQUEST_ID [--yes]\n  quit | exit\nsecret source flags: --secret-stdin | --secret-fd N (Unix only) | --secret-env NAME | --secret-prompt\ncaution: --secret-env NAME accepts only SHAMIR_SHELL_PASSWORD for SCRAM or SHAMIR_SHELL_TOKEN for token auth; an environment variable's value can be visible to other processes on the host and to shell history, so prefer --secret-stdin or the no-echo --secret-prompt. Profiles are stored in the profile directory (see `profile list`); the pin is never displayed.\nThe user, group and rights commands are SCRAM-only and a token session refuses them before any request.\nThe chmod, chown and chgrp mutations require confirmation (interactive `yes` or --yes), are SCRAM-only, and refuse the root resource; the server authorizes every request.\nThe activity commands are SCRAM-only, and a cancel must be issued from another session than the one running the request.\n";
 
 /// Shell entry point; argv after the leading `shell` token. Returns the
 /// design §5 exit code. The locks are taken up front (locking is
@@ -230,6 +230,10 @@ fn run_batch(
 fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &mut Ctx<'_>) -> u8 {
     let prompt = if shell.quiet { "" } else { "> " };
     let mut session: Option<Session> = None;
+    // Design §3.2: an interactively declined confirmation exits with the
+    // typed refusal code (6). The refusal is REMEMBERED for the rest of the
+    // session, so a later `exit`/EOF cannot turn it into exit 0.
+    let mut declined: Option<u8> = None;
     loop {
         if !prompt.is_empty() {
             let _ = ctx.stderr.write_all(prompt.as_bytes());
@@ -237,7 +241,7 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         }
         let line = match read_line_bounded(&mut *ctx.input) {
             ReadLine::Line(line) => line,
-            ReadLine::Eof => return 0,
+            ReadLine::Eof => return declined.unwrap_or(0),
             // Read error: emit once and stop (looping would spin).
             ReadLine::Terminal => {
                 return output::emit_human(&mut *ctx.stderr, "shell", Err(ShellError::Usage));
@@ -249,7 +253,7 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
             continue;
         }
         match tokens[0] {
-            "quit" | "exit" => return 0,
+            "quit" | "exit" => return declined.unwrap_or(0),
             "help" => {
                 ctx.write_fixed(INTERACTIVE_HELP);
                 continue;
@@ -292,9 +296,16 @@ fn run_interactive(shell: &ShellArgs, runtime: &tokio::runtime::Runtime, ctx: &m
         // One human record per command; stdout stays silent. Ctrl+C exits
         // 130 instead of falling back into the input loop.
         let interrupted = matches!(result, Err(ShellError::Interrupted));
+        if matches!(result, Err(ShellError::ConfirmationRequired)) {
+            declined = Some(ShellError::ConfirmationRequired.exit());
+        }
         let exit = output::emit_human(&mut *ctx.stderr, id, result);
         if interrupted {
             return exit;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/repl_decline_tests.rs"]
+mod repl_decline_tests;

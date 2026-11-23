@@ -375,6 +375,14 @@ fn server_code(code: &str) -> ShellError {
         // Typed P2 point-read miss (`DbResponse::Error` code `not_found`).
         "not_found" => ShellError::NotFound,
         "not_supported" => ShellError::Unsupported,
+        // Typed ACL-mutation refusals (§4.5/§5): each keeps its own stable
+        // code and a fixed local message; the server text is never echoed.
+        "invalid_owner" => ShellError::InvalidOwner,
+        "hmac_mismatch" => ShellError::HmacMismatch,
+        "hmac_required" => ShellError::HmacRequired,
+        // The addressed database does not exist (the mutation path reports this
+        // instead of a typed "not found" when the caller is an admin).
+        "unknown_db" => ShellError::UnknownDb,
         // Session-level invalidation after a successful connect: the
         // authenticated session is gone; re-login required.
         "session_expired" | "session_invalidated" | "token_revoked" | "token_expired" => {
@@ -387,6 +395,13 @@ fn server_code(code: &str) -> ShellError {
         "unknown_table" => ShellError::UnknownTable,
         "resync_required" => ShellError::ResyncRequired,
         "result_too_large" => ShellError::ResultTooLarge,
+        // Read-only follower write refusal (§6 "follower behavior": the
+        // stable diagnostic is surfaced, never retried or redirected).
+        "read_only_replica" => ShellError::ReadOnlyReplica,
+        // The VICTIM side of a cooperative cancellation: this session's own
+        // batch was cancelled by another operator. Its effects may be partial,
+        // so it is its own typed refusal, not a generic server failure.
+        "cancelled" => ShellError::Cancelled,
         _ => ShellError::Server,
     }
 }

@@ -47,7 +47,8 @@ const SECRET_LINE_MAX_BYTES: usize = 4096;
 
 /// Fixed messages and codes shared by the probes in this folder.
 pub(in crate::shell_tests) const DENIED: &str = "permission denied by the server";
-pub(in crate::shell_tests) const SERVER_FAILURE: &str = "the operation failed on the server";
+pub(in crate::shell_tests) const UNKNOWN_RESOURCE: &str =
+    "the addressed resource does not exist on this server";
 pub(in crate::shell_tests) const CONNECT_FAILURE: &str = "connection to the server failed";
 pub(in crate::shell_tests) const TOKEN_SUBSET: &str =
     "token sessions expose only the read-only shell subset; log in with SCRAM for this command";
