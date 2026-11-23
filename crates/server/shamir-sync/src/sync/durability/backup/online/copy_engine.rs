@@ -411,7 +411,10 @@ fn copy_once(
 /// tolerated filesystem-capability kinds and is the seam's fallback result.
 fn fsync_dir_fallible(dir: &Path) -> Result<(), CopyError> {
     #[cfg(test)]
-    let result = test_seams::fire_fsync_dir(dir).unwrap_or_else(|| manifest::fsync_dest_dir(dir));
+    let result = match test_seams::fire_fsync_dir(dir) {
+        Some(injected) => manifest::tolerate_dir_sync_capability(injected),
+        None => manifest::fsync_dest_dir(dir),
+    };
     #[cfg(not(test))]
     let result = manifest::fsync_dest_dir(dir);
     result.map_err(|error| dest_at(dir, error))

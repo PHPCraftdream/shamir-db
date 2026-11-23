@@ -628,7 +628,7 @@ fn d_store_copy_open_failure_at_destination_fails_at_copying_and_cleans_up() {
         &progress,
         BackupStage::Copying,
         &error,
-        "copy failed for",
+        "destination write failed for",
     );
     assert_source_untouched(&before, &source);
 }

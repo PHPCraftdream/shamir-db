@@ -254,6 +254,12 @@ pub(crate) fn fsync_dest_dir(dir: &Path) -> std::io::Result<()> {
         let _ = dir;
         Ok(())
     };
+    tolerate_dir_sync_capability(result)
+}
+
+/// The tolerance of [`fsync_dest_dir`] as a function of one fsync result, so
+/// the test seam that substitutes the result passes through the same rule.
+pub(crate) fn tolerate_dir_sync_capability(result: std::io::Result<()>) -> std::io::Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(error)
