@@ -1,5 +1,7 @@
 //! Server-default durability policy; sparse per-repo overrides are not PR1.
 
+pub(crate) mod audit_chain_files;
+
 pub mod maintenance_lock;
 
 pub mod backup;
