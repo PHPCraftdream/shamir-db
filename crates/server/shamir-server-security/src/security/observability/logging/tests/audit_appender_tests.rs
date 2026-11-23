@@ -383,17 +383,23 @@ fn strict_shutdown_completes_inside_a_local_set_a1d5c9e3() {
         .unwrap();
     let local = tokio::task::LocalSet::new();
     let closing = Arc::clone(&appender);
-    let bounded = tokio::time::timeout(
-        HANG_GUARD,
-        local.run_until(async move {
-            tokio::task::spawn_local(async move { closing.shutdown().await })
-                .await
-                .expect("the strict shutdown task panicked")
-        }),
-    );
-    let outcome = runtime
-        .block_on(bounded)
-        .expect("strict shutdown did not complete within the bound");
+    // The timeout is built INSIDE the runtime: `tokio::time::timeout`
+    // constructs its timer eagerly, and building it before `block_on` is
+    // entered panics with "there is no reactor running" on EITHER
+    // implementation. Restoring the unconditional `blocking_io(...)` dispatch
+    // makes `spawn_local` panic, which is this test's red case.
+    let outcome = runtime.block_on(async {
+        tokio::time::timeout(
+            HANG_GUARD,
+            local.run_until(async move {
+                tokio::task::spawn_local(async move { closing.shutdown().await })
+                    .await
+                    .expect("the strict shutdown task panicked")
+            }),
+        )
+        .await
+        .expect("strict shutdown did not complete within the bound")
+    });
     assert!(
         outcome.is_ok(),
         "strict shutdown reported an error: {outcome:?}"

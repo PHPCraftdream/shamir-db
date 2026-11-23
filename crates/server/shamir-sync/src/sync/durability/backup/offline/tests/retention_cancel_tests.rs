@@ -27,7 +27,10 @@ use crate::sync::durability::backup::online::manifest::{
     self as online_manifest, BackupKind, ConsistencySection, RepoConsistency, WalDirEntry,
     WalSection, WalSegmentEntry,
 };
-use crate::sync::durability::backup::{verify_retention_candidate, BackupError, ManifestFileEntry};
+use crate::sync::durability::backup::{
+    verify_retention_candidate, verify_retention_candidate_cancellable, BackupError,
+    ManifestFileEntry,
+};
 
 use super::super::HASH_STREAM_BUFFER_SIZE;
 
@@ -133,7 +136,7 @@ fn retention_cancel_interrupts_a_large_payload_hash() {
         calls.get() > 2
     };
 
-    let error = verify_retention_candidate(dir.path(), &raw, &probe)
+    let error = verify_retention_candidate_cancellable(dir.path(), &raw, &probe)
         .expect_err("a cancelled verify must not report success");
 
     // (a) the cancellation surfaces as an `Interrupted` I/O error …
@@ -155,7 +158,7 @@ fn uncancelled_verify_hashes_the_whole_payload() {
     let (dir, raw) = large_wal_candidate();
     let wal = dir.path().join("repos/alpha.shamirwal/00000000.wal");
 
-    verify_retention_candidate(dir.path(), &raw, &|| false)
+    verify_retention_candidate(dir.path(), &raw)
         .expect("an uncancelled verify of the same candidate must succeed");
 
     let (sha256, size_bytes) = hash_file(&wal).expect("hash");

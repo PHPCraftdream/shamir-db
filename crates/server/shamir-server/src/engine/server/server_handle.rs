@@ -36,6 +36,18 @@ const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 30 s outer deadline of `runtime::serve`.
 const REPO_FLUSH_BUDGET: Duration = Duration::from_secs(15);
 
+/// Upper bound for stopping the observability server in teardown step 5. Its
+/// `shutdown()` joins a listener that may still be draining a scrape and a
+/// poller that may be inside a database await, so the wait is bounded — and an
+/// expiry is REPORTED (see [`ERR_OBS_SHUTDOWN`]) instead of being silently
+/// dropped with the future.
+const OBS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Report entry when [`OBS_SHUTDOWN_TIMEOUT`] expires. Fixed prefix: an unclean
+/// report names what may still hold the database, not just a log line.
+const ERR_OBS_SHUTDOWN: &str = "observability shutdown did not complete: the metrics listener or \
+                                 the poller may still hold the database";
+
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
 /// stop signal is the shared root `shutdown_token` (cancelled by
 /// [`ServerHandle::shutdown`] before this handle is awaited), so no per-task
@@ -482,10 +494,10 @@ impl ServerHandle {
         )
         .await;
         // Signal the observability server to stop BEFORE the wait a deadline can
-        // abandon (the scheduled join below is deliberately unbounded inside the
-        // bounded future). Its own `Drop` cancels the same token, so an expiry
-        // that drops this future cannot leave a poller and a router holding the
-        // database; the full await stays in step 5.
+        // abandon; the wait itself is bounded and reported in step 5. The
+        // handle's private cancel-on-drop field cancels the same token, so an
+        // expiry that drops this future cannot leave a poller and a router
+        // holding the database; the full await stays in step 5.
         if let Some(obs) = &self.observability {
             obs.cancel();
         }
@@ -512,9 +524,24 @@ impl ServerHandle {
                 .flush_all_report(REPO_FLUSH_BUDGET, report)
                 .await;
         }
-        // 5. Stop the observability HTTP server (if any).
+        // 5. Stop the observability HTTP server (if any). BOUNDED and REPORTED:
+        //    the listener may still be draining a scrape and the poller may be
+        //    inside its database await, so an expiry must mark the report
+        //    unclean instead of dropping the future and detaching both joins.
+        //    Dropping the abandoned `obs` still cancels the token (the handle's
+        //    private cancel-on-drop field), so the tasks stop on their own at
+        //    their next cancellation point.
         if let Some(obs) = self.observability {
-            obs.shutdown().await;
+            if tokio::time::timeout(OBS_SHUTDOWN_TIMEOUT, obs.shutdown())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    timeout = ?OBS_SHUTDOWN_TIMEOUT,
+                    "shutdown: observability server did not finish stopping",
+                );
+                report.add_error(ERR_OBS_SHUTDOWN.to_string());
+            }
         }
         // 6. Join the meta-snapshot task. It was already told to stop by the
         //    `shutdown_token.cancel()` at the top of this method (it holds a

@@ -173,28 +173,43 @@ impl ObservabilityState {
 /// Handle to a running observability server.
 ///
 /// [`Self::shutdown`] stops it AND waits for both tasks. Dropping the handle
-/// cancels the same token (see `Drop`), so a shutdown future abandoned by its
-/// deadline cannot leave the poller and the router alive holding the database;
-/// the two `JoinHandle`s are still not awaited by the drop, so a dropped handle
-/// does not block — the tasks stop on their own at their next cancellation
-/// point.
+/// cancels the same token (via the private `shutdown_on_drop` field), so a
+/// shutdown future abandoned by its deadline cannot leave the poller and the
+/// router alive holding the database; the two `JoinHandle`s are still not
+/// awaited by the drop, so a dropped handle does not block — the tasks stop on
+/// their own at their next cancellation point.
+///
+/// The cancel-on-drop lives in a PRIVATE FIELD, not in an `impl Drop for
+/// ObservabilityHandle`: a type-level `Drop` would make this public type
+/// non-move-partial and stop a caller from moving the public `state` field out
+/// of it.
 pub struct ObservabilityHandle {
     pub bound_addr: SocketAddr,
     pub state: Arc<ObservabilityState>,
-    shutdown: CancellationToken,
-    // `Option` so `shutdown(self)` can TAKE the handles: the `Drop` impl below
-    // makes a direct field move out of `self` illegal.
+    /// Cancels the shared token when the handle is dropped without
+    /// [`Self::shutdown`]. Private, so moving `state` out stays legal.
+    shutdown_on_drop: CancelOnDrop,
+    // `Option` so `shutdown(self)` can TAKE the handles (a field cannot be
+    // moved out of `self` directly in a method that owns it and is also
+    // dropped at its end).
     listener_task: Option<JoinHandle<()>>,
     poller_task: Option<JoinHandle<()>>,
 }
 
-impl Drop for ObservabilityHandle {
+/// Cancels an observability server when its handle is dropped without
+/// [`ObservabilityHandle::shutdown`].
+///
+/// A handle dropped without `shutdown()` — the ordered shutdown's future was
+/// abandoned by its deadline — must still stop both tasks: they hold an
+/// `Arc<ShamirDb>` and the router, and leaving them live would keep the stores
+/// locked past the teardown. The awaits stay in `shutdown()`. The cancel sits
+/// on this private newtype's own `Drop` rather than on `ObservabilityHandle` so
+/// the handle itself stays move-partial.
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        // A handle dropped without `shutdown()` — the ordered shutdown's future
-        // was abandoned by its deadline — must still stop both tasks: they hold
-        // an `Arc<ShamirDb>` and the router, and leaving them live would keep
-        // the stores locked past the teardown. The awaits stay in `shutdown()`.
-        self.shutdown.cancel();
+        self.0.cancel();
     }
 }
 
@@ -204,7 +219,7 @@ impl ObservabilityHandle {
     /// The shutdown path signals this BEFORE any wait a deadline can abandon,
     /// so an expiry never depends on the handle's `Drop` having run yet.
     pub fn cancel(&self) {
-        self.shutdown.cancel();
+        self.shutdown_on_drop.0.cancel();
     }
 
     /// Stop the HTTP listener and the process-metrics poller.
@@ -249,7 +264,7 @@ impl ObservabilityHandle {
     pub async fn shutdown(mut self) {
         let shutdown_started = std::time::Instant::now();
         tracing::debug!("ObservabilityHandle::shutdown: enter, calling cancel()");
-        self.shutdown.cancel();
+        self.shutdown_on_drop.0.cancel();
         tracing::debug!(
             elapsed = ?shutdown_started.elapsed(),
             "ObservabilityHandle::shutdown: cancel() returned"
@@ -563,24 +578,38 @@ pub async fn spawn_with_byte_budget(
                 biased;
                 _ = shutdown_for_poller.cancelled() => break,
                 _ = interval.tick() => {
-                    collector.collect();
-                    if let Some(ref tx_m) = tx_metrics_clone {
-                        let snap = tx_m.snapshot();
-                        metrics::gauge!("shamir_tx_started_total").set(snap.txs_started as f64);
-                        metrics::gauge!("shamir_tx_committed_total").set(snap.txs_committed as f64);
-                        metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
-                        metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
-                        metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
-                        record_transactions_metrics(&snap);
-                        metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
-                        metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
-                    }
-                    // #984: degraded-index count — O(indexes) in-memory walk,
-                    // zero store reads.
-                    if let Some(ref db) = shamir_db_clone {
-                        let degraded = db.degraded_index_count().await;
-                        metrics::gauge!("shamir_degraded_indexes_total")
-                            .set(degraded as f64);
+                    // The tick BODY awaits the database
+                    // (`degraded_index_count`), so the outer `select!` alone
+                    // only observes cancellation before or after a tick: a
+                    // poller already inside that await would keep the task
+                    // alive until the await returns and hold the `Arc<ShamirDb>`
+                    // with it. Race the whole body against the same token, so
+                    // the cancel lands on the NEXT POLL, not after the await.
+                    let collect_tick = async {
+                        collector.collect();
+                        if let Some(ref tx_m) = tx_metrics_clone {
+                            let snap = tx_m.snapshot();
+                            metrics::gauge!("shamir_tx_started_total").set(snap.txs_started as f64);
+                            metrics::gauge!("shamir_tx_committed_total").set(snap.txs_committed as f64);
+                            metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
+                            metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
+                            metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
+                            record_transactions_metrics(&snap);
+                            metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
+                            metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
+                        }
+                        // #984: degraded-index count — O(indexes) in-memory walk,
+                        // zero store reads.
+                        if let Some(ref db) = shamir_db_clone {
+                            let degraded = db.degraded_index_count().await;
+                            metrics::gauge!("shamir_degraded_indexes_total")
+                                .set(degraded as f64);
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_for_poller.cancelled() => break,
+                        _ = collect_tick => {}
                     }
                 }
             }
@@ -632,7 +661,7 @@ pub async fn spawn_with_byte_budget(
     Ok(ObservabilityHandle {
         bound_addr,
         state,
-        shutdown,
+        shutdown_on_drop: CancelOnDrop(shutdown),
         listener_task: Some(listener_task),
         poller_task: Some(poller_task),
     })

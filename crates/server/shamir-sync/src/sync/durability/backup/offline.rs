@@ -72,10 +72,7 @@ fn hash_file_streaming(path: &Path, cancel: &dyn Fn() -> bool) -> std::io::Resul
     let mut size_bytes = 0u64;
     loop {
         if cancel() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "hashing cancelled",
-            ));
+            return Err(io::Error::new(io::ErrorKind::Interrupted, HashCancelled));
         }
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -89,6 +86,20 @@ fn hash_file_streaming(path: &Path, cancel: &dyn Fn() -> bool) -> std::io::Resul
 
 /// Name of the manifest file written into every snapshot directory.
 pub const MANIFEST_FILE_NAME: &str = "manifest.json";
+
+/// The retention cancel hook aborted a streaming hash. A typed marker so the
+/// caller can tell a deliberate cancellation from an OS `EINTR`
+/// (`io::ErrorKind::Interrupted` is used for both on the wire).
+#[derive(Debug)]
+pub struct HashCancelled;
+
+impl core::fmt::Display for HashCancelled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("hashing cancelled by the retention budget")
+    }
+}
+
+impl std::error::Error for HashCancelled {}
 
 #[derive(Debug, Error)]
 pub enum BackupError {
@@ -367,23 +378,10 @@ impl VerifiedManifest {
 /// is not included in its own `files` list (it is written after the list is
 /// computed).
 ///
-/// F-19 (#812): after `write_manifest` returns successfully, `dest_dir`
-/// itself is fsync'd once via [`fsync_dir`] (reused from `restore.rs`) —
-/// `copy_dir_recursive` and `write_manifest` fsync each file's CONTENT, but
-/// neither previously synced the DIRECTORY ENTRIES they create under
-/// `dest_dir` (the copied files and `manifest.json`). A single fsync of
-/// `dest_dir` after the last write into it covers every entry added directly
-/// to that directory: `fsync` on a directory flushes all of its current
-/// entry metadata, not just recently-added entries, so one call after the
-/// last write is sufficient for the top-level directory. `copy_dir_recursive`
-/// itself now ALSO fsyncs every directory it writes into (once per
-/// recursion level, at the end of its loop — see that function's doc), so
-/// nested subdirectories of a fjall table tree get their own entries made
-/// durable too, not just `dest_dir`'s immediate children. Same "fsync'd the
-/// file, not the directory" gap class F-12 (#802) already closed for
-/// `restore()`'s renames — this closes it for `backup()`'s plain creates.
-/// Log-only on failure, matching `fsync_dir`'s existing contract (see its
-/// doc in `restore.rs`) — this does not change `backup()`'s error surface.
+/// F-19 (#812): after `write_manifest` returns, `dest_dir` itself is fsync'd
+/// once via [`fsync_dir`] — a directory fsync flushes every entry added to it,
+/// and `copy_dir_recursive` fsyncs each nested directory it writes into.
+/// Log-only on failure, matching `fsync_dir`'s contract.
 pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     if !from.exists() {
         return Err(BackupError::SourceMissing(from.to_path_buf()));
@@ -661,29 +659,33 @@ pub(super) fn verify_manifest_for_restore(
     verify_manifest_impl(snapshot_dir)
 }
 
-/// Retention preflight: run the v2 verifier core over a candidate snapshot WITHOUT taking the
+/// Retention preflight without cancellation (source-compatible entry point):
+/// every hash runs to completion.
+pub fn verify_retention_candidate(dir: &Path, raw: &[u8]) -> Result<(), BackupError> {
+    verify_retention_candidate_cancellable(dir, raw, &|| false)
+}
+
+/// Retention preflight with the retention pass's cancellation probe threaded
+/// into the per-chunk hash loop. Every other caller uses the two-argument
+/// form above.
+/// Run the v2 verifier core over a candidate snapshot WITHOUT taking the
 /// blocking shared read lease (retention runs on a native scheduler worker and must never block)
 /// and WITHOUT the v1 fallback: scheduled retention only manages v2 online copies, and its
 /// classification refuses anything else before this call. `raw` is the candidate's `manifest.json`
 /// exactly as the caller already read and size-bounded it — the verifier verifies against those
-/// bytes and never re-reads the file, so a candidate whose manifest swaps between the two reads is
-/// judged on the bytes the classification decision used. THE CALLER'S MANIFEST SIZE CAP IS A
-/// PRECONDITION of this function and is not re-checked here. An ONLINE-kind match is required
-/// FIRST, on the same bytes and BEFORE any payload I/O: a v2 manifest whose `kind` is offline
-/// refuses without walking or hashing the tree; the original v2 format-version check and error are
-/// kept. The exclusive delete lease is taken separately, immediately before deletion. `cancel` is
-/// threaded into the per-chunk hash loop, so a shutdown request interrupts a large payload hash
-/// instead of waiting for it to finish; retention passes its own flag, every other caller passes
-/// `&|| false`. Not used by any reader path; the unit return carries no report fields the
-/// preflight needs.
-pub fn verify_retention_candidate(
+/// bytes and never re-reads the file. THE CALLER'S MANIFEST SIZE CAP IS A PRECONDITION and is not
+/// re-checked here. An ONLINE-kind match is required FIRST, on the same bytes and BEFORE any
+/// payload I/O: a v2 offline manifest refuses without walking or hashing the tree; the original v2
+/// format-version check and error are kept. `cancel` is consulted once per chunk, so a shutdown
+/// request interrupts a large payload hash instead of waiting for it to finish. Not used by any
+/// reader path.
+pub fn verify_retention_candidate_cancellable(
     dir: &Path,
     raw: &[u8],
     cancel: &dyn Fn() -> bool,
 ) -> Result<(), BackupError> {
-    // Kind FIRST: decode and classify the bounded bytes without touching
-    // the tree (`decode_manifest_v2` keeps the original v2 format-version
-    // check — v1 and unknown refuse typed, no v1 fallback for retention).
+    // Kind FIRST: decode and classify the bounded bytes without touching the
+    // tree (`decode_manifest_v2` keeps the v2 format-version check; no v1 fallback).
     let decoded = v2_verify::decode_manifest_v2(raw)?;
     // A v2 manifest whose `kind` is offline is not a retention candidate:
     // refused BEFORE the tree walk, hash or any other payload I/O.
@@ -692,8 +694,7 @@ pub fn verify_retention_candidate(
             "retention candidate manifest kind is not online".to_owned(),
         ));
     }
-    // Online-kind only: the payload half verifies the ALREADY-decoded
-    // manifest — one parse, no re-read.
+    // Online-kind only: the payload half verifies the ALREADY-decoded manifest — one parse.
     v2_verify::verify_decoded_manifest_v2(dir, decoded, cancel)?;
     Ok(())
 }

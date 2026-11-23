@@ -288,6 +288,9 @@ pub struct FjallAuditAppender {
     /// One-shot hook run at the END of a successful batched `append_entry`.
     #[cfg(test)]
     after_append_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// One-shot hook run in `checkpoint` after the cheap pre-gate fence.
+    #[cfg(test)]
+    before_gate_checkpoint_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test seam replacing [`rotation::sync_parent`] at dir sync.
     #[cfg(test)]
     dir_sync_hook: Mutex<Option<DirSyncHook>>,
@@ -389,6 +392,8 @@ impl FjallAuditAppender {
             #[cfg(test)]
             after_append_hook: Mutex::new(None),
             #[cfg(test)]
+            before_gate_checkpoint_hook: Mutex::new(None),
+            #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
         }
@@ -473,6 +478,8 @@ impl FjallAuditAppender {
             refused_checkpoint_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             after_append_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_gate_checkpoint_hook: Mutex::new(None),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
@@ -966,15 +973,17 @@ impl AuditAppender for FjallAuditAppender {
     }
 
     fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
-        // Post-close fence: gate-free, store-free refusal once the batched
-        // appender is closed, so a resumed inline checkpoint cannot rewrite
-        // the anchor. Strict mode has no shutdown flag.
+        // Post-close fence, cheap half: gate-free, store-free (Strict: no flag).
         self.refuse_closed_checkpoint()?;
+        #[cfg(test)]
+        self.fire_before_gate_checkpoint_hook();
         if let Some(message) = self.failed.lock().as_ref() {
             return Err(std::io::Error::other(message.clone()));
         }
-        let result = blocking_io(|| {
+        blocking_io(|| {
             self.persistence_section(|| {
+                // DECISIVE half: same gate as `final_flush_blocking`.
+                self.refuse_closed_checkpoint_under_gate()?;
                 if let Some(message) = self.failed.lock().as_ref() {
                     return Err(AppenderError::Io(std::io::Error::other(message.clone())));
                 }
@@ -985,11 +994,6 @@ impl AuditAppender for FjallAuditAppender {
                 result
             })
         })
-        .map_err(std::io::Error::other);
-        if let Err(error) = result {
-            *self.failed.lock() = Some(error.to_string());
-            return Err(error);
-        }
-        Ok(())
+        .map_err(|error| self.latch_checkpoint_failure(std::io::Error::other(error)))
     }
 }

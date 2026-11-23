@@ -1,6 +1,6 @@
 //! Pass-budget accounting and fresh-copy ownership tests: the pass charges the
 //! verifier's real reads (a manifest file once, a WAL segment and a copied
-//! stamp twice) and nothing else, at the exact boundary and one byte below it,
+//! stamp three times) and nothing else, at the exact boundary and one byte below it,
 //! and the fresh copy is owned before a scan can refuse.
 
 use std::collections::BTreeSet;
@@ -38,10 +38,11 @@ fn true_read_bytes(dir: &Path) -> u64 {
     manifest + 1 + sidecar + 1 + 2 * payload
 }
 
-/// [`true_read_bytes`] plus the stamp's two real reads: `format_stamp::inspect`
-/// and the verifier's manifest-file loop both read the copied stamp.
+/// [`true_read_bytes`] plus the stamp's three real reads: `format_stamp::inspect`
+/// and the verifier's `check_stamp_agreement` both inspect the copied stamp,
+/// and the verifier's manifest-file loop hashes it.
 fn stamped_read_bytes(dir: &Path) -> u64 {
-    true_read_bytes(dir) + 2 * stamp_bytes(dir)
+    true_read_bytes(dir) + 3 * stamp_bytes(dir)
 }
 
 fn stamp_bytes(dir: &Path) -> u64 {
@@ -180,7 +181,7 @@ fn pass_budget_refuses_when_the_second_wal_read_does_not_fit() {
 /// One pass over stamped copies fits a budget of exactly their true reads,
 /// stamp reads included.
 #[test]
-fn one_pass_charges_the_stamps_two_real_reads() {
+fn one_pass_charges_the_stamps_three_real_reads() {
     let (_temp, root) = private_root();
     let oldest = copy_with_stamp(&root, "20200101_000001", 1, Some(OWNER));
     let newest = copy_with_stamp(&root, "20200101_000002", 2, Some(OWNER));
