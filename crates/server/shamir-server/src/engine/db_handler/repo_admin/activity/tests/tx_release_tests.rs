@@ -205,13 +205,32 @@ async fn expect_waiter_proceeds(pending: AbortOnDropHandle<DbResponse>) {
     );
 }
 
+/// Wait, without sleeping, until every record lock of the finished transaction
+/// is gone. The release runs as a DETACHED task (`spawn_abort_release`), so a
+/// state read taken straight after the drop can precede it on a current-thread
+/// runtime and merely race it on a multi-thread one: the lock count is an event
+/// to wait for here, never a value to read once.
+async fn wait_for_lock_release(mvcc: &MvccStore, baseline: usize) {
+    let released = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if mvcc.locks_len() == baseline {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(released, "every record lock is released");
+}
+
 async fn assert_quiet(
     handler: &ShamirDbHandler,
     mvcc: &MvccStore,
     gate: &RepoTxGate,
     baseline: usize,
 ) {
-    assert_eq!(mvcc.locks_len(), baseline, "every record lock is released");
+    wait_for_lock_release(mvcc, baseline).await;
     assert!(
         handler.tx_registry().is_empty(),
         "no parked transaction survives"
