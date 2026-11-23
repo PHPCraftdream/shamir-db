@@ -30,7 +30,7 @@ use crate::sync::durability::backup::{
 };
 
 use super::super::super::retention_pass::manifest_digest_hex;
-use super::super::budget::{Budget, Refusal, ROOT_ENTRIES};
+use super::super::budget::{Budget, ROOT_ENTRIES};
 use super::super::ownership::{tag_fresh_with_seam, STAGED_PREFIX};
 use super::super::prune::prune_inner;
 use super::super::{prune, RetentionOutcome};
@@ -140,10 +140,7 @@ fn retain_pending(
         root,
         fresh,
         OWNER,
-        &BackupRetentionConfig {
-            keep_last,
-            max_age_days: Some(1),
-        },
+        &BackupRetentionConfig { keep_last },
         &CancelFlag::default(),
         &pending,
     )
@@ -324,7 +321,8 @@ fn unverifiable_fresh_copy_prevents_tagging_and_pruning() {
     let outcome = retain(&root, &fresh, 1);
     assert_eq!(
         (outcome.deleted, outcome.failed, outcome.untouched),
-        (0, 1, Some(1))
+        (0, 1, None),
+        "the fresh copy is verified before the scan, so no classification was published"
     );
     assert!(old.exists());
     assert!(sidecar(&fresh).get("scheduled_retention").is_none());
@@ -379,7 +377,7 @@ fn over_budget_manifest_aborts_the_pass_before_pruning() {
 }
 
 #[test]
-fn pass_budget_charges_unknown_regular_files_before_classification() {
+fn pass_budget_does_not_charge_files_the_verifier_never_reads() {
     let (_temp, root) = private_root();
     let old = copy(&root, "20200101_000001", 1, Some(OWNER));
     let unknown = copy(&root, "20200101_000002", 2, Some(OWNER));
@@ -392,20 +390,26 @@ fn pass_budget_charges_unknown_regular_files_before_classification() {
         &root,
         &fresh,
         OWNER,
-        &BackupRetentionConfig {
-            keep_last: 1,
-            max_age_days: None,
-        },
+        &BackupRetentionConfig { keep_last: 1 },
         &BTreeSet::new(),
         &mut budget,
         &mut outcome,
     );
-    assert!(matches!(refusal, Err(Refusal::Budget)));
-    assert_eq!(outcome.deleted, 0);
-    assert_eq!(outcome.untouched, None);
-    assert!(old.exists());
+    assert!(
+        refusal.is_ok(),
+        "an unread unknown file costs only its directory entry"
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (1, 0, Some(1)),
+        "the old copy is pruned and the unmanifested candidate stays untouched"
+    );
+    assert!(!old.exists());
     assert!(unknown.join("unknown").exists());
-    assert!(sidecar(&fresh).get("scheduled_retention").is_none());
+    assert_eq!(
+        sidecar(&fresh).get("scheduled_retention"),
+        Some(&json!({"version": 1, "owner": OWNER}))
+    );
 }
 
 #[test]
@@ -419,10 +423,7 @@ fn cancellation_before_scan_does_not_tag_or_delete() {
         &root,
         &fresh,
         OWNER,
-        &BackupRetentionConfig {
-            keep_last: 1,
-            max_age_days: None,
-        },
+        &BackupRetentionConfig { keep_last: 1 },
         &cancel,
         &BTreeSet::new(),
     );

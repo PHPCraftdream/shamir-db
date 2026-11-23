@@ -115,7 +115,7 @@ impl ServerLauncher {
             bootstrap,
             node_mode,
         } = self;
-        config.validate()?;
+        config.validate_for_launch()?;
         // Operator boot diagnostics: wall-clock origin of this launch, used
         // with the observed format epoch for the with_operator_boot call.
         let started_at = std::time::Instant::now();

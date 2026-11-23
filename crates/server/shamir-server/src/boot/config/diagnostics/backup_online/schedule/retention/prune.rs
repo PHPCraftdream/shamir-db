@@ -83,7 +83,6 @@ pub(super) fn prune_inner(
 
     let mut owned = Vec::new();
     let mut untouched = 0;
-    let mut fresh = None;
     // O(log n) provenance lookups: (name -> set of recorded (manifest
     // creation time, manifest SHA-256 digest)), built once for the whole
     // scan.
@@ -102,8 +101,32 @@ pub(super) fn prune_inner(
     // enforced here. Untagged candidates are tagged only after the late
     // sidecar check; already-owned matching entries need no new tag.
     let mut adopt: Vec<(String, u128, PathBuf, String)> = Vec::new();
+
+    // Verify and tag the fresh copy BEFORE the root is scanned: a verified
+    // output of this server stays owned even when the scan then refuses
+    // (budget, cancellation, an unreadable foreign entry) or the process dies
+    // right after, so a later pass can select it instead of skipping it as
+    // foreign. The tag still follows the child check and the late root and
+    // child re-checks, and an unverifiable fresh copy is never tagged.
+    // Nothing is deleted here.
+    let fresh_path = fresh_copy.to_path_buf();
+    let fresh_is_pending = fresh_name
+        .to_str()
+        .is_some_and(|name| pending_by_name.contains_key(name));
+    check_child(&fresh_path, &root_meta)?;
+    let fresh_sidecar = read_sidecar(&fresh_path, &root_meta, budget)?;
+    if has_tag(&fresh_sidecar) && !is_owned(&fresh_sidecar, owner) {
+        return Err(Refusal::Unverifiable);
+    }
+    let (fresh_time, _) = verified_time(&fresh_path, &root_meta, budget, fresh_is_pending)?;
+    check_root(root, &canonical)?;
+    check_child(&fresh_path, &root_meta)?;
+    tag_fresh(&canonical, &fresh_path, fresh_sidecar, owner, budget)?;
+
+    // The fresh copy already took its root entry slot, so the scan starts at
+    // one and skips that name.
+    let mut index = 1usize;
     let entries = fs::read_dir(&canonical).map_err(|_| Refusal::Incomplete)?;
-    let mut index = 0usize;
     for entry in entries {
         budget.checkpoint()?;
         let entry = entry.map_err(|_| Refusal::Incomplete)?;
@@ -119,6 +142,10 @@ pub(super) fn prune_inner(
         if name == SNAPSHOT_LEASE_FILE_NAME {
             continue;
         }
+        // Verified and tagged above; the scan never reclassifies it.
+        if name == fresh_name {
+            continue;
+        }
         // Crash-debris cleanup DURING the initial discovery: only a direct,
         // plain regular file with the reserved exact name shape and age
         // threshold is removed before the cap. The age rule protects another
@@ -132,7 +159,6 @@ pub(super) fn prune_inner(
             return Err(Refusal::Budget);
         }
         index += 1;
-        let is_fresh = name == fresh_name;
         let name_str = name.to_str();
         let pending_records = name_str.and_then(|name| pending_by_name.get(name));
         let is_pending = pending_records.is_some();
@@ -142,7 +168,7 @@ pub(super) fn prune_inner(
             }
             check_child(&path, &root_meta)?;
             let sidecar = read_sidecar(&path, &root_meta, budget)?;
-            if (!is_fresh && !is_pending) || has_tag(&sidecar) {
+            if !is_pending || has_tag(&sidecar) {
                 // A copy already tagged by anyone must be owned by us to
                 // stay a selection candidate; an untagged copy is eligible
                 // only as the fresh output or as an exact provenance match.
@@ -155,9 +181,6 @@ pub(super) fn prune_inner(
             Ok((time, sidecar, digest))
         };
         match classify() {
-            Ok((time, sidecar, _)) if is_fresh => {
-                fresh = Some((time, path, sidecar));
-            }
             // A recorded name/time/digest match means only that the manifest
             // bytes captured after protocol success still match at scan and
             // late check. It does not bind payload bytes or directory
@@ -190,11 +213,10 @@ pub(super) fn prune_inner(
     }
     budget.checkpoint()?;
     outcome.untouched = Some(untouched);
-    let (time, fresh_path, sidecar) = fresh.ok_or(Refusal::Unverifiable)?;
-    check_root(root, &canonical)?;
-    check_child(&fresh_path, &root_meta)?;
-    tag_fresh(&canonical, &fresh_path, sidecar, owner, budget)?;
 
+    // Fires after the fresh copy was tagged and the root was scanned, still
+    // before any adoption tag or deletion; the token is consumed only by the
+    // retention tests.
     #[cfg(test)]
     tracing::trace!(
         target: "shamir_server::retention_before_adoption",
@@ -258,10 +280,10 @@ pub(super) fn prune_inner(
         }
     }
 
-    owned.push((time, fresh_path.clone()));
+    owned.push((fresh_time, fresh_path.clone()));
     owned.sort_unstable(); // Creation time, then direct-child name.
-                           // A hard newest-N bound already selects every age-eligible copy outside
-                           // the protected set. max_age_days cannot reduce the newest-N floor.
+                           // A hard newest-N bound already selects every copy outside the
+                           // protected set; the just-created copy stays protected separately.
     let excess = owned.len().saturating_sub(policy.keep_last);
     for (_, path) in owned.into_iter().take(excess) {
         budget.checkpoint()?;
