@@ -1,10 +1,13 @@
 //! Free-text activity fields are projected through an allowlist, never
 //! echoed as-is (design `admin-shell.md` §4.5, the privacy rule): `user`
-//! and `db` must match the engine's own component-name rule, `transport`
-//! must be one of the three labels the server emits, `op_kind` must be a
-//! wire operation discriminant. Anything else is the fixed `<invalid>`
-//! placeholder, so a peer cannot smuggle credential-like text, a terminal
-//! escape or an over-long blob into the operator's terminal.
+//! must be a principal name the server accepts (RFC 8265 PRECIS
+//! `UsernameCaseMapped`, which `crates/net/shamir-connect/src/common/user/
+//! username.rs` enforces, mirrored here as far as the shell can without
+//! that crate), `db` must match the engine's own component-name rule,
+//! `transport` must be one of the three labels the server emits, `op_kind`
+//! must be a wire operation discriminant. Anything else is the fixed
+//! `<invalid>` placeholder, so a peer cannot smuggle a terminal escape or an
+//! over-long blob into the operator's terminal.
 //!
 //! Every assertion below names the value it forbids, so deleting the
 //! allowlist (or widening it to `output::sanitize`) fails the test instead
@@ -57,7 +60,7 @@ fn documented_values_pass_through() {
     for transport in ["ws", "ipc"] {
         let row = project_session(&session_row("u-1_2", transport)).expect("projects");
         assert_eq!(row["transport"], transport, "documented transport");
-        assert_eq!(row["user"], "u-1_2", "engine name rule passes");
+        assert_eq!(row["user"], "u-1_2", "the principal rule passes");
     }
     let request = project_request(&request_row("admin", "shelldb", "write")).expect("projects");
     assert_eq!(request["user"], "admin");
@@ -70,24 +73,20 @@ fn documented_values_pass_through() {
     assert_eq!(admin["op_kind"], "admin:list_activity");
 }
 
-/// A credential-shaped value, a control/escape sequence and an over-long
+/// A control/escape sequence, a whitespace, an empty value and an over-long
 /// value in ANY free-text field render as the one fixed placeholder (mutant:
-/// echoing `sanitize`d wire text — an escape-only sanitiser still lets the
-/// credential shape and the long blob through).
+/// echoing `sanitize`d wire text — an escape-only sanitiser still lets
+/// whitespace and the long blob through). A credential shape is hostile only
+/// where it cannot be the field's real value (`db`, `transport`, `op_kind`);
+/// `user` is a login name, which is legitimately any Unicode text (see
+/// [`user_field_accepts_precis_names`]).
 #[test]
 fn hostile_values_render_the_placeholder() {
     let escape = "\u{1b}[2Jshamir";
     let long = "a".repeat(300);
-    for user in [TOKEN_SHAPE, escape, &long, "", "with space", "ünïcode"] {
+    for user in [escape, &long, "", "with space"] {
         let session = project_session(&session_row(user, "tcp")).expect("projects");
         assert_eq!(session["user"], INVALID, "hostile session user");
-        assert!(
-            !session["user"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("shk1"),
-            "a credential shape must never be echoed"
-        );
         let request = project_request(&request_row(user, "shelldb", "write")).expect("projects");
         assert_eq!(request["user"], INVALID, "hostile request user");
     }
@@ -105,12 +104,13 @@ fn hostile_values_render_the_placeholder() {
     }
 }
 
-/// The placeholder is the ONLY substitution: every other leaf of a hostile
-/// row still projects normally (mutant: refusing the whole row, which would
-/// hide a real request from the operator).
+/// The placeholder is the ONLY substitution: every other leaf of a row whose
+/// free-text fields are hostile still projects normally (mutant: refusing the
+/// whole row, which would hide a real request from the operator).
 #[test]
 fn hostile_text_does_not_drop_the_row() {
-    let projected: Value = project_request(&request_row(TOKEN_SHAPE, TOKEN_SHAPE, TOKEN_SHAPE))
+    let escape = "\u{1b}[2Jshamir";
+    let projected: Value = project_request(&request_row(escape, TOKEN_SHAPE, TOKEN_SHAPE))
         .expect("a hostile row still projects");
     assert_eq!(projected["kind"], "request");
     assert_eq!(projected["request_exec_id"], "9");
@@ -243,11 +243,14 @@ fn op_kind_cap_boundary() {
     assert_eq!(row["op_kind"], INVALID);
 }
 
-/// The user and database display caps follow the engine, not a shell guess: a
-/// 65-byte ASCII login (accepted and published by the server under its
-/// 255-byte `USERNAME_MAX_BYTES` limit) is printed as-is, the cap itself
-/// passes, and one byte over it is the placeholder. Mutant: the previous
-/// 64-byte cap applied to both fields.
+/// The user and database display caps are the ones the server applies, not a
+/// shell guess: a 65-byte ASCII login (accepted and published by the server
+/// under its 255-byte `USERNAME_MAX_BYTES` limit) is printed as-is, the cap
+/// itself passes, and one byte over it is the placeholder. The cap is BYTES on
+/// both sides — the server caps the PRECIS-normalised byte length — so a
+/// 127-char Cyrillic login (254 bytes) passes and its 128-char brother
+/// (256 bytes) does not. Mutant: the previous 64-byte cap applied to both
+/// fields; mutant: counting chars instead of bytes.
 #[test]
 fn name_caps_follow_the_engine_limits() {
     let login = "u".repeat(65);
@@ -264,6 +267,19 @@ fn name_caps_follow_the_engine_limits() {
     let session = project_session(&session_row(&over_user_cap, "tcp")).expect("projects");
     assert_eq!(session["user"], INVALID, "one byte over the login limit");
 
+    let wide_at_cap = "и".repeat(127);
+    let session = project_session(&session_row(&wide_at_cap, "tcp")).expect("projects");
+    assert_eq!(
+        session["user"], wide_at_cap,
+        "254 bytes of Cyrillic is inside the limit"
+    );
+    let wide_over_cap = "и".repeat(128);
+    let session = project_session(&session_row(&wide_over_cap, "tcp")).expect("projects");
+    assert_eq!(
+        session["user"], INVALID,
+        "256 bytes of Cyrillic is over the limit, even though it is 128 chars"
+    );
+
     let long_db = "d".repeat(65);
     let request = project_request(&request_row("admin", &long_db, "write")).expect("projects");
     assert_eq!(request["db"], long_db, "a 65-byte database name passes");
@@ -274,10 +290,80 @@ fn name_caps_follow_the_engine_limits() {
     let request = project_request(&request_row("admin", &over_db_cap, "write")).expect("projects");
     assert_eq!(request["db"], INVALID);
 
-    // The charset stays the engine's component rule: a non-ASCII PRECIS login
-    // name the server accepts still renders as the placeholder.
+    // `db` keeps the engine's ASCII-only component rule, so a non-ASCII or
+    // dotted value the `user` field now prints is still the placeholder for a
+    // database (see `db_field_keeps_the_component_rule`).
     for raw in ["ünïcode", "mixed_case.with.dot"] {
-        let session = project_session(&session_row(raw, "tcp")).expect("projects");
-        assert_eq!(session["user"], INVALID, "non-ASCII / non-component name");
+        let request = project_request(&request_row("admin", raw, "write")).expect("projects");
+        assert_eq!(request["db"], INVALID, "the db charset stays ASCII-only");
+    }
+}
+
+/// The `user` field follows the login profile the SERVER enforces, not the
+/// engine's ASCII component rule: `crates/net/shamir-connect/src/common/user/
+/// username.rs` accepts a PRECIS `UsernameCaseMapped` login in any script, so
+/// a legitimate non-ASCII login must be printed, never hidden. Mutant: the
+/// component rule `[A-Za-z0-9_-]` applied to a principal, which turned every
+/// non-ASCII login into `<invalid>` in a real `activity sessions` /
+/// `activity requests` listing.
+#[test]
+fn user_field_accepts_precis_names() {
+    for user in ["Владимир", "иван", "Ünal", "用户", "u-1_2", "user42"] {
+        let session = project_session(&session_row(user, "tcp")).expect("projects");
+        assert_eq!(session["user"], user, "a server-accepted login is printed");
+        let request = project_request(&request_row(user, "shelldb", "write")).expect("projects");
+        assert_eq!(
+            request["user"], user,
+            "a server-accepted login is printed in a request row too"
+        );
+    }
+}
+
+/// `db` keeps the engine's own component rule, which is ASCII-only: the very
+/// text the `user` field now prints is the placeholder in `db`. Mutant:
+/// routing `db` through the principal rule, which would echo any printable
+/// Unicode as a database name.
+#[test]
+fn db_field_keeps_the_component_rule() {
+    for db in [
+        "Владимир",
+        "иван",
+        "shelldb.prod",
+        "with space",
+        "shelldb/prod",
+    ] {
+        let request = project_request(&request_row("admin", db, "write")).expect("projects");
+        assert_eq!(request["db"], INVALID, "a db is not a principal name");
+    }
+    for db in ["shelldb", "db-1_2", "db42"] {
+        let request = project_request(&request_row("admin", db, "write")).expect("projects");
+        assert_eq!(request["db"], db, "the component rule still passes");
+    }
+}
+
+/// A `user` value that is not terminal-safe is still the placeholder, even
+/// though the profile is otherwise permissive: a C0 control, a C1 control, a
+/// bidi override, a bidi isolate, a zero-width character, a BOM, a Unicode
+/// line separator and a whitespace each make the whole cell `<invalid>`.
+/// Mutant: accepting every character (e.g. checking only the length), which
+/// would put a bidi override or a line break in the cell.
+#[test]
+fn user_field_rejects_terminal_control_characters() {
+    let hostile = [
+        "ivan\u{7}",
+        "ivan\u{85}",
+        "ivan\u{202E}",
+        "\u{2066}ivan",
+        "ivan\u{200B}",
+        "\u{FEFF}ivan",
+        "ivan\u{2028}next",
+        "ivan\tname",
+        "\u{3000}ivan",
+    ];
+    for user in hostile {
+        let session = project_session(&session_row(user, "tcp")).expect("projects");
+        assert_eq!(session["user"], INVALID, "terminal control in user");
+        let request = project_request(&request_row(user, "shelldb", "write")).expect("projects");
+        assert_eq!(request["user"], INVALID, "terminal control in request user");
     }
 }

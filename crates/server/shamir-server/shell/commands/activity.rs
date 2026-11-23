@@ -312,7 +312,7 @@ fn project_session(row: &ActivityRow) -> Result<Value, ShellError> {
         } => Ok(json!({
             "kind": "session",
             "session_handle": session_handle.to_string(),
-            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
+            "user": output::sanitize(&user_field(user, MAX_USER_NAME_BYTES)),
             "transport": output::sanitize(&transport_field(transport)),
             "created_at_ns": created_at_ns.to_string(),
             "idle_ns": idle_ns.to_string(),
@@ -338,7 +338,7 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
             "kind": "request",
             "request_exec_id": request_exec_id.0.to_string(),
             "session_handle": (*session_handle).map(|handle| handle.to_string()),
-            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
+            "user": output::sanitize(&user_field(user, MAX_USER_NAME_BYTES)),
             "db": output::sanitize(&name_field(db, MAX_DB_NAME_BYTES)),
             "op_kind": output::sanitize(&op_kind_field(op_kind)),
             "state": request_state_name(*state),
@@ -348,11 +348,13 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
     }
 }
 
-/// One free-text principal or database name, projected ONLY when it matches
-/// the engine's own component rule (`[A-Za-z0-9_-]`) and fits `cap` bytes;
-/// anything else becomes the fixed [`INVALID_FIELD`] placeholder. The charset
-/// is the engine's (`validate_name_component`), so a non-ASCII PRECIS login
-/// name the server accepts still renders as the placeholder.
+/// One database name, projected ONLY when it matches the engine's own
+/// component rule (`[A-Za-z0-9_-]`) and fits `cap` bytes; anything else
+/// becomes the fixed [`INVALID_FIELD`] placeholder. The charset is the
+/// engine's (`validate_name_component`), which is ASCII-only on purpose: a
+/// name outside that alphabet — including a non-ASCII login, which is not a
+/// database name — renders as the placeholder. Principal names do NOT use
+/// this rule; they go through [`user_field`].
 fn name_field(raw: &str, cap: usize) -> String {
     let allowed = !raw.is_empty()
         && raw.len() <= cap
@@ -364,6 +366,60 @@ fn name_field(raw: &str, cap: usize) -> String {
     } else {
         INVALID_FIELD.to_owned()
     }
+}
+
+/// One principal name, projected ONLY when the shell can vouch for it from
+/// the login rule the server enforces:
+/// `crates/net/shamir-connect/src/common/user/username.rs`
+/// (`NormalizedUsername::from_raw`) applies the RFC 8265 PRECIS
+/// `UsernameCaseMapped` profile, which keeps the full Unicode repertoire,
+/// case-maps it, normalises it to NFC and caps it at
+/// [`USERNAME_MAX_BYTES`] = 255 bytes. This allowlist therefore requires
+/// non-empty, at most `cap` bytes, and no character that is a control, a
+/// whitespace or a display control (the bidi/zero-width/line-separator set
+/// `output::sanitize` escapes). Anything else becomes the fixed
+/// [`INVALID_FIELD`] placeholder.
+///
+/// This is a PERMISSIVE shell-side allowlist, not a copy of the profile: it
+/// does not run the PRECIS width mapping, case mapping, NFC normalisation or
+/// the Bidi rule (no `precis-profiles` dependency in this crate), so a name
+/// the server would reject on one of those steps still passes here. It is
+/// only shape filtering: terminal safety comes from `output::sanitize`
+/// downstream, which escapes control, display-control and backslash
+/// characters, so non-ASCII letters are safe to pass through.
+fn user_field(raw: &str, cap: usize) -> String {
+    let allowed = !raw.is_empty()
+        && raw.len() <= cap
+        && raw.chars().all(|character| {
+            !character.is_control() && !character.is_whitespace() && !is_display_control(character)
+        });
+    if allowed {
+        raw.to_owned()
+    } else {
+        INVALID_FIELD.to_owned()
+    }
+}
+
+/// The display-control characters `output::sanitize` escapes: the bidi
+/// controls U+061C, U+200E, U+200F, U+202A–202E and U+2066–2069, the
+/// zero-width/format characters U+200B–200D, U+2060–2064 and U+FEFF, and the
+/// line/paragraph separators U+2028 and U+2029.
+///
+/// A private mirror of `is_display_control` in `crate::shell::output`, which
+/// is private to that module (reaching it would mean widening its
+/// visibility); keep the two tables in sync.
+fn is_display_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200D}'
+            | '\u{200E}' | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{2028}' | '\u{2029}'
+            | '\u{FEFF}'
+    )
 }
 
 /// One free-text session transport, projected ONLY from the closed set the

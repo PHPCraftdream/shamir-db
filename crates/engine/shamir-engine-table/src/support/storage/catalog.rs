@@ -219,18 +219,30 @@ impl TableCatalog {
         self.configs.get(name).map(|entry| entry.value().clone())
     }
 
-    /// Live registration identity of a configured table: the catalogue cell
-    /// the registration reserved for `name`. Never instantiates the table. An
-    /// unconfigured name has no registration (`None`), so a caller fails closed
-    /// instead of inventing one; for a configured name the cell is reserved on
-    /// demand (the same get-or-insert `insert_table_cell` performs), which is
-    /// what makes an identity exist for every registration path, including
-    /// boot-loaded legacy tables.
+    /// Registration identity of a configured table, read as ONE atomic map
+    /// operation: the `tables` entry for `name` is taken FIRST and the
+    /// `configs` check runs while it is held. That is the same order
+    /// `register_table_with` / `remove_table_with` take (entry, then config),
+    /// so this read is serialized against both mutations instead of racing
+    /// them across two separate map operations.
+    ///
+    /// Contract:
+    /// - `None` ⇔ `name` is NOT configured. Nothing is inserted — the entry is
+    ///   dropped without `or_insert_with`, so an unconfigured name can never
+    ///   have a cell reserved (or an empty one resurrected between a caller's
+    ///   earlier `table_config` read and this call). Every caller MUST report
+    ///   this as "unknown table", never as a changed registration.
+    /// - `Some` ⇔ the registration identity of a configured table: the cell
+    ///   the registration reserved, created on demand exactly as
+    ///   `insert_table_cell` does when the registration path did not reserve
+    ///   one (boot-loaded legacy tables). Never instantiates the table.
     pub fn table_registration(&self, name: &str) -> Option<TableRegistration> {
+        let entry = self.tables.entry(name.to_string());
         if !self.configs.contains_key(name) {
             return None;
         }
-        Some(TableRegistration::of(self.insert_table_cell(name)))
+        let cell = entry.or_insert_with(|| Arc::new(OnceCell::new()));
+        Some(TableRegistration::of(Arc::clone(cell.value())))
     }
 
     pub fn config_pair_matches(
@@ -261,7 +273,9 @@ impl TableCatalog {
     }
 
     /// Test-only: direct cell-map size (cold-resolver retention probe).
-    #[cfg(feature = "test-util")]
+    /// Reachable from this crate's own unit tests (`cfg(test)`) as well as
+    /// from downstream test builds that opt into `test-util`.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn table_cell_count(&self) -> usize {
         self.tables.len()
     }

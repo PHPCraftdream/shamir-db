@@ -464,19 +464,27 @@ fn lineage_field(element: &QueryValue) -> Result<Value, ShellError> {
     }
 }
 
-/// One version / epoch / bookmark leaf as the batch wire delivers it:
-/// `Null` (absent), a non-negative `Int`, a non-negative `QueryValue::Big`
-/// (the in-process engine shape) or the canonical decimal text a `u64`
-/// above `i64::MAX` becomes on the wire. Arbitrary text is NOT that shape:
-/// `"abc"`, `"007"`, `"+1"`, `"-1"` and anything above `u64::MAX` are
-/// refused.
+/// One version / epoch / bookmark leaf as the batch wire delivers it, for
+/// a value the engine types as `u64`:
+/// - `Null` (absent);
+/// - a non-negative `Int` — the engine emits a small non-negative integer
+///   as `Int`;
+/// - a `QueryValue::Big` (the in-process engine shape) whose value is a
+///   real `u64` (`0..=u64::MAX`), since a version is a `u64` and a larger
+///   `Big` can never become one;
+/// - canonical decimal text strictly above `i64::MAX` — the encoder emits
+///   exactly that text for a `u64` above `i64::MAX`, while anything that
+///   fits in an `i64` is emitted as `Int`.
+///
+/// Arbitrary text is NOT that shape: `"abc"`, `"7"`, `"007"`, `"+1"`,
+/// `" 7"`, `"7 "`, `"-1"` and anything above `u64::MAX` are refused.
 fn is_optional_version(element: &QueryValue) -> bool {
     match element {
         QueryValue::Null | QueryValue::Int(0..) => true,
-        QueryValue::Big(value) => !value.to_string().starts_with('-'),
+        QueryValue::Big(value) => u64::try_from(value).is_ok(),
         QueryValue::Str(text) => text
             .parse::<u64>()
-            .is_ok_and(|parsed| parsed.to_string() == *text),
+            .is_ok_and(|parsed| parsed > i64::MAX as u64 && parsed.to_string() == *text),
         _ => false,
     }
 }

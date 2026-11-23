@@ -16,7 +16,7 @@ use shamir_query_types::read::{PaginationInfo, QueryRecord, QueryResult, QuerySt
 use shamir_types::types::value::QueryValue;
 
 use super::super::state::{
-    head_error, head_tail, project_count, project_head, project_subscriptions,
+    head_error, head_tail, is_optional_version, project_count, project_head, project_subscriptions,
 };
 use crate::shell::output::ShellError;
 
@@ -461,5 +461,67 @@ fn subscriptions_refuse_an_impossible_lineage_byte_and_non_canonical_text() {
     assert_eq!(
         out["subscriptions"][0]["upstream_bookmark"].as_str(),
         Some("18446744073709551615")
+    );
+}
+
+/// A version / epoch / bookmark is a `u64`, so only the shapes the engine
+/// can emit are accepted: small non-negative values as `Int`, the
+/// in-process engine shape as a `Big` that fits in a `u64`, and canonical
+/// decimal text ONLY above `i64::MAX` (the encoder emits anything smaller
+/// as `Int`). `Str("7")` and a `Big` above `u64::MAX` are not that shape.
+#[test]
+fn optional_version_accepts_only_encoder_shapes() {
+    assert!(
+        is_optional_version(&QueryValue::Int(7)),
+        "the engine emits a small non-negative value as Int"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Int(-1)),
+        "a negative Int is not a u64 version"
+    );
+
+    assert!(
+        is_optional_version(&QueryValue::Big(BigInt::from(7))),
+        "a Big that fits in a u64 is the in-process shape"
+    );
+    assert!(
+        is_optional_version(&QueryValue::Big(BigInt::from(u64::MAX))),
+        "u64::MAX is the largest version"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Big(BigInt::from(u64::MAX) + BigInt::from(1))),
+        "a Big above u64::MAX can never be a version"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Big(BigInt::from(-1))),
+        "a negative Big is not a version"
+    );
+
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("7"))),
+        "the encoder emits a small u64 as Int, never as text"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("007"))),
+        "non-canonical decimal text is refused"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("-1"))),
+        "negative text is not a u64"
+    );
+
+    let above_i64 = (i64::MAX as u64 + 1).to_string();
+    assert!(
+        is_optional_version(&QueryValue::Str(above_i64)),
+        "the encoder emits a u64 above i64::MAX as canonical decimal text"
+    );
+    let max = u64::MAX.to_string();
+    assert!(
+        is_optional_version(&QueryValue::Str(max)),
+        "u64::MAX text is the largest wire encoding"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("18446744073709551616"))),
+        "text above u64::MAX is not a version"
     );
 }

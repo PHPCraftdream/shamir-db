@@ -42,12 +42,19 @@
 //! * **source pin** — `backup-verify`, `backup`, `restore` and `doctor` are
 //!   declared INLINE in `src/main.rs` as `Subcmd` variants, not as reusable
 //!   `clap::Args` types, so no test can instantiate them. Their tokens are
-//!   pinned against the text of `src/main.rs` (read once): the `Subcmd`
-//!   variant that declares the subcommand and the field declaration that
-//!   makes clap derive each long flag (`--config`/`--from`/`--to`/`--db`/
-//!   `--repo`/`--table`/`--apply`/`--pretty`/`--json`). For those flags the
-//!   field declaration (`from: PathBuf`, `json: bool`) is the needle, since
-//!   the literal `--flag` text never appears in derive-based source.
+//!   pinned against the text of `src/main.rs` (read once): the field
+//!   declaration that makes clap derive each long flag (`--config`/`--from`/
+//!   `--to`/`--db`/`--repo`/`--table`/`--apply`/`--pretty`/`--json`) must
+//!   appear INSIDE the body of the variant that owns it — `from: PathBuf`
+//!   inside `Restore {`, `to: PathBuf` inside `Backup {`, the doctor fields
+//!   inside `Doctor {`, `config: PathBuf` inside `struct Cli {`. A whole-file
+//!   search would not prove ownership: `db: Option<String>` and
+//!   `pretty: bool` also live in `AccessTree`, and a flag moved to another
+//!   inline subcommand would leave the text present, so the pin scopes every
+//!   read to the enclosing declaration body and a move fails here. For those
+//!   flags the field declaration (`from: PathBuf`, `json: bool`) is the
+//!   needle, since the literal `--flag` text never appears in derive-based
+//!   source.
 //!   `--max-backup-age-hours`, `--schema-only` and `--as-db` are NOT
 //!   declared in `src/main.rs` at all — they live on the `Args` structs
 //!   covered by the real-parser half, which is why they are pinned there.
@@ -173,6 +180,146 @@ fn server_main_source() -> String {
         .expect("read the server argument parser source")
 }
 
+/// The text between the braces of the `src/main.rs` item declared by
+/// `header`, where `header` is the whole trimmed declaration line
+/// (`"Doctor {"`, `"struct Cli {"`).
+///
+/// The header is matched only where a LINE'S TRIMMED CONTENT IS EXACTLY the
+/// header, so a `///`/`//` comment or prose that merely mentions it never
+/// matches; a line that starts with `"`, and a line reached inside a
+/// `/* ... */` block comment or a multi-line raw string, are skipped too.
+/// Braces inside `//` line comments are ignored while the body is delimited.
+/// A missing header, a header without `{` or an unbalanced body panics with
+/// the header in the message: the pin fails closed instead of passing on an
+/// empty or foreign slice.
+fn variant_body<'a>(source: &'a str, header: &str) -> &'a str {
+    // Cross-line lexical state: `/* ... */` nesting depth and the hash count
+    // of an open raw string (`r#"..."#`).
+    let mut block_depth = 0usize;
+    let mut raw_hashes: Option<usize> = None;
+    let mut open = None;
+    let mut line_start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let mention = block_depth > 0
+            || raw_hashes.is_some()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('"');
+        if !mention && open.is_none() && trimmed == header {
+            open = Some(
+                line_start
+                    + line
+                        .rfind('{')
+                        .unwrap_or_else(|| panic!("`{header}` has no opening brace")),
+            );
+        }
+        advance_lexical_state(line, &mut block_depth, &mut raw_hashes);
+        line_start += line.len();
+    }
+    let open = open.unwrap_or_else(|| panic!("src/main.rs has no line `{header}`"));
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            // A line comment runs to the newline; its braces never count.
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open + 1..index];
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("`{header}` has no matching closing brace in src/main.rs")
+}
+
+/// Advance the cross-line lexical state through one line: block-comment
+/// nesting and raw-string boundaries, ignoring text inside a `//` comment.
+fn advance_lexical_state(line: &str, block_depth: &mut usize, raw_hashes: &mut Option<usize>) {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if let Some(hashes) = *raw_hashes {
+            let closes = index + 1 + hashes <= bytes.len()
+                && bytes[index] == b'"'
+                && bytes[index + 1..index + 1 + hashes]
+                    .iter()
+                    .all(|byte| *byte == b'#');
+            if closes {
+                *raw_hashes = None;
+                index += 1 + hashes;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if *block_depth > 0 {
+            if bytes[index..].starts_with(b"/*") {
+                *block_depth += 1;
+                index += 2;
+            } else if bytes[index..].starts_with(b"*/") {
+                *block_depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index..].starts_with(b"//") {
+            return;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            *block_depth = 1;
+            index += 2;
+            continue;
+        }
+        match bytes[index] {
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            }
+            // A char literal (`'{'`, `'\n'`) closes after one byte or one
+            // escape; anything else after `'` is a lifetime, which closes
+            // nothing.
+            b'\'' if index + 2 < bytes.len() && bytes[index + 2] == b'\'' => index += 3,
+            b'\''
+                if index + 3 < bytes.len()
+                    && bytes[index + 1] == b'\\'
+                    && bytes[index + 3] == b'\'' =>
+            {
+                index += 4;
+            }
+            b'r' => {
+                let mut hashes = 0usize;
+                while index + 1 + hashes < bytes.len() && bytes[index + 1 + hashes] == b'#' {
+                    hashes += 1;
+                }
+                let quote = index + 1 + hashes;
+                if bytes.get(quote) == Some(&b'"') {
+                    *raw_hashes = Some(hashes);
+                    index = quote + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+}
+
 // ── The real-parser wrappers (one real `clap::Args` struct each) ─────
 
 /// `logical-export`'s REAL argument struct, behind a one-field parser.
@@ -196,23 +343,25 @@ struct FormatMigrateParser {
     args: shamir_server::migrate::FormatMigrateArgs,
 }
 
-/// Tokens printed by the four INLINE manuals and the `src/main.rs`
-/// declaration that makes them parse: the `Subcmd` variant for a
-/// subcommand, the field for a flag (clap derives the long form from it).
-const MAIN_PARSER_DECLARATIONS: &[(&str, &str)] = &[
-    ("backup-verify", "BackupVerify {"),
-    ("backup", "Backup {"),
-    ("restore", "Restore {"),
-    ("doctor", "Doctor {"),
-    ("--config", "config: PathBuf"),
-    ("--from", "from: PathBuf"),
-    ("--to", "to: PathBuf"),
-    ("--db", "db: Option<String>"),
-    ("--repo", "repo: Option<String>"),
-    ("--table", "table: Option<String>"),
-    ("--apply", "apply: bool"),
-    ("--pretty", "pretty: bool"),
-    ("--json", "json: bool"),
+/// Tokens printed by the four INLINE manuals, the `src/main.rs` declaration
+/// that ENCLOSES each one, and the field declaration clap derives from it:
+/// `(token, enclosing header, field)`. The header scopes the read to one
+/// item, so the same needle text in another variant (`db: Option<String>`
+/// and `pretty: bool` also live in `AccessTree`) cannot satisfy the pin.
+const MAIN_PARSER_DECLARATIONS: &[(&str, &str, &str)] = &[
+    ("backup-verify", "BackupVerify {", "snapshot: PathBuf"),
+    ("backup", "Backup {", "to: PathBuf"),
+    ("restore", "Restore {", "from: PathBuf"),
+    ("doctor", "Doctor {", "db: Option<String>"),
+    ("--config", "struct Cli {", "config: PathBuf"),
+    ("--from", "Restore {", "from: PathBuf"),
+    ("--to", "Backup {", "to: PathBuf"),
+    ("--db", "Doctor {", "db: Option<String>"),
+    ("--repo", "Doctor {", "repo: Option<String>"),
+    ("--table", "Doctor {", "table: Option<String>"),
+    ("--apply", "Doctor {", "apply: bool"),
+    ("--pretty", "Doctor {", "pretty: bool"),
+    ("--json", "Doctor {", "json: bool"),
 ];
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -368,7 +517,11 @@ fn explained_command_options_are_refused() {
 /// Source half: `backup-verify`, `backup`, `restore`, `doctor` and the
 /// `--config`/`--from`/`--to`/`--db`/`--repo`/`--table`/`--apply`/
 /// `--pretty`/`--json` flags are declared inline in `src/main.rs`, read
-/// once; each declaration the manual relies on must be present.
+/// once; each declaration the manual relies on must appear INSIDE the body
+/// of its enclosing item (`Backup {`, `Restore {`, `Doctor {`,
+/// `struct Cli {`). Moving a flag to another inline subcommand keeps its
+/// text in the file but empties the body that owns the manual's token, so
+/// the move fails here.
 #[test]
 fn printed_flags_exist_in_the_server_argument_parser() {
     // Real-parser pin: the three manuals whose parser is an `Args` struct.
@@ -449,12 +602,27 @@ fn printed_flags_exist_in_the_server_argument_parser() {
     ])
     .expect("the flag `format-migrate` advertises must exist on its real args");
 
-    // Source pin: the inline `Subcmd` declarations, read once.
+    // Source pin: each declaration must sit INSIDE the body of the item
+    // that owns the manual's token, read once.
     let source = server_main_source();
-    for &(token, declaration) in MAIN_PARSER_DECLARATIONS {
+    for &(token, header, declaration) in MAIN_PARSER_DECLARATIONS {
+        let body = variant_body(&source, header);
         assert!(
-            source.contains(declaration),
-            "a manual prints `{token}` but `{declaration}` is absent from src/main.rs"
+            body.contains(declaration),
+            "a manual prints `{token}`, whose `{declaration}` is not inside \
+             `{header}` in src/main.rs"
         );
     }
+    // Negative control: the body read must not leak between variants. `--to`
+    // lives on `Backup` (not `Restore`, and certainly not `Doctor`), `--from`
+    // on `Restore` (not `Backup`): if `variant_body` returned a whole-file or
+    // oversized slice, these two assertions would fire.
+    assert!(
+        !variant_body(&source, "Doctor {").contains("to: PathBuf"),
+        "`to: PathBuf` must not be found in the `Doctor` variant body"
+    );
+    assert!(
+        !variant_body(&source, "Backup {").contains("from: PathBuf"),
+        "`from: PathBuf` must not be found in the `Backup` variant body"
+    );
 }
