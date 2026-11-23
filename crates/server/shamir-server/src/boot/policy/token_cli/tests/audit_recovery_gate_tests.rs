@@ -18,6 +18,7 @@
 
 use super::super::{
     args::{CreateArgs, ListArgs},
+    create,
     lock::{is_lock_contention, LockFailure},
     run_with_io,
     secret_output::{self, OutputPathError},
@@ -26,7 +27,7 @@ use super::super::{
 use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
 use crate::config::Config;
 use crate::engine::server_meta::ServerMetaStore;
-use crate::security::tokens::TokenStore;
+use crate::security::tokens::{NewToken, TokenAuditContext, TokenStore};
 use crate::security::user_directory::FjallUserDirectory;
 use anyhow::Error as AnyError;
 use shamir_connect::common::crypto::StoredKey;
@@ -35,6 +36,7 @@ use shamir_connect::server::admin::UserDirectory as _;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
 };
+use shamir_connect::server::token::{TokenChannels, TokenMode};
 use shamir_connect::server::user_record::UserRecord;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -867,5 +869,131 @@ async fn create_failure_removes_the_created_out_file() {
     assert!(
         !String::from_utf8(o).expect("stdout").contains("shk1."),
         "no secret may be delivered by a failed create"
+    );
+}
+
+/// The backstop appender: if the chain ever stops refusing the oversized field,
+/// persisting the entry fails and `checkpoint_now` reports `Persistence`, so the
+/// equality assertion below still fails.
+struct RefusingAuditAppender;
+
+impl AuditAppender for RefusingAuditAppender {
+    fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("injected"))
+    }
+    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+/// An offline `token create` whose audit append is refused for a NON-exhaustion
+/// reason must report an unaudited token, not exhaustion, and deliver nothing.
+/// The record is already stored: `TokenService::create_with_context` stores it
+/// first (token_service.rs:267-303) and only warns when the audit append fails,
+/// so the refusal reaches `create` only through the writer's latch.
+///
+/// What remains in the store: one live, unrevoked `TokenRecord` — `id`,
+/// `owner_user_id = [3; 16]`, `label = "unaudited"`,
+/// `mac = compute_mac(key, 1, 1, &id, &secret)`, `key_id = 1`,
+/// `format_version = 1`, `created_at_ns`, `expires_at_ns`,
+/// `mode = read_only`, `channels = both`, `databases = None`,
+/// `roles = ["user"]`, `revoked_at_ns = None`.
+///
+/// Mutants killed: (i) restricting the latch to `SequenceExhausted` means this
+/// `FieldTooLong` refusal does not latch, `checkpoint_now` returns `Ok`, and the
+/// `expect_err` fails; (ii) making `checkpoint_now` ignore a latched checkpoint
+/// (return `Ok` after the latch) fails the same assertion. The appender is the
+/// backstop above.
+///
+/// Parent verdicts, both failing. Before the writer latched every refusal, the
+/// latch covered only sequence exhaustion, so a non-exhaustion refusal left
+/// `finish` with nothing to trip on: `cp` was `Ok`, `run_create` reached its
+/// `(Ok, Ok)` arm, and `deliver` ran — the secret was delivered while its
+/// audit event was missing. Against this round's parent the latch already
+/// covered any refusal, but the `fail_after_create_for_test` seam did not
+/// exist (so this test did not compile), and the exhausted-only wording the
+/// last assertion rejects was still in place.
+#[tokio::test]
+async fn offline_create_with_a_refused_audit_append_delivers_nothing_and_reports_an_unaudited_token(
+) {
+    let tmp = TempDir::new().expect("tmp");
+    let c = config(&tmp);
+    std::fs::create_dir_all(c.data_dir.join("users")).expect("users dir");
+    let m = ServerMetaStore::open_or_init(c.data_dir.join("server_meta")).expect("meta");
+    let d = Arc::new(FjallUserDirectory::open(c.data_dir.join("users")).expect("directory"));
+    d.insert("alice".into(), user_record()).expect("user");
+    let writer = Arc::new(AuditChainWriter::new_with_shared(
+        Arc::new(AuditChain::from_checkpoint([5; 32], 1, [0; 32])),
+        Arc::new(RefusingAuditAppender),
+    ));
+    let svc = create::service(&c, &m, d, Arc::clone(&writer))
+        .await
+        .expect("service opens");
+    // `transport` is a u8-length audit field: 256 bytes is a typed
+    // `FieldTooLong` refusal, raised inside the chain BEFORE the appender and
+    // latched by the writer as an event that was never written.
+    let created = svc
+        .create_with_context(
+            NewToken {
+                owner_user_id: [3; 16],
+                owner_roles: vec!["user".into()],
+                label: "unaudited".into(),
+                ttl_secs: Some(7200),
+                mode: TokenMode::ReadOnly,
+                channels: TokenChannels::Both,
+                databases: None,
+            },
+            TokenAuditContext {
+                actor_username: "alice".into(),
+                transport: "x".repeat(256),
+                session_id_prefix: [0; 8],
+            },
+        )
+        .await
+        .expect("the record is stored before the audit append, whose error is swallowed");
+    assert!(
+        !created.token.is_empty(),
+        "the bearer secret exists only in this value"
+    );
+    // Observed version of the doc comment's "what remains in the store": the
+    // record the failed audit event did not cover is still there and still
+    // live. `lookup` reads the store through the live service handle.
+    let stored = svc
+        .lookup(created.record_view.id)
+        .await
+        .expect("lookup of the leftover record")
+        .expect("the refused audit event must not remove the stored record");
+    assert_eq!(
+        stored.label, "unaudited",
+        "the leftover record is the one created"
+    );
+    assert_eq!(
+        stored.owner_user_id, [3; 16],
+        "the leftover record keeps its owner"
+    );
+    assert_eq!(
+        stored.revoked_at_ns, None,
+        "the leftover record is live, not revoked"
+    );
+    let latched = writer
+        .checkpoint_now()
+        .expect_err("a refused event must latch the checkpoint");
+    assert_eq!(latched, AuditError::SequenceExhaustedUnaudited);
+    let out = tmp.path().join("unaudited.out");
+    let output = secret_output::prepare(Some(&out), true).expect("prepare");
+    let msg = create::fail_after_create_for_test(
+        output,
+        Some(&out),
+        &anyhow::Error::new(latched),
+        "TOKENID",
+    )
+    .to_string();
+    assert!(msg.contains("was not written"), "{msg}");
+    assert!(msg.contains("TOKENID"), "{msg}");
+    assert!(msg.contains("token revoke"), "{msg}");
+    assert!(!msg.contains("sequence space is exhausted"), "{msg}");
+    assert!(
+        !out.exists(),
+        "the created-but-unusable output file must be removed"
     );
 }

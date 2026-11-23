@@ -56,12 +56,17 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         None => None,
     };
     let output = secret_output::prepare(validated_out.as_deref(), io.is_terminal)?;
-    // Identity of the file THIS process just created, captured while no other
-    // process can have replaced it yet (the exclusive create just succeeded).
-    // Cleanup below removes the path only while it still names this file as of
-    // that check — the identity is re-read, then the path is removed, so a
-    // replacement landing inside that window is removed too; a `None` identity
-    // removes nothing, which is the safe direction.
+    // Identity of the file THIS process just created (the exclusive create
+    // just succeeded). It is NOT atomic with `prepare`: `file_identity`
+    // RE-OPENS the path (`CreateFileW`/`symlink_metadata`), so a replacement
+    // landing between `prepare` and this call would be captured as this
+    // process's file. The maintenance lock the offline command holds makes
+    // that window unreachable for cooperating processes, but not for a
+    // process that ignores the lock. Cleanup below removes the path only
+    // while it still names this file as of that check — the identity is
+    // re-read, then the path is removed, so a replacement landing inside that
+    // window is removed too; a `None` identity removes nothing, which is the
+    // safe direction.
     let identity = validated_out.as_deref().and_then(file_identity);
     let setup = async {
         let (m, d, w, app) = open_locked(c)?;
@@ -130,28 +135,12 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     let (secret, text, token_id) = match (prepared, cp) {
         (Ok(v), Ok(())) => v,
         (Ok((_, _, id)), Err(e)) => {
-            // Nothing was delivered: this file still holds no secret, so the
-            // created-but-unusable output must not be left behind.
-            drop(output);
-            remove_out_file(validated_out.as_deref(), identity);
-            // `finish` reports a latched sequence exhaustion distinctly: the
-            // token exists but its audit event was never written, so this is
-            // NOT the generic checkpoint failure below.
-            let unaudited = e.chain().any(|cause| {
-                matches!(
-                    cause.downcast_ref::<AuditError>(),
-                    Some(AuditError::SequenceExhaustedUnaudited)
-                )
-            });
-            if unaudited {
-                return Err(anyhow::anyhow!(
-                    "token {id} WAS created but an audit event was NOT written: the \
-                     audit sequence space is exhausted, so the audit trail for this \
-                     token does not exist; revoke it with `token revoke {id}`"
-                ));
-            }
-            return Err(anyhow::anyhow!(
-                "token {id} was created but the audit checkpoint failed; revoke it with `token revoke {id}`"
+            return Err(fail_after_create(
+                output,
+                validated_out.as_deref(),
+                identity,
+                &e,
+                &id,
             ));
         }
         (Err(e), Ok(())) => {
@@ -173,6 +162,61 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     std::io::Write::write_all(io.stdout, text.as_bytes())
         .map_err(|_| anyhow::anyhow!("token {token_id} was created; metadata output failed"))?;
     Ok(())
+}
+/// The created-but-unauditable path: drop the never-written output, remove the
+/// output file this process created, and return the operator-facing error.
+fn fail_after_create(
+    output: secret_output::SecretOutput,
+    out: Option<&Path>,
+    identity: Option<FileIdentity>,
+    error: &anyhow::Error,
+    id: &str,
+) -> anyhow::Error {
+    // No rollback here, deliberately. `TokenService::create_with_context`
+    // already stored the record (token_service.rs:267-303) BEFORE it requested
+    // the audit append; that append error is swallowed there (only warned) and
+    // surfaces here solely through the writer's latch. The offline command
+    // holds the maintenance lock, so a rollback WOULD be mechanically safe —
+    // but a silent delete on a failure path is itself an unaudited mutation of
+    // the token store, while `token revoke <id>` is the audited, idempotent
+    // primitive that works offline under the same lock. Nobody can use the
+    // token in the meantime: the bearer secret exists only in the
+    // `CreatedToken` this command never printed and in the output file it just
+    // removed; the store keeps only `mac = HMAC(key, id, secret)`, from which
+    // the secret is not recoverable.
+    drop(output);
+    remove_out_file(out, identity);
+    // The error type does not carry exhausted-vs-other, so one class-neutral
+    // message covers every latched append refusal.
+    let unaudited = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<AuditError>(),
+            Some(AuditError::SequenceExhaustedUnaudited)
+        )
+    });
+    if unaudited {
+        return anyhow::anyhow!(
+            "token {id} was created but its audit event was not written: the audit \
+             checkpoint cannot certify the log, so the audit trail for this token \
+             does not exist. The secret was NOT delivered and no output file was \
+             left behind. Revoke it with `token revoke {id}`."
+        );
+    }
+    anyhow::anyhow!(
+        "token {id} was created but the audit checkpoint failed; revoke it with `token revoke {id}`"
+    )
+}
+/// Test seam for [`fail_after_create`]: capture the identity from `out` exactly
+/// where `run_create` captures it, so a test can drive the real removal path
+/// without exposing the private `FileIdentity` type.
+#[cfg(test)]
+pub(super) fn fail_after_create_for_test(
+    output: secret_output::SecretOutput,
+    out: Option<&Path>,
+    error: &anyhow::Error,
+    id: &str,
+) -> anyhow::Error {
+    fail_after_create(output, out, out.and_then(file_identity), error, id)
 }
 /// Identity of the directory entry at `path`, taken WITHOUT following a
 /// final link, so cleanup can tell the file this process created from a

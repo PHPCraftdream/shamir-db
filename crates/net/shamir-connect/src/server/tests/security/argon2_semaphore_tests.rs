@@ -14,20 +14,29 @@ const WATCHDOG: Duration = Duration::from_secs(120);
 
 /// Bound on the in-gap release probe in
 /// [`release_after_failed_check_wakes_waiter`]: long enough that a lock-free
-/// release (which completes in microseconds) is always observed inside the
-/// gap, far short enough to keep the passing path well under the per-test
-/// kill. This bound is NOT the oracle: the pass condition is the `acquired`
-/// assertion after the gap closes, and a releaser that is merely slow still
-/// notifies the parked waiter, so a timeout here never fails a correct run.
-/// It is on the EXPECTED path of a green run — that run's probe always times
-/// out — so every green run pays this 5 s.
+/// release (which completes in microseconds) is observed inside the gap in
+/// every run where the releaser is actually scheduled, far short enough to
+/// keep the passing path well under the per-test kill.
+///
+/// This bound IS one of the two oracles. Its outcome is stored as
+/// `completed_in_gap`: `Ok(())` means the release completed inside the
+/// check-to-park gap and the test FAILS ("the release did not serialize with
+/// the waiter mutex"); a timeout means the release serialized with the waiter
+/// mutex, which is required but not sufficient. The timeout is also the
+/// EXPECTED path of every green run — a correct releaser is blocked on the
+/// waiter mutex the waiter holds — so every green run pays this 5 s.
+///
+/// The second oracle is the post-gap `acquired` assertion together with the
+/// wake-reason flag: a timeout here never fails a correct run, but a correct
+/// run still has to WAKE the parked waiter rather than leave it to its slice.
 const GAP_PROBE: Duration = Duration::from_secs(5);
 
-/// Bound on the handshake receives of
+/// Bound on the test thread's handshake receives of
 /// [`acquire_until_refuses_preexpired_entry_reading_without_the_waiter_mutex`],
 /// whose red path is the probe blocking on the holder's waiter mutex: waiting
-/// the full [`WATCHDOG`] there would put a red run past the per-test kill
-/// before the assertion could fire. A green run's handshakes are immediate, so
+/// the full [`WATCHDOG`] there would let a red run burn 120 s before the
+/// assertion could fire, so this fails it at 20 s instead, well inside the
+/// 180 s default per-test kill. A green run's handshakes are immediate, so
 /// this only shortens the failing path, and [`WATCHDOG`] stays the bound for
 /// the joins.
 const PROBE_BOUND: Duration = Duration::from_secs(20);
@@ -222,11 +231,11 @@ fn release_after_failed_check_wakes_waiter() {
         .recv_timeout(WATCHDOG)
         .expect("waiter must reach the failed-check gap");
     // Request the release only now, with the gap provably open, then await
-    // its arrival for one short `GAP_PROBE`. That receive is a probe, not the
-    // oracle: the correct releaser is blocked on the waiter mutex the waiter
-    // is holding, so the expected outcome is a TIMEOUT (the gap is closed
-    // next), while a lock-free release answers at once and is reported by the
-    // assertion below.
+    // its arrival for one short `GAP_PROBE`. This receive is the first of the
+    // two oracles: the correct releaser is blocked on the waiter mutex the
+    // waiter is holding, so the expected outcome is a TIMEOUT (the gap is
+    // closed next), while a lock-free release answers at once and fails the
+    // `completed_in_gap` assertion below.
     drop_tx.send(()).expect("releaser still waiting");
     let completed_in_gap = notify_ran_rx.recv_timeout(GAP_PROBE).is_ok();
     go_tx.send(()).expect("waiter still in the gap");

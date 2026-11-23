@@ -554,12 +554,17 @@ pub enum AuditError {
         /// The sequence the append would have consumed.
         next: u64,
     },
-    /// The writer latched [`AuditError::SequenceExhausted`]: an event was
-    /// refused and never written, so a checkpoint must not certify the
-    /// log as complete. Raised by [`AuditChainWriter::checkpoint_now`].
+    /// The writer latched an append refusal: an event was requested and
+    /// never written, so a checkpoint must not certify the log as complete.
+    /// The latch trips on ANY inner-chain refusal — sequence exhaustion and
+    /// typed-input refusals (e.g. `FieldTooLong`, `RecordTooLarge`) alike.
+    /// The variant name is kept for its existing callers, which all match
+    /// the variant rather than its text; it therefore means "an audit event
+    /// was requested and not written", not specifically exhaustion. Raised
+    /// by [`AuditChainWriter::checkpoint_now`].
     #[error(
-        "audit sequence space is exhausted and an audit event was not written; \
-         the audit checkpoint cannot certify the log"
+        "an audit event was requested and was not written; the audit \
+         checkpoint cannot certify the log"
     )]
     SequenceExhaustedUnaudited,
     /// Entry's `hmac` doesn't match its canonical bytes.
