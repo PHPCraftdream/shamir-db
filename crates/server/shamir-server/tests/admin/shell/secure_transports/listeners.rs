@@ -25,7 +25,7 @@ use crate::shell_tests::secure_fixture::{
 
 use super::capture::{
     assert_clean, assert_member, error, result, scripted_child, CONNECT_FAILURE, DENIED,
-    SERVER_FAILURE, TOKEN_SUBSET,
+    TOKEN_SUBSET, UNKNOWN_RESOURCE,
 };
 
 fn ping_and_connect(run: &impl Fn(&[&str]) -> ShellRun) {
@@ -188,9 +188,10 @@ fn shell_secure_native_wss_scram_reflection_and_pin_refusal() {
         run
     };
 
-    // The real DescribeRepo handler includes the missing name in its error.
+    // The real DescribeRepo handler includes the missing name in its error;
+    // the shell maps the server's `unknown_db` to its own fixed text.
     let missing = admin_run(&["repo", "describe", MISSING_REPO]);
-    error(&missing, "repo describe", 5, "server_error", SERVER_FAILURE);
+    error(&missing, "repo describe", 5, "unknown_db", UNKNOWN_RESOURCE);
     assert!(
         !missing.contains_canary(MISSING_REPO),
         "opaque peer error reflected"
@@ -466,7 +467,7 @@ fn assert_human_reflection(shell: &ShellFixture, password: &Zeroizing<String>) {
         "escaped index name must reach human output"
     );
     assert!(
-        human.contains("server_error") && human.contains(SERVER_FAILURE),
+        human.contains("unknown_db") && human.contains(UNKNOWN_RESOURCE),
         "expected the local repo failure"
     );
 }

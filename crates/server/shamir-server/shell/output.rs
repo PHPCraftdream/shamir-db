@@ -74,6 +74,37 @@ pub(crate) enum ShellError {
     SecretSourceConflict,
     Timeout,
     Interrupted,
+    /// `chmod`/`chown`/`chgrp` addressed the resource root, which the shell
+    /// never mutates.
+    RootMutation,
+    /// A state-changing command was answered neither with `--yes` nor with
+    /// an interactive `yes`.
+    ConfirmationRequired,
+    /// `chmod` MODE is not a one-to-four digit octal literal at most
+    /// `0o7777`.
+    InvalidMode,
+    /// The named owner or group does not exist in the observed directory.
+    UnknownPrincipal,
+    /// A rights mutation named an owner or group id the server does not
+    /// know (`invalid_owner`).
+    InvalidOwner,
+    /// A signed rights mutation carried a tag that does not match the
+    /// canonical bytes (`hmac_mismatch`).
+    HmacMismatch,
+    /// A rights mutation reached the server without a tag the destructive-op
+    /// gate accepts (`hmac_required`).
+    HmacRequired,
+    /// A mutation addressed a database that does not exist (`unknown_db`).
+    UnknownDb,
+    /// The access tree is larger than the shell's whole-tree projection
+    /// budget (`group tree` / `group members`); `rights show` is unaffected.
+    TreeTooLarge,
+    /// The node is a read-only replica and refuses this write
+    /// (`read_only_replica`).
+    ReadOnlyReplica,
+    /// The request was cancelled by another operator before it finished
+    /// (`cancelled`): its effects may be partial.
+    Cancelled,
 }
 
 impl ShellError {
@@ -114,6 +145,17 @@ impl ShellError {
             ShellError::SecretSourceConflict => "secret_source_conflict",
             ShellError::Timeout => "timeout_outcome_unknown",
             ShellError::Interrupted => "interrupted",
+            ShellError::RootMutation => "root_mutation_refused",
+            ShellError::ConfirmationRequired => "confirmation_required",
+            ShellError::InvalidMode => "invalid_mode",
+            ShellError::UnknownPrincipal => "unknown_principal",
+            ShellError::InvalidOwner => "invalid_owner",
+            ShellError::HmacMismatch => "hmac_mismatch",
+            ShellError::HmacRequired => "hmac_required",
+            ShellError::UnknownDb => "unknown_db",
+            ShellError::TreeTooLarge => "tree_too_large",
+            ShellError::ReadOnlyReplica => "read_only_replica",
+            ShellError::Cancelled => "cancelled",
         }
     }
 
@@ -130,7 +172,7 @@ impl ShellError {
             ShellError::Authentication => "authentication failed",
             ShellError::Denied => "permission denied by the server",
             ShellError::Server => "the operation failed on the server",
-            ShellError::NotFound => "the addressed record or table was not found",
+            ShellError::NotFound => "the addressed resource was not found",
             ShellError::UnknownTable => "the addressed table does not exist",
             ShellError::ResyncRequired => "the repository is in replication quarantine; a reseed is required",
             ShellError::ResultTooLarge => "the encoded response exceeds the server's result-size cap",
@@ -187,6 +229,39 @@ impl ShellError {
                 "the operation timed out after send; its outcome is unknown and it may still be running"
             }
             ShellError::Interrupted => "interrupted",
+            ShellError::RootMutation => {
+                "the root resource cannot be modified from the shell; address a database, store, table or function"
+            }
+            ShellError::ConfirmationRequired => {
+                "this command changes state or cancels work; confirm interactively or pass --yes in batch mode"
+            }
+            ShellError::InvalidMode => {
+                "MODE must be an octal mode (1 to 4 digits, 0-7 only, at most 7777)"
+            }
+            ShellError::UnknownPrincipal => {
+                "the named owner or group does not exist on this server"
+            }
+            ShellError::InvalidOwner => {
+                "the addressed owner or group does not exist on this server"
+            }
+            ShellError::HmacMismatch => {
+                "the signed request was refused by the server: its signature did not match"
+            }
+            ShellError::HmacRequired => {
+                "the request carried no signature the server accepts for a destructive change"
+            }
+            ShellError::UnknownDb => {
+                "the addressed resource does not exist on this server"
+            }
+            ShellError::TreeTooLarge => {
+                "the access tree exceeds the shell's 2000-node projection limit; narrow the databases with group tree --db DATABASE (functions are never filtered)"
+            }
+            ShellError::ReadOnlyReplica => {
+                "this node is a read-only replica and refuses writes; repeat the change on the leader"
+            }
+            ShellError::Cancelled => {
+                "the request was cancelled before it finished; its earlier effects may already be applied"
+            }
         }
     }
 
@@ -196,7 +271,8 @@ impl ShellError {
             ShellError::Usage
             | ShellError::OutputVersion
             | ShellError::MissingTty
-            | ShellError::InvalidRecordId => 1,
+            | ShellError::InvalidRecordId
+            | ShellError::InvalidMode => 1,
             ShellError::Connection => 2,
             ShellError::Authentication => 3,
             ShellError::Denied | ShellError::TokenRequestDenied => 4,
@@ -205,7 +281,15 @@ impl ShellError {
             | ShellError::NotFound
             | ShellError::UnknownTable
             | ShellError::ResyncRequired
-            | ShellError::ResultTooLarge => 5,
+            | ShellError::ResultTooLarge
+            | ShellError::UnknownPrincipal
+            | ShellError::InvalidOwner
+            | ShellError::HmacMismatch
+            | ShellError::HmacRequired
+            | ShellError::UnknownDb
+            | ShellError::TreeTooLarge
+            | ShellError::ReadOnlyReplica
+            | ShellError::Cancelled => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
@@ -220,7 +304,9 @@ impl ShellError {
             | ShellError::ArgvSecret
             | ShellError::SecretTerminal
             | ShellError::SecretTooLong
-            | ShellError::SecretSourceConflict => 6,
+            | ShellError::SecretSourceConflict
+            | ShellError::RootMutation
+            | ShellError::ConfirmationRequired => 6,
             #[cfg(windows)]
             ShellError::SecretFdWindows => 6,
             ShellError::Timeout | ShellError::HeadWallTime => 7,
@@ -363,16 +449,84 @@ fn write_envelope(envelope: &Envelope<'_>) -> u8 {
     }
 }
 
+/// Re-consult the per-command budget (design §5, §6) AFTER the last blocking
+/// step and after the synchronous projection / credential scan, which the
+/// outer [`crate::shell::parser::session::guarded`] `timeout` cannot preempt
+/// because no further `.await` happens. Same pattern as the `data head`
+/// deadline (`state.rs::head_tail`): an elapsed budget is the typed
+/// `timeout_outcome_unknown` refusal (exit 7), never a silent success.
+pub(super) fn deadline_check<T>(
+    started: tokio::time::Instant,
+    outcome: Result<T, ShellError>,
+) -> Result<T, ShellError> {
+    if started.elapsed() >= crate::shell::connect::REQUEST_TIMEOUT {
+        return Err(ShellError::Timeout);
+    }
+    outcome
+}
+
+/// The shared command tail: the projection outcome, then the synchronous
+/// output scan, then the deadline consulted ONE LAST TIME — the ordering of
+/// `data head` (`state.rs::head_tail`), so an already-elapsed budget is the
+/// typed timeout (exit 7) even when the projection was refused by an
+/// unrelated error or the scan came back clean (which would otherwise exit
+/// 0 or exit 5). The scan is not interruptible: this is ordering, not
+/// preemption.
+pub(super) fn finish_command<T>(
+    started: tokio::time::Instant,
+    projected: Result<T, ShellError>,
+    scan: impl FnOnce(&T) -> Result<(), ShellError>,
+) -> Result<T, ShellError> {
+    let payload = projected.map_err(|error| deadline_error(started, error))?;
+    deadline_check(started, scan(&payload))?;
+    Ok(payload)
+}
+
+/// A refusal on an elapsed budget keeps the deadline's typed outcome: the
+/// budget wins over any per-step error (mirrors `state.rs::head_error`).
+pub(super) fn deadline_error(started: tokio::time::Instant, error: ShellError) -> ShellError {
+    if started.elapsed() >= crate::shell::connect::REQUEST_TIMEOUT {
+        ShellError::Timeout
+    } else {
+        error
+    }
+}
+
 /// Fixed-width FIELD/VALUE table (or a single `value` row) for stderr; every
-/// cell sanitized before rendering, truncation after sanitization.
+/// cell sanitized before rendering, truncation after sanitization. A listing
+/// command's non-empty array of objects renders one row per LINE; every
+/// other command keeps the single-cell rendering.
 fn write_human_result(stderr: &mut dyn Write, command: &str, data: &Json) {
-    let rows: Vec<(String, String)> = match data {
-        Json::Object(fields) => fields
-            .iter()
-            .map(|(field, item)| (display_cell(field, HUMAN_LABEL_MAX_CHARS), human_cell(item)))
-            .collect(),
-        other => vec![(String::from("value"), human_cell(other))],
-    };
+    let expand_lists = matches!(command, "activity sessions" | "activity requests");
+    let mut rows: Vec<(String, String)> = Vec::new();
+    match data {
+        Json::Object(fields) => {
+            for (field, item) in fields {
+                // A listing renders one row per LINE: a non-empty array of
+                // objects (the activity `rows` list, the principal directory)
+                // becomes `rows[0]`, `rows[1]`, ... so a later entry is never
+                // hidden behind the per-cell cap. Any other array keeps the
+                // single-cell rendering.
+                match item {
+                    Json::Array(items)
+                        if expand_lists
+                            && !items.is_empty()
+                            && items.iter().all(Json::is_object) =>
+                    {
+                        let label = display_cell(field, HUMAN_LABEL_MAX_CHARS);
+                        for (index, element) in items.iter().enumerate() {
+                            rows.push((
+                                display_cell(&format!("{label}[{index}]"), HUMAN_LABEL_MAX_CHARS),
+                                human_cell(element),
+                            ));
+                        }
+                    }
+                    _ => rows.push((display_cell(field, HUMAN_LABEL_MAX_CHARS), human_cell(item))),
+                }
+            }
+        }
+        other => rows.push((String::from("value"), human_cell(other))),
+    }
     let name_width = rows
         .iter()
         .map(|(name, _)| name.chars().count())
@@ -564,3 +718,7 @@ fn is_display_control(character: char) -> bool {
             | '\u{FEFF}'
     )
 }
+
+#[cfg(test)]
+#[path = "tests/human_rows_tests.rs"]
+mod human_rows_tests;
