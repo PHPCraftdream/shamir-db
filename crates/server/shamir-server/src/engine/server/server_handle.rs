@@ -221,10 +221,10 @@ pub(crate) async fn drain_connections(
 /// `runtime::serve` wraps the shutdown future in a deadline; on expiry that
 /// future is dropped, and with it anything it still owns. These two must not
 /// be dropped there: the scheduled-backup worker is a native thread that keeps
-/// writing under the data directory after its last cancellation checkpoint,
-/// and the single-instance lock must not be released while it does — an
-/// embedding process would otherwise see I/O and a free data dir that outlive
-/// `serve`.
+/// doing filesystem work under the managed roots (copying, retention's tagging
+/// and deletions) after its last cancellation checkpoint, and the
+/// single-instance lock must not be released while it does — an embedding
+/// process would otherwise see I/O and a free data dir that outlive `serve`.
 ///
 /// The owner is therefore extracted BEFORE the deadline and BORROWED into the
 /// shutdown future (`ServerHandle::shutdown_with_report` takes `&mut Self`
@@ -272,6 +272,42 @@ fn fire_scheduled_join_probe() {
         .lock()
         .expect("scheduled join probe")
         .take();
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
+/// One-shot probe fired immediately BEFORE the ordered shutdown's repository
+/// flush. A shutdown test compares its order with [`arm_scheduled_join_probe`]:
+/// the scheduled worker and its in-flight run are joined BEFORE the flush, so
+/// the join marker must fire first (mutant: the worker awaited after the
+/// flush).
+#[cfg(test)]
+static REPO_FLUSH_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+/// Clears an unfired [`arm_repo_flush_probe`]; a probe that fires removes
+/// itself.
+#[cfg(test)]
+pub(crate) struct RepoFlushProbeGuard;
+
+#[cfg(test)]
+impl Drop for RepoFlushProbeGuard {
+    fn drop(&mut self) {
+        *REPO_FLUSH_PROBE.lock().expect("repo flush probe") = None;
+    }
+}
+
+/// Arm ONE repository-flush probe.
+#[cfg(test)]
+pub(crate) fn arm_repo_flush_probe(probe: impl FnOnce() + Send + 'static) -> RepoFlushProbeGuard {
+    *REPO_FLUSH_PROBE.lock().expect("repo flush probe") = Some(Box::new(probe));
+    RepoFlushProbeGuard
+}
+
+/// Fire and consume the repository-flush probe, if any.
+#[cfg(test)]
+fn fire_repo_flush_probe() {
+    let probe = REPO_FLUSH_PROBE.lock().expect("repo flush probe").take();
     if let Some(probe) = probe {
         probe();
     }
@@ -442,6 +478,8 @@ impl ServerHandle {
         // after the deadline).
         owner.join_schedule(report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
+        #[cfg(test)]
+        fire_repo_flush_probe();
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
         //    writes can arrive) and BEFORE redb locks are released.
@@ -496,11 +534,27 @@ impl ServerHandle {
         drop(self.repl_supervisor);
         drop(self.token_service);
         if let Err(still_locked) = wait_stores_released(&data_dir, STORE_RELEASE_TIMEOUT).await {
+            // The barrier's outcome belongs in the report, not only in a log
+            // line: a store that still holds its directory lock means a
+            // detached writer outlived the teardown, and an immediate relaunch
+            // of the same data directory can fail with `Locked`. The caller and
+            // the supervisor only see the report.
+            let stores = still_locked
+                .iter()
+                .filter_map(|dir| dir.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::warn!(
                 ?still_locked,
                 timeout = ?STORE_RELEASE_TIMEOUT,
                 "shutdown: stores still held after the release timeout",
             );
+            report.add_error(format!(
+                "stores still held after the release timeout {STORE_RELEASE_TIMEOUT:?}: {stores} \
+                 — a detached writer outlived the teardown; an immediate relaunch of the same \
+                 data directory can fail with `Locked`"
+            ));
         }
     }
 

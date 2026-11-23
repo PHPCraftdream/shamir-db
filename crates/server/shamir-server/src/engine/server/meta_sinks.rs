@@ -115,11 +115,35 @@ pub(super) fn spawn_meta_snapshot_task(
                 biased;
                 _ = shutdown.cancelled() => {
                     tracing::debug!("meta_snapshot: shutdown cancelled, writing final snapshots");
-                    if let Err(e) = lockout.persist_snapshot() {
-                        tracing::warn!(error = %e, "final lockout snapshot persist failed");
-                    }
-                    if let Err(e) = rate_limit.persist_snapshot() {
-                        tracing::warn!(error = %e, "final rate-limit snapshot persist failed");
+                    // OFF the runtime worker: a final `persist_snapshot` is a
+                    // synchronous store write (and may `SyncAll`), so writing it
+                    // inline here could starve a shutdown deadline timer on a
+                    // current-thread runtime (finding: synchronous `server_meta`
+                    // write on the teardown path). The handle is still joined by
+                    // the shutdown, so nothing is detached.
+                    let lockout = Arc::clone(&lockout);
+                    let rate_limit = Arc::clone(&rate_limit);
+                    let written = tokio::task::spawn_blocking(move || {
+                        let mut failures = Vec::new();
+                        if let Err(error) = lockout.persist_snapshot() {
+                            failures.push(("final lockout snapshot persist failed", error.to_string()));
+                        }
+                        if let Err(error) = rate_limit.persist_snapshot() {
+                            failures.push(("final rate-limit snapshot persist failed", error.to_string()));
+                        }
+                        failures
+                    })
+                    .await;
+                    match written {
+                        Ok(failures) => {
+                            for (what, error) in failures {
+                                tracing::warn!(what, %error, "final metadata snapshot persist failed");
+                            }
+                        }
+                        Err(join_error) => tracing::warn!(
+                            %join_error,
+                            "final metadata snapshot task did not complete"
+                        ),
                     }
                     break;
                 }

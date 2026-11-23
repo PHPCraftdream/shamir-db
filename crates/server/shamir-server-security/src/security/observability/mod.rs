@@ -503,10 +503,22 @@ pub async fn spawn_with_byte_budget(
     register_backup_metrics();
     register_transactions_metrics();
 
-    // 4. Background poller: refresh process metrics every 5 s. Cheap
+    // Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
     collector.collect();
+
+    // 4. Bind the socket BEFORE any task is spawned: a bind failure must not
+    //    leave a live poller behind. The launch rollback can only cancel what
+    //    it was handed, and a task spawned before the fallible bind is not
+    //    among the handle's fields yet (finding: a rolled-back observability
+    //    binding used to leave its 5 s poller running on a surviving runtime).
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(ObservabilityError::Bind)?;
+    let bound_addr = listener.local_addr().map_err(ObservabilityError::Bind)?;
+    tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
+
     // F-68b (#922): `CancellationToken`, not `Notify::notify_waiters()` — see
     // `ObservabilityHandle::shutdown`'s doc comment (this file) for the
     // lossy-`Notify` missed-wakeup bug this replaced (confirmed root cause of
@@ -549,7 +561,7 @@ pub async fn spawn_with_byte_budget(
         }
     });
 
-    // 4. Build the router.
+    // 5. Build the router.
     let app_state = AppState {
         state: state.clone(),
         prom: prom_handle,
@@ -563,13 +575,7 @@ pub async fn spawn_with_byte_budget(
         .route("/info", get(info_handler))
         .with_state(app_state);
 
-    // 5. Bind + spawn the listener.
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(ObservabilityError::Bind)?;
-    let bound_addr = listener.local_addr().map_err(ObservabilityError::Bind)?;
-    tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
-
+    // 6. Spawn the listener over the socket bound in step 4.
     let shutdown_for_serve = shutdown.clone();
     let listener_task = tokio::spawn(async move {
         let serve = axum::serve(listener, app);

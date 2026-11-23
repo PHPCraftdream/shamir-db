@@ -35,6 +35,8 @@ use crate::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig, TlsConfig,
 };
 use crate::db_handler::NodeMode;
+use crate::server::server_handle::{arm_repo_flush_probe, arm_scheduled_join_probe};
+use crate::server::server_launcher::audit_teardown::arm_teardown_probe;
 use crate::server::{BootstrapMode, ServerLauncher};
 
 const TEST_NAME: &str = "shutdown_deadline_does_not_abandon_the_scheduled_worker";
@@ -123,9 +125,49 @@ async fn run_scheduled_worker() {
     drop(parked_permit);
     guard.mark("native runner parked before its completion signal");
 
+    // STAGE MARKERS, not a guessed window. The audit-teardown probe proves the
+    // teardown entry ran, the join probe proves it REACHED
+    // `ShutdownOwner::join_schedule`, and the repository-flush probe records
+    // whether the join was already done when the flush stage started. Without
+    // them a shutdown that timed out at an earlier stage would satisfy the
+    // "still pending" assertion vacuously (mutant: a teardown that never
+    // reaches the join), and "the worker awaited after the flush" would be
+    // invisible (mutant: wait after flush).
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel::<()>();
+    let (teardown_tx, teardown_rx) = tokio::sync::oneshot::channel::<()>();
+    let joined = Arc::new(AtomicBool::new(false));
+    let flush_after_join = Arc::new(AtomicBool::new(false));
+    let _teardown_probe = arm_teardown_probe(move || {
+        let _ = teardown_tx.send(());
+    });
+    let _join_probe = {
+        let joined = Arc::clone(&joined);
+        arm_scheduled_join_probe(move || {
+            joined.store(true, Ordering::SeqCst);
+            let _ = join_tx.send(());
+        })
+    };
+    let _flush_probe = {
+        let joined = Arc::clone(&joined);
+        let flush_after_join = Arc::clone(&flush_after_join);
+        arm_repo_flush_probe(move || {
+            flush_after_join.store(joined.load(Ordering::SeqCst), Ordering::SeqCst);
+        })
+    };
+
     // Only now does the shutdown start: the deadline cannot pre-empt the run
     // start, only the wait for it.
     let mut shutdown = tokio::spawn(crate::runtime::drain_server(handle, TEST_DEADLINE));
+    timeout(BOUND, teardown_rx)
+        .await
+        .expect("the shutdown must enter the shared audit teardown")
+        .expect("teardown probe channel");
+    guard.mark("audit teardown entered");
+    timeout(BOUND, join_rx)
+        .await
+        .expect("the shutdown must reach ShutdownOwner::join_schedule")
+        .expect("join probe channel");
+    guard.mark("join_schedule reached with the worker parked");
     let still_pending = timeout(PENDING_WINDOW, &mut shutdown).await.is_err();
     // Still while the worker runs: the instance lock must be held.
     let lock_while_running = crate::maintenance_lock::acquire_server(&data_dir).is_err();
@@ -164,6 +206,19 @@ async fn run_scheduled_worker() {
         lock_after.is_ok(),
         "the data-directory lock must be free once the worker finished"
     );
+    // The flush stage was reached (the report says so whenever it was skipped)
+    // and the scheduled worker had already been joined when it started.
+    let flush_ran = !shutdown
+        .errors()
+        .iter()
+        .any(|error| error.contains("repository flush skipped"));
+    if flush_ran {
+        assert!(
+            flush_after_join.load(Ordering::SeqCst),
+            "the scheduled worker and its run are joined BEFORE the repository flush \
+             (mutant: the worker awaited after the flush): {shutdown:?}"
+        );
+    }
 }
 
 /// The runner-side rendezvous state.
@@ -207,7 +262,14 @@ fn listener_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
     create_private_dir(&data_dir).expect("private data directory");
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let occupied = held.local_addr().expect("held address").to_string();
-    let config = bind_config(data_dir.clone(), occupied, "127.0.0.1:0".to_owned());
+    let config = bind_config(data_dir.clone(), occupied.clone(), "127.0.0.1:0".to_owned());
+    // Nextest gives this test its own process, so the one-shot teardown probe
+    // cannot be consumed by another test's launch.
+    let teardown_ran = Arc::new(AtomicBool::new(false));
+    let _teardown_probe = {
+        let flag = Arc::clone(&teardown_ran);
+        arm_teardown_probe(move || flag.store(true, Ordering::SeqCst))
+    };
 
     let error = run_blocking(move || match block_on_launch(config) {
         Ok(_) => panic!("the occupied listener port must fail the bind"),
@@ -217,6 +279,19 @@ fn listener_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
     assert!(
         message.contains("listener bind"),
         "the original boot error must be returned: {message}"
+    );
+    assert!(
+        message.contains(&occupied),
+        "the error must name the LISTENER address that failed, not any bind: {message}"
+    );
+    assert!(
+        !message.contains("observability"),
+        "the listener rollback must not report the observability listener: {message}"
+    );
+    assert!(
+        teardown_ran.load(Ordering::SeqCst),
+        "the launch rollback must run the shared audit teardown (mutant: the `teardown_audit` \
+         call removed from the listener-bind branch)"
     );
     // The rollback ran to completion: nothing of this launch holds the instance
     // lock any more, so a retry after freeing the port is possible.
@@ -234,7 +309,12 @@ fn observability_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
     create_private_dir(&data_dir).expect("private data directory");
     let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
     let occupied = held.local_addr().expect("held address").to_string();
-    let config = bind_config(data_dir.clone(), "127.0.0.1:0".to_owned(), occupied);
+    let config = bind_config(data_dir.clone(), "127.0.0.1:0".to_owned(), occupied.clone());
+    let teardown_ran = Arc::new(AtomicBool::new(false));
+    let _teardown_probe = {
+        let flag = Arc::clone(&teardown_ran);
+        arm_teardown_probe(move || flag.store(true, Ordering::SeqCst))
+    };
 
     let error = run_blocking(move || match block_on_launch(config) {
         Ok(_) => panic!("the occupied observability port must fail the bind"),
@@ -244,6 +324,19 @@ fn observability_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
     assert!(
         message.contains("observability"),
         "the original boot error must be returned: {message}"
+    );
+    assert!(
+        message.contains(&occupied),
+        "the error must name the OBSERVABILITY address that failed, not any bind: {message}"
+    );
+    assert!(
+        !message.contains("listener bind"),
+        "the observability rollback must not report the data listener: {message}"
+    );
+    assert!(
+        teardown_ran.load(Ordering::SeqCst),
+        "the launch rollback must run the shared audit teardown (mutant: the `teardown_audit` \
+         call removed from the observability-bind branch)"
     );
     let lock = crate::maintenance_lock::acquire_server(&data_dir);
     assert!(
@@ -369,9 +462,10 @@ fn finish_config(
     observability: String,
 ) -> Config {
     config.data_dir = data_dir.clone();
-    if config.listeners.is_empty() {
-        config.listeners = vec![listener_config(listener)];
-    }
+    // ALWAYS one ephemeral listener: `EXAMPLE` carries the shipped unit's
+    // fixed `7331-7333`, and a test must never bind those (two tests, or a
+    // developer's own server, would collide).
+    config.listeners = vec![listener_config(listener)];
     config.tls = TlsConfig {
         cert_path: data_dir.join("cert.pem"),
         key_path: data_dir.join("key.pem"),

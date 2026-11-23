@@ -130,10 +130,12 @@ pub(crate) struct CancelRefusalAudit {
     dropped: AtomicUsize,
     idle: Notify,
     /// Queued + running jobs per principal NAME. A name's entry is inserted
-    /// with its first refusal and removed when its count returns to zero, so
-    /// the map is bounded by the live slots: at most `CANCEL_AUDIT_CAPACITY`
-    /// entries with a non-zero count, plus zero entries whose removal raced a
-    /// reservation (retired by that name's next release).
+    /// with its first refusal and removed when its count returns to zero. The
+    /// global slot is reserved BEFORE the entry is created (see
+    /// [`CancelRefusalAudit::try_reserve`]), so every non-zero entry implies a
+    /// held slot: at most `CANCEL_AUDIT_CAPACITY` entries with a non-zero
+    /// count, plus zero entries whose removal raced a reservation (retired by
+    /// that name's next release).
     ///
     /// Contention: one `update_sync`/`insert_sync` per refusal and one per
     /// release on the scc bucket of that name — the map's own bucket lock for
@@ -164,48 +166,73 @@ impl CancelRefusalAudit {
     /// `update_sync` inside the map's own bucket lock, so two principals never
     /// share a counter and the count cannot drift from the live slots.
     fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
+        // Admission and the GLOBAL slot come FIRST: a principal entry then
+        // always implies a reserved slot, so the map can never hold more live
+        // entries than `CANCEL_AUDIT_CAPACITY` (the bound its doc states).
+        // Taking the share first let a burst of callers create entries before
+        // they knew whether a global slot existed -- above that bound.
+        if !self.reserve_global_slot() {
+            return None;
+        }
+        if !self.reserve_share(principal) {
+            self.release_global_slot();
+            let dropped = self.record_drop();
+            tracing::warn!(
+                share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+                dropped,
+                "cancel refusal audit principal share full; dropping event"
+            );
+            return None;
+        }
+        Some(CancelAuditSlot {
+            queue: Arc::clone(self),
+            principal: principal.to_owned(),
+            appended: false,
+        })
+    }
+
+    /// Take one slot of `principal`'s share, or `false` when the share is full.
+    ///
+    /// The share test and the increment run in one `update_sync` inside the
+    /// map's own bucket lock, so two principals never share a counter and the
+    /// count cannot drift from the live slots.
+    fn reserve_share(&self, principal: &str) -> bool {
         loop {
-            let reserved = self.principals.update_sync(principal, |_, held| {
+            match self.principals.update_sync(principal, |_, held| {
                 if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
                     return false;
                 }
                 *held += 1;
                 true
-            });
-            match reserved {
-                Some(true) => break,
-                Some(false) => {
-                    let dropped = self.record_drop();
-                    tracing::warn!(
-                        share = CANCEL_AUDIT_PRINCIPAL_SHARE,
-                        dropped,
-                        "cancel refusal audit principal share full; dropping event"
-                    );
-                    return None;
-                }
+            }) {
+                Some(accepted) => return accepted,
                 None => {
                     // First refusal for this name: insert it already holding
                     // our slot. A concurrent insert wins the entry, and the next
                     // pass increments against that winner instead.
                     if self.principals.insert_sync(principal.to_owned(), 1).is_ok() {
-                        break;
+                        return true;
                     }
                 }
             }
         }
+    }
+
+    /// Take one GLOBAL slot, or refuse: admission closed, capacity reached, or
+    /// an earlier rejection in the same saturation episode already latched it.
+    /// The count grows only here.
+    fn reserve_global_slot(&self) -> bool {
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CLOSED != 0 {
-                self.release_share(principal);
                 let dropped = self.record_drop();
                 tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
-                return None;
+                return false;
             }
             let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
             if full && state & SATURATED != 0 {
-                self.release_share(principal);
                 self.record_drop();
-                return None;
+                return false;
             }
             let next = if full { state | SATURATED } else { state + 1 };
             match self
@@ -213,21 +240,36 @@ impl CancelRefusalAudit {
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) if full => {
-                    self.release_share(principal);
                     let dropped = self.record_drop();
                     tracing::warn!(
                         capacity = CANCEL_AUDIT_CAPACITY,
                         dropped,
                         "cancel refusal audit queue full; dropping events"
                     );
-                    return None;
+                    return false;
                 }
+                Ok(_) => return true,
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    /// Give one GLOBAL slot back, clearing the saturation latch in the same
+    /// transition. Every path that reserved a slot but produced no
+    /// [`CancelAuditSlot`] calls this; the slot's own `Drop` does too.
+    fn release_global_slot(&self) {
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            let next = (state - 1) & !SATURATED;
+            match self
+                .state
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
-                    return Some(CancelAuditSlot {
-                        queue: Arc::clone(self),
-                        principal: principal.to_owned(),
-                        appended: false,
-                    });
+                    if next == CLOSED {
+                        self.idle.notify_waiters();
+                    }
+                    return;
                 }
                 Err(current) => state = current,
             }
@@ -259,6 +301,12 @@ impl CancelRefusalAudit {
     }
 
     pub(crate) fn close(&self) {
+        // ONE decision with `spawn_tracked`: both take this mutex, so `close()`
+        // cannot return while a spawn decision is in flight. After it returns
+        // no job can still be spawned, and the handle of every already spawned
+        // job sits in the list `discard_queued` drains. Setting the bit without
+        // the mutex left exactly that window open.
+        let _decision = self.unfinished.lock();
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
 
@@ -353,26 +401,9 @@ impl Drop for CancelAuditSlot {
             self.queue.record_drop();
         }
         self.queue.release_share(&self.principal);
-        // Releasing any slot necessarily makes the queue non-full. Clear
-        // the saturation latch in the same transition as the decrement.
-        let mut state = self.queue.state.load(Ordering::Acquire);
-        loop {
-            let next = (state - 1) & !SATURATED;
-            match self.queue.state.compare_exchange_weak(
-                state,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if next == CLOSED {
-                        self.queue.idle.notify_waiters();
-                    }
-                    break;
-                }
-                Err(current) => state = current,
-            }
-        }
+        // Releasing any slot necessarily makes the queue non-full; the shared
+        // helper clears the saturation latch in the same transition.
+        self.queue.release_global_slot();
     }
 }
 

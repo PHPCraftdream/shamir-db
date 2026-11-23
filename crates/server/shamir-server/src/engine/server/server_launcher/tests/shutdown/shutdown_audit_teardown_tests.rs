@@ -63,7 +63,7 @@ async fn run_audit_timeout_while_gate_held() {
     );
     try_install_global_tracing_ring();
     let temp = tempfile::tempdir().expect("persistent data directory");
-    let handle = Box::pin(
+    let mut handle = Box::pin(
         ServerLauncher {
             config: boot_config(temp.path().to_path_buf()),
             bootstrap: BootstrapMode::Skip,
@@ -79,6 +79,9 @@ async fn run_audit_timeout_while_gate_held() {
     // thread. The hook runs while that thread owns the persistence gate, so
     // blocking in it keeps the gate held for the whole shutdown stage.
     let appender = Arc::clone(&handle.audit_appender);
+    // Observable for the skipped-close rule: the report says the close was not
+    // attempted AND the appender was never asked to attempt one.
+    let close_observable = Arc::clone(&handle.audit_appender);
     let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
     appender.arm_gate_acquired_hook({
         let gate = Arc::clone(&gate);
@@ -92,9 +95,19 @@ async fn run_audit_timeout_while_gate_held() {
             wait_until(&gate, "gate release", |state| state.released);
         })
     });
-    let holder = tokio::task::spawn_blocking({
-        let appender = Arc::clone(&appender);
-        move || appender.checkpoint(1, &[0u8; 32])
+    // The SCHEDULER's own checkpoint path, not a bare appender call: the
+    // periodic tick runs `AuditChainWriter::checkpoint_with_appender` on a
+    // blocking thread (`boot/scheduler.rs`), so holding the gate from inside
+    // that call is exactly the shape a stalling scheduler tick has.
+    let seam = handle
+        .activity_test_seam
+        .take()
+        .expect("boot activity seam");
+    let appender_trait: Arc<dyn AuditAppender> = handle.audit_appender.clone();
+    let chain = Arc::clone(&seam.audit_chain);
+    drop(seam);
+    let holder = tokio::task::spawn_blocking(move || {
+        chain.checkpoint_with_appender(appender_trait.as_ref())
     });
     // The checkpoint runs on a blocking thread, so waiting for the
     // rendezvous on this (current-thread runtime) task blocks nothing that
@@ -138,6 +151,30 @@ async fn run_audit_timeout_while_gate_held() {
     assert!(
         report.repository_failures().is_empty(),
         "repository teardown must still complete: {report:?}"
+    );
+    // Both stoppers DID stop here (the flusher checks its stop request before
+    // it ever takes the gate), so the close is submitted — and it is the close
+    // itself that runs into the held gate. The observable is therefore that the
+    // stage reports the close's own timeout rather than a skipped close.
+    assert!(
+        report
+            .errors()
+            .iter()
+            .any(|error| error.contains("waiting for the final audit")),
+        "the submitted close must report its own timeout: {report:?}"
+    );
+    assert_eq!(
+        close_observable.final_close_attempts(),
+        1,
+        "with both stoppers finished the close IS submitted exactly once \
+         (mutant: a close skipped while nothing is in the gate)"
+    );
+    assert!(
+        !report
+            .errors()
+            .iter()
+            .any(|error| error.contains("audit final close not attempted")),
+        "a skipped-close report would be a lie here: {report:?}"
     );
     assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
 }

@@ -53,12 +53,14 @@ pub(super) async fn open(
     let backup = resolve_backup(config)?;
 
     // Single-instance guard: acquire an advisory OS file lock on
-    // `<data_dir>/.shamir.lock` BEFORE opening any redb store. The
-    // lock is held for the entire process lifetime via the `File`
-    // stored in `ServerHandle.data_dir_lock` — drop releases it
-    // (and the kernel releases on crash). This prevents two servers
-    // from opening the same data_dir and corrupting/contending the
-    // redb stores.
+    // `<data_dir>/.shamir.lock` (and on its parents up to the data
+    // directory) BEFORE opening any durable store — the fjall stores
+    // (repositories, counters, sessions) and the redb stores
+    // (`server_meta`, tokens) alike. The lock is held for the whole
+    // process lifetime via the `File` kept in
+    // `ServerHandle.data_dir_lock` — drop releases it (and the kernel
+    // releases on crash). This prevents two servers from opening the
+    // same data_dir and corrupting or contending its stores.
     let data_dir_lock = crate::maintenance_lock::acquire_server(&config.data_dir)?;
 
     // Format-stamp gate (design 3.2): between the single-instance lock
