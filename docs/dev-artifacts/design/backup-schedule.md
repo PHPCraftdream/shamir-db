@@ -54,12 +54,58 @@ schedule state in memory. Hold the scheduled admission through retention to
 avoid overlap with admin writes in the root; never wait for the permit on a tick.
 
 Bias shutdown over ticks and retention starts. Graceful teardown requests
-cooperative cancellation and joins the in-flight work; an active syscall is not
-interrupted, and a copy already in final verification can finish successfully.
-The existing 30-second `serve` deadline can report an unclean shutdown before
-that work finishes; forced exit can leave partial output, including a partially
-deleted copy. Do not start retention during shutdown. Protocol directories use UTC
-`YYYYMMDD_HHMMSS` at second resolution; collisions fail without overwrite.
+cooperative cancellation and awaits the scheduler task. Each admitted run has TWO
+signals: the copy outcome is published at protocol completion — streak,
+last-success stamp and the completed/failed counters, before retention — and a
+LATE "worker finished" signal is sent only after the retention pass (including a
+caught retention panic) and the final record publication (`running = false`).
+The scheduler awaits that late signal before its own task ends, so
+`ShutdownOwner::join_schedule` still waits for the WHOLE run — retention
+included — and the data-directory instance lock is released only after it. The
+wait is the run's completion signal, not a join of the native runner thread. An
+active syscall is not interrupted, and a copy already in final verification can
+finish successfully. The existing 30-second `serve` deadline can report an
+unclean shutdown but does not abandon the worker: the scheduled worker and the
+data-directory lock are awaited after the deadline, and nothing forces a process
+exit; a kill by the operator can still leave partial output, including a
+partially deleted copy. A cancellation observed before the retention pass starts
+skips its scan. Protocol directories use UTC `YYYYMMDD_HHMMSS` at second
+resolution; collisions fail without overwrite.
+
+## Publication ordering, last error and cleanup outcome
+
+The copy outcome publishes at protocol completion, BEFORE retention:
+`note_success` (last-success timestamp — also persisted durably to the
+`server_meta` store at this point — bytes, duration), `note_finished`
+(completed/failed counters, `active` gauge) and the scheduler's outcome signal
+all fire there (the late "worker finished" signal follows after retention). At
+boot the last-success stamp is seeded back from that row
+(`install_backup_meta_store`), so the staleness evidence outlives the process.
+The registry admission (`running`) stays true through retention, so an admin
+copy and the next tick are refused
+while retention runs; the copy permit is released before it. Retention and
+adoption run under `catch_unwind`: a panic there is ONE retention failure
+(`shamir_backup_retention_failed_total`), never a copy failure, and a
+cancellation observed inside the pass is not a failure at all. The scheduler
+resets `shamir_backup_scheduled_failure_streak` on that completion, so a long
+retention never keeps the failure streak active.
+
+A scheduled run's `last_error` is rendered path-free as `<stage>: <reason>`
+(`OnlineBackupError::stage_and_reason`). Stage words: `preparing`, `captured`,
+`copying`, `sealing`, `verifying`, `done`, `failed`. Reason tokens: `busy`,
+`cancelled`, `port-failed`, `manifest-failed`, `verify-failed`,
+`recopy-cap-exceeded`, `io-<kind>`, `destination-io-<kind>`, `copy-cancelled`,
+`copy-io-<kind>`, `copy-destination-io-<kind>`, `copy-recopy-cap`,
+`copy-audit-files-unstable`
+(`<kind>` is the kebab-case `io::ErrorKind` name; `io-<kind>` is a source-side
+io error, `destination-io-<kind>` a destination-side one — the snapshot child's
+create and the manifest/backup-metadata publication), plus a
+`; cleanup-failed-<kind>` suffix when a failed run could not remove its own
+partial snapshot directory — the original failure stays primary and the suffix
+carries only the `io::ErrorKind`. An admin run keeps the full `Display` chain,
+and the privileged `BackupStatus` keeps its intentional `destination`/`dest_dir`
+paths. The scheduled-only logs (marker provisioning, manifest-capture refusal)
+carry `reason`/`kind` fields and no path.
 
 ## Ownership, verification and pruning
 
@@ -120,22 +166,42 @@ Added series use the `shamir_backup_` prefix; only the scheduled counter has a l
 
 | Suffix | Meaning |
 |---|---|
-| `last_success_timestamp_seconds` | Unix seconds of latest successful admin or scheduled online protocol, zero before success. |
-| `last_duration_seconds`, `last_bytes` | Duration and full manifest payload bytes of that success, zero initially. Share duration measurement/state with existing metrics while preserving their semantics; count WAL and sidecar payload listed in the manifest once, not metadata or retry traffic. |
-| `scheduled_runs_total{result=…}` | `started`, `skipped_busy`, `skipped_window`, `failed`, `completed`; failure/completion refer to copy outcome, not retention. |
-| `scheduled_failure_streak`, `schedule_enabled` | Saturating streak increments on scheduled `failed`, resets on `completed`, unchanged on skips/admin. Enabled is 0/1. Both reset at boot. |
-| `schedule_started_timestamp_seconds` | Unix time recorded at each enabled scheduler boot; 0 before enablement. |
-| `retention_deleted_total`, `retention_failed_total`, `retention_untouched` | Successful deletions, retention errors, and noneligible foreign/unverifiable entry count from the last complete classification, respectively. |
+| `last_success_timestamp_seconds` | Unix seconds of the NEWEST evidence that copies work: the latest successful admin or scheduled online protocol (persisted durably at copy success in the `server_meta` store, fjall keyspace `server_meta_v1`, key `backup_last_success_unix_secs_v1`, epoch seconds) or, before the first success, the schedule's FIRST arming time (key `backup_armed_at_unix_secs_v1`, written once by `arm_schedule_clock` when a schedule is first enabled and removed by `disarm_schedule_clock` when none is configured). Removing the schedule deletes the row, so re-adding one arms a NEW time at the first boot that has a schedule again, and the staleness clock restarts there; the gap with no schedule is not reported as staleness. `install_backup_meta_store` seeds the in-memory cell with `max(armed_at, last_success)` at boot, `note_success` raises it with `fetch_max`, and each scrape `fetch_min`s it to "now" IN PLACE: a future stamp is replaced by the current time exactly ONCE and later scrapes report that same clamped value, so the exported age grows. Before the first success the series therefore reports the first arming, and a restored `data_dir` carries both persisted rows of the backup it came from. Zero only when no schedule was ever armed and no success was recorded. |
+| `last_duration_seconds`, `last_bytes` | Duration and full manifest payload bytes of the last SUCCESSFUL copy, zero before the first success of the process. In-memory only: the durable rows carry no duration or bytes, so after a restart both read 0 until the first success in the new process. `shamir_backup_last_duration_seconds` is a last-value gauge rendered from the per-scrape snapshot and reads 0 before the first success; `shamir_backup_duration_seconds` is observable-only and OMITTED until the first success of the process (no fabricated zero). Neither changes on a failed run. Share duration measurement/state with existing metrics while preserving their semantics; count WAL and sidecar payload listed in the manifest once, not metadata or retry traffic. |
+| `scheduled_runs_total{result=…}` | `started`, `skipped_busy`, `skipped_window`, `failed`, `completed`; the terminal outcome publishes at protocol completion and refers to the copy, not retention. |
+| `scheduled_failure_streak`, `schedule_enabled` | Saturating streak increments on scheduled `failed` (including an admission refusal) and resets on `completed`, i.e. at copy completion before retention; unchanged on skips/admin, and a retention panic does not touch it. Enabled is 0/1. Both are process state, zero at boot. |
+| `schedule_started_timestamp_seconds` | Unix time recorded at each enabled scheduler boot; 0 before enablement, a new value after a restart. |
+| `retention_deleted_total`, `retention_failed_total`, `retention_untouched` | Successful deletions, retention errors, and noneligible foreign/unverifiable entry count from the last complete classification, respectively. Errors include marker-provisioning failures before the copy and before the pass, tag/delete-lease/deletion errors and a panic in the pass; they exclude reader-busy skips (`skipped_in_use`), a cancelled pass and the best-effort boot marker attempt. |
+
+The four LAST-VALUE gauges (`last_success_timestamp_seconds`,
+`scheduled_failure_streak`, `last_duration_seconds`, `duration_seconds`) are not
+stored in the process-global recorder: `render_backup_scrape_gauges` renders them
+from each scrape's own `BackupMetricsSnapshot` into that response body, the same
+way the per-server activity gauges are rendered. Two overlapping scrapes
+therefore cannot apply in reverse order and an older concurrent scrape cannot
+publish an older value; the cumulative counters keep the recorder's
+`.absolute()` (`fetch_max`) monotonicity. A value the step cannot observe (the
+pin duration, the WAL segment count) stays unset rather than fabricated.
 
 Ship `deploy/alerts/shamir-backup.rules.yml`: `BackupStale` gates on enabled
-and measures age from the last success, or from the positive schedule-start
-timestamp before the first success. Both paths use the same threshold
+and measures age from the last success — before the first success the series
+reports the schedule's first arming time, so the same expression measures that
+age too (the unchanged zero-value fallback to the positive schedule-start
+timestamp remains in the rule). The last-success series
+survives restarts: it is seeded at boot from the newest of the durable
+`server_meta` rows and clamped to the current time once at scrape, so a restart
+no longer zeroes the staleness clock. A restored data directory carries the
+persisted rows of the backup it came from, so after a restore the series reports
+the age of that restored evidence, not zero. Both paths use the same threshold
 (1.5 × the interval; 24h gives 36h) and `for: 5m`. Adjust the threshold for
 backup runtime, allowed windows and planned outages. Admin success also clears
 staleness. `BackupFailing`: enabled,
-streak >= 3 and scheduled `failed` count >= 3; the streak proves ordering.
-`BackupRetentionFailing`: positive increase
-in retention failures over a configured lookback. Logs contain no payloads.
+streak >= 3 and scheduled `failed` count >= 3; the streak proves ordering and
+resets at copy completion, before retention. `BackupRetentionFailing`: positive increase
+in retention failures over a configured lookback; it covers marker-provisioning
+failures, tag/delete-lease/deletion errors and a retention-pass panic, but not
+reader-busy skips or the best-effort boot marker attempt. Thresholds are
+unchanged. Logs contain no payloads.
 
 ## CI acceptance and boundaries
 

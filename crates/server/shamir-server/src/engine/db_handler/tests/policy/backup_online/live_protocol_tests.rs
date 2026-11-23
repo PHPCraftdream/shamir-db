@@ -458,8 +458,8 @@ fn seal_shutdown_cancellation_pauses_bridge_without_premature_reopen() {
         .expect("committed row must read back");
     assert_eq!(stored, InnerValue::Int(3), "the row must read back as n=3");
 
-    // The run failed with EXACTLY the typed seal cancellation (no `..`:
-    // the variant carries only `stage`) and its owned destination is
+    // The run failed with the typed seal cancellation at `Sealing` (the
+    // cleanup slot is not asserted here) and its owned destination is
     // gone — fail-closed, no snapshot.
     let result = done_rx
         .recv_timeout(TEST_BOUND)
@@ -469,7 +469,8 @@ fn seal_shutdown_cancellation_pauses_bridge_without_premature_reopen() {
         matches!(
             &error,
             OnlineBackupError::Cancelled {
-                stage: BackupStage::Sealing
+                stage: BackupStage::Sealing,
+                ..
             }
         ),
         "exactly the Sealing-stage cancellation is required, got: {error}"
@@ -648,6 +649,7 @@ fn seal_recopy_byte_cap_semantics_on_synthetic_file_port() {
     let OnlineBackupError::Failed {
         stage,
         source: OnlineBackupFailure::RecopyCap(message),
+        ..
     } = &error
     else {
         panic!("the byte cap must fail typed at Sealing, got: {error}");
@@ -685,6 +687,7 @@ fn seal_recopy_byte_cap_semantics_on_synthetic_file_port() {
     let OnlineBackupError::Failed {
         stage,
         source: OnlineBackupFailure::RecopyCap(message),
+        ..
     } = &error
     else {
         panic!("the tiny cap must fail typed at Sealing, got: {error}");
