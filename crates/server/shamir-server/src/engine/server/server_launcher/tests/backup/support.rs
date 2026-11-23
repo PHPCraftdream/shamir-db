@@ -245,6 +245,20 @@ pub(super) fn sample(metrics: &str, series: &str) -> u64 {
         .unwrap_or_else(|error| panic!("invalid /metrics value for {series}: {error}"))
 }
 
+/// The value of an OPTIONAL exporter series (one the renderer omits until the
+/// first success), or `None` when the series is absent from this scrape.
+pub(super) fn optional_sample(metrics: &str, series: &str) -> Option<f64> {
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .map(|value| {
+            value
+                .trim()
+                .parse()
+                .unwrap_or_else(|error| panic!("invalid /metrics value for {series}: {error}"))
+        })
+}
+
 pub(super) fn on_big_stack<F, Fut>(body: F)
 where
     F: FnOnce() -> Fut + Send + 'static,

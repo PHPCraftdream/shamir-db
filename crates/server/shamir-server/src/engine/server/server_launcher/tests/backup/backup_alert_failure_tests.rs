@@ -14,8 +14,8 @@ use crate::server::{BootstrapMode, ServerLauncher};
 use crate::sync::durability::backup::online::set_snapshot_name_base_seconds;
 
 use super::support::{
-    await_outcome, metric_type, on_big_stack, sample, scheduled_config, scrape_metrics,
-    TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
+    await_outcome, metric_type, on_big_stack, optional_sample, sample, scheduled_config,
+    scrape_metrics, TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
 };
 
 const ALERT_FAILURE_TEST: &str =
@@ -93,6 +93,12 @@ async fn run_alert_failure() {
         metric_type(&failed_route, "shamir_backup_scheduled_failure_streak"),
         "gauge"
     );
+    // The failed run copied nothing: the duration series (rendered only from
+    // the last-success cell) must stay absent, not fabricate a success.
+    assert!(
+        optional_sample(&failed_route, "shamir_backup_duration_seconds").is_none(),
+        "a failed copy must not export a duration series: {failed_route}"
+    );
 
     // The repair, then the streak must fall back to zero.
     fs::remove_dir_all(&blocker).expect("manifest blocker removed");
@@ -110,13 +116,13 @@ async fn run_alert_failure() {
         metric_type(&recovered_route, "shamir_backup_scheduled_failure_streak"),
         "gauge"
     );
+    let copy_seconds = optional_sample(&recovered_route, "shamir_backup_duration_seconds")
+        .expect("a real copy success must export the duration series");
     assert!(
-        sample(
-            &recovered_route,
-            "shamir_backup_last_success_timestamp_seconds"
-        ) > 0,
-        "the route must render a real success stamp, not a fabricated zero \
-         (mutant: `note_success` never publishing): {recovered_route}"
+        copy_seconds > 0.0,
+        "the duration series must carry the repaired copy's own duration (mutant: \
+         `note_success` never publishing the last-success cell — the stamp cell alone is \
+         boot-seeded): {recovered_route}"
     );
 
     let report = timeout(BOUND, handle.shutdown())

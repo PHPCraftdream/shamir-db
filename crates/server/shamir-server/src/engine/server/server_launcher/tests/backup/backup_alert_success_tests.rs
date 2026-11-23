@@ -11,8 +11,8 @@ use crate::server::{BootstrapMode, ServerLauncher};
 use crate::sync::durability::backup::online::set_snapshot_name_base_seconds;
 
 use super::support::{
-    await_outcome, metric_type, on_big_stack, sample, scheduled_config, scrape_metrics,
-    TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
+    await_outcome, metric_type, on_big_stack, optional_sample, sample, scheduled_config,
+    scrape_metrics, TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
 };
 
 const ALERT_SUCCESS_TEST: &str = "live_alert_success_inputs_reach_the_real_metrics_route";
@@ -73,6 +73,15 @@ async fn run_alert_success() {
         .expect("observability")
         .bound_addr;
 
+    // The boot seed fills only the last-success STAMP cell; this series is
+    // rendered solely from the last-success cell, so its absence proves no
+    // copy has succeeded yet in this process.
+    let pre_run = scrape_metrics(addr).await;
+    assert!(
+        optional_sample(&pre_run, "shamir_backup_duration_seconds").is_none(),
+        "no success has happened yet, so the duration series must be absent: {pre_run}"
+    );
+
     await_outcome(&mut receive, true, "the first scheduled success").await;
     guard.mark("first scheduled success reported");
     let frozen = backup_metrics_snapshot().last_success_timestamp_seconds;
@@ -83,16 +92,25 @@ async fn run_alert_success() {
         "the route must render exactly the success stamp the test observed in-process \
          (mutant: a route value not sourced from the runner's snapshot)"
     );
+    let copy_seconds = optional_sample(&route, "shamir_backup_duration_seconds")
+        .expect("a real copy success must export the duration series");
+    assert!(
+        copy_seconds > 0.0,
+        "the duration series must carry the copy's own duration (mutant: `note_success` \
+         never publishing the last-success cell — the stamp cell alone is boot-seeded): {route}"
+    );
+    // Sanity check, NOT a mutant oracle: the boot seed already makes the
+    // stamp cell nonzero.
     assert!(
         frozen > 0,
-        "the route must render a real success stamp, not a fabricated zero \
-         (mutant: `note_success` never publishing): {route}"
+        "the route must render a nonzero last-success stamp: {route}"
     );
+    // Sanity check, NOT a mutant oracle: `baseline` is taken before launch, so
+    // the boot seed alone satisfies this.
     assert!(
         frozen > baseline.last_success_timestamp_seconds,
-        "the last-success stamp must ADVANCE past the value observed before the run \
-         (mutant: a gauge pinned to the baseline or always zero): frozen={frozen} \
-         before={}",
+        "the last-success stamp must sit past the value observed before the launch: \
+         frozen={frozen} before={}",
         baseline.last_success_timestamp_seconds
     );
     assert_eq!(

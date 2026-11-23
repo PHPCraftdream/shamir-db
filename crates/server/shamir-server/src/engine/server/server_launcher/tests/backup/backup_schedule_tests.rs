@@ -24,6 +24,7 @@ use crate::boot::config::diagnostics::backup_online::registry::arm_scheduled_ret
 use crate::boot::config::diagnostics::backup_online::schedule::runner::{spawn, spawn_for_test};
 use crate::boot::config::diagnostics::backup_online::OnlineBackupRegistry;
 use crate::config::ResolvedSchedule;
+use crate::server::server_handle::arm_scheduled_join_probe;
 use crate::server::{BootstrapMode, ServerLauncher};
 use crate::sync::durability::backup::online::set_snapshot_name_base_seconds;
 use crate::sync::durability::backup::{
@@ -31,9 +32,9 @@ use crate::sync::durability::backup::{
 };
 
 use super::support::{
-    arm_run_observer, on_big_stack, release_worker, sample, scheduled_config, scrape_metrics,
-    wait_for_release, WorkerGate, BOUND, OUTER, PARKED_PROBE, PENDING_WINDOW, SNAPSHOT_NAME_BASE,
-    TICK, WATCHDOG,
+    arm_run_observer, on_big_stack, optional_sample, release_worker, sample, scheduled_config,
+    scrape_metrics, wait_for_release, WorkerGate, BOUND, OUTER, PARKED_PROBE, PENDING_WINDOW,
+    SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
 };
 
 const TEST_NAME: &str = "scheduled_backups_verify_prune_and_export_metrics_on_a_real_server";
@@ -133,13 +134,21 @@ async fn run() {
             .expect("the scheduled worker must keep its terminal channel open");
         assert!(outcome, "scheduled copy must succeed");
         if index == 0 {
+            let first_scrape = scrape_metrics(addr).await;
             first_success_stamp = sample(
-                &scrape_metrics(addr).await,
+                &first_scrape,
                 "shamir_backup_last_success_timestamp_seconds",
             );
+            // The copy outcome, success cell included, is published BEFORE
+            // retention; the boot seed fills only the stamp cell, so this
+            // duration series proves a real success of this process (mutant:
+            // `note_success` never publishing the last-success cell).
+            let first_copy_seconds =
+                optional_sample(&first_scrape, "shamir_backup_duration_seconds")
+                    .expect("the first scheduled success must export the duration series");
             assert!(
-                first_success_stamp > 0,
-                "the first scheduled success must stamp a nonzero last-success value"
+                first_copy_seconds > 0.0,
+                "the first scheduled success must publish a nonzero duration: {first_scrape}"
             );
         }
         guard.mark("scheduled copy outcome reported (retention follows)");
@@ -180,7 +189,6 @@ async fn run() {
     assert!(completed >= baseline.scheduled_runs_total[4] + 2);
     // Advancement, not a wall-clock comparison: self-observed stamps only.
     let last_success = sample(&metrics, "shamir_backup_last_success_timestamp_seconds");
-    assert!(last_success > 0);
     assert!(
         last_success >= first_success_stamp,
         "the last-success stamp must not regress below the value observed after the first run \
@@ -332,10 +340,23 @@ async fn run_production_spawn() {
         .expect("the launch callback recorded the launcher's registry");
     // The launcher's ROOT token, cloned only to know WHEN the root cancel happened.
     let root = handle.shutdown_token.clone();
+    // Fires from INSIDE `ShutdownOwner::join_schedule`, right before the await
+    // of the scheduled worker, so the pending window below starts AT the join
+    // instead of at whatever point of the earlier teardown stages the runtime
+    // happens to be at.
+    let (join_reached_tx, mut join_reached_rx) = mpsc::unbounded_channel::<()>();
+    let join_probe = arm_scheduled_join_probe(move || {
+        let _ = join_reached_tx.send(());
+    });
     let mut shutdown = tokio::spawn(handle.shutdown());
     timeout(BOUND, root.cancelled())
         .await
         .expect("handle.shutdown() must cancel the launcher's root shutdown token");
+    timeout(BOUND, join_reached_rx.recv())
+        .await
+        .expect("shutdown must reach the scheduled join within the bound")
+        .expect("the join probe channel must stay open");
+    guard.mark("shutdown reached the scheduled join");
     let parked_status = registry.status();
     guard.mark("root shutdown requested, worker still parked");
 
@@ -357,6 +378,9 @@ async fn run_production_spawn() {
         "the worker must still be parked after the root cancel"
     );
 
+    // The probe runs INSIDE the join, so this window can no longer pass
+    // vacuously on a slow runner (it used to start before the join was even
+    // reached).
     let still_pending = timeout(PENDING_WINDOW, &mut shutdown).await.is_err();
     guard.mark("shutdown stayed pending past the pending window");
 
@@ -382,6 +406,9 @@ async fn run_production_spawn() {
         report.is_clean(),
         "a shutdown that drained the released worker must be clean: {report:?}"
     );
+    // Late, never early: the guard only clears an UNFIRED probe on drop, and
+    // the probe fired long before this point.
+    drop(join_probe);
 }
 
 // ---------------------------------------------------------------------------
@@ -468,14 +495,12 @@ async fn run_retention_park() {
     guard.mark("production worker parked inside retention");
 
     // (1) The COPY outcome is already published while retention is parked.
+    // Mutant: the copy outcome published only after the retention pass.
     let parked_metrics = backup_metrics_snapshot();
     assert!(
-        parked_metrics.last_success_timestamp_seconds > 0,
-        "the successful scheduled copy must be published BEFORE retention: {parked_metrics:?}"
-    );
-    assert_eq!(
-        parked_metrics.scheduled_failure_streak, 0,
-        "a successful copy must keep the failure streak at zero while retention runs"
+        parked_metrics.last_duration_seconds.is_some(),
+        "the successful scheduled copy must publish its last-success cell BEFORE retention \
+         (mutant: the copy outcome published only after the retention pass): {parked_metrics:?}"
     );
 
     // (3a) The instance lock is still held while retention is parked.
@@ -486,10 +511,23 @@ async fn run_retention_park() {
 
     // (2) Shutdown must not return during the park (mutant: FINISHED sent early).
     let root = handle.shutdown_token.clone();
+    // Fires from INSIDE `ShutdownOwner::join_schedule`, right before the await
+    // of the scheduled worker, so the probe window below starts AT the join.
+    let (join_reached_tx, mut join_reached_rx) = mpsc::unbounded_channel::<()>();
+    let join_probe = arm_scheduled_join_probe(move || {
+        let _ = join_reached_tx.send(());
+    });
     let mut shutdown = tokio::spawn(handle.shutdown());
     timeout(BOUND, root.cancelled())
         .await
         .expect("handle.shutdown() must cancel the launcher's root token");
+    timeout(BOUND, join_reached_rx.recv())
+        .await
+        .expect("shutdown must reach the scheduled join within the bound")
+        .expect("the join probe channel must stay open");
+    guard.mark("shutdown reached the scheduled join");
+    // The probe runs INSIDE the join, so this window can no longer pass
+    // vacuously on a slow runner.
     let still_pending = timeout(PARKED_PROBE, &mut shutdown).await.is_err();
     guard.mark("shutdown stayed pending while retention was parked");
 
@@ -515,4 +553,7 @@ async fn run_retention_park() {
         lock_after.is_ok(),
         "the data-directory lock must be free once shutdown drained retention"
     );
+    // Late, never early: the guard only clears an UNFIRED probe on drop, and
+    // the probe fired long before this point.
+    drop(join_probe);
 }
