@@ -2,8 +2,7 @@
 
 mod activity_gauge_binding_tests;
 mod backup_schedule_tests;
-mod cancel_counter_tests;
+mod cancel;
 mod default_database_tests;
 mod load_metrics_binding_tests;
-mod shutdown_audit_teardown_tests;
-mod shutdown_deadline_tests;
+mod shutdown;
