@@ -29,7 +29,6 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
-
 use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -86,8 +85,9 @@ fn bob_session() -> Session {
 /// Superuser-class alice: `session_actor` maps `is_superuser` to
 /// `Actor::Admin`, which short-circuits `authorize_access` — used ONLY
 /// where the test's subject is name RESOLUTION, not ACL: a non-admin
-/// actor would let the ACL's fail-closed `resource_meta` fallback hide a
-/// genuinely missing name behind `access_denied`.
+/// actor's table-level ACL refusal now answers the SAME `unknown_table` an
+/// absent name does (read-refusal parity), so it could not distinguish
+/// "genuinely missing" from "denied".
 fn superuser_alice_session() -> Session {
     let mut s = Session::new(
         [0xAB; 16],
@@ -449,7 +449,8 @@ async fn get_record_denied_when_database_read_denied() {
 ///   — table and even repo/db names are never resolved.
 /// - this test: the FIRST call succeeds (db + store chmod'd open) and
 ///   the SECOND call (`Action::Read` on the specific `Table`) refuses —
-///   still before any lookup.
+///   still before any lookup, and with the SAME `unknown_table` code an
+///   absent table answers (read-refusal parity: no existence oracle).
 #[tokio::test]
 async fn get_record_denied_when_table_read_denied() {
     let handler = build_handler(QueryLimitsCap::UNLIMITED).await;
@@ -458,21 +459,22 @@ async fn get_record_denied_when_table_read_denied() {
 
     let key = RecordId([1u8; 16]);
     let resp = send(&handler, &bob, get_record_req(key)).await;
-    expect_error(resp, "access_denied", "db allowed, table Read denied");
+    expect_error(resp, "unknown_table", "db allowed, table Read denied");
 }
 
-/// PARITY (pins the CURRENT documented behaviour; it does not change the
-/// ACL policy): with Database Read granted and Table Read restricted, the
-/// SAME principal can tell a CONFIGURED private table from an ABSENT name.
+/// PARITY (the invariant this rule establishes): with Database Read granted
+/// and Table Read restricted, the SAME principal CANNOT tell a configured
+/// private table from an ABSENT name.
 ///
 /// The two outcomes are deliberately paired because the deny-then-resolve
-/// order makes them different: `authorize_cursor_read` authorizes the Table
-/// NAME, and the ACL default is open for a name with no catalogue record,
-/// so an absent name passes the Table check and name resolution then fails
-/// with `unknown_table`. Pinning both here keeps a future re-order from
-/// silently widening or narrowing the accepted disclosure.
+/// order once made them different: `authorize_cursor_read` authorizes the
+/// Table NAME, and the ACL default is open for a name with no catalogue
+/// record, so an absent name passes the Table check and name resolution
+/// then fails with `unknown_table`. The Table denial now answers the SAME
+/// `unknown_table`, so the pair is indistinguishable. Pinning both here
+/// keeps a future re-order from silently re-opening the disclosure.
 #[tokio::test]
-async fn get_record_denied_present_table_and_absent_name_are_distinguishable() {
+async fn get_record_denied_present_table_and_absent_name_are_indistinguishable() {
     let handler = build_handler(QueryLimitsCap::UNLIMITED).await;
     open_db_and_store_only(&handler, 0o777).await;
     let bob = bob_session();
@@ -480,7 +482,7 @@ async fn get_record_denied_present_table_and_absent_name_are_distinguishable() {
 
     // Present private table: Database+Store Read pass, Table Read denied.
     let resp = send(&handler, &bob, get_record_req(key)).await;
-    expect_error(resp, "access_denied", "db allowed, table Read denied");
+    expect_error(resp, "unknown_table", "db allowed, table Read denied");
 
     // Absent name: no catalogue record, so the Table ACL default is open
     // and name resolution is what refuses.

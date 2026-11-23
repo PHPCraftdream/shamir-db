@@ -96,9 +96,19 @@ impl<'a> Authorized<'a> {
     ///    same table N times pays the gate cost once), mirroring the
     ///    inline ACL cache `tx_execute_as` used to keep by hand.
     ///
-    /// Returns `BatchError::QueryError { code: Some("access_denied"), .. }`
-    /// on the first denial — the same wire shape `execute_as`/
-    /// `tx_execute_as` already produced.
+    /// Returns `BatchError::QueryError` on the first denial:
+    /// - the database check keeps `code: Some("access_denied")` — it runs
+    ///   before any table is resolved and therefore discloses nothing about
+    ///   one;
+    /// - a denied `(Action::Read, ResourcePath::Table { .. })` answers
+    ///   `code: Some("unknown_table")` instead — the SAME code every read
+    ///   path answers for an absent table. This is the no-existence-oracle
+    ///   rule: the table ACL is open by default for a name with no
+    ///   catalogue record, so a table-Read denial is only reachable for a
+    ///   table that EXISTS, and replying `access_denied` there would let an
+    ///   unauthorized caller tell a closed table from an absent one;
+    /// - every other table action (writes/DDL) keeps `access_denied`: that
+    ///   rule masks existence on READS only.
     pub async fn authorize(
         request: &'a BatchRequest,
         actor: Actor,
@@ -111,9 +121,15 @@ impl<'a> Authorized<'a> {
 
         let metadata = RequestMetadata::collect(&request.queries, db_name);
         for (action, path) in &metadata.required_access {
-            gate.check(&actor, path, *action)
-                .await
-                .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+            gate.check(&actor, path, *action).await.map_err(|e| {
+                let code = if *action == Action::Read && matches!(path, ResourcePath::Table { .. })
+                {
+                    "unknown_table"
+                } else {
+                    "access_denied"
+                };
+                BatchError::query_coded("", code, e.to_string())
+            })?;
         }
 
         Ok(Self {

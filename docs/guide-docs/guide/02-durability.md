@@ -130,6 +130,22 @@ resp.transaction?.commit_version;  // number
 построиться до ответа. Если `false` — коммит durable, но какие-то
 проекции отложены до recovery (данные появятся после рестарта).
 
+При аборте `resp.transaction?.status` равен `'aborted'`, а
+`resp.transaction?.reason` сохраняет debug-текст ошибки
+(`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`).
+Стабильный машиночитаемый код упавшей операции вынесен отдельно в
+`resp.transaction?.abort_code` — например `call_in_tx_not_supported` или
+`skip_aborted`; поля нет, когда у аборта нет стабильного кода
+(`crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`).
+Для `committed` и `indeterminate` исходов `abort_code` отсутствует
+(там же: строки 79 и 126 — соответствующие конструкторы оставляют `None`).
+
+Тело `for_each` с собственным `transactional: true`, которое абортится,
+теперь валит свою итерацию: коммита не было, поэтому пустой результат не
+выдаётся за вычисленное значение, а внешний батч получает ошибку с тем же
+стабильным кодом и причиной
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:450-493`).
+
 ### Кросс-таблицная атомарность
 
 ```ts

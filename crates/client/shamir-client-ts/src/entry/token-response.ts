@@ -20,7 +20,7 @@ function wire(value: unknown, depth = 0): boolean {
 function u64(value: unknown): boolean { try { return typeof value === 'number' ? Number.isSafeInteger(value) && value >= 0 : typeof value === 'bigint' && value >= 0n && value <= 0xffff_ffff_ffff_ffffn; } catch { return false; } }
 function validateTransaction(tx: unknown): tx is Record<string, unknown> {
   if (!record(tx) || !u64(tx.tx_id) || !['committed','aborted','indeterminate'].includes(String(tx.status)) || typeof tx.materialized !== 'boolean') return false;
-  if (tx.reason !== undefined && typeof tx.reason !== 'string' || tx.error !== undefined && typeof tx.error !== 'string') return false;
+  if (tx.reason !== undefined && typeof tx.reason !== 'string' || tx.abort_code !== undefined && typeof tx.abort_code !== 'string' || tx.error !== undefined && typeof tx.error !== 'string') return false;
   tx.tx_id = safeNumber(tx.tx_id);
   validateTransactionVisibility(tx as unknown as TransactionInfo);
   return true;

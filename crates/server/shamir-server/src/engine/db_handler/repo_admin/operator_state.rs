@@ -21,7 +21,11 @@
 //!    on the `Table`; the ancestor walk inside `authorize_access` covers
 //!    the `Store` link). Authorizing before resolution keeps an
 //!    unauthorized caller's response indistinguishable from a genuine
-//!    not-found (same property `get_ddl_op_status` relies on).
+//!    not-found (same property `get_ddl_op_status` relies on): a Table
+//!    denial and an absent table BOTH answer the typed `unknown_table`
+//!    (see [`authorize_cursor_read`]), so the point read never reveals
+//!    whether the table exists. The Database denial keeps `access_denied`
+//!    — it runs before any table resolution.
 //! 2. The same repository quarantine probe as the cursor read path
 //!    ([`quarantine_cursor_error`] — one `read_quarantine_reason`
 //!    atomic-map probe, the same reason the batch path carries inside
@@ -83,7 +87,7 @@
 //!    `RequestHandler::handle` reuses them instead of re-encoding.
 
 use core::num::NonZeroU64;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use shamir_collections::TFxMap;
 
@@ -100,6 +104,7 @@ use shamir_types::types::record_id::RecordId;
 
 use super::activity::server_busy_response;
 use super::config::NodeMode;
+use super::repo_audit::enqueue_typed_read_audit;
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard};
 use crate::db_handler::cursor_handlers::error_response;
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
@@ -153,7 +158,9 @@ fn unknown_table_response() -> DbResponse {
 
 /// Fixed-text refusal for a table whose REGISTRATION is no longer the one the
 /// ACL approved, and for a registration that cannot be pinned at all. Same
-/// typed code the ACL refusals use; the message never names the identity.
+/// typed code the DATABASE-level ACL refusal uses (a TABLE-level ACL refusal
+/// is `unknown_table`, so this fixed post-auth race refusal keeps the
+/// distinct `access_denied`); the message never names the identity.
 fn changed_registration_response() -> DbResponse {
     DbResponse::Error {
         code: "access_denied".to_string(),
@@ -196,11 +203,13 @@ fn final_lookup_error_response(
     }
 }
 
-/// Map an engine [`shamir_db::DbError`] onto the coarse wire `code` tag,
-/// mirroring `handler.rs`'s `get_ddl_op_status` mapping (`validation` /
-/// `not_found` / `query`) with one addition: the quarantine gate inside
-/// `ShamirDb::get_table` surfaces as `resync_required` (defense in
-/// depth — the probe above normally fires first).
+/// Map an engine [`shamir_db::DbError`] onto the coarse wire `code` tag for a
+/// failure that is NOT a table-name miss on the point read (the table-miss
+/// cases are handled by [`final_lookup_error_response`] / the early
+/// configured-table check): `validation` / `not_found` / `query`, with one
+/// addition: the quarantine gate inside `ShamirDb::get_table` surfaces as
+/// `resync_required` (defense in depth — the probe above normally fires
+/// first).
 fn db_error_response(e: shamir_db::DbError) -> DbResponse {
     let code = match &e {
         shamir_db::DbError::NotFound(_) => "not_found",
@@ -235,6 +244,46 @@ async fn reserve_record_budget_upfront(handler: &ShamirDbHandler) -> Option<Byte
 }
 
 impl ShamirDbHandler {
+    /// Emit the slow-query WARN and the detached `ok` audit for ONE successful
+    /// typed read. Both are best-effort and cannot affect the reply; every
+    /// refusal path returns before the successful response exists and never
+    /// reaches here.
+    ///
+    /// The WARN mirrors the batch path (`repo_admin/execute.rs`) with the same
+    /// field names. The ids that exist only on a batch (`request_id` /
+    /// `request_exec_id` / `client_rid`) are omitted rather than invented.
+    /// `db_name` is the empty string for the server-wide `status`. The audit
+    /// payload carries names only (see [`enqueue_typed_read_audit`]).
+    fn record_typed_read_outcome(
+        &self,
+        session: &Session,
+        operation: &'static str,
+        db_name: &str,
+        repo_table: Option<(&str, &str)>,
+        started: Instant,
+    ) {
+        let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if self.slow_query.threshold_us > 0 && elapsed_us > self.slow_query.threshold_us {
+            tracing::warn!(
+                elapsed_us = elapsed_us,
+                threshold_us = self.slow_query.threshold_us,
+                db = db_name,
+                queries = 1,
+                "slow query",
+            );
+        }
+        if let Some(audit) = &self.audit {
+            drop(enqueue_typed_read_audit(
+                &self.cancel_refusal_audit,
+                audit,
+                session,
+                operation,
+                db_name,
+                repo_table,
+            ));
+        }
+    }
+
     /// P2 — `DbRequest::GetRecord`: the typed exact-key point read.
     /// See the module docs for the gate ordering and the budget story.
     pub(super) async fn get_record(
@@ -245,6 +294,7 @@ impl ShamirDbHandler {
         table_name: &str,
         key: RecordId,
     ) -> DbResponse {
+        let started = Instant::now();
         // 1. Bound every caller-supplied name BEFORE anything can echo or
         //    resolve it: the `GetRecord` error envelope is bounded by
         //    construction, and an over-long name can never reach the
@@ -404,7 +454,15 @@ impl ShamirDbHandler {
                 // Mirror `execute`/`enforce_page_budget`: a serialization
                 // failure here is swallowed — the response still goes out,
                 // just without budget accounting; any upfront reservation
-                // is dropped as-is.
+                // is dropped as-is. The successful read is still observed
+                // on this early-return path.
+                self.record_typed_read_outcome(
+                    session,
+                    "get_record",
+                    db_name,
+                    Some((repo_name, table_name)),
+                    started,
+                );
                 return response;
             };
             if cap_active && bytes.len() > self.query_limits.max_result_size_bytes {
@@ -440,6 +498,17 @@ impl ShamirDbHandler {
             stash_serialized_response(bytes);
         }
 
+        // The successful read is fully built and not rejected: emit its
+        // slow-query WARN and detached `ok` audit exactly once. A refusal
+        // (including `result_too_large`) returned above and is never
+        // audited.
+        self.record_typed_read_outcome(
+            session,
+            "get_record",
+            db_name,
+            Some((repo_name, table_name)),
+            started,
+        );
         response
     }
 }
@@ -533,6 +602,7 @@ impl ShamirDbHandler {
     /// 3. The role mapping is `NodeMode::ReadOnly → follower`, every other
     ///    configuration → `unknown` — never inferred from a local stream.
     pub(super) async fn operator_status(&self, session: &Session) -> DbResponse {
+        let started = Instant::now();
         if !session.permissions.is_superuser {
             return DbResponse::Error {
                 code: "permission_denied".to_string(),
@@ -665,6 +735,13 @@ impl ShamirDbHandler {
             }
         }
 
+        // The successful status is built and not rejected: emit its
+        // slow-query WARN and detached `ok` audit exactly once. The earlier
+        // gates (permission, boot context, request slot, override read) and
+        // the size refusal return before this point, so no refusal is
+        // audited. `status` is server-wide, so it carries no db/repo/table
+        // name.
+        self.record_typed_read_outcome(session, "status", "", None, started);
         response
     }
 }

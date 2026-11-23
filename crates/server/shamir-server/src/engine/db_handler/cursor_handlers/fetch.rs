@@ -14,6 +14,7 @@ use crate::cursor_registry::{CursorRegistryError, PaginationMode};
 
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
+    wrap_table_lookup_err,
 };
 use super::keyset::{
     build_filter_context, fetch_keyset_page, order_by_field_value, row_record_id, KeysetOutcome,
@@ -111,8 +112,9 @@ impl ShamirDbHandler {
     /// happens INSIDE the per-table `OnceCell` init closure, serialized
     /// against a concurrent `remove_table`) — so a `DropTable` that commits
     /// WHILE a cursor is open mid-scroll is observed on the very next
-    /// `FetchNext` as a clean engine error (routed through
-    /// `wrap_engine_err`/`error_code` like any other read failure), instead
+    /// `FetchNext` as a clean typed `unknown_table`
+    /// (`wrap_table_lookup_err` — the SAME code an absent table answers, so
+    /// the refusal is not an existence oracle), instead
     /// of silently continuing to serve reads against a conceptually-dropped
     /// table. A CACHED `TableManager` handle would paper over exactly that:
     /// the handle itself has no lifecycle hook that revalidates the table
@@ -207,10 +209,13 @@ impl ShamirDbHandler {
         // change from making the ORDER matter, so keeping the two handlers
         // consistent is worth the pure reshuffle.
         //
-        // W-6 (#790, Wave D review): NOT quite a pure reshuffle after all —
-        // a db dropped between `CreateCursor` and this `FetchNext` now
-        // surfaces as `access_denied`, not `unknown_db`, for a non-admin
-        // actor. Verified mechanism (NOT resource_meta's fail-closed path —
+        // W-6 (#790, Wave D review) + read-refusal parity: a db dropped
+        // between `CreateCursor` and this `FetchNext` still surfaces through
+        // the TABLE check (not `unknown_db`) for a non-admin actor, but that
+        // table-level refusal is now the SAME typed `unknown_table` every
+        // read path answers for an absent/forbidden table — NOT
+        // `access_denied`, which would tell the caller the table exists.
+        // Verified mechanism (NOT resource_meta's fail-closed path —
         // `ShamirDb::remove_db` only deletes the db's own catalogue row,
         // which `resource_meta` treats as a plain not-found default-open,
         // not a storage error): the TARGET TABLE's own real, still-
@@ -220,7 +225,7 @@ impl ShamirDbHandler {
         // Either way this is a deliberate, accepted consequence of
         // authorizing before resolving, documented here since it was not
         // explicitly called out when the reorder landed (CR-D5/N-9) — see
-        // `fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unknown_db`.
+        // `fetch_next_after_db_dropped_mid_scroll_surfaces_unknown_table_not_unknown_db`.
         //
         // Re-authorize on every FetchNext, not just at CreateCursor time: a
         // pinned snapshot only bounds WHAT DATA a cursor can see, not
@@ -271,7 +276,17 @@ impl ShamirDbHandler {
             .await
         {
             Ok(t) => t,
-            Err(e) => return error_response(&wrap_engine_err(e)),
+            // An absent table answers `unknown_table` (same code as the
+            // table-Read denial above); a vanished parent keeps its typed
+            // `unknown_db`/`unknown_repo`.
+            Err(e) => {
+                return error_response(&wrap_table_lookup_err(
+                    &self.db,
+                    cursor.db(),
+                    cursor.repo(),
+                    e,
+                ));
+            }
         };
 
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();

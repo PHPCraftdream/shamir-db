@@ -407,10 +407,10 @@ async fn mid_scroll_drop_table_produces_clean_error_not_stale_reads() {
     let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
     match resp {
         DbResponse::Error { code, .. } => {
-            // Not asserting a specific code here (this is a generic engine
-            // "table not found" surfaced via `wrap_engine_err`, not one of
-            // the cursor-specific structured codes) -- the point is that it
-            // IS an error, not a silently-served page.
+            // Not asserting a specific code here (a dropped table now
+            // surfaces through `wrap_table_lookup_err` as `unknown_table`,
+            // the same code an absent table answers, but the point of THIS
+            // test is that it IS an error, not a silently-served page).
             assert_ne!(
                 code, "",
                 "a concurrent drop_table mid-scroll must produce SOME clean error code"

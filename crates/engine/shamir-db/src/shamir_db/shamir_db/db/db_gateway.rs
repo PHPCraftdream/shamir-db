@@ -9,8 +9,38 @@ use crate::types::value::QueryValue;
 use crate::{access::Actor, shamir_db::shamir_db::ShamirDb};
 use async_trait::async_trait;
 use shamir_query_types::batch::BatchTreeVisitor;
-#[cfg(test)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Server-side sink for the stable code of the batch error that refused the
+/// most recent gateway operation.
+///
+/// Only [`FacadeDbGateway`] writes here (then hands the classified
+/// [`DbGatewayError`] to the guest), so the guest cannot forge a code: trap
+/// messages never reach this channel.
+pub(crate) struct GatewayCodeSink {
+    code: Mutex<Option<String>>,
+}
+
+impl GatewayCodeSink {
+    pub(crate) fn new() -> Self {
+        Self {
+            code: Mutex::new(None),
+        }
+    }
+
+    /// Record the refused operation's stable code; `None` leaves the sink
+    /// empty.
+    pub(crate) fn record(&self, code: Option<&str>) {
+        if let Some(code) = code {
+            *self.code.lock().expect("gateway code sink mutex") = Some(code.to_string());
+        }
+    }
+
+    /// Take the recorded code, clearing the sink.
+    pub(crate) fn take(&self) -> Option<String> {
+        self.code.lock().expect("gateway code sink mutex").take()
+    }
+}
 
 /// [`DbGateway`] implementation that routes through [`ShamirDb::execute`].
 ///
@@ -32,9 +62,21 @@ pub(super) struct FacadeDbGateway {
     /// under setuid).  The gateway runs the function's DB access AS this
     /// actor so per-table ACLs apply — NOT as System.
     pub(super) actor: Actor,
+    /// Optional server-side channel that receives the stable code of a
+    /// refused operation before the guest sees the classified error.
+    pub(super) code_sink: Option<Arc<GatewayCodeSink>>,
 }
 
 impl FacadeDbGateway {
+    /// Record the refused operation's stable code (only when a sink is
+    /// installed), then classify exactly as before.
+    fn record_and_classify(&self, e: BatchError) -> DbGatewayError {
+        if let Some(sink) = &self.code_sink {
+            sink.record(e.code());
+        }
+        classify_batch_error(e)
+    }
+
     /// Convert a [`QueryValue`] scalar into a [`FilterValue`] for use in a
     /// `Filter::Eq` predicate. Unsupported values retain the field-specific
     /// error classification expected by the function gateway.
@@ -148,6 +190,12 @@ impl FacadeDbGateway {
 }
 
 /// Classify the gateway failure while retaining the original batch error.
+///
+/// `unknown_table` deliberately has NO arm: a table-Read ACL denial and an
+/// absent table both carry that code (read-refusal parity — see
+/// `Authorized::authorize` and `validate_tables`), so both classify as the
+/// same generic [`DbGatewayError::ExecutionSource`] and a guest cannot tell
+/// the two apart from the error KIND.
 pub(crate) fn classify_batch_error(e: BatchError) -> DbGatewayError {
     match &e {
         BatchError::QueryError {
@@ -188,7 +236,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(classify_batch_error)?;
+            .map_err(|e| self.record_and_classify(e))?;
         Ok(response
             .results
             .get("r")
@@ -213,7 +261,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(classify_batch_error)?;
+            .map_err(|e| self.record_and_classify(e))?;
         let result = match response.results.get("i") {
             Some(r) => r,
             None => {
@@ -248,7 +296,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(classify_batch_error)?;
+            .map_err(|e| self.record_and_classify(e))?;
         Ok(response
             .results
             .get("q")
@@ -279,7 +327,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(classify_batch_error)?;
+            .map_err(|e| self.record_and_classify(e))?;
         rmp_serde::to_vec_named(&response).map_err(|e| DbGatewayError::ExecutionSource {
             message: format!("execute: response encode error: {e}"),
             source: Box::new(e),

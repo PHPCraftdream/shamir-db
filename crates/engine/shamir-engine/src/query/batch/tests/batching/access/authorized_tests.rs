@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
+use shamir_query_builder::write;
 use shamir_query_types::batch::{BatchOp, QueryEntry, SubBatchOp};
 
 use crate::db_instance::db_instance::DbInstance;
@@ -61,6 +62,32 @@ impl AccessGate for AllowGate {
         _path: &ResourcePath,
         _action: Action,
     ) -> Result<(), AccessError> {
+        Ok(())
+    }
+}
+
+/// Allows every `(actor, path, action)` triple except one: `self.action` on
+/// a `Table` path. Used to prove the read-refusal parity rule (a table READ
+/// denial is masked as `unknown_table`; other table actions are not).
+struct DenyTableGate {
+    action: Action,
+}
+
+#[async_trait::async_trait]
+impl AccessGate for DenyTableGate {
+    async fn check(
+        &self,
+        actor: &Actor,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<(), AccessError> {
+        if action == self.action && matches!(path, ResourcePath::Table { .. }) {
+            return Err(AccessError {
+                actor: actor.clone(),
+                path: path.to_string(),
+                action,
+            });
+        }
         Ok(())
     }
 }
@@ -241,4 +268,56 @@ async fn authorize_recurses_into_nested_batch_ops() {
         )),
         "outer op must also reach the gate; saw: {seen:?}"
     );
+}
+
+/// Read-refusal parity: a denied TABLE `Read` answers `unknown_table` — the
+/// SAME code every read path answers for an ABSENT table — so an
+/// unauthorized caller cannot tell a closed table from a missing one.
+///
+/// WITHOUT the mapping the denial carries `access_denied`, which (because the
+/// table ACL is open by default for a name with no catalogue record) can only
+/// ever be observed for a table that exists: that difference IS the oracle.
+#[tokio::test]
+async fn denied_table_read_reports_unknown_table() {
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    let req = b.build();
+
+    let err = Authorized::authorize(
+        &req,
+        Actor::User(7),
+        "test",
+        &DenyTableGate {
+            action: Action::Read,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Some("unknown_table"));
+}
+
+/// The masking is READ-only: a denied table WRITE keeps `access_denied`
+/// (writes/DDL are not existence-masked by this rule).
+#[tokio::test]
+async fn denied_table_write_keeps_access_denied() {
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "i1",
+        write::insert("users").row(write::doc().set("name", "Alice").unwrap()),
+    );
+    let req = b.build();
+
+    let err = Authorized::authorize(
+        &req,
+        Actor::User(7),
+        "test",
+        &DenyTableGate {
+            action: Action::Create,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), Some("access_denied"));
 }

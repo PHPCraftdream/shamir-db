@@ -208,8 +208,8 @@ async fn call_in_transactional_batch_rejected() {
 
     // A transactional batch error is converted to a tx ABORT (Ok response
     // with an aborted TransactionInfo), not propagated as Err — matching the
-    // execute_transactional_impl error-handling contract. The error code
-    // appears in the tx abort reason (debug-formatted BatchError).
+    // execute_transactional_impl error-handling contract. The stable code
+    // now appears in `abort_code`; `reason` keeps the debug-formatted text.
     let resp = result.expect("transactional batch should return Ok with tx info");
     let tx_info = resp
         .transaction
@@ -226,6 +226,79 @@ async fn call_in_transactional_batch_rejected() {
     assert!(
         reason.contains("call_in_tx_not_supported"),
         "tx abort reason should contain call_in_tx_not_supported, got: {reason}"
+    );
+}
+
+// ============================================================================
+// Test 2b: the abort keeps the failing op's stable code, not just the
+// debug-formatted reason.
+// ============================================================================
+
+#[tokio::test]
+async fn transactional_abort_carries_the_failing_op_stable_code() {
+    let (_repo, resolver) = setup_repo().await;
+
+    let insert_entry = QueryEntry {
+        op: BatchOp::Insert(InsertOp {
+            insert_into: TableRef::new("users"),
+            values: vec![mpack!({ "name": "seed" })],
+            records_idmsgpack: Vec::new(),
+            select: None,
+        }),
+        return_result: false,
+        abort_on_skip: false,
+        after: Vec::new(),
+        when: None,
+    };
+    let mut call_ent = call_entry();
+    call_ent.after = vec!["ins".to_string()];
+
+    let mut queries = new_map();
+    queries.insert("ins".to_string(), insert_entry);
+    queries.insert("c".to_string(), call_ent);
+    let req = BatchRequest {
+        id: shamir_types::types::value::QueryValue::Int(20),
+        name: None,
+        transactional: true,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let resp = crate::query::batch::execute_batch_unchecked(
+        &req,
+        &resolver,
+        None,
+        None,
+        Actor::System,
+        "test",
+    )
+    .await
+    .expect("transactional abort is returned as an Ok response with metadata");
+
+    let tx_info = resp
+        .transaction
+        .as_ref()
+        .expect("transactional batch should carry TransactionInfo");
+    assert_eq!(tx_info.status, "aborted");
+    assert_eq!(
+        tx_info.abort_code.as_deref(),
+        Some("call_in_tx_not_supported"),
+        "the stable code of the op that aborted the tx must survive in abort_code"
+    );
+    assert!(
+        tx_info
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("call_in_tx_not_supported")),
+        "reason must keep the debug-formatted text"
     );
 }
 

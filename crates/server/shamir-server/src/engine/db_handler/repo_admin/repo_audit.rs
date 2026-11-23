@@ -518,31 +518,105 @@ struct ShapeResetAuditDetails<'a> {
     repo: &'a str,
 }
 
-// Report a shape-reset job discarded before execution (e.g. during runtime
+// Report a detached audit job discarded before execution (e.g. during runtime
 // teardown), so a refused spawn is visible and its slot is accounted.
-struct PendingShapeResetAudit {
+struct PendingDetachedAudit {
     dispatcher: tracing::Dispatch,
     completed: bool,
     // Field drop order: release the writer before signalling idle.
     audit: Arc<AuditChainWriter>,
     slot: CancelAuditSlot,
+    /// The operation-specific message logged when the job never ran.
+    dropped_message: &'static str,
 }
 
-impl PendingShapeResetAudit {
+impl PendingDetachedAudit {
     fn complete(mut self, appended: bool) {
         self.completed = true;
         self.slot.appended = appended;
     }
 }
 
-impl Drop for PendingShapeResetAudit {
+impl Drop for PendingDetachedAudit {
     fn drop(&mut self) {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
-                tracing::error!("shape reset audit job dropped before append completed");
+                tracing::error!("{}", self.dropped_message);
             });
         }
     }
+}
+
+/// One ready-to-spawn detached audit append. The operation-specific pieces
+/// (label, encoded details, the two error messages) are supplied by the
+/// caller; everything else — the bounded admission/share reservation, the
+/// clock, the session-prefix fields and the blocking append — is shared.
+struct DetachedAuditJob<'a> {
+    queue: &'a Arc<CancelRefusalAudit>,
+    audit: &'a Arc<AuditChainWriter>,
+    session: &'a Session,
+    operation: &'static str,
+    details: Vec<u8>,
+    dropped_message: &'static str,
+    rejected_message: &'static str,
+}
+
+/// Shared body of every best-effort, detached `ok` audit append: reserve one
+/// bounded share slot, spawn a tracked blocking job and append under the
+/// caller's dispatcher. A job that cannot be built (clock unavailable, share
+/// exhausted) never spawns and accounts as a drop exactly like the cancel
+/// enqueues.
+fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
+    let DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation,
+        details,
+        dropped_message,
+        rejected_message,
+    } = job;
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(error) => {
+            tracing::error!(%error, "audit append skipped: clock unavailable");
+            return None;
+        }
+    };
+    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
+    // a job that cannot be built never consumes a share slot.
+    let slot = queue.try_reserve(&session.username)?;
+    let mut session_prefix = [0u8; 8];
+    session_prefix.copy_from_slice(&session.session_id[..8]);
+    let transport = transport_name(session.transport_kind);
+    let username = session.username.clone();
+    let pending = PendingDetachedAudit {
+        dispatcher: tracing::dispatcher::get_default(Clone::clone),
+        completed: false,
+        audit: Arc::clone(audit),
+        slot,
+        dropped_message,
+    };
+    queue.spawn_tracked(move || {
+        let guard = pending;
+        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
+            if let Err(error) = guard.audit.append(
+                operation,
+                transport,
+                username,
+                "",
+                session_prefix,
+                "ok",
+                details,
+                now_ns,
+            ) {
+                tracing::error!(%error, "{}", rejected_message);
+                return false;
+            }
+            true
+        });
+        guard.complete(appended);
+    })
 }
 
 /// Best-effort, detached audit append for a successful shape-statistics
@@ -567,45 +641,74 @@ pub(super) fn enqueue_shape_reset_audit(
             return None;
         }
     };
-    let now_ns = match UnixNanos::try_now() {
-        Ok(now) => now.as_u64(),
+    spawn_detached_audit(DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation: "reset_shape_stats",
+        details,
+        dropped_message: "shape reset audit job dropped before append completed",
+        rejected_message: "audit append rejected shape reset",
+    })
+}
+
+/// Payload of one successful TYPED READ (`status` / `get_record`): the scope
+/// NAMES only.
+///
+/// A read can return record values or carry a caller-supplied key/filter, and
+/// NONE of that may enter the audit chain. The operation label, the db name
+/// and (when the read is scoped to one table) the repository and table names
+/// are the whole payload — no value, key, filter or literal.
+#[derive(serde::Serialize)]
+struct TypedReadAuditDetails<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table: Option<&'a str>,
+}
+
+/// Best-effort, detached audit append for a successful typed read. Uses the
+/// same bounded queue, admission/share accounting, clock and session-prefix
+/// fields as [`enqueue_shape_reset_audit`]; only the operation label and the
+/// names-only payload differ.
+///
+/// `operation` is the stable label (`status` / `get_record`), `db` is the read
+/// scope's database name (the server-wide `status` passes an empty name, which
+/// is omitted from the payload), and `repo_table` is `Some` for a table-scoped
+/// read. The status word is the fixed
+/// `ok`: this is called only on the success path, so a refusal is never
+/// audited. The payload carries names only — never a record value, key, filter
+/// or caller literal.
+pub(super) fn enqueue_typed_read_audit(
+    queue: &Arc<CancelRefusalAudit>,
+    audit: &Arc<AuditChainWriter>,
+    session: &Session,
+    operation: &'static str,
+    db: &str,
+    repo_table: Option<(&str, &str)>,
+) -> Option<JoinHandle<()>> {
+    let db = (!db.is_empty()).then_some(db);
+    let (repo, table) = match repo_table {
+        Some((repo, table)) => (Some(repo), Some(table)),
+        None => (None, None),
+    };
+    let details = match rmp_serde::to_vec_named(&TypedReadAuditDetails { db, repo, table }) {
+        Ok(details) => details,
         Err(error) => {
-            tracing::error!(%error, "audit append skipped: clock unavailable");
+            tracing::error!(%error, "audit append skipped: typed read encoding failed");
             return None;
         }
     };
-    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
-    // a job that cannot be built never consumes a share slot.
-    let slot = queue.try_reserve(&session.username)?;
-    let mut session_prefix = [0u8; 8];
-    session_prefix.copy_from_slice(&session.session_id[..8]);
-    let transport = transport_name(session.transport_kind);
-    let username = session.username.clone();
-    let pending = PendingShapeResetAudit {
-        dispatcher: tracing::dispatcher::get_default(Clone::clone),
-        completed: false,
-        audit: Arc::clone(audit),
-        slot,
-    };
-    queue.spawn_tracked(move || {
-        let guard = pending;
-        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
-            if let Err(error) = guard.audit.append(
-                "reset_shape_stats",
-                transport,
-                username,
-                "",
-                session_prefix,
-                "ok",
-                details,
-                now_ns,
-            ) {
-                tracing::error!(%error, "audit append rejected shape reset");
-                return false;
-            }
-            true
-        });
-        guard.complete(appended);
+    spawn_detached_audit(DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation,
+        details,
+        dropped_message: "typed read audit job dropped before append completed",
+        rejected_message: "audit append rejected typed read",
     })
 }
 

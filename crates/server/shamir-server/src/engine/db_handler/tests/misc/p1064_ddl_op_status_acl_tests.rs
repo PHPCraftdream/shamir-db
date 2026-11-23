@@ -139,8 +139,11 @@ fn get_ddl_op_status_req(op_id: &str) -> DbRequest {
     }
 }
 
+/// A poll naming an ABSENT table answers the SAME typed `unknown_table` a
+/// table-Read ACL denial answers (read-refusal parity: the status poll must
+/// not reveal whether the table exists).
 #[tokio::test]
-async fn rv_db_48da8907_missing_table_status_uses_not_found_code() {
+async fn rv_db_48da8907_missing_table_status_uses_unknown_table_code() {
     let (handler, _) = build_handler_with_dropped_index().await;
     let alice = alice_session();
     let response = send(
@@ -154,7 +157,7 @@ async fn rv_db_48da8907_missing_table_status_uses_not_found_code() {
         },
     )
     .await;
-    assert!(matches!(response, DbResponse::Error { code, .. } if code == "not_found"));
+    assert!(matches!(response, DbResponse::Error { code, .. } if code == "unknown_table"));
 }
 
 /// An actor with NO access to the table must NOT be able to poll a REAL,

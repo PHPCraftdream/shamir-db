@@ -671,3 +671,130 @@ async fn for_each_all_iterations_succeed_commits_and_all_rows_visible() {
 // remaining sources — `$query`-column-ref (`@alias[].field`) and `$fn` call
 // — plus a dedicated test proving `over` is resolved EXACTLY ONCE, before
 // the loop starts, never re-resolved per iteration.
+
+// ============================================================================
+// A transactional ForEach body that ABORTS must fail its iteration.
+//
+// `execute_planned_batch_impl` used to discard the body's `TransactionInfo`,
+// so an aborted transactional body looked like a successful empty iteration.
+// Nothing was committed, so reporting the empty map as the iteration's value
+// would be a lie; the iteration now fails with the abort's stable code.
+// ============================================================================
+
+#[tokio::test]
+async fn transactional_body_abort_fails_the_iteration_with_its_stable_code() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("orders")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Body: insert one row, then a Call. A Call inside a transaction is
+    // rejected by the engine with the stable code
+    // `call_in_tx_not_supported`, which aborts the body's transaction.
+    let mut body_queries = new_map();
+    body_queries.insert(
+        "seed".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![mpack!({ "user_id": 1_i64, "note": "body" })],
+                records_idmsgpack: Vec::new(),
+                select: None,
+            }),
+            return_result: false,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    body_queries.insert(
+        "call".to_string(),
+        QueryEntry {
+            op: BatchOp::Call(shamir_query_types::call::CallOp {
+                call: "some_function".to_string(),
+                params: Vec::new(),
+                repo: "main".to_string(),
+            }),
+            return_result: true,
+            abort_on_skip: false,
+            after: vec!["seed".to_string()],
+            when: None,
+        },
+    );
+    let body = BatchRequest {
+        id: QueryValue::Int(700),
+        name: None,
+        transactional: true, // the body opens its own transaction
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: body_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![FilterValue::Int(1)]),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    // `wrap_for_each` builds a NON-transactional outer batch, so the
+    // transactional body runs through `execute_planned_batch_impl`'s own
+    // transaction rather than the outer tx.
+    let req = wrap_for_each(fe);
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("an aborted transactional iteration must fail the outer op");
+    assert_eq!(
+        err.code(),
+        Some("call_in_tx_not_supported"),
+        "the iteration failure must carry the abort's stable code, got: {err:?}"
+    );
+
+    // Nothing was committed by the aborted body.
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders"),
+            )),
+            return_result: true,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: QueryValue::Int(701),
+        name: None,
+        transactional: false,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        0,
+        "the aborted transactional body must not leave its insert behind"
+    );
+}

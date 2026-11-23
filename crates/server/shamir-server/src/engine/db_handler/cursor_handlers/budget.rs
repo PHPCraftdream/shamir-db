@@ -3,6 +3,7 @@
 use shamir_db::query::batch::BatchError;
 
 use crate::byte_budget::{stash_guard, ByteBudgetGuard};
+use crate::db_handler::cursor_support::resolve_repo;
 use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
 
 /// Wrap an engine [`shamir_storage::error::DbError`] (or any `Display`
@@ -14,6 +15,35 @@ pub(super) fn wrap_engine_err(e: impl std::fmt::Display) -> BatchError {
         message: e.to_string(),
         code: None,
     }
+}
+
+/// Wrap a `ShamirDb::get_table` failure on a cursor read path.
+///
+/// An absent table must answer `unknown_table` — the SAME code
+/// `authorize_cursor_read`'s Table denial answers for an existing but
+/// unreadable table — instead of the legacy-mapped `query` that
+/// `wrap_engine_err`'s untagged error falls back to, so a cursor create or
+/// fetch never tells the caller whether the table exists. A `NotFound` whose
+/// PARENT no longer resolves keeps its own typed name-resolution code
+/// (`unknown_db`/`unknown_repo`, via [`resolve_repo`]); every other error is
+/// wrapped exactly like [`wrap_engine_err`]. Message text is unchanged.
+pub(super) fn wrap_table_lookup_err(
+    db: &shamir_db::ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+    e: shamir_db::DbError,
+) -> BatchError {
+    if matches!(&e, shamir_db::DbError::NotFound(_)) {
+        return match resolve_repo(db, db_name, repo_name) {
+            Ok(_) => BatchError::QueryError {
+                alias: String::new(),
+                message: e.to_string(),
+                code: Some("unknown_table".to_string()),
+            },
+            Err(parent) => parent,
+        };
+    }
+    wrap_engine_err(e)
 }
 
 pub(in crate::engine::db_handler) fn error_response(e: &BatchError) -> DbResponse {

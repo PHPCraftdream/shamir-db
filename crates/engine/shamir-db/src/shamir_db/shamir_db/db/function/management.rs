@@ -10,6 +10,7 @@ use shamir_engine::function::{
 use shamir_types::types::value::QueryValue;
 
 use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
+use super::super::db_gateway::GatewayCodeSink;
 use super::artifact::{fresh_artifact_id, ARTIFACT_ID_FIELD};
 use super::types::{optimize_name, FunctionState};
 #[cfg(test)]
@@ -667,7 +668,7 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, None, caller, None)
+        self.invoke_function_root(name, params, None, caller, None, None)
             .await
     }
 
@@ -693,7 +694,7 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, Some(batch), caller, None)
+        self.invoke_function_root(name, params, Some(batch), caller, None, None)
             .await
     }
 
@@ -729,8 +730,30 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, None, caller, Some((db_name, repo)))
+        self.invoke_function_root(name, params, None, caller, Some((db_name, repo)), None)
             .await
+    }
+
+    /// Like [`invoke_function_in_db_as`] but reports the stable code of a
+    /// gateway refusal through the server-side `sink` (never guest text).
+    pub(crate) async fn invoke_function_in_db_as_with_gateway_code(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        caller: Actor,
+        sink: Arc<GatewayCodeSink>,
+    ) -> DbResult<QueryValue> {
+        self.invoke_function_root(
+            name,
+            params,
+            None,
+            caller,
+            Some((db_name, repo)),
+            Some(sink),
+        )
+        .await
     }
 
     /// Like [`invoke_function_in_db`] but shares an existing batch context.
@@ -756,7 +779,14 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, Some(batch), caller, Some((db_name, repo)))
-            .await
+        self.invoke_function_root(
+            name,
+            params,
+            Some(batch),
+            caller,
+            Some((db_name, repo)),
+            None,
+        )
+        .await
     }
 }

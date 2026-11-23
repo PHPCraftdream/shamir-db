@@ -5,6 +5,7 @@ use shamir_collections::{TFxSet, TMap};
 use shamir_query_types::batch::{BatchLimits, BatchTreeVisitor, LimitKind};
 use shamir_query_types::filter::Filter;
 use shamir_query_types::read::{ReadQuery, SelectExpr, SelectItem};
+use shamir_storage::error::DbError;
 
 /// Validate that all referenced tables exist before execution.
 ///
@@ -14,6 +15,13 @@ use shamir_query_types::read::{ReadQuery, SelectExpr, SelectItem};
 /// Tables/repos that are **created** by this same batch are exempted:
 /// the DDL will materialise them before the DML runs (enforced by
 /// `after` ordering edges).
+///
+/// A missing table on a READ (`BatchOp::Read`) is tagged
+/// `code: Some("unknown_table")` — the same code `Authorized::authorize`
+/// answers for a table-Read ACL denial and the point/cursor read paths
+/// answer for an absent table — so a read refusal never tells the caller
+/// whether the table exists. Every other op keeps `code: None` (the
+/// message text is unchanged for all of them).
 pub(in crate::query::batch) async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
@@ -41,17 +49,23 @@ pub(in crate::query::batch) async fn validate_tables(
             }
 
             if seen.insert(key) {
-                resolver
-                    .resolve(table_ref)
-                    .await
-                    .map_err(|e| BatchError::QueryError {
+                let is_read = matches!(&entry.op, BatchOp::Read(_));
+                resolver.resolve(table_ref).await.map_err(|e| {
+                    // READ-only tagging: see the doc comment above.
+                    let code = if is_read && matches!(&e, DbError::NotFound(_)) {
+                        Some("unknown_table".to_string())
+                    } else {
+                        None
+                    };
+                    BatchError::QueryError {
                         alias: alias.clone(),
                         message: format!(
                             "Table '{}' in repo '{}' not found: {}",
                             table_ref.table, table_ref.repo, e
                         ),
-                        code: None,
-                    })?;
+                        code,
+                    }
+                })?;
             }
         }
     }

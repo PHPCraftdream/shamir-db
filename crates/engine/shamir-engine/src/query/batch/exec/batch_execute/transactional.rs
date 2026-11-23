@@ -297,8 +297,14 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                 return Err(plan_err);
             }
 
-            let info =
+            let mut info =
                 shamir_query_types::batch::TransactionInfo::aborted(tx_id, abort_reason(&plan_err));
+            // Keep the stable code of the failing operation alongside the
+            // debug-text reason; `abort_reason` debug-formats the error and
+            // must not remain the only record of the cause.
+            if let Some(code) = plan_err.code() {
+                info = info.with_abort_code(code);
+            }
             Ok((new_map(), Some(info)))
         }
         Ok(results) => {

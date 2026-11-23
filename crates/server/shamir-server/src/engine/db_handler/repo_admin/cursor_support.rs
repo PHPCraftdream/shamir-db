@@ -52,6 +52,19 @@ pub(super) fn resolve_repo(
 /// less. `Actor::System`/`Actor::Admin` short-circuit to `Ok(())` inside
 /// `authorize_access` itself (admin bypass, same as everywhere else).
 ///
+/// **Refusal parity — no table-existence oracle.** The two calls answer
+/// with DIFFERENT codes, deliberately:
+/// - the `Database` denial keeps `access_denied`: it runs before any table
+///   is resolved and therefore discloses nothing about one;
+/// - the `Table` denial answers `unknown_table` — the SAME code every read
+///   path answers for an absent table (`GetRecord`'s `unknown_table_response`
+///   and the configured-table refusals in
+///   `crates/engine/shamir-engine/src/query/batch/exec/batch_validate.rs`).
+///   The table ACL is open by default for a name with no catalogue record,
+///   so a table-Read denial is only reachable for a table that EXISTS;
+///   replying `access_denied` there would let the caller tell a closed table
+///   from an absent one.
+///
 /// `pub(super)`: also used by `handler.rs`'s `get_ddl_op_status` (#1064) —
 /// a DDL-status poll is a read of that table's operational state, so it
 /// gets the SAME table-Read gate a cursor read does. Authorizing BEFORE any
@@ -86,7 +99,7 @@ pub(super) async fn authorize_cursor_read(
         shamir_db::access::Action::Read,
     )
     .await
-    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+    .map_err(|e| BatchError::query_coded("", "unknown_table", e.to_string()))?;
 
     Ok(())
 }

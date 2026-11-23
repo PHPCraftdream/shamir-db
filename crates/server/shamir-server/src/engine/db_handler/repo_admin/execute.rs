@@ -425,11 +425,23 @@ impl ShamirDbHandler {
         // RI-15 (CR-B2) — single convergence point for capped success and
         // error replies (including all three cancel operations): serialize
         // the final `DbResponse` envelope exactly ONCE, shrink the upfront
-        // reservation down to that actual size (an error response's tiny
-        // actual size still needs its pessimistic over-reservation narrowed
-        // back down), then stash both the guard and the already-serialized
+        // reservation down to that actual size (any reply's tiny actual
+        // size still needs its pessimistic over-reservation narrowed back
+        // down), then stash both the guard and the already-serialized
         // bytes so `RequestHandler::handle` reuses them instead of encoding
         // the SAME response a second time.
+        //
+        // The two kinds of reply are fenced differently. A DATA reply is
+        // capped at `reserve_bytes` — the caller's own `max_result_size`
+        // clamped to the operator's limit. An ERROR reply is fenced only by
+        // the operator's `max_result_size_bytes`: a refusal is a fixed
+        // envelope carrying the reason the caller got nothing, so a caller
+        // asking for `max_result_size: 1` must not have `unknown_table`,
+        // `server_busy` (or any other coded refusal) rewritten into
+        // `result_too_large` — that would destroy the cause. This is the
+        // same rule as the `cancelled` carve-out above. The operator's cap
+        // still bounds an error envelope whose message embeds
+        // caller-supplied text (e.g. a table name).
         //
         // The guard is stashed in a task-local (`byte_budget::stash_guard`)
         // rather than returned from this function: `execute`'s return type
@@ -442,14 +454,18 @@ impl ShamirDbHandler {
         // writer task, after the socket write completes — never in this
         // dispatch task.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            if !control_op && bytes.len() > reserve_bytes {
-                // Includes arbitrary error strings, not just successful payloads.
+            // A refusal keeps the operator's fence, never the caller's.
+            let size_cap = match &final_response {
+                DbResponse::Error { .. } => self.query_limits.max_result_size_bytes,
+                _ => reserve_bytes,
+            };
+            if !control_op && bytes.len() > size_cap {
                 // Release before returning; never stash the rejected payload.
                 drop(budget_guard);
                 return DbResponse::Error {
                     code: "result_too_large".to_string(),
                     message: format!(
-                        "encoded response is {} bytes; maximum is {reserve_bytes}",
+                        "encoded response is {} bytes; maximum is {size_cap}",
                         bytes.len(),
                     ),
                 };

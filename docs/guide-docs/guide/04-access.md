@@ -232,7 +232,14 @@ await Batch.create('chmod')
 |---|---|---|
 | admin (owner) | ✅ разрешён | owner → bits `rwx` (0o700 portion) |
 | bob (member of `devs`) | ✅ разрешён | group → bits `r-x` (0o050 portion) |
-| carol (не в группе) | ❌ `access_denied` | other → bits `---` (0o000 portion) |
+| carol (не в группе) | ❌ чтение — `unknown_table` (exit 5); запись — `access_denied` (exit 4) | other → bits `---` (0o000 portion) |
+
+Отказ в доступе к таблице при **чтении данных** приходит кодом
+`unknown_table` — тем же, что и для отсутствующей таблицы, чтобы ACL не
+служил оракулом существования (подробнее — в `07-operations.md`, раздел про
+административный шелл). **Запись**, DDL и административная интроспекция
+(`table describe`, чтение схемы таблицы) сохраняют `access_denied`:
+маскируется только отказ чтения данных.
 
 ### Дефолт — открытый
 

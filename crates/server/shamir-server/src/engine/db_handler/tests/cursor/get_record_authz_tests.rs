@@ -41,18 +41,19 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{create_table, drop_table};
 use shamir_query_builder::doc;
+use shamir_query_builder::query::Query;
 use shamir_query_builder::wire::admin::get_record;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{DropTableOp, ResourceRef};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex};
-use shamir_query_types::read::QueryRecord;
+use shamir_query_types::read::{QueryRecord, ReadQuery};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 
 use shamir_types::types::record_id::RecordId;
 
 use crate::byte_budget::ByteBudget;
-use crate::db_handler::config::QueryLimitsCap;
+use crate::db_handler::config::{CursorLimitsCap, QueryLimitsCap};
 use crate::db_handler::handler::ShamirDbHandler;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
@@ -447,7 +448,8 @@ async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
 
 /// The read passes the early ACL, parks on the held budget, the table's Read
 /// right is revoked, the budget is released: the reply must be the typed
-/// `access_denied`, never a record payload.
+/// `unknown_table` (the SAME code an absent table answers — the table ACL
+/// cannot be used as an existence oracle), never a record payload.
 ///
 /// WITHOUT the fix the handler never re-authorizes, so the parked read
 /// resolves the table and returns the seeded `DbResponse::Record`.
@@ -476,7 +478,7 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
         .expect("the released read must complete within the 120s bound");
     expect_error(
         resp,
-        "access_denied",
+        "unknown_table",
         "table Read revoked while parked on the budget",
     );
 }
@@ -777,5 +779,189 @@ async fn get_record_refuses_over_long_names_without_echoing_them() {
         resp,
         "unknown_table",
         "255-byte table name passes the bound",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cold-resolver cell retention on the batch-read and cursor-create paths
+// (moved here verbatim from the former `unknown_table_cell_growth_tests`
+// module, which the layout folder limit no longer allows as its own file).
+// ---------------------------------------------------------------------------
+
+// Regression for cold-resolver cell retention in `RepoCore::get_table_ctx`:
+// the table cell used to be inserted BEFORE the configured-table check, so
+// every request naming a NEVER-created table left an empty `OnceCell` in
+// the repository's `tables` map forever — N distinct unknown names grew it
+// without bound.
+//
+// The engine's own tests cannot observe this (`RepoInstance::table_cell_count`
+// is `test-util`-gated and `shamir-engine`'s tests do not enable it), so the
+// probe lives here, where the dev-dependency does.
+//
+// Each subject request must reach the configured-table refusal (the message
+// carries the engine's "is not configured in this repository" text) and
+// leave the cell map unchanged. WITHOUT the pre-check every probe inserts
+// one cell, so the count grows by the number of distinct names.
+//
+// Fixture mirrors the point-read tests above (in-memory `ShamirDb`, owner
+// alice, repo `main` with table `items`; requests are builder-produced and
+// dispatched through the real handler; every await is bounded by a 120 s
+// timeout because the Windows CI runner may be up to 10x slower). No temp
+// dirs and no sleeps are involved: the repository is purely in-memory and
+// lives for the whole test.
+
+/// Distinct never-created names per subject (the task's minimum is 8).
+const UNKNOWN_NAMES: usize = 8;
+
+/// Handler over an in-memory `ShamirDb` with `app.main.items` owned by alice.
+/// `items` is CONFIGURED but never opened, so its own cell is not part of the
+/// baseline either.
+async fn build_growth_handler() -> ShamirDbHandler {
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
+        .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
+        .expect("create_db");
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner))
+        .await
+        .expect("add repo must complete within the 120s bound")
+        .expect("add repo");
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED)
+}
+
+/// Eight DISTINCT never-created table names.
+fn unknown_names() -> impl Iterator<Item = String> {
+    (0..UNKNOWN_NAMES).map(|i| format!("absent_table_{i}"))
+}
+
+/// Live cell-map size of the repository the requests resolve against.
+fn table_cell_count(handler: &ShamirDbHandler) -> usize {
+    handler
+        .db()
+        .get_db("app")
+        .expect("app database")
+        .get_repo("main")
+        .expect("main repo")
+        .table_cell_count()
+}
+
+fn batch_read_req(table: &str) -> DbRequest {
+    let mut batch = Batch::new();
+    batch.query("read", Query::with_repo("main", table));
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".to_string(),
+        batch: batch.build(),
+    }
+}
+
+fn create_cursor_req(table: &str) -> DbRequest {
+    DbRequest::CreateCursor {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".to_string(),
+        query: ReadQuery::with_repo("main", table),
+        page_size: 1,
+    }
+}
+
+/// The batch path refuses an unknown table in `validate_tables`, which tags
+/// the engine's `NotFound` with the batch alias — the stable `unknown_table`
+/// code the neighbouring missing-table read test asserts
+/// (`tx_execute_lifecycle_tests::ordinary_query_error_preserves_handle_for_successful_execute`).
+/// The message must carry the configured-table text, proving the refusal
+/// came from the check under test rather than from an earlier gate.
+fn expect_batch_unknown_table_refusal(resp: DbResponse, table: &str) {
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_table",
+                "batch read of unknown table '{table}'"
+            );
+            assert!(
+                message.contains(table),
+                "the refusal must name the probed table, got {message:?}"
+            );
+            assert!(
+                message.contains("is not configured in this repository"),
+                "the refusal must come from the configured-table check, got {message:?}"
+            );
+        }
+        other => panic!("expected the unknown-table refusal for '{table}', got {other:?}"),
+    }
+}
+
+/// `create_cursor` surfaces the same engine `NotFound` through
+/// `wrap_engine_err`, which leaves the code to the legacy message-sniffing
+/// heuristic. Its wire code is therefore NOT pinned here — the neighbouring
+/// pagination tests take the same stance for a generic engine "table not
+/// found" after a mid-scroll drop. What must hold is that the request is
+/// refused by the configured-table check and never becomes a cursor.
+fn expect_cursor_unknown_table_refusal(resp: DbResponse, table: &str) {
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert!(
+                !code.is_empty(),
+                "cursor create of unknown table '{table}' must produce a code"
+            );
+            assert!(
+                message.contains(table),
+                "the refusal must name the probed table, got {message:?}"
+            );
+            assert!(
+                message.contains("is not configured in this repository"),
+                "the refusal must come from the configured-table check, got {message:?}"
+            );
+        }
+        other => panic!("expected the unknown-table refusal for '{table}', got {other:?}"),
+    }
+}
+
+/// (a) Eight distinct never-created names, each a refused batch read, must
+/// leave the repository's cell map byte-for-byte unchanged.
+///
+/// WITHOUT the fix these eight requests grow the cell map by eight.
+#[tokio::test]
+async fn batch_reads_of_unknown_tables_do_not_grow_catalogue_cells() {
+    let handler = build_growth_handler().await;
+    let session = superuser_alice_session();
+    let before = table_cell_count(&handler);
+
+    for name in unknown_names() {
+        let resp = send(&handler, &session, batch_read_req(name.as_str())).await;
+        expect_batch_unknown_table_refusal(resp, name.as_str());
+    }
+
+    assert_eq!(
+        table_cell_count(&handler),
+        before,
+        "a refused batch read must not insert a catalogue cell for its table"
+    );
+}
+
+/// (b) The same eight names, each a refused cursor create, must leave the
+/// cell map unchanged.
+///
+/// WITHOUT the fix these eight requests grow the cell map by eight.
+#[tokio::test]
+async fn cursor_creates_over_unknown_tables_do_not_grow_catalogue_cells() {
+    let handler = build_growth_handler().await;
+    let session = superuser_alice_session();
+    let before = table_cell_count(&handler);
+
+    for name in unknown_names() {
+        let resp = send(&handler, &session, create_cursor_req(name.as_str())).await;
+        expect_cursor_unknown_table_refusal(resp, name.as_str());
+    }
+
+    assert_eq!(
+        table_cell_count(&handler),
+        before,
+        "a refused cursor create must not insert a catalogue cell for its table"
     );
 }

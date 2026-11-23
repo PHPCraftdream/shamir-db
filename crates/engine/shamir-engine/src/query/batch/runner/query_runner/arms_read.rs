@@ -447,32 +447,51 @@ impl<'a> QueryRunner<'a> {
                             code: e.code().map(str::to_owned),
                         },
                     })?,
-                    None => execute_planned_batch_impl(
-                        &fe.batch,
-                        &mut plan,
-                        self.resolver,
-                        self.admin,
-                        self.invoker,
-                        self.actor.clone(),
-                        self.db_name,
-                        self.depth + 1,
-                        &resolved_params,
-                        self.scope,
-                    )
-                    .await
-                    .map_err(|e| match e {
-                        limit_error @ (BatchError::ExecutionTimedOut { .. }
-                        | BatchError::TooManyQueries { .. }
-                        | BatchError::TooManyIterations { .. }
-                        | BatchError::LimitExceeded { .. }
-                        | BatchError::AsOfVisibilityTimeout { .. }
-                        | BatchError::Cancelled) => limit_error,
-                        e => BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: format!("for_each '{}' iteration failed: {}", alias, e),
-                            code: e.code().map(str::to_owned),
-                        },
-                    })?,
+                    // A transactional body aborts by returning `Ok` with an
+                    // `aborted` TransactionInfo and an empty result map. That
+                    // abort committed nothing, so returning/appending the
+                    // empty value would be a lie about what the body computed;
+                    // fail the iteration with the abort's own stable code.
+                    None => {
+                        let (results, tx_info) = execute_planned_batch_impl(
+                            &fe.batch,
+                            &mut plan,
+                            self.resolver,
+                            self.admin,
+                            self.invoker,
+                            self.actor.clone(),
+                            self.db_name,
+                            self.depth + 1,
+                            &resolved_params,
+                            self.scope,
+                        )
+                        .await
+                        .map_err(|e| match e {
+                            limit_error @ (BatchError::ExecutionTimedOut { .. }
+                            | BatchError::TooManyQueries { .. }
+                            | BatchError::TooManyIterations { .. }
+                            | BatchError::LimitExceeded { .. }
+                            | BatchError::AsOfVisibilityTimeout { .. }
+                            | BatchError::Cancelled) => limit_error,
+                            e => BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: format!("for_each '{}' iteration failed: {}", alias, e),
+                                code: e.code().map(str::to_owned),
+                            },
+                        })?;
+                        if let Some(info) = tx_info {
+                            if info.status == "aborted" {
+                                return Err(BatchError::query_coded(
+                                    alias.to_string(),
+                                    info.abort_code.as_deref().unwrap_or("transaction_aborted"),
+                                    info.reason
+                                        .as_deref()
+                                        .unwrap_or("transactional body aborted"),
+                                ));
+                            }
+                        }
+                        results
+                    }
                 };
 
                 // Same per-iteration value shape a single sub-batch already

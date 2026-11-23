@@ -408,12 +408,14 @@ async fn permission_group_grant() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
-                "carol should be denied, got code={}, msg={}",
+                code, "unknown_table",
+                "carol's Table Read is denied; the refusal carries the SAME \
+                 unknown_table code an absent table answers (no existence \
+                 oracle), got code={}, msg={}",
                 code, message
             );
         }
-        other => panic!("expected access_denied for carol, got {:?}", other),
+        other => panic!("expected unknown_table for carol, got {:?}", other),
     }
 
     // Cleanup

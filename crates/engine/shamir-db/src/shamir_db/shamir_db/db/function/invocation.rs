@@ -12,7 +12,7 @@ use crate::engine::function::Security;
 use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
 use crate::{DbError, DbResult};
 
-use super::super::db_gateway::FacadeDbGateway;
+use super::super::db_gateway::{FacadeDbGateway, GatewayCodeSink};
 use super::artifact::artifact_id_from_record;
 
 pub(in crate::shamir_db::shamir_db) struct ShamirDbCallResolver {
@@ -136,6 +136,7 @@ impl ShamirDbCallResolver {
                 shamir: self.shamir.clone(),
                 db_name: db_name.clone(),
                 actor: target.actor().clone(),
+                code_sink: None,
             });
             target = target
                 .with_db(gateway, repo.clone())
@@ -193,6 +194,7 @@ impl ShamirDb {
         batch: Option<&Arc<BatchContext>>,
         caller: Actor,
         db: Option<(&str, &str)>,
+        code_sink: Option<Arc<GatewayCodeSink>>,
     ) -> DbResult<QueryValue> {
         let binding = self
             .functions()
@@ -257,6 +259,7 @@ impl ShamirDb {
                 shamir: self.clone(),
                 db_name: db_name.to_string(),
                 actor: ctx.actor().clone(),
+                code_sink,
             });
             ctx = ctx
                 .with_db(gateway, repo.to_string())

@@ -303,7 +303,14 @@ export interface TransactionInfo {
    * and reconcile; never auto-retry or treat as rolled back.
    */
   status: 'committed' | 'aborted' | 'indeterminate';
+  /** Human-readable abort reason (debug text; committed/indeterminate omit it). */
   reason?: string;
+  /**
+   * Stable code of the operation that aborted the transaction (for example
+   * `call_in_tx_not_supported` or `skip_aborted`). Absent when the abort has
+   * no stable code, and for committed/indeterminate outcomes.
+   */
+  abort_code?: string;
   /** Published commit error; status remains committed, never retry the writes. */
   error?: string;
   /** Lossless wire dual: small integers decode as safe numbers; SDK normalizes to bigint. */

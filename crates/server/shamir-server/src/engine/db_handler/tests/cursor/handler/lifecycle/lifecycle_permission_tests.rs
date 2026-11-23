@@ -804,19 +804,23 @@ async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
     match resp {
         DbResponse::Error { code, .. } => {
             assert_eq!(
-                code, "access_denied",
-                "FetchNext must re-check authorization and deny after revocation"
+                code, "unknown_table",
+                "FetchNext must re-check authorization and deny after revocation \
+                 (same code an absent table answers)"
             )
         }
-        other => panic!("expected access_denied after mid-scroll revocation, got {other:?}"),
+        other => panic!("expected unknown_table after mid-scroll revocation, got {other:?}"),
     }
 }
 
 /// W-6 (#790, Wave D review): regression guard pinning the EXACT (accepted,
 /// documented) behavior change from CR-D5/N-9's `fetch_next` authorize-
 /// before-resolve reorder — a db dropped between `CreateCursor` and a later
-/// `FetchNext` now surfaces as `access_denied`, NOT `unknown_db`, for a
-/// non-admin actor.
+/// `FetchNext` surfaces through the surviving TABLE ACL (not `unknown_db`)
+/// for a non-admin actor, and that table-level refusal is now the SAME typed
+/// `unknown_table` every read path answers for an absent/forbidden table
+/// (read-refusal parity: not `access_denied`, which would disclose that the
+/// table exists).
 ///
 /// Mechanism (see the comment at `fetch_next`'s N-9/W-6 authorize call
 /// site): `ShamirDb::remove_db` only deletes the db's OWN catalogue row
@@ -830,7 +834,7 @@ async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
 /// "defensible" / "arguably more correct"); it must never silently flip
 /// back to `unknown_db` without that being a deliberate, reviewed change.
 #[tokio::test]
-async fn fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unknown_db() {
+async fn fetch_next_after_db_dropped_mid_scroll_surfaces_unknown_table_not_unknown_db() {
     let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
     let bob = other_session();
 
@@ -876,14 +880,15 @@ async fn fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unkno
     match resp {
         DbResponse::Error { code, .. } => {
             assert_eq!(
-                code, "access_denied",
-                "a db dropped mid-scroll must surface as access_denied (the NEW, \
-                 accepted CR-D5/N-9 authorize-before-resolve order), not unknown_db \
-                 (the OLD, pre-reorder behavior) -- see W-6 (#790)"
+                code, "unknown_table",
+                "a db dropped mid-scroll must surface through the surviving TABLE \
+                 ACL as unknown_table (the NEW, accepted CR-D5/N-9 \
+                 authorize-before-resolve order + read-refusal parity), not \
+                 unknown_db (the OLD, pre-reorder behavior) -- see W-6 (#790)"
             );
         }
         other => {
-            panic!("expected access_denied for a db dropped mid-scroll (W-6, #790), got {other:?}")
+            panic!("expected unknown_table for a db dropped mid-scroll (W-6, #790), got {other:?}")
         }
     }
 }

@@ -373,7 +373,16 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
 /// return type doesn't trip clippy's `type_complexity` lint.
 type PlannedBatchResultFuture<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<TMap<String, QueryResult>, BatchError>> + Send + 'a,
+        dyn std::future::Future<
+                Output = Result<
+                    (
+                        TMap<String, QueryResult>,
+                        Option<shamir_query_types::batch::TransactionInfo>,
+                    ),
+                    BatchError,
+                >,
+            > + Send
+            + 'a,
     >,
 >;
 
@@ -387,9 +396,12 @@ type PlannedBatchResultFuture<'a> = std::pin::Pin<
 /// `query_runner.rs`, which now plans/validates the loop body ONCE before
 /// the loop instead of once per iteration.
 ///
-/// Returns just the filtered results map, not a full [`BatchResponse`] —
-/// the plan/timing/id metadata `BatchResponse` otherwise carries is never
-/// consumed by a `ForEach` iteration's caller (only `.results` is).
+/// Returns the filtered results map plus the transaction outcome (`None` for
+/// non-transactional bodies), not a full [`BatchResponse`] — the plan/timing/id
+/// metadata `BatchResponse` otherwise carries is never consumed by a
+/// `ForEach` iteration's caller (only `.results` is), but the outcome must be
+/// returned so an ABORTED transactional body can fail its iteration instead
+/// of looking like an empty success.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
     request: &'a BatchRequest,
@@ -411,7 +423,7 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
         scope.check()?;
 
         // 3. Execute — branch on transactional.
-        let (all_results, _tx_info) = if request.transactional {
+        let (all_results, tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
                 plan,
@@ -448,8 +460,13 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
         // 3.5. Durability: same as `execute_batch_impl`.
         flush_if_synced_durability(request, resolver, db_name, scope, depth).await?;
 
-        // 4. Filter results for response
-        Ok(crate::query::batch::receipts::filter(all_results, request))
+        // 4. Filter results for response. The transaction outcome is returned
+        // alongside them so the caller can fail an aborted iteration instead
+        // of presenting the empty result set the body never produced.
+        Ok((
+            crate::query::batch::receipts::filter(all_results, request),
+            tx_info,
+        ))
     }) // end Box::pin
 }
 

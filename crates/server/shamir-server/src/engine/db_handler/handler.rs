@@ -97,7 +97,7 @@ use super::admin::{
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::error_response;
-use super::cursor_support::authorize_cursor_read;
+use super::cursor_support::{authorize_cursor_read, resolve_repo};
 use super::handlers::token_admin;
 use super::repo_audit::CancelRefusalAudit;
 
@@ -855,8 +855,12 @@ impl ShamirDbHandler {
     /// strings, exactly like `create_cursor` does) is what keeps an
     /// unauthorized caller's response indistinguishable from a genuine
     /// not-found — `self.db.get_ddl_op_status` (which does the actual
-    /// resolution and can reveal unknown-db/unknown-repo distinctly) is
-    /// never even called unless authorization already succeeded.
+    /// resolution) is never even called unless authorization already
+    /// succeeded. When it does run, a miss is classified with the SAME
+    /// table-Read parity the gate itself uses: an absent TABLE answers
+    /// `unknown_table` (the code `authorize_cursor_read`'s Table denial
+    /// answers for a closed table), while a vanished parent keeps its own
+    /// typed `unknown_db`/`unknown_repo`.
     async fn get_ddl_op_status(
         &self,
         session: &Session,
@@ -872,15 +876,25 @@ impl ShamirDbHandler {
 
         match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
             Ok(status) => DbResponse::DdlOpStatus { status },
-            Err(e) => DbResponse::Error {
-                code: match e {
-                    shamir_db::DbError::Validation(_) => "validation",
-                    shamir_db::DbError::NotFound(_) => "not_found",
-                    _ => "query",
+            Err(e) => {
+                let code = match &e {
+                    shamir_db::DbError::Validation(_) => "validation".to_string(),
+                    // Same rule as every read path: an absent table is
+                    // `unknown_table` (the typed code the Table ACL denial
+                    // above answers for an existing closed table), never a
+                    // distinct not-found that would reveal the table's
+                    // existence. A vanished PARENT keeps its own typed code.
+                    shamir_db::DbError::NotFound(_) => match resolve_repo(&self.db, db, repo) {
+                        Ok(_) => "unknown_table".to_string(),
+                        Err(parent) => error_code(&parent).to_string(),
+                    },
+                    _ => "query".to_string(),
+                };
+                DbResponse::Error {
+                    code,
+                    message: format!("Failed to read DDL op status: {}", e),
                 }
-                .to_string(),
-                message: format!("Failed to read DDL op status: {}", e),
-            },
+            }
         }
     }
 }

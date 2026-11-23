@@ -7,6 +7,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::filter::FilterValue;
 use shamir_types::access::{Action, Actor, ResourceMeta, ResourcePath};
 use shamir_types::types::value::QueryValue;
 
@@ -35,6 +36,12 @@ const GET_SOURCE: &str = r#"@entry procedure p() -> i64 {
     let found: { id: i64, label: string }? = db_get("secrets", 1);
     if (is_null(found)) { return -1; }
     return unwrap(found).id;
+}"#;
+
+/// A guest-controlled message that LOOKS like a stable batch code.
+const FORGED_CODE_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    if (true) { throw "server_busy"; }
+    return 0;
 }"#;
 
 const BATCH_READ_SOURCE: &str = r#"@entry procedure p() -> i64 {
@@ -215,9 +222,18 @@ fn assert_gateway_denial(result: DbResult<QueryValue>, operation: &str, action: 
         message.contains("compute error"),
         "expected the guest compute error kind, got: {message}"
     );
+    // A denied READ now carries the unified `unknown_table` code (the SAME
+    // code an absent table answers — the read refusal is not an existence
+    // oracle), which the gateway classifies as a generic execution failure.
+    // CREATE/WRITE/DELETE keep `access_denied`, hence `Permission`.
+    let gateway_class = if action == "READ" {
+        "execution failed"
+    } else {
+        "permission denied"
+    };
     assert!(
-        message.contains(&format!("{operation}: db gateway: permission denied:")),
-        "expected the gateway Permission denial for {operation}, got: {message}"
+        message.contains(&format!("{operation}: db gateway: {gateway_class}:")),
+        "expected the gateway {gateway_class} denial for {operation}, got: {message}"
     );
     let denial =
         format!("access denied: User({RESTRICTED_ID}) cannot {action} on db://testdb/main/secrets");
@@ -336,4 +352,64 @@ async fn shamir_invoker_batch_read_execute_is_denied_independently() {
     );
     assert_native_row(&db, 1, "seeded").await;
     assert_gateway_denial(invoke(&db, "batch_invoker").await, "db_execute", "READ");
+}
+
+/// The outer batch `Call` must report the SAME stable code the stored
+/// procedure's gateway refusal carried (`unknown_table` for a denied READ),
+/// supplied through the server-side sink rather than the guest.
+#[tokio::test]
+async fn shamir_invoker_gateway_denial_code_reaches_the_outer_call() {
+    let db = setup().await;
+    seed_row(&db, 1, "seeded").await;
+    create_procedure(&db, "get_invoker", GET_SOURCE, Security::Invoker).await;
+
+    let mut batch = Batch::new();
+    batch.id("denied_call");
+    batch.call("result", "get_invoker", [] as [FilterValue; 0]);
+    let error = db
+        .execute_as(
+            restricted(),
+            DB_NAME,
+            &batch
+                .to_request_via_msgpack()
+                .expect("denied-call request encoding"),
+        )
+        .await
+        .expect_err("the Invoker read denial must fail the outer batch");
+    assert_eq!(
+        error.code(),
+        Some("unknown_table"),
+        "outer Call must report the gateway's stable code, got: {error:?}"
+    );
+}
+
+/// A guest `throw` whose text looks like a stable code must NOT become the
+/// outer `Call`'s code: only the server-side sink can supply one.
+#[tokio::test]
+async fn shamir_guest_trap_text_cannot_forge_batch_code() {
+    let db = setup().await;
+    create_procedure(&db, "forged_code", FORGED_CODE_SOURCE, Security::Invoker).await;
+
+    let mut batch = Batch::new();
+    batch.id("forged_code_call");
+    batch.call("result", "forged_code", [] as [FilterValue; 0]);
+    let error = db
+        .execute_as(
+            restricted(),
+            DB_NAME,
+            &batch
+                .to_request_via_msgpack()
+                .expect("forged-code request encoding"),
+        )
+        .await
+        .expect_err("a guest throw must fail the outer batch");
+    assert!(
+        error.to_string().contains("server_busy"),
+        "the guest trap text must still be visible in the message, got: {error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        None,
+        "guest-controlled trap text must never become a stable code, got: {error:?}"
+    );
 }

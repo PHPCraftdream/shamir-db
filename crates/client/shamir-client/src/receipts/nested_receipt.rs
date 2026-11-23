@@ -83,6 +83,8 @@ struct NestedTransactionWire {
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
+    abort_code: Option<String>,
+    #[serde(default)]
     error: Option<String>,
     #[serde(default, deserialize_with = "u64_flex::deserialize_option")]
     snapshot_version: Option<u64>,
@@ -110,6 +112,7 @@ pub(crate) fn decode_nested_transaction(
         tx_id: wire.tx_id,
         status: wire.status,
         reason: wire.reason,
+        abort_code: wire.abort_code,
         error: wire.error,
         snapshot_version: wire.snapshot_version,
         commit_version: wire.commit_version,

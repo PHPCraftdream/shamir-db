@@ -147,7 +147,9 @@ fn ordinary_query_error_preserves_handle_for_successful_execute() {
         let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
         match execute(&handler, &session, handle, read("missing")).await {
             DbResponse::Error { code, message } => {
-                assert_eq!(code, "query", "{message}");
+                // A missing table on a READ is the same typed `unknown_table`
+                // every read path answers (no existence oracle).
+                assert_eq!(code, "unknown_table", "{message}");
                 assert!(message.contains("missing"), "{message}");
             }
             other => panic!("expected missing-table query error, got {other:?}"),

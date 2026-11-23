@@ -11,6 +11,7 @@ use crate::cursor_registry::{Cursor, CursorActivity, CursorRegistryError, Pagina
 
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
+    wrap_table_lookup_err,
 };
 use super::keyset::{
     build_filter_context, order_by_column_contains_null, order_by_column_is_schema_typed_scalar,
@@ -110,7 +111,12 @@ impl ShamirDbHandler {
         // change to what a cursor's read can see.
         let table = match self.db.get_table(db_name, &repo_name, &table_name).await {
             Ok(t) => t,
-            Err(e) => return error_response(&wrap_engine_err(e)),
+            // An absent table answers `unknown_table`, the SAME code the
+            // table-Read denial above answers for an existing closed table
+            // (`authorize_cursor_read`); parents keep `unknown_db`/`unknown_repo`.
+            Err(e) => {
+                return error_response(&wrap_table_lookup_err(&self.db, db_name, &repo_name, e));
+            }
         };
         let gate = match repo.tx_gate().await {
             Ok(g) => g,

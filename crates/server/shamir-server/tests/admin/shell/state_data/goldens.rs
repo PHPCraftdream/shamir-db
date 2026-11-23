@@ -440,10 +440,10 @@ fn data_count_head_get_goldens_and_refusals() {
     assert!(!wrong_table_run.contains_canary(fixture.canary.as_str()));
     refusal(&wrong_table_run, "get", "not_found", 5);
 
-    // A missing table: the typed `unknown_table` refusal with exit 5 is
-    // carried by the P2 point read (the engine emits the code there only);
-    // the batch `count` path refuses as a generic server error, exit 5 —
-    // never a usage error and never a crash.
+    // A missing table: the typed `unknown_table` refusal with exit 5 on
+    // EVERY read path — the P2 point read and the batch `count` path both
+    // carry it now (read-refusal parity: the batch read no longer answers a
+    // generic server error, so the two paths cannot be told apart).
     let get_missing = run_shell(
         fixture,
         &["data", "get", DB_NAME, REPO_NAME, "no_such_table", real_id],
@@ -455,7 +455,7 @@ fn data_count_head_get_goldens_and_refusals() {
         &["data", "count", DB_NAME, REPO_NAME, "no_such_table"],
     );
     assert!(!count_missing.contains_canary(fixture.canary.as_str()));
-    refusal(&count_missing, "data", "server_error", 5);
+    refusal(&count_missing, "data", "unknown_table", 5);
 
     // malformed KEY: typed `invalid_record_id` (exit 1), PRE-NETWORK. The
     // profile points at a bound-then-dropped port; a dial would fail with

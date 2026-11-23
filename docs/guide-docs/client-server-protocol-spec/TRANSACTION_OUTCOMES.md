@@ -18,6 +18,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `tx_id` | Repository transaction identifier. |
 | `status` | `"committed"`, `"aborted"`, or `"indeterminate"`. |
 | `reason` | Abort diagnostic; omitted when absent, not necessarily a stable code. Omitted for indeterminate outcomes (their `error` is `"wal_outcome_unknown"`). |
+| `abort_code` | **Additive, optional** stable code of the operation that aborted the transaction (for example `call_in_tx_not_supported` or `skip_aborted`); omitted when the abort has no stable code, and for committed/indeterminate outcomes. `reason` remains the debug text. |
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version for committed outcomes; the ATTEMPTED version (no success claim) for indeterminate outcomes; absent for aborted outcomes. |

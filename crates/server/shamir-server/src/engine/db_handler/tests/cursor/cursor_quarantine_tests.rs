@@ -6,6 +6,7 @@
 //! module-private, so the minimal setup is duplicated here re-export-free).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -20,18 +21,26 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
-use shamir_query_builder::write::Insert;
-use shamir_query_types::admin::{ReplDirection, ReplMode};
-use shamir_query_types::read::ReadQuery;
+use shamir_query_builder::doc;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::wire::admin::get_record;
+use shamir_query_builder::write::{insert, Insert};
+use shamir_query_types::admin::{ReplDirection, ReplMode, ResourceRef};
+use shamir_query_types::read::{QueryRecord, ReadQuery};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 
-use shamir_query_builder::doc;
+use shamir_types::types::record_id::RecordId;
 
-use crate::db_handler::config::CursorLimitsCap;
+use crate::db_handler::config::{CursorLimitsCap, QueryLimitsCap};
 use crate::db_handler::handler::ShamirDbHandler;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
 const ALICE_SID: [u8; 32] = [0xAA; 32];
+const BOB_SID: [u8; 32] = [0xBB; 32];
+/// Generous per-call bound (hang detector; slow Windows runner).
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// The never-created table name used as the absent case in every pair.
+const ABSENT_TABLE: &str = "absent_items";
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -248,4 +257,289 @@ async fn cursor_reads_healthy_and_non_replicated_repos_unaffected() {
         matches!(resp, DbResponse::CursorPage { .. }),
         "non-replicated repo stays cursor-readable: {resp:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// READ-refusal uniformity across the `GetRecord`, batch-read and cursor-create
+// paths (moved here verbatim from the former `read_refusal_uniformity_tests`
+// module, which the layout folder limit no longer allows as its own file).
+// The natural sibling `get_record_tests.rs` is already at the 1000-line file
+// limit, so the block lives in this folder's other refusal-gating module.
+// ---------------------------------------------------------------------------
+
+// An actor that cannot READ a table must not be able to tell whether that
+// table EXISTS.
+//
+// Before this rule, the table ACL was consulted on the raw NAME: a closed
+// table answered `access_denied`, while an absent name passed the
+// (default-open) table check and was then refused for absence — `query` on
+// the batch path, `not_found`-ish legacy codes on the cursor path. That
+// difference is an existence oracle.
+//
+// Each test below asks the SAME actor the SAME question twice — once about
+// an existing table it may not read, once about an absent name — and
+// asserts the two wire codes are EQUAL (and equal to `unknown_table`). The
+// equality is the invariant; the literal pins which code the invariant
+// resolved to.
+//
+// Fixture mirrors `get_record_tests.rs` (in-memory `ShamirDb`, owner alice,
+// repo `main` with table `items`, one seeded row; requests built through
+// `shamir_query_builder` and dispatched through the real handler; every
+// await is bounded by a 120 s timeout because the Windows CI runner may be
+// up to 10x slower). No temp dirs and no sleeps: the repository is purely
+// in-memory and lives for the whole test.
+
+/// Unrelated non-owner, non-superuser actor.
+fn bob_session() -> Session {
+    let mut s = Session::new(
+        [0xCD; 16],
+        "bob".into(),
+        SessionPermissions::from_roles(vec!["read_write".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        UnixNanos::now().as_u64(),
+    );
+    s.session_id = BOB_SID;
+    s
+}
+
+/// Handler over an in-memory `ShamirDb` with `app.main.items` owned by alice
+/// (principal `[0xAB; 16]`), plus one seeded row. `items` therefore EXISTS
+/// and is closed to bob until a test opens the ancestors.
+///
+/// Distinct from this module's `build_handler` (which builds three repos with
+/// three rows each): the owner control below asserts EXACTLY one row comes
+/// back, so the uniformity fixture keeps its own single-row seeding.
+async fn build_uniformity_handler() -> ShamirDbHandler {
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
+        .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
+        .expect("create_db");
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner.clone()))
+        .await
+        .expect("add repo must complete within the 120s bound")
+        .expect("add repo");
+
+    let handler = ShamirDbHandler::new(Arc::new(shamir))
+        .with_cursor_limits(CursorLimitsCap::UNLIMITED)
+        .with_query_limits(QueryLimitsCap::UNLIMITED);
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "seed",
+        insert("items").row(doc! { "id" => "k000", "v" => 0_i64 }),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler.db().execute_as(owner, "app", &b.build()),
+    )
+    .await
+    .expect("engine insert must complete within the 120s bound")
+    .expect("engine insert must succeed");
+    handler
+}
+
+/// Open ONLY the database and store ancestors to `mode`, leaving `items` at
+/// its enforced 0o700 default — the "Database-read
+/// but Table-read-denied" ACL state (mirrors
+/// `get_record_tests::open_db_and_store_only`).
+async fn open_db_and_store_only(handler: &ShamirDbHandler, mode: u16) {
+    let mut batch = Batch::new();
+    batch.chmod(
+        "db",
+        shamir_query_builder::ddl::chmod(
+            ResourceRef::Database {
+                database: "app".into(),
+            },
+            mode,
+        )
+        .hmac("read-refusal-uniformity-test")
+        .build()
+        .expect("build chmod db"),
+    );
+    batch.chmod(
+        "store",
+        shamir_query_builder::ddl::chmod(
+            ResourceRef::Store {
+                store: ["app".into(), "main".into()],
+            },
+            mode,
+        )
+        .hmac("read-refusal-uniformity-test")
+        .build()
+        .expect("build chmod store"),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("admin chmod must complete within the 120s bound")
+    .expect("admin chmod must succeed");
+}
+
+/// Send a wire request through the REAL `RequestHandler::handle`, bounded by
+/// `CALL_TIMEOUT`. This module's bare `send` carries no hang detector, so the
+/// merged tests keep their own bounded variant instead of silently losing
+/// the 120 s bound.
+async fn send_with_call_timeout(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    req: DbRequest,
+) -> DbResponse {
+    let bytes = rmp_serde::to_vec_named(&req).expect("encode request");
+    let conn = ConnectionServices::without_push(0);
+    let resp_bytes = tokio::time::timeout(
+        CALL_TIMEOUT,
+        Box::pin(handler.handle(session, &bytes, &conn)),
+    )
+    .await
+    .expect("handle must complete within the 120s bound")
+    .expect("handle must not error at the protocol level");
+    rmp_serde::from_slice(&resp_bytes).expect("decode response")
+}
+
+/// Extract the wire error code, panicking on a non-error response.
+fn error_code_of(resp: DbResponse, context: &str) -> String {
+    match resp {
+        DbResponse::Error { code, .. } => code,
+        other => panic!("{context}: expected an error, got {other:?}"),
+    }
+}
+
+fn batch_read_req(table: &str) -> DbRequest {
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.query("read", Query::with_repo("main", table));
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".to_string(),
+        batch: batch.build(),
+    }
+}
+
+/// `GetRecord`: a closed table and an absent name must answer the SAME
+/// code. WITHOUT the rule the closed table answers `access_denied` while
+/// the absent name answers `unknown_table`, so both the equality and the
+/// literal below fail.
+#[tokio::test]
+async fn get_record_refusal_is_identical_for_closed_and_absent_tables() {
+    let handler = build_uniformity_handler().await;
+    open_db_and_store_only(&handler, 0o777).await;
+    let bob = bob_session();
+    let key = RecordId([1u8; 16]);
+
+    let closed = error_code_of(
+        send_with_call_timeout(&handler, &bob, get_record("app", "main", "items", key)).await,
+        "GetRecord on the closed table",
+    );
+    let absent = error_code_of(
+        send_with_call_timeout(&handler, &bob, get_record("app", "main", ABSENT_TABLE, key)).await,
+        "GetRecord on the absent table",
+    );
+
+    assert_eq!(
+        closed, absent,
+        "GetRecord must not reveal whether the table exists: closed={closed}, absent={absent}"
+    );
+    assert_eq!(closed, "unknown_table");
+}
+
+/// Batch read: a closed table and an absent name must answer the SAME code.
+/// WITHOUT the rule the closed table is denied by `Authorized::authorize`
+/// (`access_denied`) and the absent name fails `validate_tables` (the
+/// legacy-mapped generic `query`), so the equality fails.
+#[tokio::test]
+async fn batch_read_refusal_is_identical_for_closed_and_absent_tables() {
+    let handler = build_uniformity_handler().await;
+    open_db_and_store_only(&handler, 0o777).await;
+    let bob = bob_session();
+
+    let closed = error_code_of(
+        send_with_call_timeout(&handler, &bob, batch_read_req("items")).await,
+        "batch read of the closed table",
+    );
+    let absent = error_code_of(
+        send_with_call_timeout(&handler, &bob, batch_read_req(ABSENT_TABLE)).await,
+        "batch read of the absent table",
+    );
+
+    assert_eq!(
+        closed, absent,
+        "a batch read must not reveal whether the table exists: closed={closed}, absent={absent}"
+    );
+    assert_eq!(closed, "unknown_table");
+}
+
+/// Cursor create: a closed table and an absent name must answer the SAME
+/// code. WITHOUT the rule the closed table is denied by
+/// `authorize_cursor_read` (`access_denied`) while the absent name reaches
+/// `get_table` and gets the legacy-mapped generic `query`, so the equality
+/// fails.
+#[tokio::test]
+async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
+    let handler = build_uniformity_handler().await;
+    open_db_and_store_only(&handler, 0o777).await;
+    let bob = bob_session();
+
+    let closed = error_code_of(
+        send_with_call_timeout(
+            &handler,
+            &bob,
+            create_cursor_req(ReadQuery::with_repo("main", "items"), 1),
+        )
+        .await,
+        "cursor create on the closed table",
+    );
+    let absent = error_code_of(
+        send_with_call_timeout(
+            &handler,
+            &bob,
+            create_cursor_req(ReadQuery::with_repo("main", ABSENT_TABLE), 1),
+        )
+        .await,
+        "cursor create on the absent table",
+    );
+
+    assert_eq!(
+        closed, absent,
+        "cursor create must not reveal whether the table exists: closed={closed}, absent={absent}"
+    );
+    assert_eq!(closed, "unknown_table");
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a refused cursor create must not register a cursor"
+    );
+}
+
+/// Control: the seed row actually EXISTS and the closed table really is the
+/// one bob may not read — a positive read by the owner returns it, so the
+/// three equality tests above cannot pass vacuously on a missing fixture
+/// table.
+#[tokio::test]
+async fn owner_control_reads_the_seeded_row() {
+    let handler = build_uniformity_handler().await;
+    let alice = alice_session();
+
+    let resp = send_with_call_timeout(&handler, &alice, batch_read_req("items")).await;
+    match resp {
+        DbResponse::Batch { response } => {
+            let result = response.results.get("read").expect("read alias returned");
+            assert_eq!(result.records.len(), 1, "the seeded row must be readable");
+            assert!(matches!(result.records[0], QueryRecord::Direct(_)));
+        }
+        other => panic!("expected the owner's Batch response, got {other:?}"),
+    }
 }
