@@ -8,7 +8,7 @@ use crate::sync::durability::backup::online::manifest::{
 use crate::sync::durability::backup::{
     verify_retention_candidate, BackupError, MANIFEST_FILE_NAME,
 };
-use crate::sync::format_stamp::STAMP_FILE_NAME;
+use crate::sync::format_stamp::{inspect, StampState, STAMP_FILE_NAME};
 
 use super::super::retention_pass::{manifest_digest_hex, MAX_MANIFEST};
 use super::budget::{metadata, plain_on_root, Budget, Refusal};
@@ -58,21 +58,36 @@ pub(super) fn verified_time(
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
-    let stamp_size = match metadata(&dir.join(STAMP_FILE_NAME)) {
+    match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
             // The verifier reads the stamp twice: `format_stamp::inspect`
-            // reads it, then the manifest-file loop hashes it (charged with
-            // the claimed files below). This is the first of the two reads,
-            // charged with the other byte charges below.
+            // (charged here, with the verdict) and the manifest-file loop's
+            // hash (charged with the claimed files below).
             let size = file_size(&tree, STAMP_FILE_NAME)?;
             if size > MAX_STAMP {
                 return Err(Refusal::Budget);
             }
-            Some(size)
+            // Decide the stamp verdict BEFORE the payload is charged: the
+            // verifier inspects the same bytes (`check_stamp_agreement`) and
+            // refuses a corrupt or newer-layout stamp, so charging the whole
+            // candidate first made a large WAL pay for a copy that could never
+            // verify. This is the inspect read, and it is charged exactly once.
+            budget.bytes(size)?;
+            match inspect(dir) {
+                StampState::Valid(stamp) => match decoded.format_epoch {
+                    Some(epoch) if epoch == stamp.format_epoch() => {}
+                    _ => return Err(Refusal::Unverifiable),
+                },
+                // Absent is permitted by v2 regardless of the manifest epoch.
+                StampState::Absent { .. } => {}
+                StampState::Corrupt { .. } | StampState::NewerLayout { .. } => {
+                    return Err(Refusal::Unverifiable);
+                }
+            }
         }
-        Err(Refusal::Unverifiable) => None, // Absent stamp is permitted by v2.
+        Err(Refusal::Unverifiable) => {} // Absent stamp is permitted by v2.
         Err(error) => return Err(error),
-    };
+    }
     let mut claimed = BTreeSet::new();
     for entry in &decoded.files {
         budget.checkpoint()?;
@@ -91,6 +106,19 @@ pub(super) fn verified_time(
         // cannot be a useful check. The copied `format.stamp` is NOT such a
         // control file: the writer does list it, so it stays hashable.
         if entry.path == BACKUP_META_FILE_NAME || entry.path == MANIFEST_FILE_NAME {
+            return Err(Refusal::Unverifiable);
+        }
+        // The verifier refuses a manifest that lists a `cache` payload
+        // (`offline.rs::is_cache_manifest_path`). Decide it HERE, before any
+        // byte of the candidate is charged: a listed cache entry made a
+        // candidate pay its whole payload for a read the verifier never does.
+        let first_component = entry
+            .path
+            .replace('\\', "/")
+            .split('/')
+            .find(|component| !component.is_empty() && *component != ".")
+            .map(str::to_owned);
+        if first_component.as_deref() == Some("cache") {
             return Err(Refusal::Unverifiable);
         }
         file_size(&tree, &entry.path)?;
@@ -150,9 +178,9 @@ pub(super) fn verified_time(
     // manifest-listed file is hashed once by that loop; a WAL segment is
     // hashed a second time by the verifier's WAL loop. The walk charges no
     // bytes and the manifest bytes are handed to the verifier, never re-read.
-    if let Some(size) = stamp_size {
-        budget.bytes(size)?;
-    }
+    // The stamp's inspect read was charged in the discovery phase above; the
+    // verifier's SECOND read of it is its manifest-file hash, charged with the
+    // claimed files below like every other listed file.
     for entry in &decoded.files {
         budget.checkpoint()?;
         budget.bytes(file_size(&tree, &entry.path)?)?;

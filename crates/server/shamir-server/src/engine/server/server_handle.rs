@@ -17,7 +17,7 @@ use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
 use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
-use crate::server::store_release_barrier::wait_stores_released;
+use crate::server::store_release_barrier::{release_stores, ReleaseOutcome};
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
 /// end once they were told to.
@@ -357,6 +357,16 @@ impl ShutdownOwner {
     }
 }
 
+/// Store-root names for the release report: bounded tokens, never full paths.
+fn store_names(locked: &[std::path::PathBuf]) -> String {
+    locked
+        .iter()
+        .filter_map(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl ServerHandle {
     /// What the boot-time format-stamp check did to `data_dir`.
     pub fn format_stamp(&self) -> shamir_sync::format_stamp::StampOutcome {
@@ -471,6 +481,14 @@ impl ServerHandle {
             report,
         )
         .await;
+        // Signal the observability server to stop BEFORE the wait a deadline can
+        // abandon (the scheduled join below is deliberately unbounded inside the
+        // bounded future). Its own `Drop` cancels the same token, so an expiry
+        // that drops this future cannot leave a poller and a router holding the
+        // database; the full await stays in step 5.
+        if let Some(obs) = &self.observability {
+            obs.cancel();
+        }
         // Do not abort: an in-flight copy or retention operation must finish
         // cleanup. This is the ORIGINAL position — before the repository flush
         // — and it borrows the owner, so a deadline can abandon this teardown
@@ -529,32 +547,48 @@ impl ServerHandle {
         //    by the embedding caller when [`ServerHandle::take_shutdown_owner`]
         //    owns it.
         let data_dir = self.data_dir;
+        // The test seam holds `Arc<ShamirDbHandler>` (and the handler holds the
+        // DB), so a fixture that never takes it would keep its OWN stores
+        // locked through the barrier and turn a healthy shutdown into an
+        // unclean report. It is test-only state: drop it with the handles.
+        #[cfg(test)]
+        drop(self.activity_test_seam);
         drop(self.shamir);
         drop(self.audit_appender);
         drop(self.repl_supervisor);
         drop(self.token_service);
-        if let Err(still_locked) = wait_stores_released(&data_dir, STORE_RELEASE_TIMEOUT).await {
-            // The barrier's outcome belongs in the report, not only in a log
-            // line: a store that still holds its directory lock means a
-            // detached writer outlived the teardown, and an immediate relaunch
-            // of the same data directory can fail with `Locked`. The caller and
-            // the supervisor only see the report.
-            let stores = still_locked
-                .iter()
-                .filter_map(|dir| dir.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
-            tracing::warn!(
-                ?still_locked,
-                timeout = ?STORE_RELEASE_TIMEOUT,
-                "shutdown: stores still held after the release timeout",
-            );
-            report.add_error(format!(
-                "stores still held after the release timeout {STORE_RELEASE_TIMEOUT:?}: {stores} \
-                 — a detached writer outlived the teardown; an immediate relaunch of the same \
-                 data directory can fail with `Locked`"
-            ));
+        // The barrier's outcome belongs in the report, not only in a log line,
+        // and the two failures stay distinct: a lock that is still HELD names
+        // the store, while a probe that could not run (a saturated blocking
+        // pool) says that the release could not be verified at all.
+        match release_stores(&data_dir, STORE_RELEASE_TIMEOUT).await {
+            ReleaseOutcome::Released => {}
+            ReleaseOutcome::StillLocked(still_locked) => {
+                let stores = store_names(&still_locked);
+                tracing::warn!(
+                    ?still_locked,
+                    timeout = ?STORE_RELEASE_TIMEOUT,
+                    "shutdown: stores still held after the release timeout",
+                );
+                report.add_error(format!(
+                    "stores still held after the release timeout {STORE_RELEASE_TIMEOUT:?}: \
+                     {stores} — a writer outside this teardown still holds the store (a detached \
+                     task or an external process); an immediate relaunch of the same data \
+                     directory can fail with `Locked`"
+                ));
+            }
+            ReleaseOutcome::Unverified => {
+                tracing::warn!(
+                    timeout = ?STORE_RELEASE_TIMEOUT,
+                    "shutdown: store release could not be verified in time",
+                );
+                report.add_error(format!(
+                    "store release could not be verified within {STORE_RELEASE_TIMEOUT:?}: the \
+                     blocking pool did not run the lock probe, so whether every store released \
+                     its directory lock is UNKNOWN; an immediate relaunch of the same data \
+                     directory can fail with `Locked`"
+                ));
+            }
         }
     }
 

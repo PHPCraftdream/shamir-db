@@ -148,42 +148,53 @@ pub(super) fn spawn_meta_snapshot_task(
                     break;
                 }
                 _ = interval.tick() => {
-                    // `persist_snapshot` is synchronous (sync redb write
-                    // under the hood). It's short — measured << 1ms for
-                    // typical state sizes — so running it on the runtime
-                    // thread is fine. If it ever grows we can wrap in
-                    // `spawn_blocking`.
-                    match lockout.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                failures = lockout.failure_pair_count(),
-                                lockouts = lockout.active_lockout_count(),
-                                "lockout snapshot persisted",
-                            );
+                    // OFF the runtime worker, exactly like the final write: the
+                    // periodic `persist_snapshot` is a synchronous store write
+                    // (and may `SyncAll`), so a shutdown beginning during it
+                    // must not share a worker with it on a current-thread
+                    // runtime. The await keeps the ordering of successive ticks.
+                    let lockout = Arc::clone(&lockout);
+                    let rate_limit = Arc::clone(&rate_limit);
+                    let written = tokio::task::spawn_blocking(move || {
+                        match lockout.persist_snapshot() {
+                            Ok(true) => {
+                                tracing::trace!(
+                                    failures = lockout.failure_pair_count(),
+                                    lockouts = lockout.active_lockout_count(),
+                                    "lockout snapshot persisted",
+                                );
+                            }
+                            Ok(false) => {
+                                // No sink installed — should not happen in
+                                // production paths since `launch()` always
+                                // wires one.
+                                tracing::trace!("meta snapshot task: no lockout sink installed");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "lockout snapshot persist failed");
+                            }
                         }
-                        Ok(false) => {
-                            // No sink installed — should not happen in
-                            // production paths since `launch()` always
-                            // wires one.
-                            tracing::trace!("meta snapshot task: no lockout sink installed");
+                        match rate_limit.persist_snapshot() {
+                            Ok(true) => {
+                                tracing::trace!(
+                                    subnets = rate_limit.tracked_subnets(),
+                                    "rate-limit snapshot persisted",
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::trace!("meta snapshot task: no rate-limit sink installed");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "rate-limit snapshot persist failed");
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "lockout snapshot persist failed");
-                        }
-                    }
-                    match rate_limit.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                subnets = rate_limit.tracked_subnets(),
-                                "rate-limit snapshot persisted",
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::trace!("meta snapshot task: no rate-limit sink installed");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "rate-limit snapshot persist failed");
-                        }
+                    })
+                    .await;
+                    if let Err(join_error) = written {
+                        tracing::warn!(
+                            %join_error,
+                            "periodic metadata snapshot task did not complete"
+                        );
                     }
                 }
             }

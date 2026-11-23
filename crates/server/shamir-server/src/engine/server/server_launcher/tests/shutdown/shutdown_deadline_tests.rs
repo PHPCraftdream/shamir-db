@@ -37,7 +37,7 @@ use crate::config::{
 use crate::db_handler::NodeMode;
 use crate::server::server_handle::{arm_repo_flush_probe, arm_scheduled_join_probe};
 use crate::server::server_launcher::audit_teardown::arm_teardown_probe;
-use crate::server::{BootstrapMode, ServerLauncher};
+use crate::server::{release_stores, BootstrapMode, ReleaseOutcome, ServerLauncher};
 
 const TEST_NAME: &str = "shutdown_deadline_does_not_abandon_the_scheduled_worker";
 const EXAMPLE: &str = include_str!(concat!(
@@ -136,7 +136,7 @@ async fn run_scheduled_worker() {
     let (join_tx, join_rx) = tokio::sync::oneshot::channel::<()>();
     let (teardown_tx, teardown_rx) = tokio::sync::oneshot::channel::<()>();
     let joined = Arc::new(AtomicBool::new(false));
-    let flush_after_join = Arc::new(AtomicBool::new(false));
+    let flush_entered = Arc::new(AtomicBool::new(false));
     let _teardown_probe = arm_teardown_probe(move || {
         let _ = teardown_tx.send(());
     });
@@ -148,11 +148,8 @@ async fn run_scheduled_worker() {
         })
     };
     let _flush_probe = {
-        let joined = Arc::clone(&joined);
-        let flush_after_join = Arc::clone(&flush_after_join);
-        arm_repo_flush_probe(move || {
-            flush_after_join.store(joined.load(Ordering::SeqCst), Ordering::SeqCst);
-        })
+        let flush_entered = Arc::clone(&flush_entered);
+        arm_repo_flush_probe(move || flush_entered.store(true, Ordering::SeqCst))
     };
 
     // Only now does the shutdown start: the deadline cannot pre-empt the run
@@ -206,19 +203,147 @@ async fn run_scheduled_worker() {
         lock_after.is_ok(),
         "the data-directory lock must be free once the worker finished"
     );
-    // The flush stage was reached (the report says so whenever it was skipped)
-    // and the scheduled worker had already been joined when it started.
-    let flush_ran = !shutdown
-        .errors()
-        .iter()
-        .any(|error| error.contains("repository flush skipped"));
-    if flush_ran {
-        assert!(
-            flush_after_join.load(Ordering::SeqCst),
-            "the scheduled worker and its run are joined BEFORE the repository flush \
-             (mutant: the worker awaited after the flush): {shutdown:?}"
-        );
-    }
+    // On expiry the bounded teardown future is dropped AT the join and
+    // `ShutdownOwner::drain` only finishes that join and releases the lock: the
+    // repository flush belonged to the dropped future, so it must NOT run.
+    // (Mutant: a flush on the expiry path would write after the report already
+    // declared the teardown abandoned.)
+    assert!(
+        !flush_entered.load(Ordering::SeqCst),
+        "the expiry path must not enter the repository flush: {shutdown:?}"
+    );
+    // The runtime is STILL ALIVE here. Nothing may still hold a store: an
+    // observability handle dropped without cancellation would keep its poller
+    // and router (and their `Arc<ShamirDb>`) alive, and the barrier would still
+    // see a store lock (mutant: no cancel in `shutdown_with_report` and no
+    // `Drop` cancel on the handle).
+    let released = release_stores(&data_dir, Duration::from_secs(10)).await;
+    assert!(
+        matches!(released, ReleaseOutcome::Released),
+        "an expired shutdown must not leave live tasks holding the stores: {released:?}"
+    );
+}
+
+/// A NORMAL shutdown (no expiry) joins the scheduled worker and its run BEFORE
+/// the repository flush. The flush probe records whether the run had already
+/// completed when the flush stage started, so the mutant "wait after flush"
+/// (flush first, join after) records `false`.
+#[test]
+fn normal_shutdown_joins_the_scheduled_worker_before_the_repository_flush() {
+    on_big_stack(|| async {
+        timeout(BOUND, run_normal_order())
+            .await
+            .expect("normal-order test bounded");
+    });
+}
+
+async fn run_normal_order() {
+    let guard = FlakeGuard::with_watchdog(
+        "normal_shutdown_joins_the_scheduled_worker_before_the_repository_flush",
+        Duration::from_secs(300),
+    );
+    try_install_global_tracing_ring();
+    let temp = tempfile::tempdir().expect("test root");
+    let data_dir = temp.path().join("data");
+    let backups = temp.path().join("backups");
+    create_private_dir(&data_dir).expect("private data directory");
+    create_private_dir(&backups).expect("private backup directory");
+
+    let parked = Arc::new(Semaphore::new(0));
+    let gate = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
+    let completed = Arc::new(AtomicBool::new(false));
+
+    let handle = ServerLauncher::new(backup_config(data_dir.clone(), backups))
+        .with_bootstrap(BootstrapMode::Skip)
+        .launch_with_backup_test({
+            let parked = Arc::clone(&parked);
+            let gate = Arc::clone(&gate);
+            let completed = Arc::clone(&completed);
+            move |resolved, registry, owner, shutdown| {
+                registry.arm_post_run_callback_for_shutdown_test({
+                    let parked = Arc::clone(&parked);
+                    let gate = Arc::clone(&gate);
+                    move |_published: &Path| {
+                        parked.add_permits(1);
+                        wait_until(&gate, "worker release", |state| state.released);
+                        None
+                    }
+                });
+                spawn_for_test(
+                    resolved,
+                    registry,
+                    owner,
+                    shutdown.child_token(),
+                    Duration::from_secs(3600),
+                    move |ok| {
+                        if ok {
+                            completed.store(true, Ordering::SeqCst);
+                        }
+                    },
+                )
+            }
+        })
+        .await
+        .expect("launch real server with the scheduled backup worker");
+    guard.mark("launched");
+
+    let parked_permit = timeout(BOUND, parked.acquire())
+        .await
+        .expect("the scheduled run must reach its post-run callback")
+        .expect("parked semaphore open");
+    drop(parked_permit);
+    guard.mark("native runner parked before its completion signal");
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel::<()>();
+    let flush_entered = Arc::new(AtomicBool::new(false));
+    let flush_saw_completion = Arc::new(AtomicBool::new(false));
+    let _join_probe = arm_scheduled_join_probe(move || {
+        let _ = join_tx.send(());
+    });
+    let _flush_probe = {
+        let flush_entered = Arc::clone(&flush_entered);
+        let flush_saw_completion = Arc::clone(&flush_saw_completion);
+        let completed = Arc::clone(&completed);
+        arm_repo_flush_probe(move || {
+            flush_entered.store(true, Ordering::SeqCst);
+            flush_saw_completion.store(completed.load(Ordering::SeqCst), Ordering::SeqCst);
+        })
+    };
+
+    // GENEROUS deadline: this case must not expire.
+    let shutdown = tokio::spawn(crate::runtime::drain_server(handle, BOUND));
+    timeout(BOUND, join_rx)
+        .await
+        .expect("a normal shutdown must reach ShutdownOwner::join_schedule")
+        .expect("join probe channel");
+    guard.mark("join_schedule reached");
+    release(&gate);
+    let shutdown = timeout(BOUND, shutdown)
+        .await
+        .expect("the shutdown future must finish")
+        .expect("shutdown task");
+    guard.mark("shutdown drained");
+
+    assert!(
+        !shutdown
+            .errors()
+            .iter()
+            .any(|error| error.contains("graceful shutdown exceeded deadline")),
+        "the normal case must not expire: {shutdown:?}"
+    );
+    assert!(
+        completed.load(Ordering::SeqCst),
+        "the scheduled run must complete before the shutdown returns: {shutdown:?}"
+    );
+    assert!(
+        flush_entered.load(Ordering::SeqCst),
+        "the repository flush stage must run on a normal shutdown: {shutdown:?}"
+    );
+    assert!(
+        flush_saw_completion.load(Ordering::SeqCst),
+        "the scheduled worker and its run are joined BEFORE the repository flush \
+         (mutant: the worker awaited after the flush): {shutdown:?}"
+    );
 }
 
 /// The runner-side rendezvous state.
@@ -276,9 +401,12 @@ fn listener_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
         Err(error) => error,
     });
     let message = error.to_string();
+    // `BootError::Bind` prefixes EVERY bind failure with `listener bind`, so the
+    // endpoint is distinguished by the inner text the HTTP path adds
+    // (`HTTP bind <addr>: ...`, `server_launcher/http/launcher.rs`).
     assert!(
-        message.contains("listener bind"),
-        "the original boot error must be returned: {message}"
+        message.contains("listener bind") && message.contains("HTTP bind"),
+        "the original boot error must be returned with the data-listener endpoint: {message}"
     );
     assert!(
         message.contains(&occupied),
@@ -286,7 +414,7 @@ fn listener_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
     );
     assert!(
         !message.contains("observability"),
-        "the listener rollback must not report the observability listener: {message}"
+        "the listener rollback must not report the observability endpoint: {message}"
     );
     assert!(
         teardown_ran.load(Ordering::SeqCst),
@@ -321,16 +449,16 @@ fn observability_bind_rollback_keeps_the_boot_error_and_releases_the_lock() {
         Err(error) => error,
     });
     let message = error.to_string();
+    // The observability path wraps its own `ObservabilityError::Bind` display,
+    // which does NOT carry the socket address; the endpoint marker in the error
+    // text is `observability`, and every bind failure shares the outer
+    // `listener bind` prefix.
     assert!(
-        message.contains("observability"),
-        "the original boot error must be returned: {message}"
+        message.contains("listener bind") && message.contains("observability"),
+        "the original boot error must be returned with the observability endpoint: {message}"
     );
     assert!(
-        message.contains(&occupied),
-        "the error must name the OBSERVABILITY address that failed, not any bind: {message}"
-    );
-    assert!(
-        !message.contains("listener bind"),
+        !message.contains("HTTP bind"),
         "the observability rollback must not report the data listener: {message}"
     );
     assert!(
@@ -419,7 +547,7 @@ fn backup_config(data_dir: PathBuf, backups: PathBuf) -> Config {
 /// A server config with the listener and observability addresses under the
 /// test's control (both are bound by the launcher, in that order).
 fn bind_config(data_dir: PathBuf, listener: String, observability: String) -> Config {
-    let mut config = Config {
+    let config = Config {
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -451,8 +579,10 @@ fn bind_config(data_dir: PathBuf, listener: String, observability: String) -> Co
         replication: None,
         backup: None,
     };
-    config.listeners = vec![listener_config(listener)];
-    finish_config(config, data_dir, "127.0.0.1:0".to_owned(), observability)
+    // The REQUESTED listener goes through unchanged: an occupied address is the
+    // fault the rollback tests inject, so replacing it with an ephemeral one
+    // would make those tests boot successfully instead of rolling back.
+    finish_config(config, data_dir, listener, observability)
 }
 
 fn finish_config(

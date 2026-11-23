@@ -16,7 +16,10 @@
 # that clamped value, so the age grows), and a restored data directory carries
 # both persisted rows of the backup it came from. The unchanged zero-value
 # fallback to shamir_backup_schedule_started_timestamp_seconds stays in the
-# expression. Thresholds and expressions are unchanged; the condition must
+# expression. An UNREADABLE armed-at row is used for the current boot only and is
+# never overwritten (bounded `read-armed-at-failed` token), so the series can report a
+# provisional first-arming time without losing the durable one.
+# Thresholds and expressions are unchanged; the condition must
 # remain true for 5m. A MANUAL successful copy also moves the last-success
 # timestamp and therefore clears staleness.
 # BackupFailing: the streak increments on scheduled `failed` (including an

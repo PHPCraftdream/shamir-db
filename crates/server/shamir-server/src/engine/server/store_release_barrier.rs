@@ -63,32 +63,81 @@ fn is_released(dir: &Path) -> bool {
     }
 }
 
-/// Wait until no fjall store under `root` is locked. On timeout returns the
-/// store roots that are still locked.
-pub(crate) async fn wait_stores_released(
-    root: &Path,
-    timeout: Duration,
-) -> Result<(), Vec<PathBuf>> {
+/// The verdict of one bounded release wait.
+#[derive(Debug)]
+pub(crate) enum ReleaseOutcome {
+    /// No store under the root holds its directory lock.
+    Released,
+    /// These store roots still held their lock when the budget expired.
+    StillLocked(Vec<PathBuf>),
+    /// The probe itself could not run to a verdict inside the budget: the
+    /// blocking pool never took the discovery/probe job (a saturated pool parks
+    /// queued jobs, so an unbounded await here would keep the public shutdown
+    /// inside this barrier forever). Distinct from [`Self::StillLocked`],
+    /// because nothing is known about the stores.
+    Unverified,
+}
+
+/// Wait until no fjall store under `root` is locked, bounded end to end.
+///
+/// Every probe await is bounded by the REMAINING budget, so neither discovery
+/// nor a lock probe can outlive the timeout on a busy pool; the verdict says
+/// which of the three cases happened.
+pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOutcome {
     let deadline = Instant::now() + timeout;
     let root = root.to_path_buf();
-    let mut pending = tokio::task::spawn_blocking(move || fjall_dirs(&root))
-        .await
-        .unwrap_or_default();
+    let mut pending = match bounded_probe(deadline, move || fjall_dirs(&root)).await {
+        Some(pending) => pending,
+        None => return ReleaseOutcome::Unverified,
+    };
     let mut delay = POLL_START;
     loop {
-        pending = tokio::task::spawn_blocking(move || {
+        pending = match bounded_probe(deadline, move || {
             pending.retain(|dir| !is_released(dir));
             pending
         })
         .await
-        .unwrap_or_default();
+        {
+            Some(pending) => pending,
+            None => return ReleaseOutcome::Unverified,
+        };
         if pending.is_empty() {
-            return Ok(());
+            return ReleaseOutcome::Released;
         }
         if Instant::now() >= deadline {
-            return Err(pending);
+            return ReleaseOutcome::StillLocked(pending);
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(POLL_MAX);
+    }
+}
+
+/// Run ONE blocking probe, bounded by `deadline`. `None` when the budget ran out
+/// before a pool worker took the job (a saturated pool) or when the job ended
+/// without a value.
+async fn bounded_probe<T: Send + 'static>(
+    deadline: Instant,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.send(probe());
+    });
+    match tokio::time::timeout_at(deadline, rx).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+/// Fail-closed wrapper for the callers that must not publish while the lock
+/// state is UNKNOWN: `Unverified` is reported as a failure of the given root.
+pub(crate) async fn wait_stores_released(
+    root: &Path,
+    timeout: Duration,
+) -> Result<(), Vec<PathBuf>> {
+    match release_stores(root, timeout).await {
+        ReleaseOutcome::Released => Ok(()),
+        ReleaseOutcome::StillLocked(locked) => Err(locked),
+        ReleaseOutcome::Unverified => Err(vec![root.to_path_buf()]),
     }
 }

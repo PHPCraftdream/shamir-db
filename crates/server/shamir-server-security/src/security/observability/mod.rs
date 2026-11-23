@@ -170,21 +170,43 @@ impl ObservabilityState {
     }
 }
 
-/// Handle to a running observability server. `shutdown` MUST be called
-/// explicitly to stop it — dropping this handle does NOT cancel
-/// `listener_task`/`poller_task` (a bare `CancellationToken` has no
-/// Drop-triggered cancel; that's `tokio_util::sync::DropGuard`'s job,
-/// which this type doesn't use) nor abort the `JoinHandle`s, so an
-/// un-shut-down drop leaks both background tasks running detached.
+/// Handle to a running observability server.
+///
+/// [`Self::shutdown`] stops it AND waits for both tasks. Dropping the handle
+/// cancels the same token (see `Drop`), so a shutdown future abandoned by its
+/// deadline cannot leave the poller and the router alive holding the database;
+/// the two `JoinHandle`s are still not awaited by the drop, so a dropped handle
+/// does not block — the tasks stop on their own at their next cancellation
+/// point.
 pub struct ObservabilityHandle {
     pub bound_addr: SocketAddr,
     pub state: Arc<ObservabilityState>,
     shutdown: CancellationToken,
-    listener_task: JoinHandle<()>,
-    poller_task: JoinHandle<()>,
+    // `Option` so `shutdown(self)` can TAKE the handles: the `Drop` impl below
+    // makes a direct field move out of `self` illegal.
+    listener_task: Option<JoinHandle<()>>,
+    poller_task: Option<JoinHandle<()>>,
+}
+
+impl Drop for ObservabilityHandle {
+    fn drop(&mut self) {
+        // A handle dropped without `shutdown()` — the ordered shutdown's future
+        // was abandoned by its deadline — must still stop both tasks: they hold
+        // an `Arc<ShamirDb>` and the router, and leaving them live would keep
+        // the stores locked past the teardown. The awaits stay in `shutdown()`.
+        self.shutdown.cancel();
+    }
 }
 
 impl ObservabilityHandle {
+    /// Ask both tasks to stop WITHOUT waiting for them.
+    ///
+    /// The shutdown path signals this BEFORE any wait a deadline can abandon,
+    /// so an expiry never depends on the handle's `Drop` having run yet.
+    pub fn cancel(&self) {
+        self.shutdown.cancel();
+    }
+
     /// Stop the HTTP listener and the process-metrics poller.
     ///
     /// F-68 (#895) cluster D / task #124 added timestamped `tracing` events
@@ -224,7 +246,7 @@ impl ObservabilityHandle {
     /// immediately once cancelled, closing the race by construction. The
     /// `tracing` instrumentation is kept (still useful if some other stall
     /// appears here later).
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         let shutdown_started = std::time::Instant::now();
         tracing::debug!("ObservabilityHandle::shutdown: enter, calling cancel()");
         self.shutdown.cancel();
@@ -235,7 +257,9 @@ impl ObservabilityHandle {
 
         let listener_wait_started = std::time::Instant::now();
         tracing::debug!("ObservabilityHandle::shutdown: awaiting listener_task");
-        let _ = self.listener_task.await;
+        if let Some(listener_task) = self.listener_task.take() {
+            let _ = listener_task.await;
+        }
         tracing::debug!(
             elapsed = ?listener_wait_started.elapsed(),
             "ObservabilityHandle::shutdown: listener_task.await returned \
@@ -244,7 +268,9 @@ impl ObservabilityHandle {
 
         let poller_wait_started = std::time::Instant::now();
         tracing::debug!("ObservabilityHandle::shutdown: awaiting poller_task");
-        let _ = self.poller_task.await;
+        if let Some(poller_task) = self.poller_task.take() {
+            let _ = poller_task.await;
+        }
         tracing::debug!(
             elapsed = ?poller_wait_started.elapsed(),
             "ObservabilityHandle::shutdown: poller_task.await returned"
@@ -607,8 +633,8 @@ pub async fn spawn_with_byte_budget(
         bound_addr,
         state,
         shutdown,
-        listener_task,
-        poller_task,
+        listener_task: Some(listener_task),
+        poller_task: Some(poller_task),
     })
 }
 

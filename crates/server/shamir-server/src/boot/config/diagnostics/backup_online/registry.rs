@@ -848,10 +848,12 @@ struct RunGuard {
     completed_dir: Option<PathBuf>,
     started_at: Instant,
     armed: bool,
+    /// Whether the body already accounted the COPY outcome (`note_finished`):
+    /// an explicit flag, because a MANUAL run has no sender at all and
+    /// `outcome.is_none()` could not tell "published" from "never published".
+    copy_accounted: bool,
     // Field drop closes the channel on unwind only after Drop publishes
     // the failure; normal completion sends explicitly, before retention.
-    // `None` is therefore how `Drop` knows the COPY outcome was already
-    // published (protocol completion) and must not be counted again.
     outcome: Option<oneshot::Sender<bool>>,
     // The LATE signal: sent exactly once when the run is fully over (final
     // record published, defensive refusal, or the unwind path). Never early.
@@ -877,6 +879,7 @@ impl RunGuard {
             completed_dir: None,
             started_at: Instant::now(),
             armed: false,
+            copy_accounted: false,
             outcome,
             finished,
         }
@@ -885,6 +888,8 @@ impl RunGuard {
     /// Publish the COPY outcome at protocol completion; does NOT disarm (the
     /// guard must stay live across retention so a later panic still records).
     fn publish_outcome(&mut self, verified: bool) {
+        // The accounting is done for EVERY run here; only a scheduled one has a sender.
+        self.copy_accounted = true;
         if let Some(outcome) = self.outcome.take() {
             let _ = outcome.send(verified);
         }
@@ -911,11 +916,10 @@ impl Drop for RunGuard {
             return;
         }
         let stage = self.run_state.stage();
-        // `publish_outcome` takes the sender, so `None` means the COPY
-        // outcome already reached the scheduler: this unwind happened in the
-        // post-publication window (retention and the final publication) and
-        // must not count the copy a second time.
-        let copy_published = self.outcome.is_none();
+        // `publish_outcome` marks the accounting done, so this covers the
+        // scheduled post-publication window AND a manual run (which has no
+        // sender) — the latter must still be counted as ONE copy failure.
+        let copy_published = self.copy_accounted;
         let error = match (&self.completed_dir, self.scheduled) {
             (Some(_), true) => String::from(
                 "online-backup runner panicked after the protocol completed; \

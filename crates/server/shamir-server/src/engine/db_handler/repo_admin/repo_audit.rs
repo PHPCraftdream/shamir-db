@@ -171,6 +171,18 @@ impl CancelRefusalAudit {
         // entries than `CANCEL_AUDIT_CAPACITY` (the bound its doc states).
         // Taking the share first let a burst of callers create entries before
         // they knew whether a global slot existed -- above that bound.
+        // READ-ONLY pre-check first: an already-capped principal is refused
+        // without touching a global slot, so it can neither take the last one
+        // while it stalls on the map nor refuse another principal meanwhile.
+        if self.share_is_full(principal) {
+            let dropped = self.record_drop();
+            tracing::warn!(
+                share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+                dropped,
+                "cancel refusal audit principal share full; dropping event"
+            );
+            return None;
+        }
         if !self.reserve_global_slot() {
             return None;
         }
@@ -189,6 +201,13 @@ impl CancelRefusalAudit {
             principal: principal.to_owned(),
             appended: false,
         })
+    }
+
+    /// Read-only share test: creates no entry and takes no slot.
+    fn share_is_full(&self, principal: &str) -> bool {
+        self.principals
+            .read_sync(principal, |_, held| *held >= CANCEL_AUDIT_PRINCIPAL_SHARE)
+            .unwrap_or(false)
     }
 
     /// Take one slot of `principal`'s share, or `false` when the share is full.
@@ -335,6 +354,15 @@ impl CancelRefusalAudit {
         }
     }
 
+    /// Test-only hook fired BETWEEN the admission check and the spawn, on the
+    /// caller's thread. A close-race test parks there to prove that `close()`
+    /// cannot return while a spawn decision is in flight.
+    #[cfg(test)]
+    pub(crate) fn arm_spawn_window_probe(probe: impl FnOnce() + 'static) -> SpawnWindowProbeGuard {
+        SPAWN_WINDOW_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+        SpawnWindowProbeGuard
+    }
+
     /// Spawn one accepted job and register its abort handle as ONE decision
     /// with [`Self::close`].
     ///
@@ -354,6 +382,8 @@ impl CancelRefusalAudit {
         if self.state.load(Ordering::Acquire) & CLOSED != 0 {
             return None;
         }
+        #[cfg(test)]
+        fire_spawn_window_probe();
         let handle = tokio::task::spawn_blocking(job);
         handles.retain(|queued| !queued.is_finished());
         handles.push(handle.abort_handle());
@@ -384,6 +414,32 @@ impl CancelRefusalAudit {
             tracing::debug!(dropped, "cancel refusal audit drops so far");
         }
         complete
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPAWN_WINDOW_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears an unfired spawn-window probe; a probe that fires removes itself.
+#[cfg(test)]
+pub(crate) struct SpawnWindowProbeGuard;
+
+#[cfg(test)]
+impl Drop for SpawnWindowProbeGuard {
+    fn drop(&mut self) {
+        SPAWN_WINDOW_PROBE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Fire and consume the current thread's spawn-window probe, if any.
+#[cfg(test)]
+fn fire_spawn_window_probe() {
+    let probe = SPAWN_WINDOW_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe();
     }
 }
 

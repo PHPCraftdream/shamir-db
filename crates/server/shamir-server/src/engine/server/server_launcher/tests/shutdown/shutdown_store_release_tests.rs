@@ -26,7 +26,7 @@ use crate::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig, TlsConfig,
 };
 use crate::db_handler::NodeMode;
-use crate::server::wait_stores_released;
+use crate::server::{release_stores, ReleaseOutcome};
 use crate::server::{BootstrapMode, ServerLauncher};
 
 /// Generous bound: the Windows CI runner is up to 10x slower than a
@@ -69,12 +69,41 @@ fn a_store_that_outlives_the_teardown_reaches_the_shutdown_report() {
         .expect("the test holds the stale store lock");
     guard.mark("stale store lock held before boot");
 
-    let handle = run_blocking(move || {
-        let config = boot_config(data_dir.clone());
-        block_on_launch(config)
-    });
+    // ONE runtime for the launch and the shutdown: dropping the launch runtime
+    // first would tear down its blocking pool and any task still holding a
+    // store, so the barrier's verdict would come from a dead runtime instead of
+    // from the shutdown under test.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let data_dir_for_boot = data_dir.clone();
+    let handle = runtime
+        .block_on(async move {
+            tokio::time::timeout(
+                BOUND,
+                Box::pin(
+                    ServerLauncher {
+                        config: boot_config(data_dir_for_boot),
+                        bootstrap: BootstrapMode::Skip,
+                        node_mode: NodeMode::ReadWrite,
+                    }
+                    .launch(),
+                ),
+            )
+            .await
+        })
+        .expect("launcher boot within the bound")
+        .expect("launcher boot");
     guard.mark("launcher booted");
-    let report = run_blocking(move || block_on_shutdown(handle, Duration::from_secs(30)));
+    let report = runtime.block_on(async {
+        tokio::time::timeout(
+            BOUND,
+            crate::runtime::drain_server(handle, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the embedding shutdown must finish within the bound")
+    });
     guard.mark("shutdown drained with the store still locked");
 
     // Unconditional release, then assert: a failing claim never leaves the
@@ -91,8 +120,54 @@ fn a_store_that_outlives_the_teardown_reaches_the_shutdown_report() {
          clean): {report:?}"
     );
     assert!(
+        report
+            .errors()
+            .iter()
+            .any(|error| error.contains("stale_store")),
+        "the report must NAME the store root it is still waiting for: {report:?}"
+    );
+    assert!(
         !report.is_clean(),
         "a store that outlived the teardown makes the shutdown unclean: {report:?}"
+    );
+
+    // The counterfactual: with the lock released, the SAME runtime and the same
+    // data directory shut down cleanly — so the entry above came from the held
+    // lock, not from the runtime or from the fixture.
+    let data_dir_for_reboot = data_dir.clone();
+    let handle = runtime
+        .block_on(async move {
+            tokio::time::timeout(
+                BOUND,
+                Box::pin(
+                    ServerLauncher {
+                        config: boot_config(data_dir_for_reboot),
+                        bootstrap: BootstrapMode::Skip,
+                        node_mode: NodeMode::ReadWrite,
+                    }
+                    .launch(),
+                ),
+            )
+            .await
+        })
+        .expect("second boot within the bound")
+        .expect("second boot");
+    guard.mark("second launcher booted with the lock released");
+    let clean = runtime.block_on(async {
+        tokio::time::timeout(
+            BOUND,
+            crate::runtime::drain_server(handle, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the second shutdown must finish within the bound")
+    });
+    guard.mark("second shutdown drained");
+    assert!(
+        !clean
+            .errors()
+            .iter()
+            .any(|error| error.contains("stores still held after the release timeout")),
+        "with the lock released the barrier must not report a held store: {clean:?}"
     );
 }
 
@@ -111,22 +186,66 @@ async fn run_held_store_lock() {
         .expect("open store lock");
     held.try_lock().expect("the test holds the store lock");
 
-    let locked = wait_stores_released(temp.path(), Duration::from_millis(100)).await;
-    let still = locked.expect_err(
-        "a held store lock must fail the barrier: an `Ok` here would report a released data \
-         directory while a writer still owns it",
-    );
-    assert_eq!(
-        still,
-        vec![store.clone()],
-        "the barrier names the store root it is still waiting for"
-    );
+    match release_stores(temp.path(), Duration::from_millis(100)).await {
+        ReleaseOutcome::StillLocked(still) => assert_eq!(
+            still,
+            vec![store.clone()],
+            "the barrier names the store root it is still waiting for"
+        ),
+        other => panic!(
+            "a held store lock must be reported as StillLocked — `Released` would report a \
+             released data directory while a writer still owns it — got {other:?}"
+        ),
+    }
 
     held.unlock().expect("release the store lock");
-    wait_stores_released(temp.path(), BOUND)
-        .await
-        .expect("a released store lock must satisfy the barrier");
+    assert!(
+        matches!(
+            release_stores(temp.path(), BOUND).await,
+            ReleaseOutcome::Released
+        ),
+        "a released store lock must satisfy the barrier"
+    );
     drop(held);
+}
+
+/// A saturated blocking pool must yield the DISTINCT `Unverified` verdict, not
+/// a hang and not a false `Released`: the probe job is queued behind the only
+/// pool worker, so the barrier's own budget decides.
+///
+/// Mutant: the former unbounded `spawn_blocking(..).await` (no `timeout_at`)
+/// makes this test hang until the watchdog instead of returning; a barrier that
+/// falls back to `Released` fails the assertion.
+#[test]
+fn a_saturated_blocking_pool_reports_an_unverified_release() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime");
+    let temp = tempfile::tempdir().expect("test root");
+    let root = temp.path().to_path_buf();
+    let store = root.join("counters");
+    std::fs::create_dir_all(&store).expect("store dir");
+    std::fs::write(store.join("version"), b"v").expect("version marker");
+    std::fs::write(store.join("lock"), b"").expect("lock file");
+
+    // Occupy the ONLY blocking worker for far longer than the barrier budget.
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let occupied = runtime.spawn_blocking(move || {
+        let _ = started_tx.send(());
+        std::thread::sleep(Duration::from_millis(1_500));
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the pool worker started the occupying job");
+
+    let outcome = runtime.block_on(release_stores(&root, Duration::from_millis(150)));
+    drop(occupied);
+    assert!(
+        matches!(outcome, ReleaseOutcome::Unverified),
+        "a probe that cannot run must be reported as Unverified, got {outcome:?}"
+    );
 }
 
 /// A server config with no fixed ports: every listener and the observability
@@ -175,47 +294,6 @@ fn boot_config(data_dir: PathBuf) -> Config {
         replication: None,
         backup: None,
     }
-}
-
-fn block_on_launch(config: Config) -> crate::server::ServerHandle {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    let launched = runtime.block_on(async move {
-        tokio::time::timeout(
-            BOUND,
-            Box::pin(
-                ServerLauncher {
-                    config,
-                    bootstrap: BootstrapMode::Skip,
-                    node_mode: NodeMode::ReadWrite,
-                }
-                .launch(),
-            ),
-        )
-        .await
-    });
-    match launched {
-        Ok(Ok(handle)) => handle,
-        Ok(Err(error)) => panic!("launcher boot failed: {error}"),
-        Err(_) => panic!("launcher boot did not finish within {BOUND:?}"),
-    }
-}
-
-fn block_on_shutdown(
-    handle: crate::server::ServerHandle,
-    deadline: Duration,
-) -> shamir_db::ShutdownReport {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async move {
-        tokio::time::timeout(BOUND, crate::runtime::drain_server(handle, deadline))
-            .await
-            .expect("the embedding shutdown must finish within the bound")
-    })
 }
 
 fn run_blocking<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {

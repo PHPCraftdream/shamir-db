@@ -127,6 +127,10 @@ fn note_success_never_lowers_the_exported_stamp() {
     // Run N+1 stamps an OLDER second than run N did.
     clock.pin(NOW - 60);
     note_success(2, Duration::from_secs(1));
+    // Restore the clock BEFORE the scrape: a scrape made at the older second
+    // would `fetch_min` the cell down to it, and the assertion below would then
+    // measure the scrape's own clamp instead of the success accounting.
+    clock.pin(NOW);
     assert_eq!(
         backup_metrics_snapshot().last_success_timestamp_seconds,
         NOW,
