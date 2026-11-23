@@ -604,6 +604,10 @@ impl SessionPermissions {
             BatchOp::CancelTx(_) | BatchOp::CancelCursorAdmin(_) => {
                 (Action::Alter, Resource::Global)
             }
+            // R4b-4: shape statistics are node-local telemetry; the listing is
+            // read-only and the reset is a handler-authorized local wipe.
+            BatchOp::ListShapeStats(_) => (Action::Read, Resource::Global),
+            BatchOp::ResetShapeStats(_) => (Action::Alter, Resource::Global),
         }
     }
 

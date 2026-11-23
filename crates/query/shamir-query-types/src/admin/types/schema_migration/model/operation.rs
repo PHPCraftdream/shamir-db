@@ -533,6 +533,16 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "cursor cancellation",
                 ))
             }
+            BatchOp::ListShapeStats(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "shape statistics listing",
+                ))
+            }
+            BatchOp::ResetShapeStats(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "shape statistics reset",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

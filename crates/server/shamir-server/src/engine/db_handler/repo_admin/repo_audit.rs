@@ -537,6 +537,109 @@ pub(super) fn enqueue_cancel_refusal_audit(
     enqueue_operator_cancel_audit(queue, audit, session, "cancel_request", target.0, outcome)
 }
 
+/// Payload of one shape-statistics reset (`reset_shape_stats`): the
+/// repository name ONLY.
+///
+/// The reset destroys node-local telemetry; there is no per-shape, counter
+/// or user data to record, and none may enter the audit chain. The repo
+/// name is the operator-visible target of the admin operation, never
+/// sensitive (the same name already appears in `alter_repo` payloads).
+#[derive(serde::Serialize)]
+struct ShapeResetAuditDetails<'a> {
+    repo: &'a str,
+}
+
+// Report a shape-reset job discarded before execution (e.g. during runtime
+// teardown), so a refused spawn is visible and its slot is accounted.
+struct PendingShapeResetAudit {
+    dispatcher: tracing::Dispatch,
+    completed: bool,
+    // Field drop order: release the writer before signalling idle.
+    audit: Arc<AuditChainWriter>,
+    slot: CancelAuditSlot,
+}
+
+impl PendingShapeResetAudit {
+    fn complete(mut self, appended: bool) {
+        self.completed = true;
+        self.slot.appended = appended;
+    }
+}
+
+impl Drop for PendingShapeResetAudit {
+    fn drop(&mut self) {
+        if !self.completed {
+            tracing::dispatcher::with_default(&self.dispatcher, || {
+                tracing::error!("shape reset audit job dropped before append completed");
+            });
+        }
+    }
+}
+
+/// Best-effort, detached audit append for a successful shape-statistics
+/// reset. Admission, per-principal share, drain accounting and the blocking
+/// append are the SAME machinery (and the same bounded queue) the operator
+/// cancels use, so a reset can never block the reply and can never grow an
+/// unbounded job list.
+///
+/// Operation label `reset_shape_stats` names the reset; the status word is
+/// the fixed `ok` (the wipe has no partial outcome) and the details carry
+/// the repository name only.
+pub(super) fn enqueue_shape_reset_audit(
+    queue: &Arc<CancelRefusalAudit>,
+    audit: &Arc<AuditChainWriter>,
+    session: &Session,
+    repo: &str,
+) -> Option<JoinHandle<()>> {
+    let details = match rmp_serde::to_vec_named(&ShapeResetAuditDetails { repo }) {
+        Ok(details) => details,
+        Err(error) => {
+            tracing::error!(%error, "audit append skipped: shape reset encoding failed");
+            return None;
+        }
+    };
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(error) => {
+            tracing::error!(%error, "audit append skipped: clock unavailable");
+            return None;
+        }
+    };
+    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
+    // a job that cannot be built never consumes a share slot.
+    let slot = queue.try_reserve(&session.username)?;
+    let mut session_prefix = [0u8; 8];
+    session_prefix.copy_from_slice(&session.session_id[..8]);
+    let transport = transport_name(session.transport_kind);
+    let username = session.username.clone();
+    let pending = PendingShapeResetAudit {
+        dispatcher: tracing::dispatcher::get_default(Clone::clone),
+        completed: false,
+        audit: Arc::clone(audit),
+        slot,
+    };
+    queue.spawn_tracked(move || {
+        let guard = pending;
+        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
+            if let Err(error) = guard.audit.append(
+                "reset_shape_stats",
+                transport,
+                username,
+                "",
+                session_prefix,
+                "ok",
+                details,
+                now_ns,
+            ) {
+                tracing::error!(%error, "audit append rejected shape reset");
+                return false;
+            }
+            true
+        });
+        guard.complete(appended);
+    })
+}
+
 pub(super) fn repo_audit_observer(
     audit: Arc<AuditChainWriter>,
     session: &Session,

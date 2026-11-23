@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::QueryMetrics;
+use super::{QueryMetrics, ShapeRegistry};
 use crate::repo::durability_policy::{Histogram, HistogramSnapshot, LATENCY_NS_BOUNDS};
 use shamir_engine_table::index_metrics::{IndexBuildObserver, IndexMetricKind};
 
@@ -40,6 +40,8 @@ pub struct EngineMetrics {
     /// `shamir_index_rebuild_seconds` — doctor/repair or identity-migration
     /// re-invocations of the create paths.
     index_rebuilds: [Histogram; 3],
+    /// Bounded per-shape execution counters.
+    shapes: ShapeRegistry,
 }
 
 impl Default for EngineMetrics {
@@ -50,6 +52,7 @@ impl Default for EngineMetrics {
             rows: std::array::from_fn(|_| AtomicU64::new(0)),
             index_builds: std::array::from_fn(|_| Histogram::new(LATENCY_NS_BOUNDS)),
             index_rebuilds: std::array::from_fn(|_| Histogram::new(LATENCY_NS_BOUNDS)),
+            shapes: ShapeRegistry::default(),
         }
     }
 }
@@ -82,6 +85,10 @@ impl QueryMetrics for EngineMetrics {
             self.rows[1].fetch_add(returned, Ordering::Relaxed);
         }
     }
+
+    fn record_shape(&self, key: [u8; 16], elapsed_ns: u64, failed: bool) {
+        self.shapes.record(key, elapsed_ns, failed);
+    }
 }
 
 impl IndexBuildObserver for EngineMetrics {
@@ -106,7 +113,13 @@ impl EngineMetrics {
                 .collect(),
             rows_viewed: self.rows[0].load(Ordering::Relaxed),
             rows_returned: self.rows[1].load(Ordering::Relaxed),
+            shapes_tracked: self.shapes.tracked() as u64,
         }
+    }
+
+    /// Per-shape execution counters of this repository.
+    pub fn shape_stats(&self) -> &ShapeRegistry {
+        &self.shapes
     }
 
     /// Torn-free copies of the index build/rebuild histograms for the

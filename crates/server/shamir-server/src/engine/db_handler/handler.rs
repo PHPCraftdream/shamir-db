@@ -239,6 +239,12 @@ pub struct ShamirDbHandler {
     /// via [`Self::with_operator_boot`]. `None` for handlers built
     /// outside the server boot path (unit tests).
     pub(super) operator_boot: Option<OperatorBootContext>,
+    /// Test-only seam: parks `reset_shape_stats` at the commit claim so a
+    /// test can race a cancellation against it. `None` in production (a
+    /// `#[cfg(test)]` field — no runtime cost, no production surface).
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) shape_reset_pause:
+        Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
 /// Boot metadata captured at server launch (see `with_operator_boot`).
@@ -268,6 +274,27 @@ impl ShamirDbHandler {
         self
     }
 
+    /// Test-only: install the shape-reset pause seam (see
+    /// [`Self::shape_reset_pause_at`]).
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn with_shape_reset_pause(
+        mut self,
+        pause: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
+    ) -> Self {
+        self.shape_reset_pause = pause;
+        self
+    }
+
+    /// Test-only seam used by `reset_shape_stats`: called with `false`
+    /// immediately before the commit claim and with `true` immediately
+    /// after a successful claim, both before the wipe.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn shape_reset_pause_at(&self, after_claim: bool) {
+        if let Some(pause) = &self.shape_reset_pause {
+            pause(after_claim);
+        }
+    }
+
     /// Construct a handler over a shared [`ShamirDb`] without admin support.
     /// Use [`Self::with_admin`] when SCRAM user creation should be possible.
     pub fn new(db: Arc<ShamirDb>) -> Self {
@@ -294,6 +321,8 @@ impl ShamirDbHandler {
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
+            #[cfg(test)]
+            shape_reset_pause: None,
         }
     }
 
@@ -322,6 +351,8 @@ impl ShamirDbHandler {
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
+            #[cfg(test)]
+            shape_reset_pause: None,
         }
     }
 
