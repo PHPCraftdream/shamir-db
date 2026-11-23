@@ -18,6 +18,10 @@ use sha2::{Digest, Sha256};
 use super::manifest::BACKUP_META_FILE_NAME;
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
+use crate::sync::durability::audit_chain_files::{
+    audit_capture_is_stable, is_audit_log_file_name, list_audit_files,
+    remove_uncaptured_active_log, AUDIT_CAPTURE_ROUNDS,
+};
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
 /// Fixed reused buffer for streaming copies and hashes.
@@ -61,7 +65,9 @@ pub struct CopyPassResult {
 /// Copy failures. Sharing violations exhausted after the bounded retry
 /// surface as `Io` carrying the original error; a tripped seal gate
 /// surfaces as typed `RecopyCap` (the protocol maps it to
-/// `OnlineBackupFailure::RecopyCap` at `Sealing`).
+/// `OnlineBackupFailure::RecopyCap` at `Sealing`). The bounded audit chain
+/// rounds of the data-directory pass fail typed when an archive keeps
+/// appearing behind the copy.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyError {
     #[error("backup copy cancelled")]
@@ -74,6 +80,8 @@ pub enum CopyError {
     },
     #[error("seal re-copy cap exceeded: {0}")]
     RecopyCap(String),
+    #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
+    AuditFilesUnstable { rounds: usize },
 }
 
 /// Cooperative seal-re-copy gate (design Q12): bounds ONE repo's seal
@@ -395,15 +403,18 @@ const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 /// (sorted per directory), skipping top-level directories named in
 /// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
 /// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
-/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above). With
-/// a gate, cancel and the clock are checked at every directory iteration
-/// — the listing is inside the re-copy budget.
+/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
+/// Top-level audit chain files are skipped when `skip_audit_files` is set
+/// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
+/// clock are checked at every directory iteration — the listing is inside
+/// the re-copy budget.
 fn list_files(
     source_root: &Path,
     skip_top_level_dirs: &[&str],
     skip_top_level_files: &[&str],
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
+    skip_audit_files: bool,
 ) -> Result<Vec<PathBuf>, CopyError> {
     let mut out = Vec::new();
     let mut stack = vec![source_root.to_path_buf()];
@@ -452,6 +463,10 @@ fn list_files(
                 {
                     continue;
                 }
+                if skip_audit_files && dir.as_path() == source_root && is_audit_log_file_name(name)
+                {
+                    continue;
+                }
                 if !skip_top_level_files.is_empty()
                     && dir.as_path() == source_root
                     && skip_top_level_files
@@ -490,6 +505,7 @@ pub fn run_copy_pass(
         &PassRules {
             skip_top_level_dirs,
             skip_top_level_files: &[],
+            audit_files: AuditFiles::InOrder,
             exclude_dirs,
             cancel,
             options,
@@ -499,6 +515,47 @@ pub fn run_copy_pass(
     )
 }
 
+/// Data-dir pass: everything outside `exclude_dirs`, skipping the private
+/// `cache` subtree and the manifest's own files, in TWO phases.
+///
+/// Phase 1 captures every other file of the pass — including both audit
+/// anchor stores (`audit_checkpoint/`, `server_meta/`) — and leaves the
+/// audit chain files (the active `audit.log` and its rotation archives)
+/// out. Phase 2 begins only after phase 1 has finished, lists the audit
+/// chain files freshly and captures them, archives first and the active
+/// log last.
+///
+/// That order is what makes the copy audit-consistent: an anchor can only
+/// name log positions that were already durable, and therefore already
+/// present in the audit files, before the audit listing of phase 2.
+/// `checkpoint_locked` flushes the log before it writes the
+/// `audit_checkpoint` row, and `rotate_locked` fsyncs, renames, reopens,
+/// dir-syncs and only then persists both anchors; the log is append-only
+/// and a rotation only ADDS an archive, never rewrites one. So every byte
+/// a captured anchor covers is in the files phase 2 lists — including a
+/// rotation that lands between phase 1's listing and its anchor capture,
+/// whose new archive phase 2 lists afterwards. A single pass that lists
+/// once cannot close that window: its listing predates the anchor capture,
+/// so a rotation in between hides the archive holding exactly the bytes
+/// the captured anchor names.
+///
+/// Phase 2 re-lists the audit directory after each capture round and runs
+/// another round when the fresh listing names an archive the round did not
+/// copy; every round copies every listed file again (a rotation can move the
+/// active log's bytes into a new archive). A stable round, up to the
+/// [`AUDIT_CAPTURE_ROUNDS`]-th, ends the pass; no stable round within the
+/// bound fails it with a typed [`CopyError::AuditFilesUnstable`] — never a
+/// silently inconsistent copy. The manifest describes exactly the bytes of
+/// the last round, and an active log an earlier pass left in the destination
+/// that the last round did not capture is removed (the source has none while a
+/// rotation reopens it). A source file that vanishes during a corrective
+/// re-copy still fails the pass with its I/O error, as in every other pass.
+///
+/// Not covered, by design: retention may DELETE an archive between the
+/// listing and its copy — a vanished file is excluded exactly as any other
+/// deleted source file — and retention never removes the newest archive,
+/// the only one that can hold the tail an anchor persisted just before
+/// names.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -506,19 +563,53 @@ pub(super) fn run_data_dir_copy_pass(
     cancel: &CancelFlag,
     options: &CopyOptions,
 ) -> Result<CopyPassResult, CopyError> {
-    run_copy_pass_inner(
-        source_root,
-        dest_root,
-        &PassRules {
-            skip_top_level_dirs: &["cache"],
-            skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
-            exclude_dirs,
-            cancel,
-            options,
-            gate: None,
-            preauth: &BTreeMap::new(),
-        },
-    )
+    let rules = PassRules {
+        skip_top_level_dirs: &["cache"],
+        skip_top_level_files: &[MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME],
+        audit_files: AuditFiles::AfterAnchor,
+        exclude_dirs,
+        cancel,
+        options,
+        gate: None,
+        preauth: &BTreeMap::new(),
+    };
+    // Phase 1: every other file, both anchor stores included.
+    let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
+    // Phase 2: the audit chain files, listed only now.
+    for _ in 0..AUDIT_CAPTURE_ROUNDS {
+        let audit = run_copy_pass_inner(
+            source_root,
+            dest_root,
+            &PassRules {
+                audit_files: AuditFiles::Only,
+                ..rules
+            },
+        )?;
+        if audit_capture_is_stable(source_root, &audit, cancel)? {
+            remove_uncaptured_active_log(dest_root, &audit)?;
+            result.files.extend(audit.files);
+            result.changed_files += audit.changed_files;
+            result.missing_files += audit.missing_files;
+            return Ok(result);
+        }
+    }
+    Err(CopyError::AuditFilesUnstable {
+        rounds: AUDIT_CAPTURE_ROUNDS,
+    })
+}
+
+/// How one pass treats the audit chain files of its source root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditFiles {
+    /// Ordinary pass (repo, WAL, gated re-copy): audit files are captured
+    /// with everything else, in sorted order.
+    InOrder,
+    /// Data-directory phase 1: the audit chain files are left to phase 2,
+    /// which runs only after this pass has captured every anchor store.
+    AfterAnchor,
+    /// Data-directory phase 2: the audit chain files ARE the listing,
+    /// archives first and the active log last.
+    Only,
 }
 
 /// Engine-internal pass rules shared by the copy loops (keeps argument
@@ -531,6 +622,8 @@ struct PassRules<'a> {
     options: &'a CopyOptions,
     gate: Option<&'a SealGate>,
     preauth: &'a BTreeMap<String, (String, u64)>,
+    /// Which audit chain files this pass captures (see [`AuditFiles`]).
+    audit_files: AuditFiles,
 }
 
 /// Same pass, GATED and INCREMENTAL (seal re-copy): `gate` bounds the
@@ -561,6 +654,7 @@ pub(crate) fn run_copy_pass_gated(
         &PassRules {
             skip_top_level_dirs: &[],
             skip_top_level_files: &[],
+            audit_files: AuditFiles::InOrder,
             exclude_dirs: &[],
             cancel,
             options,
@@ -591,7 +685,7 @@ pub(crate) fn authenticate_dest(
     {
         return Ok(BTreeMap::new());
     }
-    let listing = list_files(dest_root, &[], &[], cancel, gate)?;
+    let listing = list_files(dest_root, &[], &[], cancel, gate, false)?;
     let mut out = BTreeMap::new();
     for path in listing {
         if let Some(gate) = gate {
@@ -619,13 +713,32 @@ fn run_copy_pass_inner(
     dest_root: &Path,
     rules: &PassRules<'_>,
 ) -> Result<CopyPassResult, CopyError> {
-    let listing = list_files(
-        source_root,
-        rules.skip_top_level_dirs,
-        rules.skip_top_level_files,
-        rules.cancel,
-        rules.gate,
-    )?;
+    let listing = match rules.audit_files {
+        AuditFiles::Only => list_audit_files(source_root, rules.cancel, rules.gate)?,
+        AuditFiles::AfterAnchor => {
+            let listing = list_files(
+                source_root,
+                rules.skip_top_level_dirs,
+                rules.skip_top_level_files,
+                rules.cancel,
+                rules.gate,
+                true,
+            )?;
+            // Test-only seam: the pass listing is fixed and it names no
+            // audit chain file; the anchor stores are captured from here on.
+            #[cfg(test)]
+            test_seams::fire_after_listing(source_root);
+            listing
+        }
+        AuditFiles::InOrder => list_files(
+            source_root,
+            rules.skip_top_level_dirs,
+            rules.skip_top_level_files,
+            rules.cancel,
+            rules.gate,
+            false,
+        )?,
+    };
     let &PassRules {
         exclude_dirs,
         cancel,
@@ -804,6 +917,8 @@ fn run_copy_pass_inner(
                 (hash, size)
             }
         };
+        #[cfg(test)]
+        test_seams::fire_after_capture(&source_path);
         files.push(CopiedFile {
             rel_path: rel_slash,
             sha256: hash,
