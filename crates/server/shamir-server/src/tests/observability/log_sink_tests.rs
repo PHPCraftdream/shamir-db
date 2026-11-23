@@ -8,7 +8,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use crate::logging::{validate_sink_path, LogSinkError};
+use crate::logging::{sink_mode_for, validate_sink_path, LogSinkError, SinkMode};
 
 /// `<data_dir>/audit.log` — the active audit log name itself.
 #[test]
@@ -34,6 +34,24 @@ fn reserved_rotation_archive_sink_is_refused() {
         matches!(err, LogSinkError::ReservedAuditName),
         "got {err:?}"
     );
+}
+
+/// `<data_dir>/AUDIT.LOG` and `<data_dir>/AUDIT.LOG.<digits>` — the reserved
+/// NAME is matched ASCII-case-insensitively on EVERY platform (the file-name
+/// half is unconditional; only directory-prefix matching follows the
+/// platform), so a case-variant sink must be refused everywhere.
+#[test]
+fn reserved_sink_case_variant_is_refused_on_every_platform() {
+    let data_dir = TempDir::new().expect("data dir");
+    for name in ["AUDIT.LOG", "AUDIT.LOG.00000000000000000001"] {
+        let sink = data_dir.path().join(name);
+        let err = validate_sink_path(&sink, data_dir.path())
+            .expect_err("a case-variant of a reserved sink name must be refused");
+        assert!(
+            matches!(err, LogSinkError::ReservedAuditName),
+            "{name}: got {err:?}"
+        );
+    }
 }
 
 /// `<data_dir>/server.log` — an ordinary diagnostic sink in `data_dir`.
@@ -65,4 +83,30 @@ fn reserved_name_in_a_subdirectory_is_allowed() {
     let sink = logs.join("audit.log");
     validate_sink_path(&sink, data_dir.path())
         .expect("a sink in a subdirectory of data_dir must be allowed");
+}
+
+/// `<data_dir>/logs/audit.log` where `logs/` does NOT exist yet — the sink
+/// lands in the not-yet-created subdirectory, not in `data_dir` itself, so it
+/// is allowed. (Walking up to the nearest existing ancestor would compare
+/// `data_dir` and refuse it.)
+#[test]
+fn reserved_name_in_a_not_yet_created_subdirectory_is_allowed() {
+    let data_dir = TempDir::new().expect("data dir");
+    let sink = data_dir.path().join("logs").join("audit.log");
+    assert!(!data_dir.path().join("logs").exists());
+    validate_sink_path(&sink, data_dir.path())
+        .expect("a sink in a not-yet-created subdirectory of data_dir must be allowed");
+}
+
+/// A command that is not offline gets the configured sink.
+#[test]
+fn sink_mode_for_online_command_is_config() {
+    assert_eq!(sink_mode_for(false), SinkMode::Config);
+}
+
+/// An offline command gets stdout only: it must not create a file before its
+/// preconditions and its lock hold.
+#[test]
+fn sink_mode_for_offline_command_is_stdout_only() {
+    assert_eq!(sink_mode_for(true), SinkMode::StdoutOnly);
 }

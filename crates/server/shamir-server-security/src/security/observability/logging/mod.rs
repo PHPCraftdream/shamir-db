@@ -30,8 +30,7 @@
 //!
 //! Runtime API: [`set_mask`], [`set_namespace_level`], [`current_mask`].
 
-use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -64,6 +63,10 @@ const BURST_FLUSH_THRESHOLD: usize = 256 * 1024;
 /// SIGHUP triggers a live log-level reload via [`reload`] + [`set_mask`].
 /// Per-namespace overrides can be applied via [`set_namespace_level`].
 pub mod audit_appender;
+
+mod sink_guard;
+
+pub use sink_guard::{boot_logging, sink_mode_for, validate_sink_path, LogSinkError, SinkMode};
 
 pub mod ns {
     /// Access control / permissions enforcement (Shomer).
@@ -389,76 +392,6 @@ fn parse_level_filter(level: &str) -> LevelFilter {
 /// appender holds the file handle.)
 pub fn reload(cfg: &LoggingConfig) {
     set_mask(LogMask::new(parse_level_filter(&cfg.level)));
-}
-
-/// Refusals from [`validate_sink_path`].
-#[derive(Debug, thiserror::Error)]
-pub enum LogSinkError {
-    /// The diagnostic log would be written into the audit-log namespace.
-    #[error("the diagnostic log file resolves into the audit log namespace of the data directory; nothing was opened")]
-    ReservedAuditName,
-}
-
-/// Refuse a diagnostic log sink that resolves into the audit-log namespace of
-/// `data_dir` — the active audit log or a `audit.log.<digits>` rotation
-/// archive — before anything is opened.
-///
-/// A sink in a SUBDIRECTORY of `data_dir` is allowed: only a log file that
-/// lands directly in `data_dir` can collide with the appender's own files.
-/// When `data_dir` does not exist yet there is no namespace, so `Ok(())`.
-pub fn validate_sink_path(log_file: &Path, data_dir: &Path) -> Result<(), LogSinkError> {
-    // Out of scope: a symlink (or a data directory swapped between this check
-    // and the open) that redirects an otherwise innocent path into the audit
-    // namespace. This rejects a misconfigured sink before it is opened; it is
-    // not a sandbox boundary.
-    let Ok(canonical_data_dir) = fs::canonicalize(data_dir) else {
-        // NotFound — no data directory yet, so no audit namespace to protect.
-        // Any other stat failure leaves no directory to compare against.
-        return Ok(());
-    };
-    let resolved = if log_file.is_absolute() {
-        log_file.to_path_buf()
-    } else {
-        match env::current_dir() {
-            Ok(cwd) => cwd.join(log_file),
-            Err(_) => return Ok(()),
-        }
-    };
-    // Canonicalize the nearest EXISTING ancestor: the configured name itself
-    // may not exist yet, but its directory does (a relative path was just
-    // resolved against the cwd above, so it cannot run off the chain).
-    let mut ancestor = resolved.parent().unwrap_or(resolved.as_path());
-    let resolved_parent = loop {
-        if let Ok(dir) = fs::canonicalize(ancestor) {
-            break dir;
-        }
-        match ancestor.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => ancestor = parent,
-            // Nothing on disk in this chain → cannot be inside `data_dir`.
-            _ => return Ok(()),
-        }
-    };
-    if resolved_parent != canonical_data_dir {
-        return Ok(());
-    }
-    match resolved.file_name() {
-        Some(name) if audit_appender::is_reserved_audit_name(name) => {
-            Err(LogSinkError::ReservedAuditName)
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Which sink [`init_for`] installs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkMode {
-    /// Honour `LoggingConfig::file` (the server path, and the behaviour of
-    /// [`init`]).
-    Config,
-    /// Stdout only, exactly as if `file == None`. An offline command gets no
-    /// file sink ([`SinkMode::StdoutOnly`]) because it must not create any
-    /// file before its preconditions and its lock hold.
-    StdoutOnly,
 }
 
 /// Initialise the global tracing subscriber.

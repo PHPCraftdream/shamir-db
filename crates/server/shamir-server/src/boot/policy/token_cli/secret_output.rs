@@ -27,9 +27,12 @@ pub(super) enum OutputPathError {
     /// The path resolves into the reserved `audit.log*` namespace of the
     /// data directory: the active log, any rotation archive, or any entry
     /// below a reserved-named component, or into that same directory by
-    /// on-disk identity. Name matching follows the PLATFORM: ASCII case
-    /// variants name the audit log on Windows (case-insensitive mounts) and
-    /// are separate directory entries on Unix, where matching is byte-exact.
+    /// on-disk identity. The reserved FILE NAME is matched
+    /// ASCII-case-insensitively on EVERY platform — over-refusal is harmless
+    /// and under-refusal is not; on a case-insensitive mount `AUDIT.LOG` IS
+    /// the audit log, and on a case-sensitive filesystem refusing it only
+    /// blocks a name nobody should use. Only the DIRECTORY-component
+    /// comparison follows the platform.
     #[error(
         "the secret output path resolves to the audit log, one of its \
              archives, or something below that namespace; nothing was written"
@@ -46,12 +49,17 @@ pub(super) enum OutputPathError {
     TrailingSeparator,
 }
 
-/// Directory-entry matching follows the PLATFORM: Windows mounts are
-/// case-insensitive, Unix ones are not, so an `AUDIT.LOG` entry is the
-/// audit log only where the filesystem itself resolves it to `audit.log`.
-/// Elsewhere it is a distinct entry that refusing would over-block.
+/// Directory-COMPONENT matching follows the PLATFORM, as a compile-time
+/// predicate `cfg!(any(windows, target_os = "macos"))`: the default Windows
+/// mounts and the default macOS APFS volume are case-insensitive, so on those
+/// an `AUDIT.LOG` directory entry IS the audit log directory; elsewhere
+/// (Linux, and a case-sensitive APFS volume) the comparison is byte-exact
+/// because it names a distinct directory. This is ONLY about the DIRECTORY
+/// prefix: the reserved FILE NAME is deliberately matched
+/// ASCII-case-insensitively on EVERY platform (`reserved_name_matches`
+/// below), because over-refusal of a name nobody should use is harmless.
 fn dir_component_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
-    if cfg!(windows) {
+    if cfg!(any(windows, target_os = "macos")) {
         a.eq_ignore_ascii_case(b)
     } else {
         a == b
@@ -59,16 +67,16 @@ fn dir_component_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
 }
 
 /// True when `name` is the active `audit.log` or one of its rotation
-/// archives, under the same platform rule as `dir_component_eq`: an ASCII
-/// case-insensitive prefix on Windows, a byte-exact prefix on Unix.
+/// archives. The FILE NAME is matched ASCII-case-insensitively on EVERY
+/// platform because over-refusal is harmless and under-refusal is not: on a
+/// case-insensitive mount (Windows, default macOS APFS, a case-insensitive
+/// Linux mount) `AUDIT.LOG` IS the audit log, and on a case-sensitive
+/// filesystem refusing it only blocks a name nobody should use. Only the
+/// DIRECTORY prefix above (`dir_component_eq`) follows the platform.
 fn reserved_name_matches(name: &std::ffi::OsStr) -> bool {
     const PREFIX: &[u8] = b"audit.log";
     let bytes = name.as_encoded_bytes();
-    if cfg!(windows) {
-        bytes.len() >= PREFIX.len() && bytes[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
-    } else {
-        bytes.starts_with(PREFIX)
-    }
+    bytes.len() >= PREFIX.len() && bytes[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
 }
 
 /// True when `path` lies under `dir` and the component of `path` directly
@@ -223,9 +231,11 @@ fn is_dangling_symlink(path: &Path) -> bool {
 }
 
 /// Rejects a secret output path that resolves into the reserved audit
-/// namespace of `data_dir` (case-insensitive component compare on Windows)
-/// and returns the validated destination for `prepare` and cleanup, so no
-/// later link resolution can differ from the validated one. Checked, in
+/// namespace of `data_dir` (the DIRECTORY prefix compares
+/// case-insensitively on Windows and macOS; the reserved FILE NAME is
+/// matched case-insensitively everywhere) and returns the validated
+/// destination for `prepare` and cleanup, so
+/// no later link resolution can differ from the validated one. Checked, in
 /// order: the lexical destination under its canonical parent (a reserved
 /// final name is refused even when an existing link points out), the whole
 /// resolved entry (a final link must not reach a reserved target under a
@@ -235,9 +245,11 @@ fn is_dangling_symlink(path: &Path) -> bool {
 /// current directory; a path with no final file name falls through to the
 /// ordinary exclusive-create error of `prepare`.
 pub(super) fn validate_out_file(path: &Path, data_dir: &Path) -> Result<PathBuf, OutputPathError> {
-    // a trailing separator names a directory, never a file
+    // A trailing separator names a directory, never a file. Backslash is a
+    // separator only on Windows: on Unix it is an ordinary filename byte, so
+    // `secret\` is a legal destination there and must not be refused.
     let raw = path.as_os_str().as_encoded_bytes();
-    if raw.ends_with(b"/") || raw.ends_with(b"\\") {
+    if raw.ends_with(b"/") || (cfg!(windows) && raw.ends_with(b"\\")) {
         return Err(OutputPathError::TrailingSeparator);
     }
     let canonical_dir = match std::fs::canonicalize(data_dir) {

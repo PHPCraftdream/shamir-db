@@ -604,10 +604,11 @@ async fn create_refuses_every_reserved_audit_namespace_alias() {
     std::fs::create_dir_all(c.data_dir.join("audit.log.dir").join("grand"))
         .expect("reserved-named directory tree");
     std::fs::create_dir_all(c.data_dir.join("sub")).expect("dotdot base directory");
-    // ASCII case variants are reserved on EVERY platform (Windows and macOS
-    // defaults are case-insensitive; Linux can mount case-insensitive
-    // filesystems), so the uppercase archive shape is refused everywhere.
-    // No entry with that spelling exists in the fixture.
+    // The reserved FILE NAME is unconditionally ASCII-case-insensitive by
+    // decision (over-refusal is harmless, under-refusal is not), while only
+    // directory-component matching follows the platform. So the uppercase
+    // archive shape is refused everywhere. No entry with that spelling
+    // exists in the fixture.
     let aliases: Vec<std::path::PathBuf> = vec![
         log_path(&c),
         c.data_dir.join("audit.log.00000000000000000042"),
@@ -637,6 +638,92 @@ async fn create_refuses_every_reserved_audit_namespace_alias() {
         !archive_alias.exists(),
         "the refusal must not create an archive-named file"
     );
+}
+
+/// The FILE-NAME half of the rule is unconditional (see the alias test
+/// above); only the DIRECTORY-prefix comparison follows the platform. On a
+/// case-insensitive filesystem (Windows, default macOS APFS) a sibling whose
+/// name differs from `data_dir` only in ASCII case IS `data_dir`, so a
+/// reserved name under it must be refused — the Windows half is a real
+/// oracle (a typed refusal). On a case-sensitive filesystem it is a
+/// different directory with no audit namespace, so the create must not fail
+/// with the typed output-path refusal — a weaker negative: if the create
+/// succeeds this branch asserts nothing further (a success legitimately
+/// appends its audit record to the real log), and it exists to catch an
+/// unconditional directory fold that would over-refuse. The real-log-unchanged
+/// assertion therefore applies to the refusal path only.
+#[tokio::test]
+async fn create_refuses_a_case_variant_of_the_data_directory_only_where_the_filesystem_folds_case()
+{
+    let (_tmp, c) = seeded_dir(&["one"]).await;
+    let before = std::fs::read(log_path(&c)).expect("read audit.log");
+    // A DIFFERENT directory whose name differs from data_dir only in ASCII
+    // case. On a case-insensitive filesystem (Windows, default macOS APFS)
+    // it IS data_dir, so a reserved name under it must be refused; on a
+    // case-sensitive filesystem it is a different directory with no audit
+    // namespace, so the same path is an ordinary destination.
+    let original_name = c
+        .data_dir
+        .file_name()
+        .expect("data_dir has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let flipped_name: String = original_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_lowercase() {
+                ch.to_ascii_uppercase()
+            } else if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            }
+        })
+        .collect();
+    if flipped_name == original_name {
+        // No ASCII letter to flip (e.g. a purely numeric temp name): there is
+        // no case variant to build, so the fixture cannot exercise the rule.
+        return;
+    }
+    let flipped = c
+        .data_dir
+        .parent()
+        .expect("data_dir has a parent")
+        .join(&flipped_name);
+    std::fs::create_dir_all(&flipped).expect("case-variant directory");
+    let out = flipped.join("audit.log");
+    let (result, _o, _e) = run(&c, create_args_with_out("alice", "case-dir", &out), true).await;
+    if cfg!(any(windows, target_os = "macos")) {
+        let err = result.expect_err(
+            "a case-variant of data_dir must be refused where the filesystem folds case",
+        );
+        typed_output_error(&err, "create");
+        assert_eq!(
+            std::fs::read(log_path(&c)).expect("reread audit.log"),
+            before,
+            "a refusal must not touch the real audit log"
+        );
+    } else {
+        // Different directory, no audit namespace: the create reaches the
+        // normal store path rather than the reserved-name refusal. Written
+        // as runtime code (not `#[cfg]`) so this branch still compiles on
+        // Windows; it only EXECUTES on a case-sensitive filesystem.
+        if let Err(err) = result {
+            assert!(
+                !err.chain()
+                    .any(|cause| cause.downcast_ref::<OutputPathError>().is_some()),
+                "on a case-sensitive filesystem a differently-spelled directory \
+                 is not the audit namespace: {err:#}"
+            );
+            assert_eq!(
+                std::fs::read(log_path(&c)).expect("reread audit.log"),
+                before,
+                "a failure before the store path must not touch the real audit log"
+            );
+        }
+        // A success appends its audit record to the real log, so nothing
+        // further is asserted here.
+    }
 }
 
 /// Round-3 follow-up: final symlink aliases are typed-refused without being

@@ -39,7 +39,7 @@ use zeroize::Zeroizing;
 use shamir_server::backup;
 use shamir_server::config::Config;
 use shamir_server::doctor;
-use shamir_server::logging::SinkMode;
+use shamir_server::logging::sink_mode_for;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
@@ -377,39 +377,42 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             );
         }
     }
-    // Refuse a diagnostic log sink that would land in the audit-log namespace
-    // (the server path too) — nothing is opened for a refused sink.
-    if let Some(ref f) = config.logging.file {
-        shamir_server::logging::validate_sink_path(std::path::Path::new(f), &config.data_dir)?;
-    }
     // Offline subcommands take the data-directory lock (or refuse it) and must
     // not create any file before their preconditions and their lock hold, so
     // they get no file sink. `FormatMigrate` and `Shell` returned above;
     // `Run` / `None` are the server path.
-    let offline = matches!(
-        cli.command,
+    //
+    // Exhaustive on purpose — no `_` arm and no `matches!`: a new `Subcmd`
+    // variant must state which sink it gets instead of silently inheriting
+    // one. The R5-5 branch adds `Subcmd::BackupVerify` and will need an
+    // explicit arm at merge; that compile error is the point.
+    let offline = match cli.command {
         Some(
             Subcmd::Token { .. }
-                | Subcmd::Restore { .. }
-                | Subcmd::Backup { .. }
-                | Subcmd::LogicalExport(_)
-                | Subcmd::LogicalImport(_)
-                | Subcmd::ReplicationSeedExport { .. }
-                | Subcmd::ReplicationSeedInstall { .. }
-                | Subcmd::ReplicationSeedVerify { .. }
-                | Subcmd::AccessTree { .. }
-                | Subcmd::Service { .. }
-                | Subcmd::Doctor { .. }
-        )
-    );
-    let _log_guard = shamir_server::logging::init_for(
+            | Subcmd::Restore { .. }
+            | Subcmd::Backup { .. }
+            | Subcmd::LogicalExport(_)
+            | Subcmd::LogicalImport(_)
+            | Subcmd::ReplicationSeedExport { .. }
+            | Subcmd::ReplicationSeedInstall { .. }
+            | Subcmd::ReplicationSeedVerify { .. }
+            | Subcmd::AccessTree { .. }
+            | Subcmd::Service { .. }
+            | Subcmd::Doctor { .. }
+            | Subcmd::FormatMigrate(_)
+            | Subcmd::Shell,
+        ) => true,
+        Some(Subcmd::Run { .. }) | None => false,
+    };
+    // The ONE boot path for both server entries: it refuses a sink that would
+    // land in the audit-log namespace (nothing is opened for a refused sink),
+    // then installs the subscriber. `SinkMode::StdoutOnly` — every offline
+    // command — never validates, opens, creates or stat-s the path at all.
+    let _log_guard = shamir_server::logging::boot_logging(
         &config.logging,
-        if offline {
-            SinkMode::StdoutOnly
-        } else {
-            SinkMode::Config
-        },
-    );
+        &config.data_dir,
+        sink_mode_for(offline),
+    )?;
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.

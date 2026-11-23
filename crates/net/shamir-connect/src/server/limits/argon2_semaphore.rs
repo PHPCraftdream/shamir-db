@@ -80,7 +80,12 @@ impl Argon2PermitBudget {
     /// dependency is compiled WITHOUT `cfg(test)`, so a `cfg(test)` item here
     /// would be invisible to the tests of the crate that depends on this one.
     /// Release builds elide the item; production callers only ever see
-    /// [`Self::at_admission`].
+    /// [`Self::at_admission`]. The profile split is therefore: the item exists
+    /// in any build with `debug_assertions` on (all test builds) and is elided
+    /// from release builds, so a dependent crate's tests must run in a
+    /// debug-assertions profile — this crate has no `test-hooks` feature to
+    /// forward, and one crate's `test-hooks` cannot enable an item in its
+    /// dependency.
     #[cfg(any(test, debug_assertions))]
     pub fn at_admission_with_anchor(
         deadline_ns: u64,

@@ -835,10 +835,12 @@ fn record_size_counts_escapes_like_emitted_bytes() {
 }
 
 /// The writer path refuses oversized input as a typed input refusal
-/// BEFORE publication: nothing reaches the appender, no state change,
-/// and no fail-closed persistence latch.
+/// BEFORE publication: nothing reaches the appender and no chain state
+/// changes. The refusal is still latched — an event that was refused is
+/// an event that was not written, so the log is not certifiable
+/// afterwards. A writer that never saw a refusal checkpoints normally.
 #[test]
-fn writer_refuses_oversized_record_without_latching() {
+fn writer_refuses_oversized_record_before_publication_and_latches() {
     let shared = Arc::new(AuditChain::new(key()));
     let concrete = Arc::new(CountingAppender::default());
     let appender = Arc::clone(&concrete) as Arc<dyn AuditAppender>;
@@ -865,16 +867,35 @@ fn writer_refuses_oversized_record_without_latching() {
     let seq = writer
         .append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0)
         .map(|e| e.seq)
-        .expect("typed input refusal must not latch persistence");
+        .expect("a latched writer still admits a valid event");
     assert_eq!(seq, 1);
-    // Exactly one publication (and its companion checkpoint) after the
-    // valid append.
+    // Exactly one publication after the valid append.
     assert_eq!(concrete.appends.lock().unwrap().len(), 1);
     // Checkpointing is periodic (every 1000th seq), so seq=1 alone does not
-    // checkpoint; an explicit checkpoint_now() produces exactly one.
+    // checkpoint.
     assert!(concrete.checkpoints.lock().unwrap().is_empty());
-    writer.checkpoint_now().expect("manual checkpoint succeeds");
-    assert_eq!(concrete.checkpoints.lock().unwrap().len(), 1);
+    // The earlier refusal latched: this writer must NOT certify the log it
+    // is missing an event from, so nothing is persisted either.
+    assert!(matches!(
+        writer.checkpoint_now(),
+        Err(AuditError::SequenceExhaustedUnaudited)
+    ));
+    assert!(concrete.checkpoints.lock().unwrap().is_empty());
+
+    // Positive control: a writer with no refused append still checkpoints,
+    // so the refusal above — not the writer itself — is what blocks it.
+    let clean_chain = Arc::new(AuditChain::new(key()));
+    let clean = Arc::new(CountingAppender::default());
+    let clean_appender = Arc::clone(&clean) as Arc<dyn AuditAppender>;
+    let clean_writer = AuditChainWriter::new_with_shared(clean_chain, clean_appender);
+    clean_writer
+        .append("event", "t", "x", "", [0; 8], "ok", Vec::new(), 0)
+        .expect("valid append on a fresh writer");
+    assert!(clean.checkpoints.lock().unwrap().is_empty());
+    clean_writer
+        .checkpoint_now()
+        .expect("manual checkpoint succeeds");
+    assert_eq!(clean.checkpoints.lock().unwrap().len(), 1);
 }
 
 /// The sequence boundary at `u64::MAX - 1` and above: the direct chain

@@ -25,9 +25,10 @@ use std::sync::Arc;
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
 };
 use zeroize::Zeroizing;
 /// I/O seam for tests and the process entry point.
@@ -57,8 +58,10 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     let output = secret_output::prepare(validated_out.as_deref(), io.is_terminal)?;
     // Identity of the file THIS process just created, captured while no other
     // process can have replaced it yet (the exclusive create just succeeded).
-    // Cleanup below removes the path only while it still names this file; a
-    // `None` identity removes nothing, which is the safe direction.
+    // Cleanup below removes the path only while it still names this file as of
+    // that check — the identity is re-read, then the path is removed, so a
+    // replacement landing inside that window is removed too; a `None` identity
+    // removes nothing, which is the safe direction.
     let identity = validated_out.as_deref().and_then(file_identity);
     let setup = async {
         let (m, d, w, app) = open_locked(c)?;
@@ -203,6 +206,16 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
 /// with `FILE_FLAG_OPEN_REPARSE_POINT`, so a final reparse point reports the
 /// link rather than its target — the same object `symlink_metadata` reports on
 /// Unix — and the handle is closed on every path.
+///
+/// `FileIdInfo` is unavailable on FAT/exFAT and some SMB shares, so a failed
+/// query falls back to `GetFileInformationByHandle` with the older
+/// `BY_HANDLE_FILE_INFORMATION` and builds the identity from the volume serial
+/// plus the 64-bit file index (in the low half of the 16-byte id). Without
+/// that fallback the identity was `None` there and `remove_out_file` removed
+/// nothing, leaving a failed create's exclusivity-blocking file behind. An
+/// identity taken one way never equals one taken the other, so if the
+/// filesystem's capabilities change between capture and cleanup the comparison
+/// fails and nothing is removed — the safe direction.
 #[cfg(windows)]
 fn file_identity(path: &Path) -> Option<FileIdentity> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -240,20 +253,45 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
             std::mem::size_of::<FILE_ID_INFO>() as u32,
         )
     };
+    if ok != 0 {
+        // SAFETY: `handle` came from the `CreateFileW` above and is closed
+        // exactly once — here, and nowhere else on this path, because this
+        // branch returns.
+        unsafe { CloseHandle(handle) };
+        return Some(FileIdentity {
+            volume: info.VolumeSerialNumber,
+            index: info.FileId.Identifier,
+        });
+    }
+    // FAT/exFAT and some SMB shares do not implement `FileIdInfo`; the older
+    // `GetFileInformationByHandle` query does, and its volume serial plus
+    // 64-bit file index still tell this process's file from a replacement.
+    let mut basic = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is still valid here, and `basic` is a correctly sized
+    // and aligned out-buffer for `GetFileInformationByHandle`; the call only
+    // writes it.
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut basic) };
     // SAFETY: `handle` came from the `CreateFileW` above and is closed exactly
-    // once, on both the success and the failure path.
+    // once, on every path (this is the only close after the fallback query).
     unsafe { CloseHandle(handle) };
     if ok == 0 {
         return None;
     }
+    let mut index = [0u8; 16];
+    index[..4].copy_from_slice(&basic.nFileIndexHigh.to_be_bytes());
+    index[4..8].copy_from_slice(&basic.nFileIndexLow.to_be_bytes());
     Some(FileIdentity {
-        volume: info.VolumeSerialNumber,
-        index: info.FileId.Identifier,
+        volume: u64::from(basic.dwVolumeSerialNumber),
+        index,
     })
 }
 /// Remove the output file created by [`secret_output::prepare`] — but only if
-/// the path still names the SAME file: a replacement that reused the name is
-/// left alone, and an unknown identity removes nothing.
+/// the path still names the SAME file as of this check: a replacement that
+/// reused the name before the identity re-read is left alone, and an unknown
+/// identity removes nothing. The identity re-read and the `remove_file` are
+/// two separate steps, so a replacement that lands inside that window is
+/// removed; closing it would need a directory-level atomic operation the CLI
+/// does not have.
 fn remove_out_file(path: Option<&Path>, expected: Option<FileIdentity>) {
     let (Some(path), Some(expected)) = (path, expected) else {
         return;

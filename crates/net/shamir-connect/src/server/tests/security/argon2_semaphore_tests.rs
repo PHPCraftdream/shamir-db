@@ -12,13 +12,25 @@ use std::time::Duration;
 /// synchronisation.
 const WATCHDOG: Duration = Duration::from_secs(120);
 
-/// Bound on the in-gap release probe: long enough that a lock-free release
-/// (which completes in microseconds) is always observed inside the gap, far
-/// short enough to keep the passing path well under the per-test kill.
-/// This bound is NOT the oracle: the pass condition is the `acquired`
+/// Bound on the in-gap release probe in
+/// [`release_after_failed_check_wakes_waiter`]: long enough that a lock-free
+/// release (which completes in microseconds) is always observed inside the
+/// gap, far short enough to keep the passing path well under the per-test
+/// kill. This bound is NOT the oracle: the pass condition is the `acquired`
 /// assertion after the gap closes, and a releaser that is merely slow still
 /// notifies the parked waiter, so a timeout here never fails a correct run.
+/// It is on the EXPECTED path of a green run — that run's probe always times
+/// out — so every green run pays this 5 s.
 const GAP_PROBE: Duration = Duration::from_secs(5);
+
+/// Bound on the handshake receives of
+/// [`acquire_until_refuses_preexpired_entry_reading_without_the_waiter_mutex`],
+/// whose red path is the probe blocking on the holder's waiter mutex: waiting
+/// the full [`WATCHDOG`] there would put a red run past the per-test kill
+/// before the assertion could fire. A green run's handshakes are immediate, so
+/// this only shortens the failing path, and [`WATCHDOG`] stays the bound for
+/// the joins.
+const PROBE_BOUND: Duration = Duration::from_secs(20);
 
 /// Outer hang detector for a worker parked until the test closes a handshake.
 /// Strictly longer than [`WATCHDOG`], because the step that closes such a
@@ -633,7 +645,7 @@ fn acquire_until_refuses_preexpired_entry_reading_without_the_waiter_mutex() {
         })
     };
     locked_rx
-        .recv_timeout(WATCHDOG)
+        .recv_timeout(PROBE_BOUND)
         .expect("the waiter mutex is held by the probe");
 
     let probe = {
@@ -654,7 +666,7 @@ fn acquire_until_refuses_preexpired_entry_reading_without_the_waiter_mutex() {
     // observing it here proves the mutex was live at the moment the caller
     // returned.
     let (refused, reads) = observed_rx
-        .recv_timeout(WATCHDOG)
+        .recv_timeout(PROBE_BOUND)
         .expect("a pre-expired entry reading must not block on the waiter mutex");
     join_checked(probe);
     join_checked(holder);

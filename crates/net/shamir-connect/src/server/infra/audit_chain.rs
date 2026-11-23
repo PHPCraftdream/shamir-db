@@ -606,11 +606,16 @@ pub trait AuditAppender: Send + Sync {
 pub struct AuditChainWriter {
     chain: Arc<AuditChain>,
     appender: Arc<dyn AuditAppender>,
-    /// Latched by [`Self::append`] when the inner chain refuses an event with
-    /// [`AuditError::SequenceExhausted`]: that event was never written, so no
-    /// later checkpoint may report success. Monotonic — never cleared — and
-    /// atomic only, so it adds no lock and no ordering constraint.
-    sequence_exhausted: std::sync::atomic::AtomicBool,
+    /// Latched by [`Self::append`] when the inner chain refuses an event for
+    /// ANY reason — [`AuditError::SequenceExhausted`] or a typed-input refusal
+    /// such as [`AuditError::RecordTooLarge`] / [`AuditError::FieldTooLong`]:
+    /// that event was never written, so no later checkpoint may report
+    /// success. Latching only the exhaustion case left every other refusal
+    /// certifiable, which let a caller that ignores the append error (the
+    /// token service warns and continues) deliver a secret whose audit event
+    /// does not exist. Monotonic — never cleared — and atomic only, so it adds
+    /// no lock and no ordering constraint.
+    append_failed: std::sync::atomic::AtomicBool,
 }
 
 impl AuditChainWriter {
@@ -622,7 +627,7 @@ impl AuditChainWriter {
         Self {
             chain: Arc::new(chain),
             appender,
-            sequence_exhausted: std::sync::atomic::AtomicBool::new(false),
+            append_failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -633,7 +638,7 @@ impl AuditChainWriter {
         Self {
             chain,
             appender,
-            sequence_exhausted: std::sync::atomic::AtomicBool::new(false),
+            append_failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -646,6 +651,12 @@ impl AuditChainWriter {
     }
 
     /// Append + appender.append + appender.checkpoint (every 1000 entries).
+    ///
+    /// A refusal leaves the chain state untouched but latches
+    /// [`Self::checkpoint_now`]: that event was never written, so the writer
+    /// never certifies the log again. An append failure from the appender
+    /// latches `persistence_failed` instead, which fails both `append` and
+    /// `checkpoint_now`.
     #[allow(clippy::too_many_arguments)]
     pub fn append(
         &self,
@@ -679,15 +690,16 @@ impl AuditChainWriter {
             ts_ns,
         ) {
             Ok(entry) => entry,
-            // Sequence exhaustion means THIS event was never written. Latch it
-            // so a later checkpoint cannot certify a log that lost an event;
-            // the refusal itself is unchanged and stays before publication.
-            Err(AuditError::SequenceExhausted { next }) => {
-                self.sequence_exhausted
+            // ANY refusal means THIS event was never written. Latch it — not
+            // only sequence exhaustion — so a later checkpoint cannot certify
+            // a log that lost an event; the refusal itself is unchanged and
+            // stays before publication, and no state (sequence, predecessor
+            // HMAC, retained window) was consumed by it.
+            Err(other) => {
+                self.append_failed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                return Err(AuditError::SequenceExhausted { next });
+                return Err(other);
             }
-            Err(other) => return Err(other),
         };
         self.appender.append_entry(&entry).map_err(|error| {
             self.chain
@@ -714,14 +726,14 @@ impl AuditChainWriter {
     /// tighter truncation-detection bounds).
     ///
     /// Refuses with [`AuditError::SequenceExhaustedUnaudited`] once
-    /// [`Self::append`] has latched a sequence exhaustion: the log is
-    /// missing an event, so reporting a successful checkpoint would let the
-    /// caller treat the audit trail as complete.
+    /// [`Self::append`] has latched ANY append failure (sequence exhaustion
+    /// and every typed-input refusal alike): the log is missing an event, so
+    /// reporting a successful checkpoint would let the caller treat the audit
+    /// trail as complete. The variant keeps its name and message because its
+    /// `Display` text is asserted elsewhere; it now means "an audit event was
+    /// requested and not written", not only "the sequence space ran out".
     pub fn checkpoint_now(&self) -> Result<(), AuditError> {
-        if self
-            .sequence_exhausted
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.append_failed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(AuditError::SequenceExhaustedUnaudited);
         }
         let _gate = self.chain.durable_gate.lock();

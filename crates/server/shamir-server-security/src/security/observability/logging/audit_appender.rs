@@ -60,19 +60,17 @@ const CHECKPOINT_KEY: &[u8] = &[0u8];
 /// archive (recovery's `ROTATED_PREFIX` names the archives with 20 digits; any
 /// non-empty digit run is reserved here).
 ///
-/// Matching is ASCII-case-insensitive on Windows only (`cfg!(windows)`);
-/// elsewhere it is byte-exact, because the appender writes the exact lowercase
-/// name and on a case-sensitive filesystem `AUDIT.LOG` is a different entry.
+/// Matching is ASCII-case-insensitive on EVERY platform: over-refusal is
+/// harmless and under-refusal is not. On a case-insensitive mount (Windows,
+/// default macOS APFS, a case-insensitive Linux mount) `AUDIT.LOG` IS the
+/// audit log, so refusing it is required; on a case-sensitive filesystem it
+/// names a distinct entry, and refusing it only blocks a name nobody should
+/// use. This helper is the appender's own namespace definition: its only
+/// caller is the sink guard, `logging::sink_guard::validate_sink_path`, which
+/// must therefore refuse a sink named `AUDIT.LOG` in `data_dir` everywhere.
 pub fn is_reserved_audit_name(name: &OsStr) -> bool {
-    let raw = name.as_encoded_bytes();
-    let folded;
-    let bytes: &[u8] = if cfg!(windows) {
-        folded = raw.to_ascii_lowercase();
-        &folded
-    } else {
-        raw
-    };
-    let Some(suffix) = bytes.strip_prefix(AUDIT_LOG_FILENAME.as_bytes()) else {
+    let folded = name.as_encoded_bytes().to_ascii_lowercase();
+    let Some(suffix) = folded.strip_prefix(AUDIT_LOG_FILENAME.as_bytes()) else {
         return false;
     };
     suffix.is_empty()
