@@ -64,7 +64,7 @@ async fn fixture(lifetime: Duration) -> (ShamirDbHandler, Session, u64) {
                 "app".into(),
                 "main".into(),
                 lifetime,
-                handler.tx_abort_release(),
+                handler.tx_abort_release("app", "main"),
             ),
         )
         .expect("park transaction");

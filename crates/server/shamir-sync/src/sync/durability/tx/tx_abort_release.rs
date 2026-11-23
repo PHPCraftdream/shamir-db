@@ -23,9 +23,11 @@ use shamir_tx::TxContext;
 /// but its own arguments, so it cannot stall a reaper tick, a session teardown
 /// or shutdown. A still-pending detached task is dropped with the runtime, and
 /// a transaction being dropped at that moment has no waiter the process will
-/// honour anyway. Outside a runtime nothing could drive an async release, so
-/// the context drops as-is (its own RAII rollback) and the locks go with the
-/// process; this never panics.
+/// honour anyway. Outside a live runtime (a drop after the runtime shut down,
+/// or on a runtime that is already tearing down) nothing can drive an async
+/// release: the context drops as-is and this transaction's record locks are NOT
+/// released — the case is logged at `warn!` with the transaction's database and
+/// repository names; it never panics.
 pub(in crate::sync::durability) fn spawn_abort_release(
     release: &TxAbortRelease,
     ctx: TxContext,
@@ -37,12 +39,12 @@ pub(in crate::sync::durability) fn spawn_abort_release(
         return;
     }
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        tracing::debug!(
+        tracing::warn!(
             db,
             repo,
             "interactive tx ended outside a tokio runtime: its record locks go with the process"
         );
         return;
     };
-    runtime.spawn(release(ctx, db.to_owned(), repo.to_owned()));
+    runtime.spawn(release(ctx));
 }

@@ -10,7 +10,6 @@ use shamir_sync::durability::tx_cancel::TxParkedState;
 use shamir_tx::{CancelState, TxContext};
 use shamir_types::access::{Action, ResourcePath};
 
-use super::abort_release::release_parked_locks;
 use super::requests::RequestEntry;
 use crate::engine::db_handler::handler::{session_actor, ShamirDbHandler};
 use crate::engine::db_handler::repo_audit::{
@@ -253,7 +252,7 @@ impl ShamirDbHandler {
             TxParkedState::Open(tx) => match ctx.take() {
                 Some(parked) => {
                     drop(ctx);
-                    self.release_tx_locks(&parked, &tx).await;
+                    self.release_tx_locks(parked, &tx).await;
                     CancelOutcome::Cancelled
                 }
                 None => CancelOutcome::AlreadyFinished,
@@ -270,8 +269,9 @@ impl ShamirDbHandler {
     /// release of the same transaction is a harmless no-op because
     /// `MvccStore::release_locks` removes only holders whose `tx_version`
     /// matches.
-    async fn release_tx_locks(&self, parked: &TxContext, tx: &InteractiveTx) {
-        release_parked_locks(&self.db, parked, tx.db(), tx.repo()).await;
+    async fn release_tx_locks(&self, parked: TxContext, tx: &InteractiveTx) {
+        let release = tx.abort_release();
+        release(parked).await;
     }
 
     /// Cancel another session's result cursor by its id. Ownership comes from

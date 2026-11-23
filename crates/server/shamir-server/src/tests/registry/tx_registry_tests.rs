@@ -6,12 +6,18 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::value::InnerValue;
 
-use crate::tx_registry::{
-    no_abort_release, spawn_reaper_task, InteractiveTx, TxRegistry, TxRegistryError,
-};
+use crate::tx_registry::{spawn_reaper_task, InteractiveTx, TxRegistry, TxRegistryError};
 
 const SID_A: [u8; 32] = [0xAA; 32];
 const SID_B: [u8; 32] = [0xBB; 32];
+
+/// A releaser that releases nothing: these tests drive the registry's own
+/// bookkeeping with a snapshot transaction, so no Level-3 lock can exist.
+fn no_abort_release() -> crate::tx_registry::TxAbortRelease {
+    std::sync::Arc::new(|_| -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::ready(()))
+    })
+}
 
 /// Build a real `(handle, InteractiveTx)` from a standalone gate — the
 /// registry stores genuine `TxContext` + `SnapshotGuard` values.

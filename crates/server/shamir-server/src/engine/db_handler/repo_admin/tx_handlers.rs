@@ -40,14 +40,18 @@ fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<
 }
 
 impl ShamirDbHandler {
-    /// The releaser a newly parked [`InteractiveTx`] must carry: it frees the
-    /// Level-3 record locks the parked context still holds whenever the LAST
-    /// reference to the transaction goes away outside the commit pipeline —
-    /// the owner's rollback, the reaper, session teardown, an execution-limit
-    /// abort, or a request that loses its race with them. Hand-built
-    /// transactions in fixtures use it to get the real releaser.
-    pub fn tx_abort_release(&self) -> TxAbortRelease {
-        super::activity::tx_abort_release(Arc::clone(&self.db))
+    /// The releaser a newly parked [`InteractiveTx`] must carry: it is bound to
+    /// the repository RESOLVED for this handle, so a `RenameDb`/`RenameRepo`
+    /// (or a `DropDb`) between `TxBegin` and the end of the transaction cannot
+    /// make the release resolve nothing. `None` (the repository vanished
+    /// between `tx_begin_as` and this insert) logs instead of dropping the
+    /// locks silently.
+    pub fn tx_abort_release(&self, db_name: &str, repo_name: &str) -> TxAbortRelease {
+        let repo = self
+            .db
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name));
+        super::activity::tx_abort_release(repo)
     }
 
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
@@ -128,7 +132,7 @@ impl ShamirDbHandler {
             db_name.to_string(),
             repo_name.to_string(),
             INTERACTIVE_TX_MAX_LIFETIME,
-            self.tx_abort_release(),
+            self.tx_abort_release(db_name, repo_name),
         );
         match self.tx_registry.register_activity(
             handle,

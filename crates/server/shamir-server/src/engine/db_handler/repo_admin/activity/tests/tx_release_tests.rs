@@ -1,4 +1,4 @@
-//! R4b-4 — every end of an interactive transaction releases the Level-3
+//! INTERACTIVE-TX-LOCK-LEAK (release-1) — every end of an interactive transaction releases the Level-3
 //! pessimistic record locks it still holds.
 //!
 //! `shamir_tx::TxContext` has no `Drop` that frees them (they live in the
@@ -31,6 +31,7 @@ use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_sync::durability::tx_cancel::TxParkedState;
 use shamir_test_diag::FlakeGuard;
 use shamir_tx::{LockMode, MvccStore, RepoTxGate};
+use shamir_types::access::{ResourceMeta, ResourcePath};
 use shamir_types::types::record_id::RecordId;
 use tokio::sync::Notify;
 use tokio_util::task::AbortOnDropHandle;
@@ -563,6 +564,7 @@ async fn a_repeated_release_is_harmless() {
 /// The release is keyed by the transaction's own id, so a late release never
 /// frees a record that a LATER transaction has since acquired. Kills the
 /// mutant that clears every holder on the transaction's keys.
+/// This guards a property inherited from `MvccStore::release_locks` (which this task does not modify): it never touches `InteractiveTx::drop` — it takes the context out by hand and calls the engine release directly — so it also passes on the parent commit and is not a regression test for this change.
 #[tokio::test]
 async fn a_late_release_never_frees_a_reacquired_lock() {
     tokio::time::timeout(
@@ -626,4 +628,169 @@ async fn a_late_release_never_frees_a_reacquired_lock() {
     )
     .await
     .expect("late-release scenario within timeout");
+}
+
+/// A `RenameDb` while the transaction is parked must not lose the store: the
+/// releaser holds the repository RESOLVED at registration, not the names. With
+/// a name-resolving release the rollback frees nothing and the record stays
+/// locked until the process exits. Kills that mutant.
+#[tokio::test]
+async fn renamed_database_still_releases_record_locks() {
+    tokio::time::timeout(
+        TIMEOUT,
+        Box::pin(async {
+            let guard =
+                FlakeGuard::with_watchdog("renamed_database_still_releases_record_locks", TIMEOUT);
+            let owner = Actor::User(principal64([7; 16]));
+            let db = open_app_db(&owner).await;
+            let handler = Arc::new(ShamirDbHandler::new(Arc::clone(&db)));
+            let (gate, mvcc) = storage(&handler).await;
+            let admin = session(9, 9, true);
+            let key = seed_row(&handler, &admin, 1).await;
+            let baseline = mvcc.locks_len();
+            let writer = session(1, 1, true);
+            let handle = begin_locked(&handler, &writer, 5).await;
+            assert!(
+                mvcc.locks_len() > baseline,
+                "the staged write holds the lock"
+            );
+            db.rename_db_as(DB, "app_renamed", Actor::System)
+                .await
+                .expect("an admin rename under a parked transaction is allowed");
+            guard.mark("database renamed while the transaction is parked");
+            let rolled = wire_request(
+                &handler,
+                &writer,
+                DbRequest::TxRollback {
+                    db: DB.into(),
+                    tx_handle: handle,
+                },
+            )
+            .await;
+            assert!(
+                matches!(&rolled, DbResponse::TxRolledBack { tx_handle } if *tx_handle == handle),
+                "rollback: {rolled:?}"
+            );
+            guard.mark("owner rolled back after the rename");
+            let newer =
+                tokio::time::timeout(TIMEOUT, hold(&mvcc, &gate, std::slice::from_ref(&key)))
+                    .await
+                    .expect("the renamed store's record must be lockable again");
+            mvcc.release_locks(newer, std::slice::from_ref(&key)).await;
+            assert_quiet(&handler, &mvcc, &gate, baseline).await;
+            guard.mark("a waiter on the record acquires it after the rename");
+        }),
+    )
+    .await
+    .expect("rename-db scenario within timeout");
+}
+
+/// The same hole through `RenameRepo`: the repository moves to a new key while
+/// the transaction is parked, and the release must still reach its store.
+#[tokio::test]
+async fn renamed_repository_still_releases_record_locks() {
+    tokio::time::timeout(
+        TIMEOUT,
+        Box::pin(async {
+            let guard = FlakeGuard::with_watchdog(
+                "renamed_repository_still_releases_record_locks",
+                TIMEOUT,
+            );
+            let owner = Actor::User(principal64([7; 16]));
+            let db = open_app_db(&owner).await;
+            let handler = Arc::new(ShamirDbHandler::new(Arc::clone(&db)));
+            let (gate, mvcc) = storage(&handler).await;
+            let admin = session(9, 9, true);
+            let key = seed_row(&handler, &admin, 1).await;
+            let baseline = mvcc.locks_len();
+            let writer = session(1, 1, true);
+            let _handle = begin_locked(&handler, &writer, 5).await;
+            assert!(
+                mvcc.locks_len() > baseline,
+                "the staged write holds the lock"
+            );
+            db.rename_repo_as(DB, REPO, "main_renamed", Actor::System)
+                .await
+                .expect("an admin repo rename under a parked transaction is allowed");
+            guard.mark("repository renamed while the transaction is parked");
+            assert_eq!(
+                handler.tx_registry().reap_expired(Duration::ZERO),
+                1,
+                "a zero idle TTL expires the idle transaction"
+            );
+            guard.mark("reaper removed the transaction after the rename");
+            let newer =
+                tokio::time::timeout(TIMEOUT, hold(&mvcc, &gate, std::slice::from_ref(&key)))
+                    .await
+                    .expect("the renamed store's record must be lockable again");
+            mvcc.release_locks(newer, std::slice::from_ref(&key)).await;
+            assert_quiet(&handler, &mvcc, &gate, baseline).await;
+            guard.mark("a waiter on the record acquires it after the repo rename");
+        }),
+    )
+    .await
+    .expect("rename-repo scenario within timeout");
+}
+
+/// A commit refused BEFORE the pipeline takes the context (`access_denied`: the
+/// session owns the database when `TxBegin` runs but loses `Database:Write`
+/// before `TxCommit`) drops the context inside `tx_commit_resolved`, so only
+/// that early return can free the record locks. Kills the mutant that returns
+/// without releasing.
+#[tokio::test]
+async fn denied_commit_releases_record_locks() {
+    tokio::time::timeout(
+        TIMEOUT,
+        Box::pin(async {
+            let guard = FlakeGuard::with_watchdog("denied_commit_releases_record_locks", TIMEOUT);
+            let owner = Actor::User(principal64([7; 16]));
+            let db = open_app_db(&owner).await;
+            let handler = Arc::new(ShamirDbHandler::new(Arc::clone(&db)));
+            let (gate, mvcc) = storage(&handler).await;
+            let admin = session(9, 9, true);
+            let key = seed_row(&handler, &admin, 1).await;
+            let baseline = mvcc.locks_len();
+            // The owning, NOT superuser, principal: the fixture catalogue makes
+            // it the owner of the database, so begin and staging pass while the
+            // database is not narrowed yet.
+            let writer = session(7, 1, false);
+            let handle = begin_locked(&handler, &writer, 5).await;
+            assert!(
+                mvcc.locks_len() > baseline,
+                "the staged write holds the lock"
+            );
+            db.set_resource_meta(
+                &ResourcePath::database(DB),
+                &ResourceMeta::owned_enforced(Actor::System),
+            )
+            .await
+            .expect("narrow the database node to its System owner");
+            guard.mark("database ACL narrowed under a parked transaction");
+            let denied = wire_request(
+                &handler,
+                &writer,
+                DbRequest::TxCommit {
+                    query_version: CURRENT_QUERY_LANG_VERSION,
+                    visibility_wait: None,
+                    db: DB.into(),
+                    tx_handle: handle,
+                },
+            )
+            .await;
+            assert!(
+                matches!(&denied, DbResponse::Error { code, .. } if code == "access_denied"),
+                "the commit must be refused before the pipeline: {denied:?}"
+            );
+            guard.mark("commit refused before the pipeline took the context");
+            let newer =
+                tokio::time::timeout(TIMEOUT, hold(&mvcc, &gate, std::slice::from_ref(&key)))
+                    .await
+                    .expect("the refused commit must release the record lock");
+            mvcc.release_locks(newer, std::slice::from_ref(&key)).await;
+            assert_quiet(&handler, &mvcc, &gate, baseline).await;
+            guard.mark("the record is lockable again");
+        }),
+    )
+    .await
+    .expect("denied-commit scenario within timeout");
 }

@@ -818,7 +818,7 @@ fn cancel_tx_never_removes_replacement_under_stale_authorization() {
                         DB.to_string(),
                         REPO.to_string(),
                         Duration::from_secs(300),
-                        fixture.handler.tx_abort_release(),
+                        fixture.handler.tx_abort_release(DB, REPO),
                     ),
                     bob.activity_handle(),
                     Arc::from(bob.username.as_str()),

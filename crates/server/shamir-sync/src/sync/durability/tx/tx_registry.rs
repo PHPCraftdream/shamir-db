@@ -90,16 +90,11 @@ pub const DEFAULT_INTERACTIVE_TX_IDLE_TTL: Duration = Duration::from_secs(30);
 /// reaped within a few seconds of becoming reapable.
 pub const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Releases the Level-3 record locks a parked tx still holds once its last
-/// reference goes away outside the commit pipeline (see [`no_abort_release`]).
-pub type TxAbortRelease =
-    Arc<dyn Fn(TxContext, String, String) -> BoxFuture<'static, ()> + Send + Sync>;
-
-/// A releaser that releases nothing: registry fixtures park a transaction with
-/// no repository behind it, so no Level-3 lock can exist.
-pub fn no_abort_release() -> TxAbortRelease {
-    Arc::new(|_, _, _| -> BoxFuture<'static, ()> { Box::pin(std::future::ready(())) })
-}
+/// Releases the Level-3 pessimistic record locks a parked transaction still holds when the
+/// LAST reference to its context goes away outside the commit pipeline. Receives the taken
+/// [`TxContext`]; the releaser ALREADY holds the repository resolved when the handle was parked, so
+/// `RenameDb` / `RenameRepo` between begin and end cannot make it resolve nothing.
+pub type TxAbortRelease = Arc<dyn Fn(TxContext) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Phase B Stage 6 — handle for the periodic interactive-tx reaper task.
 /// Just the `JoinHandle<()>` — the stop signal is the shared root
@@ -481,6 +476,11 @@ impl InteractiveTx {
     /// than `idle_ttl` as of `now`. The sweep reaps any tx that returns true.
     pub fn is_expired(&self, now: Instant, idle_ttl: Duration) -> bool {
         self.timing.is_expired(now, idle_ttl)
+    }
+
+    /// The releaser this transaction carries, used by the synchronous operator-cancel path.
+    pub fn abort_release(&self) -> &TxAbortRelease {
+        &self.abort_release
     }
 }
 
