@@ -18,16 +18,12 @@ use shamir_connect::server::audit_chain::{AuditChain, AuditChainWriter};
 use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
-#[cfg(unix)]
-use std::os::unix::fs::symlink;
-
 use super::super::failure_injection_tests::{run, write_file, InjectPort};
 use super::audit_fixtures;
 use super::audit_fixtures::{budget_left, helper_deadline, JoinOnDrop};
-use crate::sync::durability::audit_chain_files::reconcile_destination_audit_files;
 use crate::sync::durability::backup::online::copy_engine::test_seams;
 use crate::sync::durability::backup::online::copy_engine::{
-    run_data_dir_copy_pass, CopiedFile, CopyError, CopyOptions, CopyPassResult,
+    run_data_dir_copy_pass, CopyError, CopyOptions,
 };
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::CancelFlag;
@@ -254,6 +250,8 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
     let audit_log_path = source.join(AUDIT_LOG_FILE);
     let released = Arc::new(AtomicBool::new(false));
     let released_for_hook = released.clone();
+    let release_sent = Arc::new(AtomicBool::new(false));
+    let release_sent_for_activity = release_sent.clone();
     // ONE absolute deadline, taken BEFORE the helper is spawned: both
     // rendezvous receives and the teardown join draw on it, so a wedged helper
     // can never spend a budget per waiting step.
@@ -284,7 +282,9 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
                 if paused_rx.recv_timeout(budget_left(deadline)).is_ok() {
                     append_cycles(&writer, 3, 2);
                 }
-                let _ = release_tx.send(());
+                // The release is the ONLY thing that can unblock the copy: a
+                // failed send must fail the test, not be swallowed.
+                release_sent_for_activity.store(release_tx.send(()).is_ok(), Ordering::SeqCst);
             })
             .expect("spawn the audit activity thread"),
         deadline,
@@ -311,6 +311,10 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
     assert!(
         released.load(Ordering::SeqCst),
         "the audit activity must finish while the copy is paused"
+    );
+    assert!(
+        release_sent.load(Ordering::SeqCst),
+        "the helper must release the paused copy (its channel send must succeed)"
     );
     let report = result.expect("the copy must succeed");
 
@@ -510,13 +514,15 @@ fn quiet_audit_log_copy_restores_and_boots() {
 
 /// A rotation that renamed `audit.log` and has not reopened it leaves the
 /// source with archives and no active file, while the destination still holds
-/// the active log an earlier pass of the same copy made. That stale file has
-/// no manifest entry and would fail the self-verification of an otherwise
-/// healthy copy, so the audit phase removes it.
+/// the active log an earlier pass of the same copy made. That stale file has no
+/// manifest entry, so the pass REFUSES and never deletes it: the copy does not
+/// edit the destination.
 ///
-/// Mutant caught: a pass that keeps the earlier destination copy.
+/// Mutant caught: a pass that deletes the stale destination file (the previous
+/// reconciliation) — the call returns `Ok` and the bytes are gone; a pass that
+/// publishes it — the run reaches self-verification with an unlisted file.
 #[test]
-fn audit_phase_removes_the_destination_active_log_the_source_no_longer_has() {
+fn audit_phase_refuses_a_stale_destination_active_log_instead_of_deleting_it() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
@@ -525,25 +531,21 @@ fn audit_phase_removes_the_destination_active_log_the_source_no_longer_has() {
     write_file(&source.join(archive), b"archived\n");
     write_file(&to.join(AUDIT_LOG_FILE), b"stale-active\n");
     let cancel = CancelFlag::default();
-    let result = run_data_dir_copy_pass(source, to, &[], &cancel, &CopyOptions::default())
-        .expect("the data directory pass must succeed");
-    let captured: Vec<&str> = result
-        .files
-        .iter()
-        .map(|file| file.rel_path.as_str())
-        .collect();
-    assert!(captured.contains(&archive), "archive missing: {captured:?}");
+    let error = run_data_dir_copy_pass(source, to, &[], &cancel, &CopyOptions::default())
+        .expect_err("a stale destination audit file must refuse the pass");
     assert!(
-        !captured.contains(&AUDIT_LOG_FILE),
-        "no active log was captured: {captured:?}"
+        matches!(error, CopyError::AuditArchiveLost),
+        "the refusal must be the typed lost-audit-file error, got {error:?}"
     );
-    assert!(
-        !to.join(AUDIT_LOG_FILE).exists(),
-        "the stale destination active log must be removed"
+    assert_eq!(
+        fs::read(to.join(AUDIT_LOG_FILE)).expect("the stale copy must survive"),
+        b"stale-active\n",
+        "the pass must never delete from the destination"
     );
     assert_eq!(
         fs::read(to.join(archive)).expect("archive copy"),
-        b"archived\n"
+        b"archived\n",
+        "the archive the pass captured stays as it was copied"
     );
 }
 
@@ -569,138 +571,5 @@ fn the_fjall_fixture_fingerprint_rejects_an_impostor_store() {
     assert!(
         !root.join("fake/lock").exists(),
         "an impostor must be rejected by the tightened fingerprint"
-    );
-}
-
-/// One captured file of a synthetic accepted snapshot (the hash is not read by
-/// reconciliation).
-fn copied(rel_path: &str) -> CopiedFile {
-    CopiedFile {
-        rel_path: rel_path.to_string(),
-        sha256: String::new(),
-        size_bytes: 0,
-    }
-}
-
-/// Reconciliation is the ONE step that deletes from the destination, so the
-/// run directory must itself be a plain directory: a symlinked run directory
-/// would redirect every removal outside the snapshot, and is refused BEFORE
-/// any removal happens.
-///
-/// Unix-only: the fixture needs a real symlink (`std::os::unix::fs::symlink`).
-/// A Windows junction is the same threat through the same `symlink_metadata`
-/// check, but creating one needs a privilege the CI user may not hold.
-///
-/// Mutant caught: removing by `fs::read_dir(dest_root)` without checking
-/// `dest_root` itself — the stale archive inside the link target is deleted
-/// and the call returns `Ok`.
-#[cfg(unix)]
-#[test]
-fn a_symlinked_run_directory_is_refused_before_any_removal() {
-    let target = TempDir::new().expect("link target");
-    let parent = TempDir::new().expect("link parent");
-    let stale = target.path().join(audit_fixtures::archive_name(1));
-    write_file(&stale, b"stale\n");
-    let run_dir = parent.path().join("run");
-    symlink(target.path(), &run_dir).expect("symlinked run directory");
-
-    let error = reconcile_destination_audit_files(&run_dir, &CopyPassResult::default(), &[])
-        .expect_err("a symlinked run directory must be refused");
-
-    assert!(
-        matches!(error, CopyError::AuditReconcileRefused { .. }),
-        "the refusal must be the typed reconcile error, got {error:?}"
-    );
-    assert!(
-        stale.exists(),
-        "nothing may be removed through the symlinked run directory"
-    );
-}
-
-/// A captured path is NEVER removed, even when it carries a reserved audit
-/// name: the protection covers the WHOLE accepted snapshot (the files of the
-/// earlier phases), not only the accepted audit round's result.
-///
-/// Mutant caught: comparing the destination against the accepted audit round
-/// alone (the previous `captured.files`-only protection) — the captured file
-/// is deleted and the published snapshot loses a file its own manifest lists,
-/// which self-verification turns into a failed run at `Verifying`.
-#[test]
-fn a_captured_phase_one_file_is_never_removed_by_reconciliation() {
-    let dest = TempDir::new().expect("destination");
-    let archive = audit_fixtures::archive_name(1);
-    write_file(&dest.path().join(&archive), b"phase-one\n");
-
-    reconcile_destination_audit_files(dest.path(), &CopyPassResult::default(), &[copied(&archive)])
-        .expect("a captured path must never be removed");
-
-    assert_eq!(
-        fs::read(dest.path().join(&archive)).expect("the captured file must survive"),
-        b"phase-one\n"
-    );
-}
-
-/// A case-folding destination that maps a destination audit name onto a
-/// captured path of another spelling is refused, not guessed at.
-///
-/// Phase 1 can capture a case-renamed archive (`AUDIT.LOG.` + 20 digits) as an
-/// ordinary file beside the archive phase 2 lists; on a destination that folds
-/// case those two manifest paths are ONE file, so "delete what the accepted
-/// round did not capture" would delete a file the manifest lists.
-///
-/// Mutant caught: deleting on an exact-name miss alone — the reserved
-/// destination name is removed and the call returns `Ok`.
-#[test]
-fn a_case_folded_destination_name_collision_is_refused() {
-    let dest = TempDir::new().expect("destination");
-    let archive = audit_fixtures::archive_name(1);
-    write_file(&dest.path().join(&archive), b"stale\n");
-    let renamed = archive.to_ascii_uppercase();
-
-    let error = reconcile_destination_audit_files(
-        dest.path(),
-        &CopyPassResult::default(),
-        &[copied(&renamed)],
-    )
-    .expect_err("a case-folded collision must be refused");
-
-    assert!(
-        matches!(error, CopyError::AuditReconcileRefused { .. }),
-        "the refusal must be the typed reconcile error, got {error:?}"
-    );
-    assert!(
-        dest.path().join(&archive).exists(),
-        "nothing may be removed when the destination name is ambiguous"
-    );
-}
-
-/// A captured set that folds two reserved audit spellings onto one name cannot
-/// be satisfied on any case-folding destination, so reconciliation refuses
-/// before it enumerates anything.
-///
-/// Mutant caught: building the folded map by overwriting the earlier spelling —
-/// no refusal, and one of the two captured files is deleted from the
-/// destination afterwards.
-#[test]
-fn two_captured_spellings_of_one_audit_name_are_refused() {
-    let dest = TempDir::new().expect("destination");
-    let archive = audit_fixtures::archive_name(1);
-    let lowered = archive.to_ascii_uppercase();
-
-    let error = reconcile_destination_audit_files(
-        dest.path(),
-        &CopyPassResult::default(),
-        &[copied(&archive), copied(&lowered)],
-    )
-    .expect_err("two captured spellings of one audit name must be refused");
-
-    assert!(
-        matches!(error, CopyError::AuditReconcileRefused { .. }),
-        "the refusal must be the typed reconcile error, got {error:?}"
-    );
-    assert_eq!(
-        fs::read_dir(dest.path()).expect("destination").count(),
-        0,
-        "a refused reconciliation must touch nothing"
     );
 }

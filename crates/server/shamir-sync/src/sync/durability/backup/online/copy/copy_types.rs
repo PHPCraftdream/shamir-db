@@ -78,14 +78,16 @@ pub enum CopyError {
     RecopyCap(String),
     #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
     AuditFilesUnstable { rounds: usize },
-    /// An archive captured by an EARLIER round of the same data-directory
-    /// pass is absent from the accepted round: the anchors are captured in
-    /// phase 1, before any round, so a rotation that advanced them and a
-    /// retention sweep that pruned the archive would leave this snapshot
-    /// carrying anchors over a prefix it does not hold — recovery refuses it
-    /// with `UnanchoredSuffix`. The pass fails closed instead of publishing a
-    /// snapshot that cannot boot. No path and no archive name in the text.
-    #[error("an audit archive captured by an earlier round is missing from the accepted round")]
+    /// The destination run directory holds a reserved audit chain file
+    /// (`audit.log` or an `audit.log.` archive) that the accepted
+    /// (manifest-defining) round did not capture. An earlier pass or an earlier
+    /// unstable round copied it and a rotation, or a retention sweep, then
+    /// removed it from the source. Publishing either drops bytes a captured
+    /// anchor may name or describes a file set the destination contradicts, so
+    /// the pass fails closed BEFORE the manifest is written; nothing is deleted,
+    /// the cleanup guard removes the whole run directory and the next scheduled
+    /// run retries. No path and no archive name in the text.
+    #[error("the destination holds an audit chain file the accepted round did not capture")]
     AuditArchiveLost,
     /// One entry of the audit chain directory could not be enumerated or
     /// examined: an entry of its listing, or that entry's metadata, failed
@@ -98,11 +100,4 @@ pub enum CopyError {
         #[source]
         source: std::io::Error,
     },
-    /// Reconciliation refused to TOUCH the destination: the deletion it would
-    /// perform could not be confined to the accepted snapshot (the run
-    /// directory is not a plain directory, or a case-folding destination would
-    /// map two captured paths onto one file). `reason` is a fixed phrase that
-    /// names no path and no archive name.
-    #[error("refusing to reconcile the destination audit files: {reason}")]
-    AuditReconcileRefused { reason: &'static str },
 }

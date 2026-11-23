@@ -5,7 +5,7 @@
 //! created atomically by the protocol (step A), never here.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
@@ -18,16 +18,15 @@ use super::manifest::{self, BACKUP_META_FILE_NAME};
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
-    audit_capture_is_stable, is_audit_archive_name, list_audit_files,
-    reconcile_destination_audit_files, AUDIT_CAPTURE_ROUNDS,
+    audit_capture_is_stable, list_audit_files, AUDIT_CAPTURE_ROUNDS,
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
-use self::audit_rounds::discarded_captured_archive;
+use self::audit_rounds::refuse_unlisted_destination_audit_file;
 use self::list_files::list_files;
 pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
 
-/// The fail-closed guard of the audit capture rounds (sibling file).
+/// The pre-publication destination guard of the data-directory pass.
 #[path = "audit_rounds.rs"]
 mod audit_rounds;
 /// The deterministic listing of a pass (sibling file).
@@ -158,8 +157,7 @@ fn is_sharing_violation(error: &CopyError) -> bool {
         | CopyError::RecopyCap(_)
         | CopyError::AuditFilesUnstable { .. }
         | CopyError::AuditListing { .. }
-        | CopyError::AuditArchiveLost
-        | CopyError::AuditReconcileRefused { .. } => {
+        | CopyError::AuditArchiveLost => {
             return false;
         }
     };
@@ -427,14 +425,16 @@ pub fn run_copy_pass(
 /// [`AUDIT_CAPTURE_ROUNDS`]-th, ends the pass; no stable round within the
 /// bound fails it with a typed [`CopyError::AuditFilesUnstable`] — never a
 /// silently inconsistent copy. The manifest describes exactly the bytes of
-/// the last round, and an active log an earlier pass left in the destination
-/// that the last round did not capture is removed (the source has none while a
-/// rotation reopens it). A destination archive an EARLIER ROUND of this same
-/// pass captured and the accepted round no longer lists is a typed refusal
-/// ([`CopyError::AuditArchiveLost`]): the anchors phase 1 captured still name
-/// it, so deleting the copy would publish a snapshot that boot refuses
-/// (`UnanchoredSuffix`) while this pass reported success. A source file that
-/// vanishes during a corrective
+/// the last round. NOTHING is deleted from the destination: a reserved audit
+/// chain file (`audit.log` or an archive) that the accepted round did not
+/// capture — copied by this pass's earlier unstable round, or by an earlier
+/// pass entirely — is a typed, path-free refusal
+/// ([`CopyError::AuditArchiveLost`]) raised BEFORE the manifest is written. The
+/// anchors phase 1 captured may name those bytes, and the run's own inventory
+/// self-verification would refuse the snapshot anyway; refusing first keeps the
+/// failure typed and path-free, and the cleanup guard removes the whole run
+/// directory so the scheduler retries. A source file that vanishes during a
+/// corrective
 /// re-copy, or its follow-up re-hash, is counted MISSING for that round: a
 /// rotation renamed the active log into a new archive, which the stability
 /// check re-lists and the next round captures, so the snapshot still carries
@@ -446,10 +446,19 @@ pub fn run_copy_pass(
 /// listing and its copy — a vanished file is excluded exactly as any other
 /// deleted source file — and retention never removes the newest archive,
 /// the only one that can hold the tail an anchor persisted just before
-/// names. An archive that was gone BEFORE any round of this pass listed it
-/// (pruned between pass D and this pass, say) is the same open window: no
-/// round here captured it, so its leftover destination copy is reconciled
-/// away and such a snapshot can still refuse at boot.
+/// names. A needed prefix that was gone BEFORE any pass captured it stays the
+/// documented pre-existing limit: the copy holds no bytes for it and boot
+/// validates the saved anchor against the copied chain.
+///
+/// Not covered either, and NOT papered over: `server_meta` is a LIVE Fjall
+/// store the running server keeps writing (its anchor row at every rotation
+/// boundary), and phase 1 copies it file by file outside every seal. A flush
+/// or a compaction between the listing and the hash can leave a mixed image
+/// (a `current` naming a version file the copy never took); the run then FAILS
+/// CLOSED — the leftover destination file is unlisted, so the inventory check
+/// refuses, or the copy's own hash mismatch refuses earlier — and the next
+/// scheduled run retries. The copier never repairs such an image and never
+/// deletes the leftover.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -469,11 +478,7 @@ pub(super) fn run_data_dir_copy_pass(
     };
     // Phase 1: every other file, both anchor stores included.
     let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
-    // Phase 2: the audit chain files, listed only now. Archives captured by an
-    // EARLIER round of this same pass are tracked separately: the anchors were
-    // captured in phase 1, so discarding one of them would publish anchors the
-    // snapshot cannot authenticate (`audit_rounds`).
-    let mut earlier_archives: BTreeSet<String> = BTreeSet::new();
+    // Phase 2: the audit chain files, listed only now.
     for _ in 0..AUDIT_CAPTURE_ROUNDS {
         let audit = run_copy_pass_inner(
             source_root,
@@ -490,103 +495,17 @@ pub(super) fn run_data_dir_copy_pass(
         result.changed_files += audit.changed_files;
         result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
-            if discarded_captured_archive(&earlier_archives, &audit.files).is_some() {
-                return Err(CopyError::AuditArchiveLost);
-            }
-            reconcile_destination_audit_files(dest_root, &audit, &result.files)?;
-            reconcile_destination_anchor_stores(dest_root, &result.files, &audit.files)?;
+            // Nothing is deleted from the destination: a reserved audit name
+            // this round did not capture — copied by pass D or by an earlier
+            // unstable round — refuses the pass before the manifest exists.
+            refuse_unlisted_destination_audit_file(dest_root, &audit.files)?;
             result.files.extend(audit.files);
             return Ok(result);
-        }
-        for file in &audit.files {
-            if is_audit_archive_name(&file.rel_path) {
-                earlier_archives.insert(file.rel_path.clone());
-            }
         }
     }
     Err(CopyError::AuditFilesUnstable {
         rounds: AUDIT_CAPTURE_ROUNDS,
     })
-}
-
-/// The anchor stores the RUNNING server keeps writing while a copy runs: the
-/// audit meta hook persists `server_meta`'s anchor row at every rotation
-/// boundary (`server/server_launcher/support/durable_stores.rs`,
-/// `store_audit_checkpoint`), so that Fjall tree rotates files under an online
-/// copy.
-const LIVE_ANCHOR_STORE_DIRS: &[&str] = &["server_meta"];
-
-/// Removes the destination's copies of LIVE anchor-store files the accepted
-/// snapshot does not list: the running server mutates `server_meta/` during the
-/// copy (its anchor row at every rotation boundary), so a file pass D copied
-/// can be gone from the source by the manifest-defining pass E and the leftover
-/// copy would fail self-verification as an unlisted file. A reconciliation, not
-/// a consistent-point capture: the destination is made to hold exactly what the
-/// final listing described, the contract `reconcile_destination_audit_files`
-/// applies to the audit chain. Only regular files under a live anchor-store
-/// directory are removed.
-fn reconcile_destination_anchor_stores(
-    dest_root: &Path,
-    phase_one: &[CopiedFile],
-    audit: &[CopiedFile],
-) -> Result<(), CopyError> {
-    let accepted: BTreeSet<&str> = phase_one
-        .iter()
-        .chain(audit.iter())
-        .map(|file| file.rel_path.as_str())
-        .collect();
-    let mut stack: Vec<PathBuf> = LIVE_ANCHOR_STORE_DIRS
-        .iter()
-        .map(|name| dest_root.join(name))
-        .filter(|path| path.is_dir())
-        .collect();
-    let mut files: Vec<PathBuf> = Vec::new();
-    while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir).map_err(|source| CopyError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| CopyError::Io {
-                path: dir.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            let meta = match fs::symlink_metadata(&path) {
-                Ok(meta) => meta,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(CopyError::Io { path, source });
-                }
-            };
-            if meta.is_dir() {
-                stack.push(path);
-            } else if meta.is_file() {
-                files.push(path);
-            }
-        }
-    }
-    for path in files {
-        let Ok(rel) = path.strip_prefix(dest_root) else {
-            continue;
-        };
-        let rel: String = rel
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
-        if accepted.contains(rel.as_str()) {
-            continue;
-        }
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(CopyError::Io { path, source });
-            }
-        }
-    }
-    Ok(())
 }
 
 /// How one pass treats the audit chain files of its source root.

@@ -8,9 +8,11 @@
 //! `audit_checkpoint` encoded with `rmp_serde::to_vec_named` and a
 //! `serde_bytes` digest — the shape `shamir-server`'s `ServerMetaStore`
 //! writes). Only the Rust type is local: the server's row type is private to
-//! that crate. The store is closed before the copy runs and reopened after
-//! the restore, so a phase-1 mutant that skips `server_meta/` fails on the
-//! missing store, not on a missing text file.
+//! that crate. A fixture whose writes all land OUTSIDE the copy window closes
+//! the store before the copy and reopens it after the restore, so a phase-1
+//! mutant that skips `server_meta/` fails on the missing store, not on a
+//! missing text file; a fixture that has to write WHILE the copy runs uses
+//! [`LiveServerMeta`] and keeps one handle open, exactly as the server does.
 
 use std::fs;
 use std::path::Path;
@@ -64,7 +66,10 @@ pub(crate) fn archive_name(index: u64) -> String {
 /// Persist the `server_meta` anchor the way the server's meta hook does:
 /// AFTER the appender's `audit_checkpoint` anchor, with the same
 /// `(next_seq, hmac)` pair. The store is created, filled, synced and CLOSED
-/// again, so the following copy sees closed files.
+/// again, so the following copy sees closed files. Fixtures whose write lands
+/// OUTSIDE the copy window use this; a write that has to happen WHILE the copy
+/// runs must go through [`LiveServerMeta`], because closing and reopening a
+/// Fjall store is a transition production never makes then.
 pub(crate) fn persist_server_meta_anchor(dir: &Path, position: (u64, [u8; 32])) {
     let path = dir.join(SERVER_META_DIR);
     fs::create_dir_all(&path).expect("mkdirs server_meta");
@@ -87,6 +92,56 @@ pub(crate) fn persist_server_meta_anchor(dir: &Path, position: (u64, [u8; 32])) 
         .expect("persist the server_meta store");
     drop(keyspace);
     drop(store);
+}
+
+/// The LIVE `server_meta` store of a fixture: opened ONCE and written through
+/// its open handle, exactly as the running server writes it
+/// (`server/engine/server_meta.rs::store_audit_checkpoint` inserts the anchor
+/// row and then persists the database with `SyncAll`).
+///
+/// The handle is held for as long as the copy runs, because that is what
+/// production holds: `server/engine/server/server_launcher/support/durable_stores.rs`
+/// keeps one open `ServerMetaStore` for the life of the server and writes the
+/// anchor through it at every rotation boundary. Closing and reopening a Fjall
+/// store instead RECOVERS it, and recovery deletes superseded LSM version files
+/// (`lsm-tree` `TreeInner::cleanup_orphaned_version`), a transition the live
+/// hook never causes — a fixture that reopens mid-copy models something
+/// production does not do and makes the copy see files appear and vanish for
+/// the wrong reason.
+#[derive(Clone)]
+pub(crate) struct LiveServerMeta {
+    store: Database,
+    keyspace: fjall::Keyspace,
+}
+
+impl LiveServerMeta {
+    /// Open (or create) the fixture's `server_meta` store and keep it open.
+    pub(crate) fn open(dir: &Path) -> Self {
+        let path = dir.join(SERVER_META_DIR);
+        fs::create_dir_all(&path).expect("mkdirs server_meta");
+        let store = Database::builder(&path)
+            .open()
+            .expect("open the fixture server_meta store");
+        let keyspace = store
+            .keyspace(SERVER_META_KEYSPACE, KeyspaceCreateOptions::default)
+            .expect("server_meta keyspace");
+        Self { store, keyspace }
+    }
+
+    /// Write the anchor row through the OPEN handle and make it durable.
+    pub(crate) fn write_anchor(&self, position: (u64, [u8; 32])) {
+        let row = ServerMetaAnchorRow {
+            last_audit_seq: position.0,
+            last_audit_hmac: position.1.to_vec(),
+        };
+        let encoded = rmp_serde::to_vec_named(&row).expect("encode the server_meta anchor");
+        self.keyspace
+            .insert(SERVER_META_ANCHOR_KEY.as_bytes(), encoded.as_slice())
+            .expect("insert the server_meta anchor");
+        self.store
+            .persist(fjall::PersistMode::SyncAll)
+            .expect("persist the server_meta store");
+    }
 }
 
 /// Read the anchor back through a REOPENED Fjall store, panicking with the

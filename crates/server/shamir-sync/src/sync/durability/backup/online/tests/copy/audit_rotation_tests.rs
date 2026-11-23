@@ -24,8 +24,9 @@ use tempfile::TempDir;
 use super::super::failure_injection_tests::{run, write_file, InjectPort};
 use super::audit_fixtures;
 use super::audit_fixtures::{budget_left, helper_deadline, JoinOnDrop};
-use crate::sync::durability::backup::online::copy_engine::test_seams;
-use crate::sync::durability::backup::online::progress::CancelFlag;
+use crate::sync::durability::backup::online::copy_engine::{test_seams, CopyError};
+use crate::sync::durability::backup::online::progress::{BackupStage, CancelFlag};
+use crate::sync::durability::backup::online::protocol::{OnlineBackupError, OnlineBackupFailure};
 
 /// Audit chain key seed of the rotating fixture (never leaves the test).
 const ROTATION_KEY_SEED: u8 = 0x33;
@@ -95,9 +96,14 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
     writer.checkpoint_now().expect("persist the audit anchor");
     // The server's meta hook persists the second anchor AFTER the appender
     // anchor. The live appender holds the checkpoint store, so the chain's own
-    // checkpoint is read instead of reopening the store.
+    // checkpoint is read instead of reopening the store. The meta store is
+    // opened ONCE and STAYS open (production keeps one handle for the life of
+    // the server and writes every anchor through it), so the copy below sees a
+    // store that only gains journal rows — never a close/reopen recovery.
     let anchor = writer.chain().checkpoint();
-    audit_fixtures::persist_server_meta_anchor(&source, anchor);
+    let live_meta = audit_fixtures::LiveServerMeta::open(&source);
+    live_meta.write_anchor(anchor);
+    let live_meta_for_hook = live_meta.clone();
 
     let (paused_tx, paused_rx) = mpsc::channel::<()>();
     let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -105,7 +111,6 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
     // rendezvous receives and the teardown join draw on it, so a wedged helper
     // can never spend a budget per waiting step.
     let deadline = helper_deadline();
-    let source_for_activity = source.clone();
     let activity = JoinOnDrop::with_deadline(
         std::thread::Builder::new()
             .name("audit-rotation".to_string())
@@ -115,10 +120,10 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
                     append_rotation_event(&writer, "append the rotating event");
                     writer.checkpoint_now().expect("persist the rotated anchor");
                     // The hook runs after the appender anchor at every
-                    // rotation, so the advanced `server_meta` anchor is
-                    // persisted the same way.
+                    // rotation, so the advanced `server_meta` anchor is written
+                    // through the OPEN handle, exactly as the server does.
                     let anchor = writer.chain().checkpoint();
-                    audit_fixtures::persist_server_meta_anchor(&source_for_activity, anchor);
+                    live_meta_for_hook.write_anchor(anchor);
                 } else {
                     panic!("the copy never reached the listing pause");
                 }
@@ -155,6 +160,10 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
         "the listing-pause rendezvous must be released before the shared helper deadline"
     );
     let report = result.expect("the copy must succeed");
+    // The copy is finished: release the live handle BEFORE any store is opened
+    // again (the live source keeps the fjall lock, and the restore-side check
+    // must read the COPIED tree, not this one).
+    drop(live_meta);
     audit_fixtures::copy_snapshot_tree(&report.dest_dir, &restored);
     // Recovery FIRST: on the single-listing order the copy lacks the archive
     // the rotation created while it was paused, and the typed refusal
@@ -236,8 +245,9 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
 }
 
 /// A rotation inside the audit phase's corrective re-copy (the OPEN of the
-/// re-copy) leaves that round without the active log, the round's stability
-/// check re-lists, and the PUBLICATION describes the new archive.
+/// re-copy) is counted MISSING for that round, the stability check re-lists,
+/// the next round captures the new archive — and the run then refuses, because
+/// the destination still holds the active-log copy the rotation made stale.
 ///
 /// The rotation is armed only after the SECOND data-directory listing
 /// (phase 1 of pass D, then of the residual pass E): the fault must land in
@@ -246,10 +256,12 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
 /// re-copy; the source is gone when that copy opens it.
 ///
 /// Mutant caught: propagating the vanished source's `CopyError::Io
-/// { NotFound }` at the corrective OPEN — the run returns a typed error
-/// instead of a report and the decoded-manifest assertions never run.
+/// { NotFound }` at the corrective OPEN — the run returns the I/O variant
+/// instead of the typed lost-audit-file refusal below. Mutant caught: a pass
+/// that publishes despite the stale destination copy — the run returns a report
+/// and the refusal assertions never run.
 #[test]
-fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_next_round() {
+fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_refuses_the_run() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let source = source_dir.path().to_path_buf();
@@ -290,9 +302,6 @@ fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_ne
     let (result, _progress) = run(&port, &source, &to, &CancelFlag::default());
     drop(seam);
     drop(arm);
-    let report = result.expect(
-        "a source that vanishes inside the corrective re-copy is counted missing, not a failure",
-    );
     assert_eq!(
         listings.load(Ordering::SeqCst),
         2,
@@ -302,31 +311,39 @@ fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_ne
         rotated.load(Ordering::SeqCst),
         "the corrective branch must be reached in the residual pass"
     );
-    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    let error = result.expect_err("a stale destination audit file must refuse the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Sealing);
     assert!(
-        paths.contains(&archive),
-        "the published manifest must list the re-listed archive: {paths:?}"
-    );
-    assert!(
-        !paths.contains(&ROTATION_AUDIT_LOG.to_string()),
-        "the rotated active log must not be published: {paths:?}"
-    );
-    let bytes = b"active-before-rotation\n";
-    assert_eq!(
-        fs::read(report.dest_dir.join(&archive)).expect("archive copy"),
-        bytes,
-        "the archive must carry the bytes the active log held"
+        matches!(
+            primary,
+            OnlineBackupFailure::Copy(CopyError::AuditArchiveLost)
+        ),
+        "the tolerated-vanish path must end in the typed lost-audit-file refusal, got {primary:?}"
     );
     assert_eq!(
-        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
-        (hex::encode(Sha256::digest(bytes)), bytes.len() as u64),
-        "the manifest must describe the archive bytes exactly"
+        error.stage_and_reason(),
+        "sealing: copy-audit-archive-lost",
+        "the scheduled token must stay in the path-free copy vocabulary"
+    );
+    assert_eq!(
+        fs::read_dir(&to).expect("destination root").count(),
+        0,
+        "R4: the refused snapshot must not survive in the destination"
     );
 }
 
-/// A rotation that lands between the corrective COPY and its follow-up
-/// RE-HASH is tolerated in the audit phase and the next round publishes the
-/// new archive.
+/// A rotation that lands between the corrective COPY and its follow-up RE-HASH
+/// is tolerated in the audit phase, the next round captures the new archive —
+/// and the run then refuses, because the destination still holds the
+/// active-log copy the rotation made stale.
 ///
 /// The `hash_file` seam stands for the append that changed the log between
 /// its copy and its snapshot hash (an unmatchable digest), and on the SECOND
@@ -335,11 +352,11 @@ fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_ne
 ///
 /// Mutant caught: restoring `NotFound` propagation in the follow-up-hash arm
 /// of the corrective re-copy (`copy_engine::recopy_until_stable`). That arm
-/// is never reached by the source-open test, so this case is its own
-/// oracle: the run returns a typed `Io { NotFound }` instead of a report, and
-/// the decoded-manifest assertion never runs.
+/// is never reached by the source-open test, so this case is its own oracle:
+/// the run returns `CopyError::Io { NotFound }` instead of the typed
+/// lost-audit-file refusal below.
 #[test]
-fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() {
+fn rotation_between_the_corrective_copy_and_its_re_hash_refuses_the_run() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
@@ -385,9 +402,6 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() 
     let (result, _progress) = run(&port, source, to, &CancelFlag::default());
     drop(seam);
     drop(arm);
-    let report = result.expect(
-        "a source that vanishes inside the corrective re-hash is counted missing, not a failure",
-    );
     assert_eq!(
         listings.load(Ordering::SeqCst),
         2,
@@ -398,19 +412,31 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() 
         2,
         "the residual pass must reach the copy hash and the corrective re-hash"
     );
-    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    let error = result.expect_err("a stale destination audit file must refuse the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Sealing);
     assert!(
-        paths.contains(&archive),
-        "the published manifest must list the re-listed archive: {paths:?}"
+        matches!(
+            primary,
+            OnlineBackupFailure::Copy(CopyError::AuditArchiveLost)
+        ),
+        "the tolerated re-hash vanish must end in the typed lost-audit-file refusal, got {primary:?}"
     );
-    assert!(
-        !paths.contains(&ROTATION_AUDIT_LOG.to_string()),
-        "the rotated active log must not be published: {paths:?}"
-    );
-    let bytes = fs::read(&archive_path).expect("source archive bytes");
     assert_eq!(
-        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
-        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64),
-        "the manifest must describe the archive bytes exactly"
+        error.stage_and_reason(),
+        "sealing: copy-audit-archive-lost",
+        "the scheduled token must stay in the path-free copy vocabulary"
+    );
+    assert_eq!(
+        fs::read_dir(to).expect("destination root").count(),
+        0,
+        "R4: the refused snapshot must not survive in the destination"
     );
 }

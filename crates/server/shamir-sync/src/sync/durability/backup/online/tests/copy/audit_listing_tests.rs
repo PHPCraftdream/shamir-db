@@ -34,6 +34,13 @@ use crate::sync::durability::backup::online::protocol::{OnlineBackupError, Onlin
 /// counted separately from the captures, so a fixture that injects in the
 /// wrong pass cannot pass as "two captures".
 ///
+/// The injection is ARMED BY THE SECOND DATA-DIRECTORY LISTING (`after_listing`
+/// fires once per pass, in phase 1 — pass D, then the residual pass E), not by
+/// a capture count: pass D's captures exist only in this test's tally, so
+/// counting them is exactly what makes the arming depend on a number the
+/// protocol never promises. A capture-count arming once matched nothing on CI
+/// and left the late archive unwritten.
+///
 /// Mutant caught: a data-directory pass that captures ONE round and never
 /// re-lists (the single-listing order) — the late archive is absent from the
 /// decoded manifest and from the destination while the run still reports
@@ -51,6 +58,19 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
     let injected = Arc::new(AtomicBool::new(false));
     let injected_for_hook = injected.clone();
     let source_for_hook = source.to_path_buf();
+    // Armed by the SECOND data-directory listing: phase 1 of pass D is the
+    // first, phase 1 of the residual pass E the second. Everything captured
+    // after the arming happens inside the pass that defines the manifest.
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root: &Path| {
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
+    let armed_for_hook = armed.clone();
     let seam = test_seams::set_after_capture(Box::new(move |path: &Path| {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
@@ -58,10 +78,11 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
         if name != first_for_hook {
             return;
         }
-        // Pass D captures it first; the residual pass E's first round is the
-        // second capture, and that is where the late archive appears.
-        if captures_for_hook.fetch_add(1, Ordering::SeqCst) == 1
-            && !injected_for_hook.swap(true, Ordering::SeqCst)
+        captures_for_hook.fetch_add(1, Ordering::SeqCst);
+        // The first capture of archive 1 INSIDE the manifest-defining pass
+        // injects the late archive; the pass's fresh listing then forces the
+        // retry that captures both.
+        if armed_for_hook.load(Ordering::SeqCst) && !injected_for_hook.swap(true, Ordering::SeqCst)
         {
             write_file(&source_for_hook.join(archive_name(2)), b"archived-2\n");
         }
@@ -69,7 +90,17 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
     let port = InjectPort::with_repos(source, &["alpha"]);
     let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
     drop(seam);
+    drop(arm);
     let report = result.expect("the round that re-lists the late archive must succeed");
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "the protocol lists the data dir twice (pass D, then the residual pass E)"
+    );
+    assert!(
+        armed.load(Ordering::SeqCst),
+        "the injection is armed only by the manifest-defining pass"
+    );
     assert!(
         injected.load(Ordering::SeqCst),
         "the residual pass must inject the late archive"
@@ -96,6 +127,176 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
         audit_fixtures::manifest_entry(&report.dest_dir, &archive_name(2)),
         (hex::encode(Sha256::digest(bytes)), bytes.len() as u64),
         "the manifest must describe the late archive bytes exactly"
+    );
+}
+
+/// A file that vanishes inside an UNSTABLE round is counted MISSING, and that
+/// count survives into the result the accepted round returns.
+///
+/// Round 1 lists archives 1 and 7 and the active log; the hook then creates
+/// archive 2 and deletes archive 7 BEFORE its copy, so round 1 loses 7 and its
+/// fresh listing names 2 — round 1 is unstable and round 2 is accepted. The
+/// vanished file leaves no destination copy, so nothing is refused: this is the
+/// pass-result oracle for the counter itself.
+///
+/// Mutant caught: dropping `missing_files += 1` on the copy's `NotFound` arm —
+/// the result reports 0. Mutant caught: not accumulating a round's counters
+/// into `result` (`result.missing_files += audit.missing_files`) — the accepted
+/// round saw no loss, so the result still reports 0.
+#[test]
+fn a_source_that_vanishes_in_an_unstable_round_carries_its_missing_count() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    let first = archive_name(1);
+    let doomed = archive_name(7);
+    let late = archive_name(2);
+    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    write_file(&source.join(&first), b"archived-1\n");
+    write_file(&source.join(&doomed), b"archived-7\n");
+    write_file(&source.join("audit.log"), b"active\n");
+    let doomed_for_hook = doomed.clone();
+    let source_for_hook = source.to_path_buf();
+    let late_for_hook = late.clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_hook = armed.clone();
+    let seam = test_seams::set_after_copy(Box::new(move |path: &Path| {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        if name != archive_name(1) || armed_for_hook.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // The rotation: a NEW archive appears (the round can no longer be the
+        // accepted one) and a pruned one disappears before its own copy.
+        write_file(&source_for_hook.join(&late_for_hook), b"archived-2\n");
+        fs::remove_file(source_for_hook.join(&doomed_for_hook))
+            .expect("retention prunes the archive");
+    }));
+    let result = run_data_dir_copy_pass(
+        source,
+        to,
+        &[],
+        &CancelFlag::default(),
+        &CopyOptions::default(),
+    );
+    drop(seam);
+    let result = result.expect("a vanished file is missing, never a failure");
+    assert!(
+        armed.load(Ordering::SeqCst),
+        "the fault must inject inside the audit phase"
+    );
+    assert_eq!(
+        result.missing_files, 1,
+        "the vanished archive is counted missing and the count carries into the result"
+    );
+    let captured: Vec<&str> = result
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    for name in [first.as_str(), late.as_str(), "audit.log"] {
+        assert!(
+            captured.contains(&name),
+            "the accepted round must describe {name}: {captured:?}"
+        );
+    }
+    assert!(
+        !captured.contains(&doomed.as_str()),
+        "the vanished archive must not be described: {captured:?}"
+    );
+    assert!(
+        !to.join(&doomed).exists(),
+        "the vanished archive was never copied, so no destination copy exists"
+    );
+}
+
+/// An ITERATOR failure of the phase-2 audit listing is the typed, path-free
+/// refusal — the same arm the pass listing uses.
+///
+/// `list_audit_files` is the ONE phase-2 listing (capture round and stability
+/// check), so a dropped `DirEntry` there could hide a rotation archive. The
+/// injected error travels the seam both listings share.
+///
+/// Mutant caught: `let entry = entry?` mapped to a path-bearing `CopyError::Io`
+/// (the parent's old shape) — the typed assertion and the path canary fail.
+#[test]
+fn a_phase_two_listing_iteration_failure_is_a_typed_refusal() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let source = source_dir.path();
+    write_file(&source.join(archive_name(1)), b"archived\n");
+    let root = source.to_path_buf();
+    let seam = test_seams::set_read_dir_entry(Box::new(move |dir: &Path| {
+        if dir == root.as_path() {
+            Some(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "iteration denied",
+            ))
+        } else {
+            None
+        }
+    }));
+    let error = list_audit_files(source, &CancelFlag::default(), None)
+        .expect_err("an enumeration failure must be typed, never a silent omission");
+    drop(seam);
+    let CopyError::AuditListing { source } = &error else {
+        panic!("expected AuditListing, got {error:?}");
+    };
+    assert_eq!(source.kind(), ErrorKind::PermissionDenied);
+    let rendered = error.to_string();
+    let fixture_dir = source_dir.path().display().to_string();
+    assert!(
+        !rendered.contains(&fixture_dir) && !rendered.contains(&archive_name(1)),
+        "the refusal must carry no path and no entry name: {rendered}"
+    );
+}
+
+/// A metadata `NotFound` on a top-level archive during phase 1 is the
+/// documented VANISHED-ENTRY race, not a refusal — and the phase-2 listing
+/// still captures the file.
+///
+/// The `NotFound`-before-classification order is what makes this work: the
+/// entry is skipped in phase 1 (it appeared to vanish between the listing and
+/// the stat) and the audit phase, which lists the directory again, takes it.
+///
+/// Mutant caught: classifying `NotFound` as `AuditListing` (or moving the
+/// classification above the `NotFound` arm) — phase 1 refuses and the run never
+/// publishes.
+#[test]
+fn a_phase_one_metadata_not_found_is_skipped_and_phase_two_captures_the_archive() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let archive = archive_name(1);
+    write_file(&source.join(&archive), b"archived\n");
+    write_file(&source.join("audit.log"), b"active\n");
+    let failing = source.join(&archive);
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_for_hook = fired.clone();
+    let seam = test_seams::set_symlink_metadata(Box::new(move |path: &Path| {
+        if path == failing && !fired_for_hook.swap(true, Ordering::SeqCst) {
+            Some(Err(std::io::Error::from(ErrorKind::NotFound)))
+        } else {
+            None
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the phase-1 metadata read must be the one that vanished"
+    );
+    let report = result.expect("a vanished entry is skipped, never refused");
+    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    assert!(
+        paths.contains(&archive),
+        "the audit phase re-lists the directory and captures the archive: {paths:?}"
+    );
+    assert_eq!(
+        fs::read(report.dest_dir.join(&archive)).expect("archive copy"),
+        b"archived\n"
     );
 }
 
@@ -316,22 +517,22 @@ fn a_persistent_metadata_fault_on_an_archive_fails_the_run_path_free() {
 /// The anchors are captured by phase 1 of the manifest-defining pass (step E of
 /// `online/protocol.rs`) BEFORE any audit listing. An audit round of that same
 /// pass then copies archive 1; retention prunes it from the source before the
-/// accepted round lists the directory. Reconciling the destination would delete
-/// the copy of an archive the captured anchors still name — publication would
-/// pass (it hashes files, it does not read anchors) and boot would refuse the
-/// snapshot with `UnanchoredSuffix`. The pass must refuse instead of turning a
-/// refused backup into an unbootable success, and it must refuse TYPED and
-/// path-free: `CopyError::AuditArchiveLost` under the stable reason token.
+/// accepted round lists the directory, so the destination holds an audit chain
+/// file the accepted round never captured. The pass must refuse — typed and
+/// path-free, `CopyError::AuditArchiveLost` under the stable reason token —
+/// BEFORE the manifest exists, and it must delete nothing: publishing would
+/// either drop bytes a captured anchor may name or describe a file set the
+/// destination contradicts.
 ///
 /// The retention step runs inside the capture hook, immediately after the
 /// SECOND capture of archive 1: the first is pass D's audit round (a harmless
 /// earlier pass), the second is a round of pass E. The hook itself is the
 /// rendezvous — no sleep, no channel.
 ///
-/// Mutant caught: reconciling every destination audit name the accepted round
-/// did not capture, without asking whether an earlier round of the SAME pass
-/// copied it (the branch before `AuditArchiveLost`) — the run succeeds and
-/// leaves a published snapshot whose anchors need the deleted archive.
+/// Mutant caught: publishing without the destination check (the branch before
+/// `AuditArchiveLost`) — the run succeeds and its own inventory verification
+/// then refuses the snapshot only after the manifest was written, or (with a
+/// reconciling copy) it silently drops the archive the anchors may name.
 #[test]
 fn an_archive_captured_by_an_earlier_round_that_retention_pruned_refuses_the_run() {
     let source_dir = TempDir::new().expect("source temp dir");
@@ -419,27 +620,27 @@ fn an_archive_captured_by_an_earlier_round_that_retention_pruned_refuses_the_run
     );
 }
 
-/// An archive pruned BEFORE the manifest-defining pass captured it is
-/// reconciled away, and the run still publishes a bootable snapshot.
+/// An archive that PASS D captured and retention pruned before pass E refuses
+/// the run: the leftover copy is never deleted, and the run never publishes.
 ///
-/// Pass D's audit round copies archive 1 into the destination. Retention then
-/// prunes it and a rotation leaves archive 2 — both at the D to E boundary, so
-/// no audit round of pass E ever captured archive 1. Its destination copy has
-/// no manifest entry, and reconciliation must delete it or self-verification
-/// refuses the snapshot as holding an unlisted file. A prefix that was already
-/// gone before any round of the manifest-defining pass listed it is the
-/// documented pre-existing limit (the anchors a rotation advanced can only name
-/// archives retention keeps).
+/// Pass D's audit round copies archive 1 into the destination. At the D to E
+/// boundary retention prunes it and a rotation leaves archive 2, so no round of
+/// pass E ever captured archive 1 and its destination copy has no manifest
+/// entry. The pass-level guard runs before the manifest is written, so the run
+/// refuses typed and path-free instead of publishing a snapshot its own
+/// inventory contradicts — and the copy deletes nothing on the way out.
 ///
 /// The D to E boundary hook is the rendezvous: it runs after pass D's audit
 /// round and before pass E's first listing, and it records the run directory it
-/// found so the destination assertions below are pinned to `report.dest_dir`.
+/// found so the destination assertion below is pinned to the run the protocol
+/// created.
 ///
-/// Mutant caught: reconciling only the ACTIVE log (the previous
-/// `remove_uncaptured_active_log`) — the stale archive copy survives, the run
-/// fails at `Verifying` and the manifest assertions never run.
+/// Mutant caught: a guard that only compares within ONE pass (the previous
+/// same-pass `earlier_archives` set) — the cross-pass leftover is ignored, the
+/// run succeeds, and either the inventory check refuses after publication or a
+/// reconciling copy removes a file it does not own.
 #[test]
-fn an_archive_pruned_before_the_manifest_defining_pass_is_reconciled_away() {
+fn an_archive_captured_by_an_earlier_pass_and_retention_pruned_refuses_the_run() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
@@ -482,34 +683,51 @@ fn an_archive_pruned_before_the_manifest_defining_pass_is_reconciled_away() {
         pruned_once.load(Ordering::SeqCst),
         "the retention step must run"
     );
-    let report = result.expect("a prefix gone before pass E listed it must not fail the run");
     let observed = observed
         .lock()
         .expect("observed run dir")
         .clone()
         .expect("the boundary hook must have run");
+    let error = result.expect_err("a cross-pass leftover must refuse the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        cleanup,
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Sealing);
     assert_eq!(
-        observed, report.dest_dir,
-        "the destination assertions must address the run directory the protocol created"
-    );
-    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
-    assert!(
-        paths.contains(&late),
-        "the archive the writer left must be published: {paths:?}"
+        *cleanup, None,
+        "the cleanup guard removes the run directory, so there is no cleanup failure"
     );
     assert!(
-        !paths.contains(&pruned),
-        "the pruned archive must not be published: {paths:?}"
-    );
-    let dest_pruned = report.dest_dir.join(&pruned);
-    assert!(
-        !dest_pruned.exists(),
-        "the unmanifested copy of the pruned archive must be removed: {}",
-        dest_pruned.display()
+        matches!(
+            primary,
+            OnlineBackupFailure::Copy(CopyError::AuditArchiveLost)
+        ),
+        "the refusal must be the typed lost-audit-file error, got {primary:?}"
     );
     assert_eq!(
-        fs::read(report.dest_dir.join(&late)).expect("late archive copy"),
-        b"archived-2\n"
+        error.stage_and_reason(),
+        "sealing: copy-audit-archive-lost",
+        "the scheduled token must stay in the path-free copy vocabulary"
+    );
+    let rendered = format!("{primary}");
+    assert!(
+        !rendered.contains(&pruned) && !rendered.contains(&late),
+        "the refusal must not name any archive: {rendered}"
+    );
+    assert!(
+        !observed.exists(),
+        "the cleanup guard removes the run directory the copy refused: {}",
+        observed.display()
+    );
+    assert_eq!(
+        fs::read_dir(to).expect("destination root").count(),
+        0,
+        "R4: the refused snapshot must not survive in the destination"
     );
 }
 
