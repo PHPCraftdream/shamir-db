@@ -1,7 +1,7 @@
 //! Shared audit fixtures of the online-copy tests: the two trusted anchors a
 //! copy must carry (`audit_checkpoint` and `server_meta`), the rotation
-//! archive name, and the plain snapshot-tree copy the restore-side
-//! assertions use.
+//! archive name, the plain snapshot-tree copy the restore-side assertions use,
+//! and the bounded join of a fixture's helper thread with its own tests.
 //!
 //! The `server_meta` anchor is a REAL Fjall store in the production layout
 //! (`<data_dir>/server_meta`, keyspace `server_meta_v1`, row
@@ -14,9 +14,14 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use fjall::{Database, KeyspaceCreateOptions};
 
+use super::super::failure_injection_tests::write_file;
 use crate::sync::durability::backup::online::copy_engine::test_seams;
 use crate::sync::durability::backup::online::manifest;
 
@@ -134,6 +139,21 @@ pub(crate) fn manifest_entry(dest_dir: &Path, rel: &str) -> (String, u64) {
         .unwrap_or_else(|| panic!("the manifest must list {rel}"))
 }
 
+/// Seed the one file-backed repo the protocol's step C expects: its store
+/// file AND a valid WAL segment with its sidecar. `InjectPort::with_repos`
+/// always declares `repos/alpha.shamirwal`, and `copy_engine::list_files`
+/// fails the WAL pass with `Io { NotFound }` when that directory is absent —
+/// so a fixture that drives the FULL protocol and seeds only the store dies in
+/// step C, before any audit hook.
+pub(crate) fn seed_alpha_repo(source: &Path) {
+    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    write_file(&source.join("repos/alpha.shamirwal/00000000.wal"), b"wal-0");
+    write_file(
+        &source.join("repos/alpha.shamirwal/00000000.meta"),
+        b"meta-0",
+    );
+}
+
 /// Plain file-tree copy of a snapshot into a fresh directory: restoring an
 /// online copy moves the snapshot tree into the target `data_dir` (engine
 /// stores are replayed separately; the audit files are carried as bytes).
@@ -159,4 +179,204 @@ pub(crate) fn copy_snapshot_tree(from: &Path, to: &Path) {
         }
     }
     test_seams::recreate_fjall_locks(to);
+}
+
+/// Absolute budget for ONE helper thread, measured from a deadline taken
+/// BEFORE the thread is spawned: both rendezvous receives and the teardown join
+/// draw on that one deadline, so a wedged helper cannot spend a budget per
+/// waiting step and overrun the 180 s per-test kill.
+const JOIN_BUDGET: Duration = Duration::from_secs(150);
+
+/// The ONE absolute deadline of a helper thread: call it BEFORE spawning the
+/// thread and hand the result to every wait that involves it (the rendezvous
+/// receives through [`budget_left`], the join through
+/// [`JoinOnDrop::with_deadline`]). Two independently started budgets would add
+/// up — 120 s of rendezvous plus 150 s of join overruns the per-test kill.
+pub(super) fn helper_deadline() -> Instant {
+    Instant::now() + JOIN_BUDGET
+}
+
+/// What is left of `deadline`. An expired deadline yields `Duration::ZERO`,
+/// which `recv_timeout` reports as its own timeout instead of waiting again —
+/// no budget is ever restarted.
+pub(super) fn budget_left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// Recorded outcome of the bounded join, readable AFTER the guard is gone.
+pub(super) const OUTCOME_PENDING: u8 = 0;
+pub(super) const OUTCOME_JOINED: u8 = 1;
+pub(super) const OUTCOME_TIMED_OUT: u8 = 2;
+pub(super) const OUTCOME_PANICKED: u8 = 3;
+
+/// Outcome of a bounded join. `Joined` is the only success; `TimedOut` means
+/// the helper is still running and was NOT joined (it is left behind on
+/// purpose — a thread wedged in uninterruptible I/O is isolated by the test
+/// process, never "joined"); `Panicked` carries the helper's payload so only
+/// `JoinOnDrop::finish` decides to re-raise it.
+enum JoinOutcome {
+    Joined,
+    TimedOut,
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+/// Joins `handle` within the ABSOLUTE `deadline`: `std::thread` has no timed
+/// join, so the join runs on a throwaway thread and the caller waits on a
+/// channel with the remaining budget.
+fn join_within(handle: std::thread::JoinHandle<()>, deadline: Instant) -> JoinOutcome {
+    let (done_tx, done_rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("join-within".to_string())
+        .spawn(move || {
+            let _ = done_tx.send(handle.join());
+        });
+    if spawned.is_err() {
+        return JoinOutcome::TimedOut;
+    }
+    match done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(())) => JoinOutcome::Joined,
+        Ok(Err(payload)) => JoinOutcome::Panicked(payload),
+        Err(_) => JoinOutcome::TimedOut,
+    }
+}
+
+/// Joins a helper thread on EVERY path, within ONE absolute deadline shared
+/// with the fixture's rendezvous receives. A helper that overruns fails the
+/// test in `finish`; a helper panic is re-raised ONLY from `finish`, never
+/// from `Drop`, where a second panic during unwinding would abort the whole
+/// test binary.
+pub(super) struct JoinOnDrop {
+    handle: Option<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+    outcome: Arc<AtomicU8>,
+}
+
+impl JoinOnDrop {
+    /// Guard whose join draws on a deadline taken BEFORE the thread was
+    /// spawned (`helper_deadline`), so the rendezvous and the join share it.
+    pub(super) fn with_deadline(handle: std::thread::JoinHandle<()>, deadline: Instant) -> Self {
+        Self {
+            handle: Some(handle),
+            deadline,
+            outcome: Arc::new(AtomicU8::new(OUTCOME_PENDING)),
+        }
+    }
+
+    /// The observed outcome (`OUTCOME_*`), readable after this guard is gone —
+    /// the only way a test can assert that a wedged helper was NOT joined.
+    pub(super) fn outcome(&self) -> Arc<AtomicU8> {
+        self.outcome.clone()
+    }
+
+    /// Join eagerly within the remaining budget, re-raise the helper's panic
+    /// and fail the test when the helper is still running at the deadline.
+    pub(super) fn finish(mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        match join_within(handle, self.deadline) {
+            JoinOutcome::Joined => {
+                self.outcome.store(OUTCOME_JOINED, Ordering::SeqCst);
+            }
+            JoinOutcome::Panicked(payload) => {
+                self.outcome.store(OUTCOME_PANICKED, Ordering::SeqCst);
+                std::panic::resume_unwind(payload);
+            }
+            JoinOutcome::TimedOut => {
+                self.outcome.store(OUTCOME_TIMED_OUT, Ordering::SeqCst);
+                panic!(
+                    "the helper thread must finish within {JOIN_BUDGET:?} of the shared deadline"
+                )
+            }
+        }
+    }
+}
+
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            // Never panics here: this drop can run while unwinding, and a
+            // resumed helper panic would abort the binary. An overrunning
+            // helper is left behind; `finish` is what reports it.
+            match join_within(handle, self.deadline) {
+                JoinOutcome::Joined => {
+                    self.outcome.store(OUTCOME_JOINED, Ordering::SeqCst);
+                }
+                JoinOutcome::TimedOut => {
+                    self.outcome.store(OUTCOME_TIMED_OUT, Ordering::SeqCst);
+                }
+                JoinOutcome::Panicked(payload) => {
+                    self.outcome.store(OUTCOME_PANICKED, Ordering::SeqCst);
+                    // The guard must not run the destructor of an arbitrary
+                    // panic payload HERE: this drop can run while the test
+                    // already unwinds (a second panic aborts the whole binary)
+                    // and, even without an unwind, a payload whose `Drop`
+                    // panics would turn a reporting path into a new failure.
+                    // Leaking one payload on a path that is about to fail the
+                    // test anyway is the cheaper trade.
+                    std::mem::forget(payload);
+                }
+            }
+        }
+    }
+}
+
+/// A helper still running at the shared deadline is reported as NOT joined, and
+/// the guard's `Drop` never panics.
+///
+/// The helper blocks on a channel this test never signals, and the guard gets a
+/// deadline that has already passed (`Instant::now()`), so both the join and
+/// the drop take the timeout path with no sleep.
+///
+/// Mutant caught: a guard whose teardown treats an expired budget as a join (or
+/// restarts the budget) — the outcome reads "joined" for a helper that is still
+/// running.
+#[test]
+fn a_timed_out_helper_reports_not_joined_and_its_drop_never_panics() {
+    let (keep_open, waiting) = mpsc::channel::<()>();
+    let handle = std::thread::Builder::new()
+        .name("wedged-helper".to_string())
+        .spawn(move || {
+            let _ = waiting.recv();
+        })
+        .expect("spawn the wedged helper");
+    let guard = JoinOnDrop::with_deadline(handle, Instant::now());
+    let outcome = guard.outcome();
+    drop(guard);
+    assert_eq!(
+        outcome.load(Ordering::SeqCst),
+        OUTCOME_TIMED_OUT,
+        "a helper still running at the deadline must be reported as not joined"
+    );
+    drop(keep_open);
+}
+
+/// A panic payload the guard joins is LEAKED by `Drop`, never dropped there.
+///
+/// The payload's own `Drop` fails this test if it ever runs, so the assertion
+/// is the rule itself: the teardown path never executes an arbitrary payload's
+/// destructor (this drop can run while the test already unwinds, where a
+/// destructor that panics aborts the whole binary).
+#[test]
+fn a_joined_panic_payload_is_leaked_by_drop() {
+    struct NeverDropped;
+    impl Drop for NeverDropped {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                panic!("the guard must not drop a joined panic payload");
+            }
+        }
+    }
+    let handle = std::thread::Builder::new()
+        .name("panicking-helper".to_string())
+        .spawn(|| std::panic::panic_any(NeverDropped))
+        .expect("spawn the panicking helper");
+    let guard = JoinOnDrop::with_deadline(handle, helper_deadline());
+    let outcome = guard.outcome();
+    drop(guard);
+    assert_eq!(
+        outcome.load(Ordering::SeqCst),
+        OUTCOME_PANICKED,
+        "the guard must record the helper's panic without re-raising it"
+    );
 }

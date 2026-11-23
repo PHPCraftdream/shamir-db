@@ -440,13 +440,8 @@ fn manifest_write_conflict_fails_verifying_and_removes_destination() {
 
     assert_eq!(stage, BackupStage::Verifying);
     assert!(
-        matches!(
-            failure,
-            OnlineBackupFailure::Io(_)
-                | OnlineBackupFailure::Manifest(_)
-                | OnlineBackupFailure::Dest { .. }
-        ),
-        "the manifest write conflict must surface as an io/manifest/destination error: {failure:?}"
+        matches!(failure, OnlineBackupFailure::Publication { .. }),
+        "the blocked manifest write must surface as the typed publication error: {failure:?}"
     );
     assert!(
         !to.join("manifest.json").exists(),

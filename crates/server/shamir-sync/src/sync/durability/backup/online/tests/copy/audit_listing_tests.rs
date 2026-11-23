@@ -7,9 +7,9 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -28,10 +28,11 @@ use crate::sync::durability::backup::online::protocol::{OnlineBackupError, Onlin
 /// One late rotation archive forces exactly one more round, and the
 /// PUBLICATION describes it.
 ///
-/// The `after_capture` hook fires once per captured file (phase-1 files
-/// included), so it acts only on the SECOND capture of the fixture's archive —
-/// the residual pass E, the pass whose result defines the manifest — and
-/// writes the NEXT archive into the source with no appender involved.
+/// `after_capture` fires once per captured file. Archive 1 is captured THREE
+/// times: once in pass D, once in the residual pass E's first audit round —
+/// where the hook injects archive 2 — and once in E's retry. The injection is
+/// counted separately from the captures, so a fixture that injects in the
+/// wrong pass cannot pass as "two captures".
 ///
 /// Mutant caught: a data-directory pass that captures ONE round and never
 /// re-lists (the single-listing order) — the late archive is absent from the
@@ -42,29 +43,41 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
-    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    audit_fixtures::seed_alpha_repo(source);
     let first = archive_name(1);
     let first_for_hook = first.clone();
     let captures = Arc::new(AtomicUsize::new(0));
     let captures_for_hook = captures.clone();
+    let injected = Arc::new(AtomicBool::new(false));
+    let injected_for_hook = injected.clone();
     let source_for_hook = source.to_path_buf();
     let seam = test_seams::set_after_capture(Box::new(move |path: &Path| {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
-        if name != first_for_hook || captures_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
+        if name != first_for_hook {
             return;
         }
-        write_file(&source_for_hook.join(archive_name(2)), b"archived-2\n");
+        // Pass D captures it first; the residual pass E's first round is the
+        // second capture, and that is where the late archive appears.
+        if captures_for_hook.fetch_add(1, Ordering::SeqCst) == 1
+            && !injected_for_hook.swap(true, Ordering::SeqCst)
+        {
+            write_file(&source_for_hook.join(archive_name(2)), b"archived-2\n");
+        }
     }));
     let port = InjectPort::with_repos(source, &["alpha"]);
     let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
     drop(seam);
     let report = result.expect("the round that re-lists the late archive must succeed");
+    assert!(
+        injected.load(Ordering::SeqCst),
+        "the residual pass must inject the late archive"
+    );
     assert_eq!(
         captures.load(Ordering::SeqCst),
-        2,
-        "the hook must act in the residual pass, once"
+        3,
+        "archive 1 is captured in pass D, in E's first round and in E's retry"
     );
     let paths = audit_fixtures::manifest_paths(&report.dest_dir);
     for expected in [first.clone(), archive_name(2)] {
@@ -75,9 +88,9 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
     }
     let bytes = b"archived-2\n";
     assert_eq!(
-        fs::read(to.join(archive_name(2))).expect("late archive copy"),
+        fs::read(report.dest_dir.join(archive_name(2))).expect("late archive copy"),
         bytes,
-        "the late archive must be copied to the destination"
+        "the late archive must be copied into the run directory"
     );
     assert_eq!(
         audit_fixtures::manifest_entry(&report.dest_dir, &archive_name(2)),
@@ -234,7 +247,7 @@ fn a_persistent_metadata_fault_on_an_archive_fails_the_run_path_free() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
-    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    audit_fixtures::seed_alpha_repo(source);
     let archive = archive_name(1);
     write_file(&source.join(&archive), b"archived\n");
     write_file(&source.join("audit.log"), b"active\n");
@@ -297,46 +310,60 @@ fn a_persistent_metadata_fault_on_an_archive_fails_the_run_path_free() {
     );
 }
 
-/// An archive copied by an UNSTABLE round and then pruned by the writer is
-/// reconciled away before publication.
+/// An archive THIS pass captured in an earlier round and retention then
+/// pruned refuses the run.
 ///
-/// Retention deletes archives, so an archive captured by round 1 can be gone
-/// from the source when the accepted round lists the directory. Its
-/// destination copy would then have no manifest entry and the run's own
-/// self-verification would reject the snapshot as holding an unlisted file.
+/// The anchors are captured by phase 1 of the manifest-defining pass (step E of
+/// `online/protocol.rs`) BEFORE any audit listing. An audit round of that same
+/// pass then copies archive 1; retention prunes it from the source before the
+/// accepted round lists the directory. Reconciling the destination would delete
+/// the copy of an archive the captured anchors still name — publication would
+/// pass (it hashes files, it does not read anchors) and boot would refuse the
+/// snapshot with `UnanchoredSuffix`. The pass must refuse instead of turning a
+/// refused backup into an unbootable success, and it must refuse TYPED and
+/// path-free: `CopyError::AuditArchiveLost` under the stable reason token.
 ///
-/// Mutant caught: reconciling only the active log (the previous
-/// `remove_uncaptured_active_log`) — the pruned archive stays in the
-/// destination, the run fails at `Verifying` and the manifest assertions
-/// never run; the in-hook assertion below also pins that the archive really
-/// reached the destination first, so the test cannot pass vacuously.
+/// The retention step runs inside the capture hook, immediately after the
+/// SECOND capture of archive 1: the first is pass D's audit round (a harmless
+/// earlier pass), the second is a round of pass E. The hook itself is the
+/// rendezvous — no sleep, no channel.
+///
+/// Mutant caught: reconciling every destination audit name the accepted round
+/// did not capture, without asking whether an earlier round of the SAME pass
+/// copied it (the branch before `AuditArchiveLost`) — the run succeeds and
+/// leaves a published snapshot whose anchors need the deleted archive.
 #[test]
-fn an_archive_pruned_between_rounds_leaves_no_unmanifested_destination_copy() {
+fn an_archive_captured_by_an_earlier_round_that_retention_pruned_refuses_the_run() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
-    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    audit_fixtures::seed_alpha_repo(source);
     let pruned = archive_name(1);
     let late = archive_name(2);
     write_file(&source.join(&pruned), b"archived-1\n");
     write_file(&source.join("audit.log"), b"active\n");
     let pruned_for_hook = pruned.clone();
     let source_for_hook = source.to_path_buf();
-    let dest_for_hook = to.to_path_buf();
     let late_for_hook = late.clone();
+    let captures = Arc::new(AtomicUsize::new(0));
+    let captures_for_hook = captures.clone();
     let pruned_once = Arc::new(AtomicBool::new(false));
     let pruned_for_flag = pruned_once.clone();
     let seam = test_seams::set_after_capture(Box::new(move |path: &Path| {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
-        if name != pruned_for_hook || pruned_for_flag.swap(true, Ordering::SeqCst) {
+        if name != pruned_for_hook {
             return;
         }
-        // The archive really reached the destination before it was pruned.
+        // Pass D's audit round captures it first, pass E's first round the
+        // second time. Retention runs between that round and the accepted one.
+        if captures_for_hook.fetch_add(1, Ordering::SeqCst) + 1 != 2 {
+            return;
+        }
         assert!(
-            dest_for_hook.join(&pruned_for_hook).exists(),
-            "the pruned archive must have been copied first"
+            !pruned_for_flag.swap(true, Ordering::SeqCst),
+            "the retention step must run exactly once"
         );
         fs::remove_file(source_for_hook.join(&pruned_for_hook))
             .expect("retention prunes the archive");
@@ -345,10 +372,125 @@ fn an_archive_pruned_between_rounds_leaves_no_unmanifested_destination_copy() {
     let port = InjectPort::with_repos(source, &["alpha"]);
     let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
     drop(seam);
-    let report = result.expect("a pruned archive must not fail the run at self-verification");
     assert!(
         pruned_once.load(Ordering::SeqCst),
         "the retention step must run"
+    );
+    assert_eq!(
+        captures.load(Ordering::SeqCst),
+        2,
+        "pass D and pass E's first round capture archive 1; the refusal precedes a third"
+    );
+    let error = result.expect_err("losing a captured archive must refuse the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        cleanup,
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Sealing);
+    assert_eq!(
+        *cleanup, None,
+        "the destination removal succeeds, so there is no cleanup failure"
+    );
+    assert!(
+        matches!(
+            primary,
+            OnlineBackupFailure::Copy(CopyError::AuditArchiveLost)
+        ),
+        "the refusal must be the typed lost-archive error, got {primary:?}"
+    );
+    assert_eq!(
+        error.stage_and_reason(),
+        "sealing: copy-audit-archive-lost",
+        "the scheduled token must stay in the path-free copy vocabulary"
+    );
+    let rendered = format!("{primary}");
+    assert!(
+        !rendered.contains(&pruned) && !rendered.contains(&late),
+        "the refusal must not name any archive: {rendered}"
+    );
+    assert_eq!(
+        fs::read_dir(to).expect("destination root").count(),
+        0,
+        "R4: the refused snapshot must not survive in the destination"
+    );
+}
+
+/// An archive pruned BEFORE the manifest-defining pass captured it is
+/// reconciled away, and the run still publishes a bootable snapshot.
+///
+/// Pass D's audit round copies archive 1 into the destination. Retention then
+/// prunes it and a rotation leaves archive 2 — both at the D to E boundary, so
+/// no audit round of pass E ever captured archive 1. Its destination copy has
+/// no manifest entry, and reconciliation must delete it or self-verification
+/// refuses the snapshot as holding an unlisted file. A prefix that was already
+/// gone before any round of the manifest-defining pass listed it is the
+/// documented pre-existing limit (the anchors a rotation advanced can only name
+/// archives retention keeps).
+///
+/// The D to E boundary hook is the rendezvous: it runs after pass D's audit
+/// round and before pass E's first listing, and it records the run directory it
+/// found so the destination assertions below are pinned to `report.dest_dir`.
+///
+/// Mutant caught: reconciling only the ACTIVE log (the previous
+/// `remove_uncaptured_active_log`) — the stale archive copy survives, the run
+/// fails at `Verifying` and the manifest assertions never run.
+#[test]
+fn an_archive_pruned_before_the_manifest_defining_pass_is_reconciled_away() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let pruned = archive_name(1);
+    let late = archive_name(2);
+    write_file(&source.join(&pruned), b"archived-1\n");
+    write_file(&source.join("audit.log"), b"active\n");
+    let pruned_for_hook = pruned.clone();
+    let source_for_hook = source.to_path_buf();
+    let late_for_hook = late.clone();
+    let to_for_hook = to.to_path_buf();
+    let observed = Arc::new(Mutex::new(None::<PathBuf>));
+    let observed_for_hook = observed.clone();
+    let pruned_once = Arc::new(AtomicBool::new(false));
+    let pruned_for_flag = pruned_once.clone();
+    let seam = test_seams::set_before_boundary(Box::new(move |stage: BackupStage| {
+        if stage != BackupStage::Sealing || pruned_for_flag.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Pass D's audit round really copied the archive into the run
+        // directory before retention pruned it.
+        let run_dir = fs::read_dir(&to_for_hook)
+            .expect("destination root")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.join(&pruned_for_hook).is_file())
+            .unwrap_or_else(|| {
+                panic!("the pruned archive must have been copied into the run directory first")
+            });
+        *observed_for_hook.lock().expect("observed run dir") = Some(run_dir);
+        fs::remove_file(source_for_hook.join(&pruned_for_hook))
+            .expect("retention prunes the archive");
+        write_file(&source_for_hook.join(&late_for_hook), b"archived-2\n");
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    assert!(
+        pruned_once.load(Ordering::SeqCst),
+        "the retention step must run"
+    );
+    let report = result.expect("a prefix gone before pass E listed it must not fail the run");
+    let observed = observed
+        .lock()
+        .expect("observed run dir")
+        .clone()
+        .expect("the boundary hook must have run");
+    assert_eq!(
+        observed, report.dest_dir,
+        "the destination assertions must address the run directory the protocol created"
     );
     let paths = audit_fixtures::manifest_paths(&report.dest_dir);
     assert!(
@@ -369,4 +511,126 @@ fn an_archive_pruned_between_rounds_leaves_no_unmanifested_destination_copy() {
         fs::read(report.dest_dir.join(&late)).expect("late archive copy"),
         b"archived-2\n"
     );
+}
+
+/// An ENUMERATION failure of the data-directory root is the typed, path-free
+/// audit refusal — a different arm from failing to OPEN the root.
+///
+/// Phase 1 of the data-directory pass is the one listing whose root owns the
+/// audit chain files, so a dropped entry there could hide a rotation archive:
+/// the failure must be `CopyError::AuditListing` (`copy-io-<kind>`, no path).
+/// Failing to open the root itself keeps the path-bearing `CopyError::Io` —
+/// the operator needs the directory name — which the arm order in
+/// `list_files` pins (`read_dir` fails before any entry is yielded).
+///
+/// Mutant caught: classifying the iterator failure as `CopyError::Io` — the
+/// typed assertion fails and the rendered refusal carries the fixture path.
+#[test]
+fn an_iterator_failure_of_the_data_dir_root_is_a_typed_path_free_refusal() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    write_file(&source.join("audit.log"), b"active\n");
+    let root = source.to_path_buf();
+    let seam = test_seams::set_read_dir_entry(Box::new(move |dir: &Path| {
+        if dir == root.as_path() {
+            Some(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "iteration denied",
+            ))
+        } else {
+            None
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    let error = result.expect_err("an enumeration failure must fail the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Copying);
+    let OnlineBackupFailure::Copy(CopyError::AuditListing { source }) = primary else {
+        panic!(
+            "the data-root enumeration failure must be the typed audit listing, got {primary:?}"
+        );
+    };
+    assert_eq!(
+        source.kind(),
+        ErrorKind::PermissionDenied,
+        "the typed refusal must carry the enumeration error"
+    );
+    assert_eq!(
+        error.stage_and_reason(),
+        "copying: copy-io-permission-denied",
+        "the scheduled token must stay in the path-free copy vocabulary"
+    );
+    let rendered = format!("{primary}");
+    let fixture_dir = source_dir.path().display().to_string();
+    assert!(
+        !rendered.contains(&fixture_dir) && !rendered.contains("audit.log"),
+        "the enumeration refusal must carry no path and no entry name: {rendered}"
+    );
+}
+
+/// A file that merely happens to be named `audit.log` under a WAL root is an
+/// ordinary WAL file: its metadata failure keeps the path-bearing
+/// `CopyError::Io`.
+///
+/// The audit classification is scoped to phase 1 of the DATA-directory pass
+/// (`skip_audit_files`). Every other listing — the WAL directory here — is an
+/// `AuditFiles::InOrder` pass whose root is not the audit root, so a reserved
+/// name in it is not an audit chain file and its unreadable metadata must name
+/// the path the operator has to fix.
+///
+/// Mutant caught: classifying by name at EVERY pass root (the ungated
+/// `dir == source_root && is_audit_log_file_name` condition) — the failure
+/// becomes the path-free `CopyError::AuditListing` and the typed `Io` naming
+/// the WAL file fails.
+#[test]
+fn a_wal_root_file_named_audit_log_stays_a_plain_io_refusal() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let wal_audit_log = source.join("repos/alpha.shamirwal/audit.log");
+    write_file(&wal_audit_log, b"not-an-audit-chain-file\n");
+    let failing = wal_audit_log.clone();
+    let seam = test_seams::set_symlink_metadata(Box::new(move |path: &Path| {
+        if path == failing {
+            Some(Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "listing denied",
+            )))
+        } else {
+            None
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    let error = result.expect_err("an unreadable WAL file must fail the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Copying);
+    let OnlineBackupFailure::Copy(CopyError::Io { path, source }) = primary else {
+        panic!("a WAL file named audit.log must stay a plain io failure, got {primary:?}");
+    };
+    assert_eq!(
+        path, &wal_audit_log,
+        "the ordinary listing failure must name the exact unreadable file"
+    );
+    assert_eq!(source.kind(), ErrorKind::PermissionDenied);
 }

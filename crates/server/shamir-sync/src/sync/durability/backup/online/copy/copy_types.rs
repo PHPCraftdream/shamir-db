@@ -48,7 +48,7 @@ pub struct CopyPassResult {
 /// `Sealing`). The bounded audit chain rounds of the data-directory pass
 /// fail typed when an archive keeps appearing behind the copy.
 ///
-/// `AuditFilesUnstable` and `AuditListing` are new public Rust surface:
+/// `AuditFilesUnstable`, `AuditListing` and `AuditArchiveLost` are new public Rust surface:
 /// `publish = false` only stops registry publishing, it does not make the API
 /// private — sibling crates (`shamir-server`) can name and match these
 /// variants. There is no semver obligation for them, and neither is a stable
@@ -78,6 +78,15 @@ pub enum CopyError {
     RecopyCap(String),
     #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
     AuditFilesUnstable { rounds: usize },
+    /// An archive captured by an EARLIER round of the same data-directory
+    /// pass is absent from the accepted round: the anchors are captured in
+    /// phase 1, before any round, so a rotation that advanced them and a
+    /// retention sweep that pruned the archive would leave this snapshot
+    /// carrying anchors over a prefix it does not hold — recovery refuses it
+    /// with `UnanchoredSuffix`. The pass fails closed instead of publishing a
+    /// snapshot that cannot boot. No path and no archive name in the text.
+    #[error("an audit archive captured by an earlier round is missing from the accepted round")]
+    AuditArchiveLost,
     /// One entry of the audit chain directory could not be enumerated or
     /// examined: an entry of its listing, or that entry's metadata, failed
     /// with an error other than `NotFound`. Deliberately carries NO path —
@@ -89,4 +98,11 @@ pub enum CopyError {
         #[source]
         source: std::io::Error,
     },
+    /// Reconciliation refused to TOUCH the destination: the deletion it would
+    /// perform could not be confined to the accepted snapshot (the run
+    /// directory is not a plain directory, or a case-folding destination would
+    /// map two captured paths onto one file). `reason` is a fixed phrase that
+    /// names no path and no archive name.
+    #[error("refusing to reconcile the destination audit files: {reason}")]
+    AuditReconcileRefused { reason: &'static str },
 }

@@ -11,12 +11,13 @@
 //! than a silent omission, so an unreadable entry can never hide a possibly
 //! new rotation archive.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::backup::online::copy_engine::{CopyError, CopyPassResult, SealGate};
+use super::backup::online::copy_engine::{CopiedFile, CopyError, CopyPassResult, SealGate};
 use super::backup::online::progress::CancelFlag;
 
 /// File name of the ACTIVE audit chain log at the top of `data_dir`.
@@ -46,6 +47,15 @@ pub(super) fn is_audit_log_file_name(name: &OsStr) -> bool {
                     suffix.len() == AUDIT_ARCHIVE_DIGITS
                         && suffix.bytes().all(|byte| byte.is_ascii_digit())
                 })
+        })
+}
+
+/// True for the rotation ARCHIVE names alone (`audit.log.` + 20 ASCII decimal
+/// digits), never the active log.
+pub(super) fn is_audit_archive_name(name: &str) -> bool {
+    name.strip_prefix(AUDIT_ARCHIVE_PREFIX)
+        .is_some_and(|suffix| {
+            suffix.len() == AUDIT_ARCHIVE_DIGITS && suffix.bytes().all(|byte| byte.is_ascii_digit())
         })
 }
 
@@ -149,6 +159,13 @@ pub(super) fn audit_capture_is_stable(
     }))
 }
 
+/// Fixed, path-free reasons of [`CopyError::AuditReconcileRefused`].
+const NOT_A_PLAIN_DIRECTORY: &str = "the destination run directory is not a plain directory";
+const FOLDED_CAPTURE_COLLISION: &str =
+    "two captured snapshot paths collide on a case-folding destination";
+const FOLDED_DESTINATION_COLLISION: &str =
+    "a destination audit name collides with a captured path of another spelling";
+
 /// Removes the destination's audit chain files the ACCEPTED round did not
 /// capture.
 ///
@@ -163,12 +180,51 @@ pub(super) fn audit_capture_is_stable(
 /// rotation live in its archive, and recovery accepts a directory without an
 /// active log.
 ///
+/// This is the ONE step that DELETES from the destination, so it is confined
+/// three ways. The run directory itself must be a plain directory — a symlink,
+/// junction or any other reparse point could redirect a removal outside the
+/// snapshot, and it is refused. `snapshot` protects every path the accepted
+/// snapshot holds (`snapshot` carries the files of the earlier phases, the
+/// accepted audit round contributes its own), so a name that is captured is
+/// never removed. And a destination whose name folding maps two distinct
+/// snapshot paths onto one file would make that removal ambiguous, so a
+/// case-insensitive collision — inside the captured set, or between a captured
+/// path and a destination audit name — is refused rather than guessed at.
+///
 /// Only exact reserved names at the top of `dest_root` are considered; every
-/// other destination entry is left alone.
+/// other destination entry is left alone, and a reserved-name entry that is not
+/// a regular file is left for self-verification to judge (this engine only ever
+/// writes regular files there).
 pub(super) fn reconcile_destination_audit_files(
     dest_root: &Path,
-    captured: &CopyPassResult,
+    accepted: &CopyPassResult,
+    snapshot: &[CopiedFile],
 ) -> Result<(), CopyError> {
+    let meta = fs::symlink_metadata(dest_root).map_err(|source| CopyError::Io {
+        path: dest_root.to_path_buf(),
+        source,
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(CopyError::AuditReconcileRefused {
+            reason: NOT_A_PLAIN_DIRECTORY,
+        });
+    }
+    let mut exact: BTreeSet<&str> = BTreeSet::new();
+    let mut folded: BTreeMap<String, &str> = BTreeMap::new();
+    for file in snapshot.iter().chain(accepted.files.iter()) {
+        let name = file.rel_path.as_str();
+        exact.insert(name);
+        let key = name.to_ascii_lowercase();
+        if let Some(previous) = folded.get(key.as_str()) {
+            let reserved = |name: &str| is_audit_log_file_name(OsStr::new(name));
+            if *previous != name && (reserved(previous) || reserved(name)) {
+                return Err(CopyError::AuditReconcileRefused {
+                    reason: FOLDED_CAPTURE_COLLISION,
+                });
+            }
+        }
+        folded.insert(key, name);
+    }
     let entries = fs::read_dir(dest_root).map_err(|source| CopyError::Io {
         path: dest_root.to_path_buf(),
         source,
@@ -185,8 +241,24 @@ pub(super) fn reconcile_destination_audit_files(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if captured.files.iter().any(|file| file.rel_path == name) {
+        if exact.contains(name) {
             continue;
+        }
+        if folded
+            .get(&name.to_ascii_lowercase())
+            .is_some_and(|spelling| *spelling != name)
+        {
+            return Err(CopyError::AuditReconcileRefused {
+                reason: FOLDED_DESTINATION_COLLISION,
+            });
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => continue,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(CopyError::Io { path, source });
+            }
         }
         match fs::remove_file(&path) {
             Ok(()) => {}

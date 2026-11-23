@@ -51,6 +51,11 @@ pub type NowHook = Box<dyn FnMut(Instant) -> Instant + 'static>;
 /// test prove a directory-entry failure is never silently dropped from
 /// the snapshot listing.
 pub type MetadataHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<fs::Metadata>> + 'static>;
+/// Injects an ENTRY-ITERATION failure for one listed directory: `Some(error)`
+/// makes that directory's listing fail as if yielding a `DirEntry` had failed
+/// (a result the test cannot build otherwise), `None` falls through to the real
+/// iteration. The injected error travels the very arm a genuine one takes.
+pub type ReadDirEntryHook = Box<dyn FnMut(&Path) -> Option<std::io::Error> + 'static>;
 /// Substitutes `fs::remove_dir_all` in `RunCleanup::drop` for matching
 /// owned partial directories: `Some(result)` replaces the real removal,
 /// `None` falls through. Lets a test inject a failed partial-tree
@@ -82,6 +87,7 @@ thread_local! {
     static BEFORE_BOUNDARY: RefCell<Option<BoundaryHook>> = RefCell::new(None);
     static MONOTONIC_NOW: RefCell<Option<NowHook>> = RefCell::new(None);
     static SYMLINK_METADATA: RefCell<Option<MetadataHook>> = RefCell::new(None);
+    static READ_DIR_ENTRY: RefCell<Option<ReadDirEntryHook>> = RefCell::new(None);
     static REMOVE_DIR_ALL: RefCell<Option<RemoveDirAllHook>> = RefCell::new(None);
     static FSYNC_DIR: RefCell<Option<FsyncDirHook>> = RefCell::new(None);
     static MANIFEST_RENAME: RefCell<Option<ManifestRenameHook>> = RefCell::new(None);
@@ -98,6 +104,7 @@ enum SeamSlot {
     BeforeBoundary,
     MonotonicNow,
     SymlinkMetadata,
+    ReadDirEntry,
     RemoveDirAll,
     FsyncDir,
     ManifestRename,
@@ -120,6 +127,7 @@ impl Drop for SeamGuard {
             SeamSlot::BeforeBoundary => BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::MonotonicNow => MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::SymlinkMetadata => SYMLINK_METADATA.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::ReadDirEntry => READ_DIR_ENTRY.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::RemoveDirAll => REMOVE_DIR_ALL.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::FsyncDir => FSYNC_DIR.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::ManifestRename => MANIFEST_RENAME.with(|slot| *slot.borrow_mut() = None),
@@ -165,6 +173,11 @@ pub fn set_monotonic_now(hook: NowHook) -> SeamGuard {
 pub fn set_symlink_metadata(hook: MetadataHook) -> SeamGuard {
     SYMLINK_METADATA.with(|slot| *slot.borrow_mut() = Some(hook));
     SeamGuard(SeamSlot::SymlinkMetadata)
+}
+
+pub fn set_read_dir_entry(hook: ReadDirEntryHook) -> SeamGuard {
+    READ_DIR_ENTRY.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::ReadDirEntry)
 }
 
 pub fn set_remove_dir_all(hook: RemoveDirAllHook) -> SeamGuard {
@@ -238,6 +251,12 @@ pub fn fire_hash_file(path: &Path) -> Option<std::io::Result<(String, u64)>> {
 /// `None` (the real `symlink_metadata`). Called only from `list_files`.
 pub fn fire_symlink_metadata(path: &Path) -> Option<std::io::Result<fs::Metadata>> {
     SYMLINK_METADATA.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
+}
+
+/// The registered entry-iteration failure for one listed directory, else
+/// `None` (the real iteration). Called only from `list_files`.
+pub fn fire_read_dir_entry(dir: &Path) -> Option<std::io::Error> {
+    READ_DIR_ENTRY.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(dir)))
 }
 
 /// The registered `remove_dir_all` substitution for one owned partial

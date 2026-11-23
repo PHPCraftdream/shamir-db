@@ -5,8 +5,7 @@
 //! created atomically by the protocol (step A), never here.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
@@ -19,12 +18,21 @@ use super::manifest::{self, BACKUP_META_FILE_NAME};
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
-    audit_capture_is_stable, is_audit_log_file_name, list_audit_files,
+    audit_capture_is_stable, is_audit_archive_name, list_audit_files,
     reconcile_destination_audit_files, AUDIT_CAPTURE_ROUNDS,
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
+use self::audit_rounds::discarded_captured_archive;
+use self::list_files::list_files;
 pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
+
+/// The fail-closed guard of the audit capture rounds (sibling file).
+#[path = "audit_rounds.rs"]
+mod audit_rounds;
+/// The deterministic listing of a pass (sibling file).
+#[path = "list_files.rs"]
+mod list_files;
 
 /// Fixed reused buffer for streaming copies and hashes.
 const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
@@ -149,7 +157,9 @@ fn is_sharing_violation(error: &CopyError) -> bool {
         CopyError::Cancelled
         | CopyError::RecopyCap(_)
         | CopyError::AuditFilesUnstable { .. }
-        | CopyError::AuditListing { .. } => {
+        | CopyError::AuditListing { .. }
+        | CopyError::AuditArchiveLost
+        | CopyError::AuditReconcileRefused { .. } => {
             return false;
         }
     };
@@ -354,140 +364,13 @@ fn fsync_dir_fallible(dir: &Path) -> Result<(), CopyError> {
     manifest::fsync_dest_dir(dir).map_err(|error| dest_at(dir, error))
 }
 
-fn is_regular_file(meta: &fs::Metadata) -> bool {
-    meta.is_file()
-}
-
-/// File names skipped in every listing pass, on ALL OSes so the
-/// snapshot manifest does not differ across platforms. Both are runtime
-/// lock artifacts, not data (restore recreates them on first open):
-/// `lock` is fjall's active-store lock artifact — the live engine holds
-/// a range lock on it, so on Windows copying it can never succeed while
-/// the server is up; `.shamir.lock` is the data-dir maintenance lock
-/// (`maintenance_lock.rs`, `fs4` exclusive try-lock, PID inside) held
-/// for the whole life of the live server, so the same Windows
-/// sharing-violation applies and the file is process state, not data.
-const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
-
-/// Deterministic listing of every regular file under `source_root`
-/// (sorted per directory), skipping top-level directories named in
-/// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
-/// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
-/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
-/// Top-level audit chain files are skipped when `skip_audit_files` is set
-/// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
-/// clock are checked at every directory iteration — the listing is inside
-/// the re-copy budget. Every directory-entry and metadata failure is a
-/// typed [`CopyError::Io`]; only an entry that vanished before its
-/// metadata read (`NotFound`) is skipped as the documented source race.
-fn list_files(
-    source_root: &Path,
-    skip_top_level_dirs: &[&str],
-    skip_top_level_files: &[&str],
-    cancel: &CancelFlag,
-    gate: Option<&SealGate>,
-    skip_audit_files: bool,
-) -> Result<Vec<PathBuf>, CopyError> {
-    let mut out = Vec::new();
-    let mut stack = vec![source_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Some(gate) = gate {
-            gate.check(cancel)?;
-        } else if cancel.is_cancelled() {
-            return Err(CopyError::Cancelled);
-        }
-        // EVERY directory-entry error is typed, naming the directory:
-        // a dropped entry would silently omit a file from the listing.
-        let mut entries: Vec<PathBuf> = Vec::new();
-        let read_dir = fs::read_dir(&dir).map_err(|error| CopyError::Io {
-            path: dir.clone(),
-            source: error,
-        })?;
-        for entry in read_dir {
-            match entry {
-                Ok(entry) => entries.push(entry.path()),
-                Err(error) => return Err(io_at(&dir, error)),
-            }
-        }
-        entries.sort();
-        for entry in entries {
-            if let Some(gate) = gate {
-                // Budget checked between individual directory entries.
-                gate.check(cancel)?;
-            } else if cancel.is_cancelled() {
-                return Err(CopyError::Cancelled);
-            }
-            // Test-only seam: an injected metadata RESULT for this entry
-            // REPLACES the result the listing consumes, so the injected
-            // failure travels the same match arm as a genuine one.
-            #[cfg(test)]
-            let meta_result = match test_seams::fire_symlink_metadata(&entry) {
-                Some(result) => result,
-                None => fs::symlink_metadata(&entry),
-            };
-            #[cfg(not(test))]
-            let meta_result = fs::symlink_metadata(&entry);
-            // Only an entry that VANISHED is tolerated. A reserved top-level
-            // audit name is the audit listing's own path-free refusal: the
-            // phase-1 name exclusion runs AFTER this read.
-            let meta = match meta_result {
-                Ok(meta) => meta,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error)
-                    if dir.as_path() == source_root
-                        && entry.file_name().is_some_and(is_audit_log_file_name) =>
-                {
-                    return Err(CopyError::AuditListing { source: error });
-                }
-                Err(error) => return Err(io_at(&entry, error)),
-            };
-            if meta.is_dir() {
-                let at_top = entry.parent() == Some(source_root);
-                let name = entry
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if at_top && skip_top_level_dirs.contains(&name.as_str()) {
-                    continue;
-                }
-                stack.push(entry);
-            } else if is_regular_file(&meta) {
-                let Some(name) = entry.file_name() else {
-                    continue;
-                };
-                if SKIP_FILE_NAMES
-                    .iter()
-                    .any(|candidate| name == OsStr::new(candidate))
-                {
-                    continue;
-                }
-                if skip_audit_files && dir.as_path() == source_root && is_audit_log_file_name(name)
-                {
-                    continue;
-                }
-                if !skip_top_level_files.is_empty()
-                    && dir.as_path() == source_root
-                    && skip_top_level_files
-                        .iter()
-                        .any(|candidate| name == OsStr::new(candidate))
-                {
-                    continue;
-                }
-                out.push(entry);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
 /// One copy pass `source_root` -> `dest_root` (design 4.2 steps C/D/E):
 /// deterministic listing, per-file copy with bounded sharing-violation
 /// retry, then a second hash pass over every SOURCE file that defines the
 /// snapshot. A source file changed between copy and hash is re-copied up
 /// to twice more; one still mismatching fails the pass. A source file
 /// deleted mid-copy is excluded from the result. Files named in
-/// [`SKIP_FILE_NAMES`] (`.shamir.lock`, `lock`) and files under any of
+/// [`list_files`]'s skip rules (`.shamir.lock`, `lock`) and files under any of
 /// `exclude_dirs` (absolute source paths) are left out entirely.
 pub fn run_copy_pass(
     source_root: &Path,
@@ -546,7 +429,12 @@ pub fn run_copy_pass(
 /// silently inconsistent copy. The manifest describes exactly the bytes of
 /// the last round, and an active log an earlier pass left in the destination
 /// that the last round did not capture is removed (the source has none while a
-/// rotation reopens it). A source file that vanishes during a corrective
+/// rotation reopens it). A destination archive an EARLIER ROUND of this same
+/// pass captured and the accepted round no longer lists is a typed refusal
+/// ([`CopyError::AuditArchiveLost`]): the anchors phase 1 captured still name
+/// it, so deleting the copy would publish a snapshot that boot refuses
+/// (`UnanchoredSuffix`) while this pass reported success. A source file that
+/// vanishes during a corrective
 /// re-copy, or its follow-up re-hash, is counted MISSING for that round: a
 /// rotation renamed the active log into a new archive, which the stability
 /// check re-lists and the next round captures, so the snapshot still carries
@@ -558,7 +446,10 @@ pub fn run_copy_pass(
 /// listing and its copy — a vanished file is excluded exactly as any other
 /// deleted source file — and retention never removes the newest archive,
 /// the only one that can hold the tail an anchor persisted just before
-/// names.
+/// names. An archive that was gone BEFORE any round of this pass listed it
+/// (pruned between pass D and this pass, say) is the same open window: no
+/// round here captured it, so its leftover destination copy is reconciled
+/// away and such a snapshot can still refuse at boot.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -578,7 +469,11 @@ pub(super) fn run_data_dir_copy_pass(
     };
     // Phase 1: every other file, both anchor stores included.
     let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
-    // Phase 2: the audit chain files, listed only now.
+    // Phase 2: the audit chain files, listed only now. Archives captured by an
+    // EARLIER round of this same pass are tracked separately: the anchors were
+    // captured in phase 1, so discarding one of them would publish anchors the
+    // snapshot cannot authenticate (`audit_rounds`).
+    let mut earlier_archives: BTreeSet<String> = BTreeSet::new();
     for _ in 0..AUDIT_CAPTURE_ROUNDS {
         let audit = run_copy_pass_inner(
             source_root,
@@ -595,14 +490,103 @@ pub(super) fn run_data_dir_copy_pass(
         result.changed_files += audit.changed_files;
         result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
-            reconcile_destination_audit_files(dest_root, &audit)?;
+            if discarded_captured_archive(&earlier_archives, &audit.files).is_some() {
+                return Err(CopyError::AuditArchiveLost);
+            }
+            reconcile_destination_audit_files(dest_root, &audit, &result.files)?;
+            reconcile_destination_anchor_stores(dest_root, &result.files, &audit.files)?;
             result.files.extend(audit.files);
             return Ok(result);
+        }
+        for file in &audit.files {
+            if is_audit_archive_name(&file.rel_path) {
+                earlier_archives.insert(file.rel_path.clone());
+            }
         }
     }
     Err(CopyError::AuditFilesUnstable {
         rounds: AUDIT_CAPTURE_ROUNDS,
     })
+}
+
+/// The anchor stores the RUNNING server keeps writing while a copy runs: the
+/// audit meta hook persists `server_meta`'s anchor row at every rotation
+/// boundary (`server/server_launcher/support/durable_stores.rs`,
+/// `store_audit_checkpoint`), so that Fjall tree rotates files under an online
+/// copy.
+const LIVE_ANCHOR_STORE_DIRS: &[&str] = &["server_meta"];
+
+/// Removes the destination's copies of LIVE anchor-store files the accepted
+/// snapshot does not list: the running server mutates `server_meta/` during the
+/// copy (its anchor row at every rotation boundary), so a file pass D copied
+/// can be gone from the source by the manifest-defining pass E and the leftover
+/// copy would fail self-verification as an unlisted file. A reconciliation, not
+/// a consistent-point capture: the destination is made to hold exactly what the
+/// final listing described, the contract `reconcile_destination_audit_files`
+/// applies to the audit chain. Only regular files under a live anchor-store
+/// directory are removed.
+fn reconcile_destination_anchor_stores(
+    dest_root: &Path,
+    phase_one: &[CopiedFile],
+    audit: &[CopiedFile],
+) -> Result<(), CopyError> {
+    let accepted: BTreeSet<&str> = phase_one
+        .iter()
+        .chain(audit.iter())
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    let mut stack: Vec<PathBuf> = LIVE_ANCHOR_STORE_DIRS
+        .iter()
+        .map(|name| dest_root.join(name))
+        .filter(|path| path.is_dir())
+        .collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).map_err(|source| CopyError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| CopyError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(CopyError::Io { path, source });
+                }
+            };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    for path in files {
+        let Ok(rel) = path.strip_prefix(dest_root) else {
+            continue;
+        };
+        let rel: String = rel
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        if accepted.contains(rel.as_str()) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(CopyError::Io { path, source });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// How one pass treats the audit chain files of its source root.

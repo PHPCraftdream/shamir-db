@@ -280,6 +280,8 @@ fn copy_token(error: &CopyError) -> String {
         CopyError::RecopyCap(_) => "copy-recopy-cap".to_string(),
         CopyError::AuditFilesUnstable { .. } => "copy-audit-files-unstable".to_string(),
         CopyError::AuditListing { source } => format!("copy-io-{}", kind_token(source.kind())),
+        CopyError::AuditArchiveLost => "copy-audit-archive-lost".to_string(),
+        CopyError::AuditReconcileRefused { .. } => "copy-audit-reconcile-refused".to_string(),
     }
 }
 

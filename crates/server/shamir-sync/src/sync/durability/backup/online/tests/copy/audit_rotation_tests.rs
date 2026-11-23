@@ -14,7 +14,6 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -22,14 +21,11 @@ use shamir_connect::server::audit_chain::{AuditChain, AuditChainWriter};
 use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
-use super::super::failure_injection_tests::{run, write_file, InjectPort, JoinOnDrop};
+use super::super::failure_injection_tests::{run, write_file, InjectPort};
 use super::audit_fixtures;
+use super::audit_fixtures::{budget_left, helper_deadline, JoinOnDrop};
 use crate::sync::durability::backup::online::copy_engine::test_seams;
-use crate::sync::durability::backup::online::copy_engine::{run_data_dir_copy_pass, CopyOptions};
 use crate::sync::durability::backup::online::progress::CancelFlag;
-
-/// Rendezvous bound: a wedged copy or activity thread fails in two minutes.
-const ROTATION_HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Audit chain key seed of the rotating fixture (never leaves the test).
 const ROTATION_KEY_SEED: u8 = 0x33;
@@ -105,27 +101,17 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
 
     let (paused_tx, paused_rx) = mpsc::channel::<()>();
     let (release_tx, release_rx) = mpsc::channel::<()>();
-    let listings = Arc::new(AtomicUsize::new(0));
-    let listings_for_hook = listings.clone();
-    let released = Arc::new(AtomicBool::new(false));
-    let released_for_hook = released.clone();
-    let seam = test_seams::set_after_listing(Box::new(move |_root| {
-        // The protocol lists the data dir twice (pass D, then the residual
-        // pass E); the rotation must land in the manifest-defining latter.
-        if listings_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
-            return;
-        }
-        paused_tx.send(()).expect("signal the listing pause");
-        let released = release_rx.recv_timeout(ROTATION_HANG_GUARD).is_ok();
-        released_for_hook.store(released, Ordering::SeqCst);
-    }));
+    // ONE absolute deadline, taken BEFORE the helper is spawned: both
+    // rendezvous receives and the teardown join draw on it, so a wedged helper
+    // can never spend a budget per waiting step.
+    let deadline = helper_deadline();
     let source_for_activity = source.clone();
-    let activity = JoinOnDrop::new(
+    let activity = JoinOnDrop::with_deadline(
         std::thread::Builder::new()
             .name("audit-rotation".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                if paused_rx.recv_timeout(ROTATION_HANG_GUARD).is_ok() {
+                if paused_rx.recv_timeout(budget_left(deadline)).is_ok() {
                     append_rotation_event(&writer, "append the rotating event");
                     writer.checkpoint_now().expect("persist the rotated anchor");
                     // The hook runs after the appender anchor at every
@@ -139,7 +125,26 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
                 release_tx.send(()).expect("release the paused copy");
             })
             .expect("spawn the audit rotation thread"),
+        deadline,
     );
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let released = Arc::new(AtomicBool::new(false));
+    let released_for_hook = released.clone();
+    // Registered AFTER `activity`: on unwind locals drop in reverse order, so
+    // this hook (which owns both channel ends the helper waits on) closes them
+    // BEFORE the teardown join — the helper fails its rendezvous at once
+    // instead of waiting out the shared budget.
+    let seam = test_seams::set_after_listing(Box::new(move |_root| {
+        // The protocol lists the data dir twice (pass D, then the residual
+        // pass E); the rotation must land in the manifest-defining latter.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) != 1 {
+            return;
+        }
+        paused_tx.send(()).expect("signal the listing pause");
+        let released = release_rx.recv_timeout(budget_left(deadline)).is_ok();
+        released_for_hook.store(released, Ordering::SeqCst);
+    }));
     let port = InjectPort::with_repos(&source, &["alpha"]);
     let (result, _progress) = run(&port, &source, &to, &CancelFlag::default());
     drop(seam);
@@ -147,7 +152,7 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
     assert_eq!(listings.load(Ordering::SeqCst), 2, "second listing");
     assert!(
         released.load(Ordering::SeqCst),
-        "the listing-pause rendezvous must be released within {ROTATION_HANG_GUARD:?}"
+        "the listing-pause rendezvous must be released before the shared helper deadline"
     );
     let report = result.expect("the copy must succeed");
     audit_fixtures::copy_snapshot_tree(&report.dest_dir, &restored);
@@ -230,36 +235,45 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
     drop(appender);
 }
 
-/// A rotation inside the audit phase's corrective re-copy leaves that round
-/// without the active log, and the round's stability check re-lists so the NEXT
-/// round captures the new archive.
+/// A rotation inside the audit phase's corrective re-copy (the OPEN of the
+/// re-copy) leaves that round without the active log, the round's stability
+/// check re-lists, and the PUBLICATION describes the new archive.
 ///
-/// No appender is involved: the rotation is a plain rename of the active log
-/// into its archive, and "the file changed between its copy and its snapshot
-/// hash" is modelled by the hash seam — no bytes are appended. The seam renames
-/// the active log into `archive_name(1)` and reports a digest no copy can
-/// match, so the pass takes its bounded corrective re-copy there, where the
-/// source is gone.
+/// The rotation is armed only after the SECOND data-directory listing
+/// (phase 1 of pass D, then of the residual pass E): the fault must land in
+/// the pass whose result defines the manifest, not in pass D. The hash seam
+/// reports a digest no copy can match, so the pass takes its corrective
+/// re-copy; the source is gone when that copy opens it.
 ///
-/// Mutant caught: a corrective re-copy that propagates the vanished source's
-/// `CopyError::Io { NotFound }` and fails the pass — the `expect` on the pass
-/// fails on that parent commit. Mutant caught: a pass that reports the vanished
-/// source as a failure instead of counting it missing — `missing_files` stays
-/// zero.
+/// Mutant caught: propagating the vanished source's `CopyError::Io
+/// { NotFound }` at the corrective OPEN — the run returns a typed error
+/// instead of a report and the decoded-manifest assertions never run.
 #[test]
 fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_next_round() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let source = source_dir.path().to_path_buf();
     let to = to_dir.path().to_path_buf();
-    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    audit_fixtures::seed_alpha_repo(&source);
     let log_for_hook = source.join(ROTATION_AUDIT_LOG);
     write_file(&log_for_hook, b"active-before-rotation\n");
-    let archive_for_hook = source.join(audit_fixtures::archive_name(1));
+    let archive = audit_fixtures::archive_name(1);
+    let archive_for_hook = source.join(&archive);
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root| {
+        // Phase 1 of pass D, then phase 1 of the residual pass E.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
     let rotated = Arc::new(AtomicBool::new(false));
     let rotated_for_hook = rotated.clone();
+    let armed_for_hash = armed.clone();
     let seam = test_seams::set_hash_file(Box::new(move |path| {
-        if path != log_for_hook.as_path() {
+        if path != log_for_hook.as_path() || !armed_for_hash.load(Ordering::SeqCst) {
             return None;
         }
         if rotated_for_hook.swap(true, Ordering::SeqCst) {
@@ -272,46 +286,41 @@ fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_ne
         // its snapshot hash: a digest no copy can match.
         Some(Ok(("0".repeat(64), 0)))
     }));
-    let cancel = CancelFlag::default();
-    let result = run_data_dir_copy_pass(&source, &to, &[], &cancel, &CopyOptions::default());
+    let port = InjectPort::with_repos(&source, &["alpha"]);
+    let (result, _progress) = run(&port, &source, &to, &CancelFlag::default());
     drop(seam);
-    let result = result.expect(
+    drop(arm);
+    let report = result.expect(
         "a source that vanishes inside the corrective re-copy is counted missing, not a failure",
+    );
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "the fault must land in the residual pass (the second data-directory listing)"
     );
     assert!(
         rotated.load(Ordering::SeqCst),
-        "the seam must rotate the audit log"
+        "the corrective branch must be reached in the residual pass"
     );
-    let archive = audit_fixtures::archive_name(1);
-    let captured: Vec<&str> = result
-        .files
-        .iter()
-        .map(|file| file.rel_path.as_str())
-        .collect();
+    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
     assert!(
-        captured.contains(&archive.as_str()),
-        "the next round must capture the re-listed archive: {captured:?}"
+        paths.contains(&archive),
+        "the published manifest must list the re-listed archive: {paths:?}"
     );
     assert!(
-        !captured.contains(&ROTATION_AUDIT_LOG),
-        "the rotated active log must not be captured: {captured:?}"
+        !paths.contains(&ROTATION_AUDIT_LOG.to_string()),
+        "the rotated active log must not be published: {paths:?}"
     );
+    let bytes = b"active-before-rotation\n";
     assert_eq!(
-        result.missing_files, 1,
-        "the vanished source must be counted as missing, not reported as a failure: {captured:?}"
-    );
-    assert_eq!(
-        fs::read(to.join(&archive)).expect("archive copy"),
-        b"active-before-rotation\n",
+        fs::read(report.dest_dir.join(&archive)).expect("archive copy"),
+        bytes,
         "the archive must carry the bytes the active log held"
     );
-    let mut unique = captured.clone();
-    unique.sort_unstable();
-    unique.dedup();
     assert_eq!(
-        unique.len(),
-        captured.len(),
-        "no rel_path may be captured twice: {captured:?}"
+        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
+        (hex::encode(Sha256::digest(bytes)), bytes.len() as u64),
+        "the manifest must describe the archive bytes exactly"
     );
 }
 
@@ -334,7 +343,10 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() 
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
-    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    // The port declares `repos/alpha.shamirwal`; without a WAL segment and its
+    // sidecar the run dies in step C (opening the missing WAL directory) before
+    // any audit hook fires.
+    audit_fixtures::seed_alpha_repo(source);
     let log_path = source.join(ROTATION_AUDIT_LOG);
     write_file(&log_path, b"active-before-rotation\n");
     let archive = audit_fixtures::archive_name(1);
@@ -344,8 +356,20 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() 
     let reads_for_hook = reads.clone();
     let log_for_hook = log_path.clone();
     let archive_for_hook = archive_path.clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root| {
+        // Phase 1 of pass D, then phase 1 of the residual pass E: the fault
+        // must land in the pass whose result defines the manifest.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
+    let armed_for_hash = armed.clone();
     let seam = test_seams::set_hash_file(Box::new(move |path| {
-        if path != log_for_hook.as_path() {
+        if path != log_for_hook.as_path() || !armed_for_hash.load(Ordering::SeqCst) {
             return None;
         }
         match reads_for_hook.fetch_add(1, Ordering::SeqCst) {
@@ -360,13 +384,19 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() 
     let port = InjectPort::with_repos(source, &["alpha"]);
     let (result, _progress) = run(&port, source, to, &CancelFlag::default());
     drop(seam);
+    drop(arm);
     let report = result.expect(
         "a source that vanishes inside the corrective re-hash is counted missing, not a failure",
     );
     assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "the fault must land in the residual pass (the second data-directory listing)"
+    );
+    assert_eq!(
         reads.load(Ordering::SeqCst),
         2,
-        "the fixture must reach the copy hash and the re-hash"
+        "the residual pass must reach the copy hash and the corrective re-hash"
     );
     let paths = audit_fixtures::manifest_paths(&report.dest_dir);
     assert!(
