@@ -117,9 +117,11 @@ pub(crate) async fn drain_server(
 
 /// The one truthful deadline message, shared by both shutdown compositions.
 ///
-/// Nothing forces an exit: the exit CODE reports the unclean stop, and the
-/// scheduled worker plus the data-directory lock are awaited before the caller
-/// returns.
+/// Nothing forces an exit: the exit CODE reports the unclean stop. The message
+/// text describes the production composition: `drain_server` awaits the
+/// scheduled worker and releases the data-directory lock before the caller
+/// returns. The test-only `finish_shutdown` does not by itself carry that
+/// guarantee — its closure decides what is still awaited after the deadline.
 fn deadline_error(deadline: std::time::Duration) -> String {
     format!(
         "graceful shutdown exceeded deadline {deadline:?}: the teardown stage still running \

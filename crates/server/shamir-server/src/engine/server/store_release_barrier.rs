@@ -63,18 +63,34 @@ fn is_released(dir: &Path) -> bool {
     }
 }
 
+/// One lock re-check over a discovered store set: keep only the roots whose
+/// directory lock is still held.
+fn still_locked(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    dirs.retain(|dir| !is_released(dir));
+    dirs
+}
+
 /// The verdict of one bounded release wait.
+///
+/// The three cases are distinct in what they claim about the locks:
+/// - [`Self::Released`]: every store under the root answered the probe unlocked.
+/// - [`Self::StillLocked`]: at least one store root was OBSERVED holding its
+///   directory lock and the budget did not allow another confirmation — the
+///   last observation is the verdict, even if it is the last one that fitted
+///   inside the budget.
+/// - [`Self::Unverified`]: the store state is UNKNOWN — discovery itself never
+///   produced a store set, so there is nothing to name.
 #[derive(Debug)]
 pub(crate) enum ReleaseOutcome {
     /// No store under the root holds its directory lock.
     Released,
-    /// These store roots still held their lock when the budget expired.
+    /// These store roots were still holding their lock when the budget expired.
     StillLocked(Vec<PathBuf>),
-    /// The probe itself could not run to a verdict inside the budget: the
-    /// blocking pool never took the discovery/probe job (a saturated pool parks
-    /// queued jobs, so an unbounded await here would keep the public shutdown
-    /// inside this barrier forever). Distinct from [`Self::StillLocked`],
-    /// because nothing is known about the stores.
+    /// The store state is UNKNOWN: the discovery probe never ran to a verdict
+    /// inside the budget (a saturated blocking pool parks queued jobs, so an
+    /// unbounded await here would keep the public shutdown inside this barrier
+    /// forever), so no store root was ever discovered. A store that WAS
+    /// discovered and then observed locked is [`Self::StillLocked`], never this.
     Unverified,
 }
 
@@ -82,31 +98,39 @@ pub(crate) enum ReleaseOutcome {
 ///
 /// Every probe await is bounded by the REMAINING budget, so neither discovery
 /// nor a lock probe can outlive the timeout on a busy pool; the verdict says
-/// which of the three cases happened.
+/// which of the three cases happened. The budget is checked BEFORE a probe is
+/// submitted, so an already-spent budget never turns a known held set into an
+/// `Unverified` verdict: a lock that was observed held is reported as
+/// [`ReleaseOutcome::StillLocked`], and only a run that never discovered the
+/// stores at all reports [`ReleaseOutcome::Unverified`].
 pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOutcome {
     let deadline = Instant::now() + timeout;
     let root = root.to_path_buf();
-    let mut pending = match bounded_probe(deadline, move || fjall_dirs(&root)).await {
-        Some(pending) => pending,
-        None => return ReleaseOutcome::Unverified,
-    };
+    // `None` = discovery has not produced a store set yet, which is exactly the
+    // "unknown" state; `Some(vec![])` = a discovered set with nothing locked.
+    let mut known: Option<Vec<PathBuf>> = bounded_probe(deadline, move || fjall_dirs(&root)).await;
     let mut delay = POLL_START;
     loop {
-        pending = match bounded_probe(deadline, move || {
-            pending.retain(|dir| !is_released(dir));
-            pending
-        })
-        .await
-        {
-            Some(pending) => pending,
-            None => return ReleaseOutcome::Unverified,
+        // The known set is re-checked at the TOP of every iteration, so the
+        // verdict is always derived from the freshest observation and never
+        // from a probe that could not run.
+        let Some(held) = known.take() else {
+            return ReleaseOutcome::Unverified;
         };
-        if pending.is_empty() {
+        if held.is_empty() {
             return ReleaseOutcome::Released;
         }
         if Instant::now() >= deadline {
-            return ReleaseOutcome::StillLocked(pending);
+            return ReleaseOutcome::StillLocked(held);
         }
+        // The probe closure owns the set, so keep a copy for the fallback: a
+        // probe that cannot run (budget spent while scheduling, or a saturated
+        // pool) must not discard the locks already observed held.
+        let fallback = held.clone();
+        known = match bounded_probe(deadline, move || still_locked(held)).await {
+            Some(held) => Some(held),
+            None => return ReleaseOutcome::StillLocked(fallback),
+        };
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(POLL_MAX);
     }

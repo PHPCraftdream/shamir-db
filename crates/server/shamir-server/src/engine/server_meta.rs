@@ -395,8 +395,9 @@ impl ServerMetaStore {
     // -----------------------------------------------------------------
     // Getters (lock-free reads)
     // -----------------------------------------------------------------
-
-    /// Return one metadata value for migration regression tests.
+    // Raw metadata-row fixtures for the migration and strict-length regression tests:
+    // `blob_for_test` returns one value; set/remove the token-key row (removal recreates
+    // a legacy store); set the listener-ID row for `addr`; set any `key` row (undecodable).
     #[cfg(test)]
     pub(crate) fn blob_for_test(&self, key: &str) -> Option<Vec<u8>> {
         self.meta
@@ -405,30 +406,31 @@ impl ServerMetaStore {
             .flatten()
             .map(|value| value.to_vec())
     }
-
-    /// Set the token-key row for strict-length regression tests.
     #[cfg(test)]
     pub(crate) fn set_token_key_for_test(&self, bytes: &[u8]) {
         self.meta
             .insert(KEY_TOKEN_KEY.as_bytes(), bytes)
             .expect("set token_key test fixture");
     }
-
-    /// Remove the token key to recreate a legacy metadata store in tests.
     #[cfg(test)]
     pub(crate) fn remove_token_key_for_test(&self) {
         self.meta
             .remove(KEY_TOKEN_KEY.as_bytes())
             .expect("remove token_key test fixture");
     }
-
-    /// Set a listener-ID row for strict-length regression tests.
     #[cfg(test)]
     pub(crate) fn set_http_login_listener_id_for_test(&self, addr: &str, bytes: &[u8]) {
         let key = format!("{LOGIN_LISTENER_ID_PREFIX}{addr}");
         self.meta
             .insert(key.as_bytes(), bytes)
             .expect("set listener ID test fixture");
+    }
+    /// Set an arbitrary metadata row so a test can seed an undecodable value.
+    #[cfg(test)]
+    pub(crate) fn set_raw_row_for_test(&self, key: &str, bytes: &[u8]) {
+        self.meta
+            .insert(key.as_bytes(), bytes)
+            .expect("set raw meta row test fixture");
     }
 
     /// Read or durably create the nonsecret retention identity on schedule enablement.

@@ -64,7 +64,8 @@ fn offline_kind_is_refused_before_the_tree_is_read() {
         "precondition: the listed payload must be absent"
     );
 
-    let error = verify_retention_candidate(dir.path(), raw.as_bytes()).expect_err("must refuse");
+    let error =
+        verify_retention_candidate(dir.path(), raw.as_bytes(), &|| false).expect_err("must refuse");
     assert!(
         matches!(&error, BackupError::ManifestInvalid(message)
             if message.contains("kind is not online")),
@@ -92,7 +93,8 @@ fn v1_fixture_deserializes_and_still_refuses_typed() {
     assert!(decoded.consistency.is_none());
     assert!(decoded.wal.is_none());
 
-    let error = verify_retention_candidate(dir.path(), raw.as_bytes()).expect_err("must refuse");
+    let error =
+        verify_retention_candidate(dir.path(), raw.as_bytes(), &|| false).expect_err("must refuse");
     assert!(
         matches!(
             &error,
@@ -152,6 +154,6 @@ fn valid_v2_online_candidate_is_accepted() {
     fs::write(root.join("manifest.json"), &encoded).expect("write manifest");
     online_manifest::write_backup_meta(root).expect("write meta");
 
-    verify_retention_candidate(root, encoded.as_bytes())
+    verify_retention_candidate(root, encoded.as_bytes(), &|| false)
         .expect("a valid v2-online candidate must be accepted");
 }

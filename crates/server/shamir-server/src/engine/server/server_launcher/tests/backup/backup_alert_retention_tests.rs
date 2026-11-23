@@ -1,5 +1,6 @@
 //! The alert RETENTION-failure input, on the real `/metrics` route: one
-//! obstructed retention pass.
+//! obstructed retention pass. The obstruction is installed BEFORE the first
+//! scheduled admission, so every run this server ever admits is obstructed.
 
 use std::fs;
 use std::sync::Arc;
@@ -16,8 +17,8 @@ use crate::sync::durability::backup::online::set_snapshot_name_base_seconds;
 use crate::sync::durability::backup::SNAPSHOT_LEASE_FILE_NAME;
 
 use super::support::{
-    arm_run_observer, metric_type, obstruct_lease_marker, on_big_stack, sample, scheduled_config,
-    scrape_metrics, TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
+    arm_run_observer, metric_type, on_big_stack, sample, scheduled_config, scrape_metrics,
+    TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
 };
 
 const ALERT_RETENTION_TEST: &str = "live_alert_retention_failure_reaches_the_real_metrics_route";
@@ -41,12 +42,29 @@ async fn run_alert_retention() {
     create_private_dir(&data_dir).expect("private data directory");
     create_private_dir(&backups).expect("private backup directory");
 
+    // Install the OBSTRUCTION before the FIRST admission: a DIRECTORY at the
+    // lease-marker path, so `provision_snapshot_lease` fails for every run the
+    // server will ever admit. Since no UNOBSTRUCTED run exists in this process,
+    // no copy outcome and no retention END delivered here can belong to one —
+    // the END/outcome pairing below cannot go stale.
+    let marker = backups.join(SNAPSHOT_LEASE_FILE_NAME);
+    create_private_dir(&marker).expect("obstruction directory at the lease-marker path");
+    let obstruction = fs::symlink_metadata(&marker).expect("obstruction at the lease-marker path");
+    assert!(
+        obstruction.is_dir(),
+        "the lease-marker obstruction must be a plain directory"
+    );
+    guard.mark("lease marker obstructed before the first admission");
+
     // Nextest gives this test its own process: the pre-run zero.
     let baseline = backup_metrics_snapshot();
     assert_eq!(
         baseline.last_success_timestamp_seconds, 0,
         "a fresh test process must not have published a success yet"
     );
+    // Read BEFORE the launch, hence before the first obstructed run: every
+    // increment observed below belongs to an obstructed pass.
+    let retention_before = baseline.retention_failed_total;
 
     let (send, mut receive) = mpsc::unbounded_channel::<TerminalOutcome>();
     let (retention_end_tx, mut retention_end_rx) = mpsc::unbounded_channel::<()>();
@@ -81,51 +99,46 @@ async fn run_alert_retention() {
         .expect("observability")
         .bound_addr;
 
-    // A FORCED retention failure at the registry level: a DIRECTORY at the
-    // lease-marker path, so provisioning fails while the copy still succeeds.
-    let marker = backups.join(SNAPSHOT_LEASE_FILE_NAME);
-    let marker_meta = fs::symlink_metadata(&marker).expect("lease marker provisioned at boot");
-    assert!(marker_meta.is_file(), "lease marker must be a regular file");
-    obstruct_lease_marker(&mut receive, &backups, &marker).await;
-    guard.mark("lease marker obstructed");
-    // Drain already-delivered outcomes: every run ADMITTED from here on
-    // reports a retention failure.
-    while receive.try_recv().is_ok() {}
-    let retention_before = backup_metrics_snapshot().retention_failed_total;
-    // Wait for the EVENT, not for runs: each iteration waits for a real
-    // retention END, never a sleep, so a pass that started before the
-    // obstruction cannot be mistaken for the obstructed one.
-    let deadline = tokio::time::Instant::now() + BOUND;
-    // The obstructed run's OWN copy outcome: one terminal signal is taken off
-    // the outcome channel for every retention END observed, so this keeps the
-    // stale-outcome drain above and still lands on the obstructed run (a run's
-    // copy outcome is published BEFORE its retention pass, so the pass that
-    // just ended never has to wait for a LATER run's copy — the bounded await
-    // only absorbs the runner task's scheduling lag).
-    let obstructed_outcome = loop {
-        match tokio::time::timeout_at(deadline, retention_end_rx.recv()).await {
-            Ok(Some(())) => {
-                let outcome = tokio::time::timeout_at(deadline, receive.recv())
-                    .await
-                    .expect("every obstructed run's copy outcome must arrive within the bound")
-                    .expect("the scheduled worker must keep its terminal channel open");
-                if backup_metrics_snapshot().retention_failed_total > retention_before {
-                    break outcome;
-                }
-            }
-            Ok(None) => panic!("the scheduled worker stopped before the obstructed retention pass"),
-            Err(_) => panic!("an obstructed retention pass must end within the bound"),
-        }
-    };
-    guard.mark("obstructed retention pass ended");
-    // The obstruction fails RETENTION only: the copy of that same run is intact,
-    // so its terminal outcome must be `Completed`.
+    // An obstructed marker must NOT refuse the boot: boot provisioning is
+    // best-effort (`resolve_backup` only warns), and the failure is accounted by
+    // the scheduled RETENTION pass, never as a boot or copy failure. Boot must
+    // also have left the obstruction untouched — a server that "repaired" the
+    // marker would silently turn this test back into an unobstructed one.
+    let after_boot = fs::symlink_metadata(&marker).expect("obstruction present after boot");
+    assert!(
+        after_boot.is_dir(),
+        "boot must not repair or replace the lease-marker obstruction"
+    );
+
+    // Run 1 was admitted at launch, already obstructed. Its retention END fires
+    // AFTER its own copy outcome was published and after this pass's retention
+    // counters were noted; run 2 cannot be admitted while run 1 is still in
+    // flight, and the runner notes run 1's outcome before run 1's late
+    // `finished`. So the FIRST END and the FIRST outcome taken here are the SAME
+    // run's, and that run was obstructed from its first step.
     //
     // Mutants caught: (a) "the retention obstruction is accounted as a failed
     // copy run" — an outcome that ORs the retention failure into the copy result
     // (`false` here, then a nonzero failure streak and a `result="failed"` run on
-    // the route), and (b) an outcome that is only reported after retention, which
-    // would leave this `recv` empty at the obstructed END and trip the bound.
+    // the route), and (b) an END or an outcome belonging to an UNOBSTRUCTED run
+    // paired with the obstructed pass — impossible to arrange here, because the
+    // obstruction predates the first admission.
+    let deadline = tokio::time::Instant::now() + BOUND;
+    tokio::time::timeout_at(deadline, retention_end_rx.recv())
+        .await
+        .expect("an obstructed retention pass must end within the bound")
+        .expect("the scheduled worker must keep its retention-END channel open");
+    let obstructed_outcome = tokio::time::timeout_at(deadline, receive.recv())
+        .await
+        .expect("the obstructed run's copy outcome must arrive within the bound")
+        .expect("the scheduled worker must keep its terminal channel open");
+    guard.mark("obstructed retention pass ended");
+    // The obstruction fails RETENTION only: the copy of that same run is intact,
+    // so its terminal outcome must be `Completed`. The OR mutant below is what
+    // this assertion kills; "published only after retention" is NOT separable
+    // through this channel (the bounded await would simply absorb the delay),
+    // which is why the pairing rests on the obstruction predating every
+    // admission rather than on the order inside one run.
     assert!(
         obstructed_outcome,
         "the obstructed run's COPY must still be reported as a success: a retention \

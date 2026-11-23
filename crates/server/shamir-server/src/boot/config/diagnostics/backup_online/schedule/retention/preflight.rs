@@ -197,9 +197,12 @@ pub(super) fn verified_time(
     // second manifest read. This preserves manifest consistency for this
     // check, but does not prove directory identity or prevent later payload
     // changes under the single-writer-root contract.
-    let verified = verify_retention_candidate(dir, &raw);
+    let verified = verify_retention_candidate(dir, &raw, &|| budget.cancelled());
     budget.checkpoint()?;
     verified.map_err(|error| match error {
+        BackupError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+            Refusal::Cancelled
+        }
         BackupError::Io(_) => Refusal::Incomplete,
         _ => Refusal::Unverifiable,
     })?;

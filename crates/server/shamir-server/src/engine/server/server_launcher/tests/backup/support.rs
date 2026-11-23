@@ -1,7 +1,6 @@
 //! Shared fixtures of the real-server scheduled-backup acceptance tests.
 
 use std::ffi::OsString;
-use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::panic::resume_unwind;
@@ -31,9 +30,10 @@ pub(super) const SNAPSHOT_NAME_BASE: u64 = 1_700_000_000;
 /// `timeout(BOUND, ..)` and panic with that wait's diagnostic message instead
 /// of the flake watchdog's generic timeline dump. 110 s covers one live
 /// scheduled copy, which costs ~50-64 s on the Windows runner, and still
-/// leaves the retention-handshake loop in `backup_alert_retention_tests.rs` —
-/// ONE `BOUND` deadline shared across two runs — room to finish, so that
-/// loop's awaits keep reporting their own message without pinching it.
+/// leaves the obstructed retention handshake in
+/// `backup_alert_retention_tests.rs` — ONE `BOUND` deadline shared by its END
+/// and outcome waits — room to finish, so those awaits keep reporting their
+/// own message without pinching it.
 pub(super) const BOUND: Duration = Duration::from_secs(110);
 /// Watchdog deadline: fires AFTER [`BOUND`] (so every await already reported
 /// its own message) and BEFORE nextest's 180 s per-test kill (so the dumped
@@ -116,42 +116,6 @@ pub(super) fn metric_type<'a>(metrics: &'a str, series: &str) -> &'a str {
         })
         .unwrap_or_else(|| panic!("missing /metrics TYPE line for {series}"))
         .trim()
-}
-
-/// Install the registry-level retention-failure injection: a DIRECTORY at the
-/// lease-marker path, so `provision_snapshot_lease` fails for every run from
-/// now on. The plain marker is MOVED ASIDE (a delete of a file a retention
-/// pass holds open stays pending on Windows). Each retry waits for the next
-/// terminal outcome — a real run boundary — bounded by [`BOUND`].
-pub(super) async fn obstruct_lease_marker(
-    receive: &mut mpsc::UnboundedReceiver<TerminalOutcome>,
-    root: &Path,
-    marker: &Path,
-) {
-    let deadline = tokio::time::Instant::now() + BOUND;
-    for attempt in 0..64 {
-        // A fresh name per attempt: replacing an ALREADY PARKED marker that a
-        // retention pass still holds open is not portable, moving a NEW one is.
-        let parked = root.join(format!("lease-marker-parked-{attempt}"));
-        match fs::rename(marker, &parked) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("move the lease marker aside: {error}"),
-        }
-        match fs::create_dir(marker) {
-            Ok(()) => return,
-            // A scheduled run re-provisioned the plain marker first: wait for
-            // that run's boundary, then retry.
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => panic!("obstruct the lease marker: {error}"),
-        }
-        match tokio::time::timeout_at(deadline, receive.recv()).await {
-            Ok(Some(_)) => {}
-            Ok(None) => panic!("the scheduled worker stopped while obstructing the lease marker"),
-            Err(_) => panic!("could not obstruct the lease marker within {BOUND:?}"),
-        }
-    }
-    panic!("could not obstruct the lease marker: a scheduled run kept re-provisioning it");
 }
 
 /// A real server whose scheduled backup runs into `backups`; the interval only

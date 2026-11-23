@@ -1,5 +1,7 @@
 use super::super::super::FjallAuditAppender;
-use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
+};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -244,4 +246,159 @@ async fn flush_now_rotates_and_preserves_entries_7ffa5398() {
     assert_eq!(entries[0].seq, 1);
     assert_eq!(entries[0].hmac, [1; 32]);
     appender.shutdown().await;
+}
+
+/// Bounded rendezvous deadline for the post-close fence test (never a sleep).
+const HANG_GUARD: Duration = Duration::from_secs(120);
+/// Audit chain key for the post-close fence test.
+const FENCE_KEY: [u8; 32] = [0x5a; 32];
+/// The writer's inline checkpoint boundary (`seq % 1000 == 0`).
+const INLINE_CHECKPOINT_EVERY: u64 = 1000;
+
+/// Releases the parked writer exactly once: explicitly, or from `Drop` when an
+/// assertion panics first, so a failure cannot strand the writer thread.
+struct ReleaseGuard(std::sync::mpsc::SyncSender<()>);
+
+impl Drop for ReleaseGuard {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+/// Raw anchor row (8-byte next sequence + 32-byte digest), or `None` before
+/// the first durable anchor write.
+fn anchor_row(appender: &FjallAuditAppender) -> Option<Vec<u8>> {
+    appender
+        .checkpoint_ks
+        .get(&[0u8][..])
+        .expect("anchor row read")
+        .map(|value| value.as_ref().to_vec())
+}
+
+/// ITEM 4: a checkpoint resumed after the appender was closed must be refused
+/// without a second anchor write.
+///
+/// The writer's first entry is `seq = 1000`, so its own inline checkpoint runs
+/// right after the append. It parks inside the one-shot end-of-append hook, the
+/// test closes the appender (`request_flusher_stop` + `final_flush_blocking`,
+/// which drains the buffer and persists the anchor), records that anchor, then
+/// releases the writer. Mutant (fence removed): the resumed checkpoint writes
+/// the anchor again and the writer sees `Ok` instead of
+/// `AuditError::Persistence`.
+#[test]
+fn post_close_inline_checkpoint_is_refused_and_anchor_is_not_rewritten_c4e08b17() {
+    let dir = TempDir::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let appender = {
+        // `open_batched` spawns the background flusher. This runtime is never
+        // driven afterwards, so that task never polls and cannot flush.
+        let _entered = runtime.enter();
+        FjallAuditAppender::open_batched(dir.path(), Duration::from_secs(3600)).unwrap()
+    };
+
+    let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    appender.arm_after_append_hook(Arc::new({
+        let release_rx = Arc::clone(&release_rx);
+        move || {
+            let _ = parked_tx.send(());
+            // Bounded: the guard's `Drop` (or the explicit release below)
+            // always unparks this thread.
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(HANG_GUARD)
+                .expect("release never arrived");
+        }
+    }));
+
+    let writer = Arc::new(AuditChainWriter::new(
+        AuditChain::from_checkpoint(FENCE_KEY, INLINE_CHECKPOINT_EVERY, [0x11; 32]),
+        appender.clone(),
+    ));
+    let appending = Arc::clone(&writer);
+    let append_thread = std::thread::spawn(move || {
+        appending.append(
+            "auth_success",
+            "test",
+            "user",
+            "127.0.0.0/24",
+            [7; 8],
+            "ok",
+            vec![0xc0],
+            42,
+        )
+    });
+
+    parked_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the writer never reached the end of its batched append");
+    appender.request_flusher_stop();
+    let close = appender.final_flush_blocking();
+    assert!(close.is_ok(), "the close itself must succeed: {close:?}");
+    let closed_anchor = anchor_row(&appender);
+    assert!(
+        closed_anchor.is_some(),
+        "the close must persist the flushed anchor"
+    );
+
+    // Release the parked writer: only the fence can keep the writer's resumed
+    // inline checkpoint from writing the anchor again.
+    drop(ReleaseGuard(release_tx));
+
+    let error = append_thread
+        .join()
+        .expect("writer thread panicked")
+        .expect_err("the resumed post-close checkpoint must be refused");
+    assert!(
+        matches!(&error, AuditError::Persistence(_)),
+        "not a persistence refusal: {error:?}"
+    );
+    assert_eq!(appender.refused_checkpoint_attempts(), 1);
+    assert_eq!(
+        anchor_row(&appender),
+        closed_anchor,
+        "the resumed checkpoint must not write the anchor again"
+    );
+    assert_eq!(appender.final_close_attempts(), 1);
+    drop(appender);
+}
+
+/// ITEM 5: a strict appender has nothing to flush, so its public `shutdown`
+/// must not dispatch through `blocking_io` — `block_in_place` PANICS inside a
+/// `LocalSet`. Mutant (unconditional `blocking_io`): the spawned local task
+/// panics and the `expect` below fails the test.
+#[test]
+fn strict_shutdown_completes_inside_a_local_set_a1d5c9e3() {
+    let dir = TempDir::new().unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = tokio::task::LocalSet::new();
+    let closing = Arc::clone(&appender);
+    let bounded = tokio::time::timeout(
+        HANG_GUARD,
+        local.run_until(async move {
+            tokio::task::spawn_local(async move { closing.shutdown().await })
+                .await
+                .expect("the strict shutdown task panicked")
+        }),
+    );
+    let outcome = runtime
+        .block_on(bounded)
+        .expect("strict shutdown did not complete within the bound");
+    assert!(
+        outcome.is_ok(),
+        "strict shutdown reported an error: {outcome:?}"
+    );
+    assert!(outcome.flusher_join_error.is_none());
+    assert_eq!(appender.final_close_attempts(), 1);
+    drop(appender);
 }

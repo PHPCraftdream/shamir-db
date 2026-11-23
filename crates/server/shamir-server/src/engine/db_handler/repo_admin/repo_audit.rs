@@ -390,6 +390,17 @@ impl CancelRefusalAudit {
         Some(handle)
     }
 
+    /// Test-only: hold ONE global admission slot open exactly as an admitted
+    /// refusal append does between its reservation and its job's completion.
+    /// A teardown test uses this to keep [`Self::drain`] pending (and let its
+    /// own budget expire) without driving a real refusal. Dropping the guard
+    /// releases the slot like a finished job, returning the queue to idle.
+    #[cfg(test)]
+    pub(crate) fn hold_admission_slot_for_test(self: &Arc<Self>) -> impl Drop {
+        self.try_reserve("test-held-refusal")
+            .expect("refusal admission must be open")
+    }
+
     pub(crate) async fn drain(&self) -> bool {
         let drained = tokio::time::timeout(DRAIN_BUDGET, async {
             // Cancel-safe: no jobs are consumed by waiting.

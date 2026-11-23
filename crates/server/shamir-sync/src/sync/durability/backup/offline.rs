@@ -1,35 +1,29 @@
 //! On-demand backup of the server's `data_dir` to a snapshot directory.
 //!
-//! v1: stop-and-copy. Operator stops the server, runs
-//! `shamir-server --config <ktav> backup --to <dest>` which recursively
-//! copies every file under `data_dir` (fjall database directories — each a
-//! directory tree of journal and LSM segment files — plus wire-table
-//! registries, audit log, rotated audit files, and TLS PEMs). The
-//! destination is `<dest>/<timestamp>/` so a single `--to` can collect
-//! daily snapshots. A `manifest.json` (file list + sha256 + size per file)
-//! is written into the snapshot last, so `restore` (`restore.rs`) has
-//! something durable to verify a snapshot against before trusting it.
+//! v1: stop-and-copy. Operator stops the server, runs `shamir-server --config <ktav> backup
+//! --to <dest>` which recursively copies every file under `data_dir` (fjall database
+//! directories — each a directory tree of journal and LSM segment files — plus wire-table
+//! registries, audit log, rotated audit files, and TLS PEMs). The destination is
+//! `<dest>/<timestamp>/` so a single `--to` can collect daily snapshots. A `manifest.json`
+//! (file list + sha256 + size per file) is written into the snapshot last, so `restore`
+//! (`restore.rs`) has something durable to verify a snapshot against before trusting it.
 //!
-//! Why stop-and-copy instead of an online backup: fjall exposes no live /
-//! online backup API on `Database` (its public surface is `insert`/`get`/
-//! `range`/`persist`/`batch`; the closest analogue, `Snapshot`, is just a
-//! seqno read snapshot, not a file-level backup). Copying the database
-//! directory while the writer is paused (i.e. server stopped) is the
-//! simplest path. Fjall is journal-based: every commit is appended to the
-//! journal as a *batch* (`Start → items → End(xxh3 checksum)`), and the
-//! default recovery mode (`RecoveryMode::TolerateCorruptTail`) discards a
-//! corrupt/torn tail batch and truncates the journal back to the last
-//! fully-checksummed batch boundary. So a copy taken during a quiescent
-//! window between commits recovers, on next open, to that last complete
-//! batch — a consistent pre-stop point. (A copy that races an in-flight
-//! append merely loses the torn tail batch; it does not corrupt earlier
-//! committed batches.) See `shamir-storage`'s `storage_fjall.rs` for how
-//! `flush()` maps to `Database::persist(PersistMode::SyncAll)`.
+//! Why stop-and-copy instead of an online backup: fjall exposes no live / online backup API on
+//! `Database` (its public surface is `insert`/`get`/`range`/`persist`/`batch`; the closest
+//! analogue, `Snapshot`, is just a seqno read snapshot, not a file-level backup). Copying the
+//! database directory while the writer is paused (i.e. server stopped) is the simplest path.
+//! Fjall is journal-based: every commit is appended to the journal as a *batch* (`Start → items
+//! → End(xxh3 checksum)`), and the default recovery mode (`RecoveryMode::TolerateCorruptTail`)
+//! discards a corrupt/torn tail batch and truncates the journal back to the last
+//! fully-checksummed batch boundary. So a copy taken during a quiescent window between commits
+//! recovers, on next open, to that last complete batch — a consistent pre-stop point. (A copy
+//! that races an in-flight append merely loses the torn tail batch; it does not corrupt earlier
+//! committed batches.) See `shamir-storage`'s `storage_fjall.rs` for how `flush()` maps to
+//! `Database::persist(PersistMode::SyncAll)`.
 //!
-//! Future enhancement (P2): an in-process / online snapshot triggered by an
-//! `admin` op, going through the engine's own repo handles (not this
-//! offline CLI, which has no access to any live handle). Not done here
-//! because it requires a wire-protocol change.
+//! Future enhancement (P2): an in-process / online snapshot triggered by an `admin` op, going
+//! through the engine's own repo handles (not this offline CLI, which has no access to any live
+//! handle). Not done here because it requires a wire-protocol change.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -65,17 +59,24 @@ const HASH_STREAM_BUFFER_SIZE: usize = 1024 * 1024;
 /// imports it inward.
 pub const SNAPSHOT_LEASE_FILE_NAME: &str = ".shamir-snapshot.lock";
 
-/// Stream `path`'s full contents through a fixed-size buffer into a running
-/// SHA-256 hasher, returning `(digest, size_bytes)`. Produces a
-/// byte-identical result to `sha256(&fs::read(path)?)`, but never holds more
-/// than [`HASH_STREAM_BUFFER_SIZE`] bytes of file content in memory at once —
-/// unlike `fs::read`, whose peak memory is proportional to the file size.
-fn hash_file_streaming(path: &Path) -> std::io::Result<([u8; 32], u64)> {
+/// Stream `path`'s full contents through a fixed-size buffer into a running SHA-256 hasher,
+/// returning `(digest, size_bytes)`. Produces a byte-identical result to
+/// `sha256(&fs::read(path)?)`, but never holds more than [`HASH_STREAM_BUFFER_SIZE`] bytes of file
+/// content in memory at once — unlike `fs::read`, whose peak memory is proportional to the file
+/// size. `cancel` is consulted once per chunk BEFORE that chunk is read; `true` aborts with
+/// `Interrupted` rather than hashing a whole large file out.
+fn hash_file_streaming(path: &Path, cancel: &dyn Fn() -> bool) -> std::io::Result<([u8; 32], u64)> {
     let mut file = fs::File::open(path)?;
     let mut buf = vec![0u8; HASH_STREAM_BUFFER_SIZE];
     let mut hasher = Sha256::new();
     let mut size_bytes = 0u64;
     loop {
+        if cancel() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "hashing cancelled",
+            ));
+        }
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
@@ -562,7 +563,7 @@ fn collect_manifest_entries(
             if rel == MANIFEST_FILE_NAME {
                 continue;
             }
-            let (digest, size_bytes) = hash_file_streaming(&path)?;
+            let (digest, size_bytes) = hash_file_streaming(&path, &|| false)?;
             entries.push(ManifestFileEntry {
                 path: rel,
                 sha256: hex::encode(digest),
@@ -586,20 +587,16 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// Verify `snapshot_dir` against its `manifest.json`, holding a shared
-/// read lease on the managed root (when it is one) for the duration so
-/// retention cannot delete mid-verify. Snapshot paths outside a managed
-/// root verify lock-free. The online backup writer self-verifies through
-/// the module-private `verify_writer_snapshot` instead: it must not lease
-/// the snapshot it is still publishing, and the old thread-scoped bypass
-/// that unleased EVERY direct child of the root on the writer's thread is
-/// gone — an older sibling verified on that thread stays leased. The
-/// single canonical-source decision happens at the start
-/// (`snapshot_lease::read_snapshot`) and every subsequent read consumes
-/// only the resolved canonical path. A snapshot that is ABSENT at that
-/// decision refuses with `BackupError::ManifestMissing` — a child that
-/// appears afterwards is never read unleased by opening the original
-/// pathname. Readers never create or write the lease marker.
+/// Verify `snapshot_dir` against its `manifest.json`, holding a shared read lease on the managed
+/// root (when it is one) for the duration so retention cannot delete mid-verify. Snapshot paths
+/// outside a managed root verify lock-free. The online backup writer self-verifies through the
+/// module-private `verify_writer_snapshot` instead: it must not lease the snapshot it is still
+/// publishing, and the old thread-scoped bypass that unleased EVERY direct child of the root on the
+/// writer's thread is gone — an older sibling verified on that thread stays leased. The single
+/// canonical-source decision happens at the start (`snapshot_lease::read_snapshot`) and every
+/// subsequent read consumes only the resolved canonical path. A snapshot that is ABSENT at that
+/// decision refuses with `BackupError::ManifestMissing` — a child that appears afterwards is never
+/// read unleased by opening the original pathname. Readers never create or write the lease marker.
 pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
     verify_manifest_with_lookup(snapshot_dir, |path| fs::canonicalize(path))
 }
@@ -664,23 +661,26 @@ pub(super) fn verify_manifest_for_restore(
     verify_manifest_impl(snapshot_dir)
 }
 
-/// Retention preflight: run the v2 verifier core over a candidate
-/// snapshot WITHOUT taking the blocking shared read lease (retention runs
-/// on a native scheduler worker and must never block) and WITHOUT the v1
-/// fallback: scheduled retention only manages v2 online copies, and its
-/// classification refuses anything else before this call. `raw` is the
-/// candidate's `manifest.json` exactly as the caller already read and
-/// size-bounded it — the verifier verifies against those bytes and never
-/// re-reads the file, so a candidate whose manifest swaps between the two
-/// reads is judged on the bytes the classification decision used. THE
-/// CALLER'S MANIFEST SIZE CAP IS A PRECONDITION of this function and is
-/// not re-checked here. An ONLINE-kind match is required FIRST, on the
-/// same bytes and BEFORE any payload I/O: a v2 manifest whose `kind` is
-/// offline refuses without walking or hashing the tree; the original v2
-/// format-version check and error are kept. The exclusive delete lease is
-/// taken separately, immediately before deletion. Not used by any reader
-/// path; the unit return carries no report fields the preflight needs.
-pub fn verify_retention_candidate(dir: &Path, raw: &[u8]) -> Result<(), BackupError> {
+/// Retention preflight: run the v2 verifier core over a candidate snapshot WITHOUT taking the
+/// blocking shared read lease (retention runs on a native scheduler worker and must never block)
+/// and WITHOUT the v1 fallback: scheduled retention only manages v2 online copies, and its
+/// classification refuses anything else before this call. `raw` is the candidate's `manifest.json`
+/// exactly as the caller already read and size-bounded it — the verifier verifies against those
+/// bytes and never re-reads the file, so a candidate whose manifest swaps between the two reads is
+/// judged on the bytes the classification decision used. THE CALLER'S MANIFEST SIZE CAP IS A
+/// PRECONDITION of this function and is not re-checked here. An ONLINE-kind match is required
+/// FIRST, on the same bytes and BEFORE any payload I/O: a v2 manifest whose `kind` is offline
+/// refuses without walking or hashing the tree; the original v2 format-version check and error are
+/// kept. The exclusive delete lease is taken separately, immediately before deletion. `cancel` is
+/// threaded into the per-chunk hash loop, so a shutdown request interrupts a large payload hash
+/// instead of waiting for it to finish; retention passes its own flag, every other caller passes
+/// `&|| false`. Not used by any reader path; the unit return carries no report fields the
+/// preflight needs.
+pub fn verify_retention_candidate(
+    dir: &Path,
+    raw: &[u8],
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), BackupError> {
     // Kind FIRST: decode and classify the bounded bytes without touching
     // the tree (`decode_manifest_v2` keeps the original v2 format-version
     // check — v1 and unknown refuse typed, no v1 fallback for retention).
@@ -694,18 +694,17 @@ pub fn verify_retention_candidate(dir: &Path, raw: &[u8]) -> Result<(), BackupEr
     }
     // Online-kind only: the payload half verifies the ALREADY-decoded
     // manifest — one parse, no re-read.
-    v2_verify::verify_decoded_manifest_v2(dir, decoded)?;
+    v2_verify::verify_decoded_manifest_v2(dir, decoded, cancel)?;
     Ok(())
 }
 
-/// Crate-private unleased verify of the EXACT snapshot the online writer
-/// just published (the protocol's `self_verify` of the child it wrote).
-/// The writer cannot lease the child it is still writing; this entry
-/// takes that one path, so the self-check never waits behind retention's
-/// exclusive lease and can never unlease an older sibling — any other
-/// verify stays on the leased [`verify_manifest`]. Not exported past the
-/// backup module: only `run_online_backup` may call it. Unit return — the
-/// protocol only needs the refusal, never the report.
+/// Crate-private unleased verify of the EXACT snapshot the online writer just published (the
+/// protocol's `self_verify` of the child it wrote). The writer cannot lease the child it is
+/// still writing; this entry takes that one path, so the self-check never waits behind
+/// retention's exclusive lease and can never unlease an older sibling — any other verify stays
+/// on the leased [`verify_manifest`]. Not exported past the backup module: only
+/// `run_online_backup` may call it. Unit return — the protocol only needs the refusal, never
+/// the report.
 pub(super) fn verify_writer_snapshot(snapshot_dir: &Path) -> Result<(), BackupError> {
     verify_manifest_impl(snapshot_dir).map(drop)
 }
@@ -793,7 +792,7 @@ fn verify_manifest_raw(
         }
 
         let file_path = snapshot_dir.join(&entry.path);
-        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
+        let (digest, actual_size) = hash_file_streaming(&file_path, &|| false).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
                 format!("manifest entry {}: {e}", entry.path),

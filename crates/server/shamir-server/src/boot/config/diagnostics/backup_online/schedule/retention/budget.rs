@@ -47,6 +47,13 @@ impl<'a> Budget<'a> {
         Ok(())
     }
 
+    /// The same flag [`Self::checkpoint`] tests, exposed as a plain probe so
+    /// a long streaming hash can poll it between chunks instead of only at
+    /// the pass's coarse checkpoints.
+    pub(super) fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
     pub(super) fn entry(&mut self, count: usize) -> Result<(), Refusal> {
         self.checkpoint()?;
         if count >= TREE_ENTRIES {

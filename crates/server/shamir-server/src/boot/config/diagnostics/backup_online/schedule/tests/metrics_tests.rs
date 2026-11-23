@@ -11,9 +11,10 @@
 //! (`arm_action`) and the `schedule_enabled` cell, pinned here as well.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serial_test::serial;
+use shamir_test_diag::try_install_global_tracing_ring;
 use tempfile::TempDir;
 
 use super::super::super::metrics::{
@@ -200,6 +201,80 @@ fn unreadable_armed_at_row_borrows_now_and_never_rewrites_the_stamp() {
         arm_action(Err(()), NOW),
         ArmingAction::UseNowWithoutWriting(NOW),
         "an unreadable row is used for this boot but MUST NOT be rewritten"
+    );
+}
+
+/// The PRODUCTION arming path against a REAL store: an UNDECODABLE armed-at
+/// row makes this boot borrow the wall clock while the durable row keeps its
+/// exact bytes, and the bounded `read-armed-at-failed` warning is logged
+/// without a filesystem path. The classifier test above pins the ROUTING
+/// only, so a write restored after `arm_action` would still pass it.
+///
+/// Mutant caught: writing `now` inside the production
+/// `ArmingAction::UseNowWithoutWriting` arm of `arm_schedule_clock` — the
+/// seeded bytes become a msgpack `u64`, so the byte-for-byte assertion fails
+/// (that mutant leaves both the exported provisional now and the warning
+/// token unchanged).
+#[serial]
+#[test]
+fn unreadable_armed_at_row_drives_the_production_arming_path_without_a_write() {
+    set_export_last_success_for_test(0);
+    try_install_global_tracing_ring();
+    let (dir, store) = temp_store();
+    // The private `KEY_BACKUP_ARMED_AT_UNIX_SECS` const in `engine/server_meta.rs`;
+    // the literal is spelled out here because the const is module-private. `0xcf`
+    // announces a `u64` payload with only two bytes behind it, so `get::<u64>` hits
+    // a real `rmp_serde` decode error (trailing garbage like `[1, 2, 3]` would NOT:
+    // `from_slice` does not reject trailing bytes).
+    store.set_raw_row_for_test("backup_armed_at_unix_secs_v1", &[0xcf, 0, 1]);
+    let before = store
+        .blob_for_test("backup_armed_at_unix_secs_v1")
+        .expect("the seeded undecodable armed-at row exists");
+
+    install_backup_meta_store(Arc::clone(&store), true);
+
+    // (a) The write this mutant restores would replace these bytes.
+    let after = store
+        .blob_for_test("backup_armed_at_unix_secs_v1")
+        .expect("an unreadable row is NOT absent: it must not be removed");
+    assert_eq!(
+        after, before,
+        "the durable first-arming stamp must survive an unreadable read byte-for-byte"
+    );
+
+    // (b) The exported evidence is the PROVISIONAL now, never the seed.
+    let exported = backup_metrics_snapshot().last_success_timestamp_seconds;
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the wall clock is after the epoch")
+        .as_secs();
+    assert_ne!(
+        exported, 0,
+        "an unreadable row still exports a provisional now"
+    );
+    assert!(
+        exported + 5 >= wall && exported <= wall + 5,
+        "the exported stamp must be the provisional now ({exported}) within 5 s of {wall}"
+    );
+
+    // (c) The bounded warning fired and carries NO filesystem path.
+    let captured = shamir_test_diag::ring::shared_ring()
+        .snapshot()
+        .into_iter()
+        .rev()
+        .find(|record| record.message.contains("read-armed-at-failed"))
+        .unwrap_or_else(|| panic!("the unreadable-row warning was not captured"));
+    let temp_dir = dir.path().display().to_string();
+    assert!(
+        !captured.message.contains(&temp_dir),
+        "the warning must not carry the data-dir path: {}",
+        captured.message
+    );
+
+    set_export_last_success_for_test(0);
+    assert!(
+        dir.path().exists(),
+        "the store stays alive for the whole test"
     );
 }
 
