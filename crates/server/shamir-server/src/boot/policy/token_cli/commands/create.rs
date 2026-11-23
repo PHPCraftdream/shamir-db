@@ -10,12 +10,26 @@ use crate::{
 };
 use base64::Engine;
 use shamir_connect::server::{
-    audit_chain::{AuditChain, AuditChainWriter},
+    audit_chain::{AuditChain, AuditChainWriter, AuditError},
     token::{TokenChannels, TokenMode},
     TokenSessionStore,
 };
 use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::Arc;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
+};
 use zeroize::Zeroizing;
 /// I/O seam for tests and the process entry point.
 pub struct CliIo<'a> {
@@ -42,6 +56,18 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         None => None,
     };
     let output = secret_output::prepare(validated_out.as_deref(), io.is_terminal)?;
+    // Identity of the file THIS process just created (the exclusive create
+    // just succeeded). It is NOT atomic with `prepare`: `file_identity`
+    // RE-OPENS the path (`CreateFileW`/`symlink_metadata`), so a replacement
+    // landing between `prepare` and this call would be captured as this
+    // process's file. The maintenance lock the offline command holds makes
+    // that window unreachable for cooperating processes, but not for a
+    // process that ignores the lock. Cleanup below removes the path only
+    // while it still names this file as of that check — the identity is
+    // re-read, then the path is removed, so a replacement landing inside that
+    // window is removed too; a `None` identity removes nothing, which is the
+    // safe direction.
+    let identity = validated_out.as_deref().and_then(file_identity);
     let setup = async {
         let (m, d, w, app) = open_locked(c)?;
         let owner = resolve(&d, &a.user)?;
@@ -54,7 +80,7 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         Ok(v) => v,
         Err(e) => {
             drop(output);
-            remove_out_file(validated_out.as_deref());
+            remove_out_file(validated_out.as_deref(), identity);
             return Err(e);
         }
     };
@@ -108,30 +134,222 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     drop(w);
     let (secret, text, token_id) = match (prepared, cp) {
         (Ok(v), Ok(())) => v,
-        (Ok((_, _, id)), Err(_)) => {
-            return Err(anyhow::anyhow!(
-                "token {id} was created but the audit checkpoint failed; revoke it with `token revoke {id}`"
-            ))
+        (Ok((_, _, id)), Err(e)) => {
+            return Err(fail_after_create(
+                output,
+                validated_out.as_deref(),
+                identity,
+                &e,
+                &id,
+            ));
         }
         (Err(e), Ok(())) => {
             drop(output);
-            remove_out_file(validated_out.as_deref());
+            remove_out_file(validated_out.as_deref(), identity);
             return Err(e);
         }
-        (Err(e), Err(_)) => return Err(e.context("the audit checkpoint also failed")),
+        (Err(e), Err(_)) => {
+            // Token creation failed too, so the file holds no secret either.
+            drop(output);
+            remove_out_file(validated_out.as_deref(), identity);
+            return Err(e.context("the audit checkpoint also failed"));
+        }
     };
+    // No removal from here on: the file then holds the legitimately delivered
+    // secret and the operator needs it to revoke.
     secret_output::deliver(output, &secret, io.stdout, io.stderr)
         .map_err(|_| anyhow::anyhow!("token {token_id} was created but secret delivery failed"))?;
     std::io::Write::write_all(io.stdout, text.as_bytes())
         .map_err(|_| anyhow::anyhow!("token {token_id} was created; metadata output failed"))?;
     Ok(())
 }
-fn remove_out_file(path: Option<&std::path::Path>) {
-    if let Some(path) = path {
+/// The created-but-unauditable path: drop the never-written output, remove the
+/// output file this process created, and return the operator-facing error.
+fn fail_after_create(
+    output: secret_output::SecretOutput,
+    out: Option<&Path>,
+    identity: Option<FileIdentity>,
+    error: &anyhow::Error,
+    id: &str,
+) -> anyhow::Error {
+    // No rollback here, deliberately. `TokenService::create_with_context`
+    // already stored the record (token_service.rs:267-303) BEFORE it requested
+    // the audit append; that append error is swallowed there (only warned) and
+    // surfaces here solely through the writer's latch. The offline command
+    // holds the maintenance lock, so a rollback WOULD be mechanically safe —
+    // but a silent delete on a failure path is itself an unaudited mutation of
+    // the token store, while `token revoke <id>` is the audited, idempotent
+    // primitive that works offline under the same lock. Nobody can use the
+    // token in the meantime: the bearer secret exists only in the
+    // `CreatedToken` this command never printed and in the output file it just
+    // removed; the store keeps only `mac = HMAC(key, id, secret)`, from which
+    // the secret is not recoverable.
+    drop(output);
+    remove_out_file(out, identity);
+    // Two branches, one set of operator facts. The latch variant means the
+    // event was never written; every other checkpoint failure means the event
+    // may exist but the log cannot be certified. Both leave the token
+    // unaudited, both suppressed delivery, and both name the id to revoke.
+    let unaudited = error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<AuditError>(),
+            Some(AuditError::SequenceExhaustedUnaudited)
+        )
+    });
+    if unaudited {
+        return anyhow::anyhow!(
+            "token {id} was created but its audit event was not written: the audit \
+             checkpoint cannot certify the log, so the audit trail for this token \
+             does not exist. The secret was NOT delivered and no output file was \
+             left behind. Revoke it with `token revoke {id}`."
+        );
+    }
+    anyhow::anyhow!(
+        "token {id} was created but its audit event was not written or the audit checkpoint \
+         cannot certify the log, so the audit trail for this token is not certified. The \
+         secret was NOT delivered and no output file was left behind. Revoke it with \
+         `token revoke {id}`."
+    )
+}
+/// Test seam for [`fail_after_create`]: capture the identity from `out` exactly
+/// where `run_create` captures it, so a test can drive the real removal path
+/// without exposing the private `FileIdentity` type.
+#[cfg(test)]
+pub(super) fn fail_after_create_for_test(
+    output: secret_output::SecretOutput,
+    out: Option<&Path>,
+    error: &anyhow::Error,
+    id: &str,
+) -> anyhow::Error {
+    fail_after_create(output, out, out.and_then(file_identity), error, id)
+}
+/// Identity of the directory entry at `path`, taken WITHOUT following a
+/// final link, so cleanup can tell the file this process created from a
+/// replacement that reused the same name.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+/// Identity of the directory entry at `path`, taken WITHOUT following a
+/// final reparse point (`FILE_FLAG_OPEN_REPARSE_POINT`), so cleanup can tell
+/// the file this process created from a replacement that reused the name.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    volume: u64,
+    index: [u8; 16],
+}
+/// `(device, inode)` of the entry itself — `symlink_metadata`, never
+/// `metadata`, so a final symlink reports the link and not its target.
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(FileIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+/// `(volume serial, 128-bit file id)` of the entry itself. The path is opened
+/// with `FILE_FLAG_OPEN_REPARSE_POINT`, so a final reparse point reports the
+/// link rather than its target — the same object `symlink_metadata` reports on
+/// Unix — and the handle is closed on every path.
+///
+/// `FileIdInfo` is unavailable on FAT/exFAT and some SMB shares, so a failed
+/// query falls back to `GetFileInformationByHandle` with the older
+/// `BY_HANDLE_FILE_INFORMATION` and builds the identity from the volume serial
+/// plus the 64-bit file index (in the low half of the 16-byte id). Without
+/// that fallback the identity was `None` there and `remove_out_file` removed
+/// nothing, leaving a failed create's exclusivity-blocking file behind. An
+/// identity taken one way never equals one taken the other, so if the
+/// filesystem's capabilities change between capture and cleanup the comparison
+/// fails and nothing is removed — the safe direction.
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return None;
+    }
+    wide.push(0);
+    // SAFETY: `wide` is a valid null-terminated UTF-16 path; no security
+    // attributes and no template handle are passed. The returned handle is
+    // either `INVALID_HANDLE_VALUE`/null (rejected below) or owned here and
+    // closed below on every path. The share mode admits the exclusive-create
+    // handle `prepare` still holds open.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return None;
+    }
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: `handle` is valid here, and `info` is a correctly sized and
+    // aligned out-buffer for `FileIdInfo`; the call only writes it.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            &mut info as *mut FILE_ID_INFO as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok != 0 {
+        // SAFETY: `handle` came from the `CreateFileW` above and is closed
+        // exactly once — here, and nowhere else on this path, because this
+        // branch returns.
+        unsafe { CloseHandle(handle) };
+        return Some(FileIdentity {
+            volume: info.VolumeSerialNumber,
+            index: info.FileId.Identifier,
+        });
+    }
+    // FAT/exFAT and some SMB shares do not implement `FileIdInfo`; the older
+    // `GetFileInformationByHandle` query does, and its volume serial plus
+    // 64-bit file index still tell this process's file from a replacement.
+    let mut basic = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is still valid here, and `basic` is a correctly sized
+    // and aligned out-buffer for `GetFileInformationByHandle`; the call only
+    // writes it.
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut basic) };
+    // SAFETY: `handle` came from the `CreateFileW` above and is closed exactly
+    // once, on every path (this is the only close after the fallback query).
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    let mut index = [0u8; 16];
+    index[..4].copy_from_slice(&basic.nFileIndexHigh.to_be_bytes());
+    index[4..8].copy_from_slice(&basic.nFileIndexLow.to_be_bytes());
+    Some(FileIdentity {
+        volume: u64::from(basic.dwVolumeSerialNumber),
+        index,
+    })
+}
+/// Remove the output file created by [`secret_output::prepare`] — but only if
+/// the path still names the SAME file as of this check: a replacement that
+/// reused the name before the identity re-read is left alone, and an unknown
+/// identity removes nothing. The identity re-read and the `remove_file` are
+/// two separate steps, so a replacement that lands inside that window is
+/// removed; closing it would need a directory-level atomic operation the CLI
+/// does not have.
+fn remove_out_file(path: Option<&Path>, expected: Option<FileIdentity>) {
+    let (Some(path), Some(expected)) = (path, expected) else {
+        return;
+    };
+    if file_identity(path) == Some(expected) {
         let _ = std::fs::remove_file(path);
     }
 }
-pub(super) fn parse_channels(s: &str) -> anyhow::Result<TokenChannels> {
+fn parse_channels(s: &str) -> anyhow::Result<TokenChannels> {
     match s {
         "http" => Ok(TokenChannels::Rest),
         "ws" => Ok(TokenChannels::Ws),
@@ -192,7 +410,7 @@ pub(super) type Opened = (
 );
 /// Create the data directory if needed (matching the old lock-last layout
 /// on a fresh directory), then take the classified offline maintenance lock.
-pub(super) fn prepare_dir_and_lock(c: &Config) -> anyhow::Result<std::fs::File> {
+fn prepare_dir_and_lock(c: &Config) -> anyhow::Result<std::fs::File> {
     std::fs::create_dir_all(&c.data_dir)?;
     lock::acquire(&c.data_dir).map_err(anyhow::Error::new)
 }

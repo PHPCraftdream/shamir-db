@@ -66,6 +66,39 @@ impl Argon2PermitBudget {
         }
     }
 
+    /// Fix a budget with an explicit monotonic anchor instead of
+    /// `Instant::now()`.
+    ///
+    /// Test seam: the SCRAM gate's queue tests live in `shamir-server-security`
+    /// and must hand the semaphore a budget whose monotonic remainder is
+    /// already spent while its wall deadline is still in the future. Such a
+    /// budget cannot be produced by [`Self::at_admission`], which anchors the
+    /// monotonic clock at the call, and it cannot be waited for in the test
+    /// without spending real seconds.
+    ///
+    /// Gated on `debug_assertions` rather than `cfg(test)` on purpose: a
+    /// dependency is compiled WITHOUT `cfg(test)`, so a `cfg(test)` item here
+    /// would be invisible to the tests of the crate that depends on this one.
+    /// Release builds elide the item; production callers only ever see
+    /// [`Self::at_admission`]. The profile split is therefore: the item exists
+    /// in any build with `debug_assertions` on (all test builds) and is elided
+    /// from release builds, so a dependent crate's tests must run in a
+    /// debug-assertions profile — this crate has no `test-hooks` feature to
+    /// forward, and one crate's `test-hooks` cannot enable an item in its
+    /// dependency.
+    #[cfg(any(test, debug_assertions))]
+    pub fn at_admission_with_anchor(
+        deadline_ns: u64,
+        admitted_ns: u64,
+        admitted_at: Instant,
+    ) -> Self {
+        Self {
+            deadline_ns,
+            admitted_ns,
+            admitted_at,
+        }
+    }
+
     /// Wall budget fixed at admission (empty when admission was already past
     /// its deadline).
     fn wall_budget(&self) -> Duration {

@@ -11,6 +11,7 @@
 
 use super::{Durab, FjallAuditAppender};
 use std::sync::atomic::Ordering;
+#[cfg(any(test, feature = "test-hooks"))]
 use std::sync::Arc;
 
 /// Results of the appender's shutdown stage, in step order.

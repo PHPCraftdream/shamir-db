@@ -177,4 +177,24 @@ impl ScramDerivationGate {
         self.kdf_runs.fetch_add(1, Ordering::Relaxed);
         Ok(kdf())
     }
+
+    /// Test-only twin of [`Self::run`]: byte-for-byte the same permit
+    /// acquisition, the same counted `Busy` mapping and the same kdf-run
+    /// witness, differing ONLY in where the budget comes from. A test can
+    /// therefore hand the blocking core an admission whose monotonic anchor
+    /// already spends the budget while its wall deadline is still in the
+    /// future; production reaches the same code through [`Self::run`].
+    #[cfg(test)]
+    pub(super) fn run_with_budget<T>(
+        &self,
+        budget: Argon2PermitBudget,
+        kdf: impl FnOnce() -> T,
+    ) -> Result<T, ScramDerivationError> {
+        let Some(_permit) = self.semaphore.acquire_until_admitted(budget) else {
+            return Err(self.busy());
+        };
+        #[cfg(test)]
+        self.kdf_runs.fetch_add(1, Ordering::Relaxed);
+        Ok(kdf())
+    }
 }
