@@ -945,6 +945,20 @@ impl OnlineBackupRegistry {
     pub(super) fn arm_post_run_callback(&self, callback: TestPostRunCallback) {
         *self.pending_post_run_callback.lock() = Some(callback);
     }
+
+    /// Ordered-shutdown test seam: arm the one-shot post-run callback the NEXT
+    /// `start` moves onto its runner thread.
+    ///
+    /// Generic on purpose: the crate-private callback type never becomes an API
+    /// surface, and no existing item's visibility changes. A shutdown test parks
+    /// the REAL runner here — after the protocol returned, before the completion
+    /// signal — to prove the shutdown deadline does not abandon the worker.
+    pub(crate) fn arm_post_run_callback_for_shutdown_test(
+        &self,
+        callback: impl Fn(&Path) -> Option<PathBuf> + Send + 'static,
+    ) {
+        self.arm_post_run_callback(Box::new(callback));
+    }
 }
 
 /// Best-effort live catalogue row count; a failed read reports 0 (the

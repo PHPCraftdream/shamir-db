@@ -55,7 +55,7 @@ pub(super) async fn open(
     // Single-instance guard: acquire an advisory OS file lock on
     // `<data_dir>/.shamir.lock` BEFORE opening any redb store. The
     // lock is held for the entire process lifetime via the `File`
-    // stored in `ServerHandle._data_dir_lock` — drop releases it
+    // stored in `ServerHandle.data_dir_lock` — drop releases it
     // (and the kernel releases on crash). This prevents two servers
     // from opening the same data_dir and corrupting/contending the
     // redb stores.

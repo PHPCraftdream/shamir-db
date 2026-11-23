@@ -1,7 +1,5 @@
 //! Runtime handle for a launched server instance.
 
-#[cfg(test)]
-use std::future::{poll_fn, Future};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +14,7 @@ use crate::audit_appender::FjallAuditAppender;
 use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
+use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::server::store_release_barrier::wait_stores_released;
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
@@ -169,7 +168,9 @@ pub struct ServerHandle {
     /// `shamir-server` that tries to open the same `data_dir` gets
     /// `BootError::AlreadyRunning` instead of silently corrupting the
     /// redb stores. Do NOT explicitly unlock — drop is the release.
-    pub(super) _data_dir_lock: std::fs::File,
+    /// `None` once [`ServerHandle::take_shutdown_owner`] moved it out for the
+    /// embedding path.
+    pub(super) data_dir_lock: Option<std::fs::File>,
     /// Instance-level runtime tunables. Initialized from `instance_defaults`
     /// consts — reads are a single atomic load (instant, non-blocking).
     /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
@@ -213,15 +214,67 @@ pub(crate) async fn drain_connections(
     joined
 }
 
-async fn join_backup_schedule(
+/// The shutdown state that must OUTLIVE the bounded shutdown wait.
+///
+/// `runtime::serve` wraps the shutdown future in a deadline; on expiry that
+/// future is dropped, and with it anything it still owns. These two must not
+/// be dropped there: the scheduled-backup worker is a native thread that keeps
+/// writing under the data directory after its last cancellation checkpoint,
+/// and the single-instance lock must not be released while it does — an
+/// embedding process would otherwise see I/O and a free data dir that outlive
+/// `serve`.
+///
+/// The owner is therefore extracted BEFORE the deadline and BORROWED into the
+/// shutdown future (`ServerHandle::shutdown_with_report` takes `&mut Self`
+/// here), never moved into it: on a normal shutdown the worker is awaited in
+/// place at its original teardown position (before the repository flush), and
+/// on expiry the dropped future leaves the worker and the lock intact for
+/// [`Self::drain`] to finish afterwards. The deadline still marks the report
+/// unclean; it only bounds the audit/repository teardown.
+pub(crate) struct ShutdownOwner {
     schedule_task: Option<(DropGuard, JoinHandle<()>)>,
-    report: &mut ShutdownReport,
-) {
-    let Some((_guard, task)) = schedule_task else {
-        return;
-    };
-    if let Err(error) = task.await {
-        report.add_error(format!("backup schedule task failed: {error}"));
+    data_dir_lock: Option<std::fs::File>,
+}
+
+impl ShutdownOwner {
+    /// Await the scheduled worker in place and forget its handle.
+    ///
+    /// Called from INSIDE the bounded shutdown future with `&mut self`, so the
+    /// owner itself is never moved into — or dropped with — that future. This
+    /// keeps the original teardown position: the scheduled task and its
+    /// in-flight run are awaited BEFORE the repository flush, not after it.
+    ///
+    /// Deliberately unbounded: a run already past its last cooperative
+    /// cancellation checkpoint has to finish its own cleanup. The wait is a
+    /// COMPLETION signal (the runner's per-run channel), not a join of the
+    /// native runner thread.
+    async fn join_schedule(&mut self, report: &mut ShutdownReport) {
+        let Some((_, task)) = self.schedule_task.as_mut() else {
+            return;
+        };
+        // Awaited THROUGH `&mut`: while the wait is pending the handle and its
+        // drop guard stay in the owner, so the deadline dropping this future
+        // mid-wait leaves them for `drain` instead of detaching the worker.
+        let joined = task.await;
+        // Finished: forget the handle (the guard drops with it).
+        self.schedule_task = None;
+        if let Err(error) = joined {
+            report.add_error(format!("backup schedule task failed: {error}"));
+        }
+    }
+
+    /// Await whatever the deadline left unawaited, then release the instance
+    /// lock by drop.
+    ///
+    /// On a normal shutdown [`Self::join_schedule`] already ran inside the
+    /// deadline, so this only releases the lock. On expiry the shutdown future
+    /// was dropped mid-teardown and the worker is still awaited here — the lock
+    /// is released afterwards, never before.
+    pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
+        self.join_schedule(report).await;
+        // Released here, after the scheduled worker finished — never
+        // explicitly unlocked (drop is the release).
+        drop(self.data_dir_lock.take());
     }
 }
 
@@ -234,9 +287,10 @@ impl ServerHandle {
     /// Stop accepting new connections, then drain the scheduler + audit log.
     /// Returns repository-level checkpoint failures; ignored reports preserve
     /// the existing caller behaviour. Connection drain remains bounded.
-    pub async fn shutdown(self) -> ShutdownReport {
+    pub async fn shutdown(mut self) -> ShutdownReport {
         let mut report = self.pending_shutdown_report();
-        self.shutdown_with_report(&mut report).await;
+        let mut owner = self.take_shutdown_owner();
+        self.shutdown_with_report(&mut report, &mut owner).await;
         crate::observability::record_shutdown(&report);
         report
     }
@@ -245,9 +299,30 @@ impl ServerHandle {
         self.shamir.shutdown_report()
     }
 
+    /// Move the scheduled worker and the instance lock out of the handle.
+    ///
+    /// `runtime::serve` calls this BEFORE it wraps the shutdown future in its
+    /// deadline, so expiry can abandon the audit/repository teardown without
+    /// dropping a running native backup thread or releasing the data directory.
+    /// Callers that keep the handle until it is consumed (`shutdown`,
+    /// `shutdown_with_report`) are unaffected: they still join the worker and
+    /// drop the lock themselves.
+    pub(crate) fn take_shutdown_owner(&mut self) -> ShutdownOwner {
+        ShutdownOwner {
+            schedule_task: self.backup_schedule_task.take(),
+            data_dir_lock: self.data_dir_lock.take(),
+        }
+    }
+
     /// cancel-safe: NO — joins and flushes may be incomplete; caller retains
-    /// repository outcomes and marks deadline expiry as unclean.
-    pub(crate) async fn shutdown_with_report(self, report: &mut ShutdownReport) {
+    /// repository outcomes and marks deadline expiry as unclean. `owner` is
+    /// borrowed, not taken: dropping this future must never drop the
+    /// scheduled worker or the instance lock.
+    pub(crate) async fn shutdown_with_report(
+        self,
+        report: &mut ShutdownReport,
+        owner: &mut ShutdownOwner,
+    ) {
         // 1. Tell all accept loops to stop. CancellationToken::cancel() is
         //    persistent: every existing `.cancelled().await` resolves on the
         //    next poll, and any new caller sees the cancelled state
@@ -299,29 +374,30 @@ impl ServerHandle {
         if let Some(task) = self.repl_supervisor_task {
             let _ = task.handle.await;
         }
-        // 3. Drain the audit chain + scheduler.
-        let drain = self.cancel_refusal_audit.drain();
-        #[cfg(test)]
-        {
-            let mut pending = self.refusal_drain_pending;
-            let mut drain = std::pin::pin!(drain);
-            poll_fn(move |cx| {
-                let result = drain.as_mut().poll(cx);
-                if result.is_pending() {
-                    if let Some(signal) = pending.take() {
-                        let _ = signal.send(());
-                    }
-                }
-                result
-            })
-            .await;
-        }
-        #[cfg(not(test))]
-        drain.await;
-        self.audit_appender.shutdown().await;
-        self.scheduler.shutdown().await;
-        // Do not abort: an in-flight copy or retention operation must finish cleanup.
-        join_backup_schedule(self.backup_schedule_task, report).await;
+        // 3. Drain the refusal-audit queue and the audit chain under ONE
+        //    shared deadline: the scheduler is signalled before it is joined,
+        //    the appender's final drain + anchor write runs on a blocking
+        //    thread, and a stalled checkpoint or flusher marks the report
+        //    unclean instead of stalling the shutdown future. Teardown
+        //    continues to the repository flush either way; a timeout does not
+        //    cancel an in-flight fsync.
+        teardown_audit(
+            AuditTeardown {
+                cancel_refusal_audit: &self.cancel_refusal_audit,
+                appender: &self.audit_appender,
+                scheduler: self.scheduler,
+                #[cfg(test)]
+                drain_probe: self.refusal_drain_pending,
+            },
+            report,
+        )
+        .await;
+        // Do not abort: an in-flight copy or retention operation must finish
+        // cleanup. This is the ORIGINAL position — before the repository flush
+        // — and it borrows the owner, so a deadline can abandon this teardown
+        // without abandoning the worker (`ShutdownOwner::drain` then awaits it
+        // after the deadline).
+        owner.join_schedule(report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
@@ -368,7 +444,9 @@ impl ServerHandle {
         //    (buffered-store flushers, connection tasks) can outlive the
         //    steps above; returning before they finish made an immediate
         //    relaunch of the same data dir fail with `Locked`. The
-        //    single-instance `_data_dir_lock` is released last, on return.
+        //    single-instance `data_dir_lock` is released last, on return — or
+        //    by the embedding caller when [`ServerHandle::take_shutdown_owner`]
+        //    owns it.
         let data_dir = self.data_dir;
         drop(self.shamir);
         drop(self.audit_appender);
