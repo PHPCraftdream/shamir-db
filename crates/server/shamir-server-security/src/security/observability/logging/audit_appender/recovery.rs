@@ -344,7 +344,7 @@ fn read_checkpoint(
         })
 }
 
-pub(super) fn decode_checkpoint(bytes: &[u8]) -> Option<Position> {
+fn decode_checkpoint(bytes: &[u8]) -> Option<Position> {
     let (seq, hmac) = bytes.split_first_chunk::<8>()?;
     Some((u64::from_be_bytes(*seq), hmac.try_into().ok()?))
 }
@@ -420,7 +420,7 @@ fn ordered_archives(dir: &Path) -> Result<Vec<PathBuf>, AuditRecoveryError> {
 /// full first row; only unclassifiable shapes fall back to the bounded
 /// full-first-row check with its exact typed refusals. At most one archive
 /// is open at a time and nothing but the probe result is retained.
-pub(super) fn ordered_archives_with_suffix(
+fn ordered_archives_with_suffix(
     dir: &Path,
 ) -> Result<Vec<(u64, u64, PathBuf)>, AuditRecoveryError> {
     classified_archives(dir, probe_first_seq)

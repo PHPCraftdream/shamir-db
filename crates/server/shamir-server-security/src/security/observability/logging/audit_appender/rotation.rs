@@ -268,6 +268,15 @@ pub(super) fn rotate_locked(
 /// stop on sync error). The listing is the one taken under the rotation
 /// lock before the rename, passed by value — no second enumeration.
 ///
+/// "Stopping" bounds DELETION only. When the delete pass breaks, a tail
+/// pass walks every archive left in the order (same order, none skipped
+/// silently) and clamps the modification time of each future-dated regular
+/// file whose metadata it can read; it never deletes and never stops at a
+/// candidate whose metadata is unavailable. So each archive in the order
+/// is visited once: deletion is attempted across the eligible prefix in
+/// front of the first blocker, and the clamp covers that blocker plus
+/// everything after it.
+///
 /// Runs only inside [`rotate_locked`] — never at appender close; retention
 /// is policy, not shutdown work. Ordering and age source:
 ///
@@ -289,18 +298,21 @@ pub(super) fn rotate_locked(
 /// archive it can see to the present ([`clamp_future_mtime`], metadata
 /// only: the HMAC chain and both anchors do not depend on it), so the delay
 /// is `retention_days` from that sweep, not the size of the clock error.
-/// A clamp that fails (no write access) only logs and repeats on the next
-/// rotation. Eligibility is reached by time; deletion happens only at a
-/// rotation. All of this preserves contiguity (nothing younger than a
+/// A clamp that fails (no write access) only logs: the delete pass stops
+/// at that archive anyway (an unclampable future date is not eligible, so
+/// it is the blocker), and the tail pass carries on with the next one; the
+/// warning repeats on the next sweep that still sees the future date.
+/// Eligibility is reached by time; deletion happens only at a rotation.
+/// All of this preserves contiguity (nothing younger than a
 /// retained archive is removed) and always removes the eligible prefix in
 /// front of the blocker, but is not a per-archive guarantee.
 ///
 /// Directory reads, classification problems, unreadable candidates and
-/// unlink/sync failures log at `warn` and stop the sweep — retention is
+/// unlink/sync failures log at `warn` and stop the delete pass — retention is
 /// housekeeping, never a correctness requirement, and never fails a
 /// rotation that already anchored. Unreadable, non-regular or
-/// unknown-mtime candidates are never removed; the sweep only ever stops,
-/// it never upgrades a suspect entry to a deletion.
+/// unknown-mtime candidates are never removed; the delete pass only ever
+/// stops, it never upgrades a suspect entry to a deletion.
 fn sweep_retention(
     mut archives: BTreeMap<u64, PathBuf>,
     retention_days: u32,
@@ -399,8 +411,20 @@ fn sweep_retention(
 
 /// Sets the modification time of an archive that lies in the future to
 /// `now` (opened for write without truncation: the content is untouched).
-/// A failure only logs: the sweep stops at this archive either way.
+/// A failure only logs; the caller's control flow is unchanged: the delete
+/// pass stops at this archive anyway (it is the blocker), the tail pass
+/// continues with the next archive.
 fn clamp_future_mtime(path: &Path, now: SystemTime) {
+    // The regular-file check is the `symlink_metadata` + `is_file` filter at
+    // the call sites, in the sweep loops; it is NOT atomic with this open.
+    // `OpenOptions::open` resolves a symlink, so a path swapped between the
+    // check and here would be written through the replacement. Deliberately
+    // not closed (a checked handle-open is not portable): the window is
+    // bracketed by the per-`data_dir` exclusive offline maintenance lock
+    // (`<data_dir>/.shamir.lock`), which the running server holds for its
+    // whole process lifetime and every offline CLI takes for its command, so
+    // only a process that ignores that lock can race the check. It serializes
+    // cooperating ShamirDB processes; it does not lock anything else out.
     let clamped = fs::OpenOptions::new()
         .write(true)
         .open(path)
