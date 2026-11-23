@@ -450,14 +450,27 @@ impl Config {
         ktav::from_file::<Self, _>(path).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
+    /// [`Self::validate`] plus the launch-time filesystem preflight of the
+    /// backup destination (privacy and lexical disjointness from `data_dir`,
+    /// [`BackupScheduleConfig::check_launch`]). Only the server launch calls
+    /// it, before it creates any directory, so an invalid schedule refuses the
+    /// launch with the same error as before the preflight moved out of
+    /// [`Self::validate`].
+    pub fn validate_for_launch(&self) -> Result<(), ConfigError> {
+        if let Some(backup) = &self.backup {
+            backup.check_launch(&self.data_dir)?;
+        }
+        self.validate()
+    }
+
     /// Sanity-check a parsed [`Config`]. Returns
     /// [`ConfigError::Validation`] with a human-readable message at the
     /// first violation; callers can surface that as a startup error.
     /// `backup.destination` is checked for syntax only here; its existence,
     /// privacy and disjointness from `data_dir` are checked when the server
-    /// resolves the schedule for launch ([`BackupScheduleConfig::resolve`]), so
-    /// offline subcommands such as `restore --from` do not depend on the backup
-    /// mount.
+    /// launches ([`Self::validate_for_launch`], then
+    /// [`BackupScheduleConfig::resolve`]), so offline subcommands such as
+    /// `restore --from` do not depend on the backup mount.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(backup) = &self.backup {
             backup.validate()?;

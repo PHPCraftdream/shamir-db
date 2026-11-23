@@ -141,8 +141,8 @@ in retention failures over a configured lookback. Logs contain no payloads.
 
 Test validation refusals, injected tick/window/DST and shutdown decisions, busy
 and early failure accounting, ownership/restart/clone and sidecar failures,
-unsafe or over-budget trees, incomplete scans, corrupt/foreign entries, floor/age
-and clock rollback, and no pruning on failed copies. Real server: drive per-run
+unsafe or over-budget trees, incomplete scans, corrupt/foreign entries, the
+`keep_last` floor and clock rollback, and no pruning on failed copies. Real server: drive per-run
 ticks and await completion signals without sleeps; allow wall stamp advancement
 between runs (inject test time if needed). Verify, restore and scrape actual
 copies, check pruning and admin latest-success, and parse rules/check metric names.

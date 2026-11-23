@@ -299,6 +299,37 @@ fn link_directory(target: &Path, link: &Path) {
 }
 
 #[test]
+fn launch_preflight_refuses_an_invalid_schedule_without_touching_the_data_dir() {
+    let dir = TempDir::new().unwrap();
+    let mut config: Config = ktav::from_str(EXAMPLE).unwrap();
+    config.data_dir = dir.path().join("source");
+
+    // A destination inside the (absent) data directory: refused lexically,
+    // before the launch creates the data directory.
+    config.backup = Some(backup(config.data_dir.join("backups")));
+    config.validate().unwrap();
+    assert_invalid(
+        config.validate_for_launch(),
+        "backup.destination must be disjoint from data_dir",
+    );
+    assert!(!config.data_dir.exists());
+
+    // A missing backup mount: syntax passes, the launch preflight refuses.
+    config.backup = Some(backup(dir.path().join("missing")));
+    config.validate().unwrap();
+    assert_invalid(
+        config.validate_for_launch(),
+        "backup.destination must be private",
+    );
+    assert!(!config.data_dir.exists());
+
+    // A healthy private destination passes without the data directory.
+    config.backup = Some(backup(private(dir.path(), "backups")));
+    config.validate_for_launch().unwrap();
+    assert!(!config.data_dir.exists());
+}
+
+#[test]
 fn refuses_link_roots_and_canonical_overlap_via_alias() {
     let dir = TempDir::new().unwrap();
     let root = private(dir.path(), "backups");

@@ -109,8 +109,35 @@ impl BackupScheduleConfig {
         self.syntax().map(|_| ())
     }
 
+    /// Launch-time preflight, run before the data directory is created: the
+    /// syntax plus the destination's lexical disjointness from the configured
+    /// `data_dir` and its privacy. It never touches `data_dir`, so an invalid
+    /// schedule refuses the launch before any directory is created.
+    pub fn check_launch(&self, data_dir: &Path) -> Result<(), ConfigError> {
+        self.syntax()?;
+        self.check_destination(data_dir)
+    }
+
     pub fn resolve(&self, data_dir: &Path) -> Result<ResolvedSchedule, ConfigError> {
         let mut schedule = self.syntax()?;
+        self.check_destination(data_dir)?;
+        let destination = self.destination.canonicalize().map_err(|error| {
+            ConfigError::Validation(format!(
+                "backup.destination cannot be canonicalized: {error}"
+            ))
+        })?;
+        if destination.file_name().is_none() {
+            return Err(invalid_destination());
+        }
+        let source = data_dir.canonicalize().map_err(|error| {
+            ConfigError::Validation(format!("backup data_dir cannot be canonicalized: {error}"))
+        })?;
+        check_disjoint(&destination, &source)?;
+        schedule.destination = destination;
+        Ok(schedule)
+    }
+
+    fn check_destination(&self, data_dir: &Path) -> Result<(), ConfigError> {
         let destination = &self.destination;
         // A path inside `data_dir` stays out of the schedule even when the
         // source cannot be canonicalized yet.
@@ -129,21 +156,7 @@ impl BackupScheduleConfig {
             })
             .map_err(|error| {
                 ConfigError::Validation(format!("backup.destination must be private: {error}"))
-            })?;
-        let destination = self.destination.canonicalize().map_err(|error| {
-            ConfigError::Validation(format!(
-                "backup.destination cannot be canonicalized: {error}"
-            ))
-        })?;
-        if destination.file_name().is_none() {
-            return Err(invalid_destination());
-        }
-        let source = data_dir.canonicalize().map_err(|error| {
-            ConfigError::Validation(format!("backup data_dir cannot be canonicalized: {error}"))
-        })?;
-        check_disjoint(&destination, &source)?;
-        schedule.destination = destination;
-        Ok(schedule)
+            })
     }
 
     fn syntax(&self) -> Result<ResolvedSchedule, ConfigError> {

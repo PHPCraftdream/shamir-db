@@ -243,13 +243,18 @@ fn scan_refusal_keeps_the_fresh_copy_owned() {
         "the fresh copy is tagged before the scan can refuse"
     );
 
-    let next = retain(&root, &fresh, 1);
+    // A later scheduled run has a NEW fresh copy: the earlier fresh copy is
+    // classified by the scan like any other candidate, so it only counts as
+    // the newest owned copy (and the older one is pruned) when it was tagged.
+    let later = copy_with_payload(&root, "20200101_000003", 3, None, &[0u8; 1 << 10]);
+    let next = retain(&root, &later, 1);
     assert_eq!(
         (next.deleted, next.failed, next.untouched),
         (1, 0, Some(0)),
-        "the next pass treats the fresh copy as owned and prunes the older copy"
+        "the earlier fresh copy is owned and the older copy is pruned"
     );
     assert!(next.adopted.is_empty(), "nothing is adopted");
     assert!(!other.exists());
     assert!(fresh.exists());
+    assert!(later.exists());
 }
