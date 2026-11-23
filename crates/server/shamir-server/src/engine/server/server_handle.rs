@@ -30,6 +30,24 @@ const CONN_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 /// their directory locks (a client that stays connected can hold one).
 const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Upper bound for joining the periodic meta-snapshot task at teardown step 6.
+///
+/// The task is told to stop by the root `shutdown_token` at the top of the
+/// teardown but still has to run one final lockout + rate-limit snapshot, and
+/// that write is submitted to the blocking pool: a saturated or stalled pool
+/// keeps the join pending for as long as the pool is starved. The bound turns
+/// that into a REPORTED verdict instead of a teardown that never reaches the
+/// store-release stage — and, inside an outer shutdown budget, it may only
+/// spend what is left of that budget (see [`stage_bound`]).
+const META_SNAPSHOT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Report entry when the meta-snapshot join misses its bound: the periodic
+/// metadata snapshot did not settle, so its `Arc<ServerMetaStore>` — and with
+/// it the fjall `server_meta` store lock — may still be held. Named separately
+/// from the generic deadline message so an outer expiry cannot replace this
+/// stage's verdict.
+const ERR_META_SNAPSHOT_UNSETTLED: &str = "meta snapshot task did not stop within";
+
 /// One shared budget for quiescing and checkpointing every repository at
 /// shutdown. A slow disk (fsync on a loaded runner) must not turn a healthy stop
 /// into an unclean report; with the connection drain it stays inside the
@@ -38,15 +56,31 @@ const REPO_FLUSH_BUDGET: Duration = Duration::from_secs(15);
 
 /// Upper bound for stopping the observability server in teardown step 5. Its
 /// `shutdown()` joins a listener that may still be draining a scrape and a
-/// poller that may be inside a database await, so the wait is bounded — and an
-/// expiry is REPORTED (see [`ERR_OBS_SHUTDOWN`]) instead of being silently
-/// dropped with the future.
+/// poller that may be inside a database await, each side under its own
+/// `OBS_TASK_JOIN_TIMEOUT`, so the wait is bounded — and an expiry is REPORTED
+/// (see [`ERR_OBS_SHUTDOWN`]) instead of being silently dropped with the
+/// future.
 const OBS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Report entry when [`OBS_SHUTDOWN_TIMEOUT`] expires. Fixed prefix: an unclean
-/// report names what may still hold the database, not just a log line.
+/// Report entry when the whole
+/// [`crate::observability::ObservabilityHandle::shutdown`] call is
+/// abandoned by [`OBS_SHUTDOWN_TIMEOUT`] — nothing was joined, so nothing can
+/// be named. Fixed prefix: an unclean report names what may still hold the
+/// database, not just a log line. When the call DOES return, the per-side
+/// outcome reports [`ERR_OBS_LISTENER_DRAINING`] /
+/// [`ERR_OBS_POLLER_RUNNING`] instead, so this message is never duplicated.
 const ERR_OBS_SHUTDOWN: &str = "observability shutdown did not complete: the metrics listener or \
                                  the poller may still hold the database";
+
+/// Report entry for a metrics listener that missed its own join bound: it may
+/// still be serving a scrape and holding the database.
+const ERR_OBS_LISTENER_DRAINING: &str =
+    "observability shutdown did not complete: the metrics listener is still draining";
+
+/// Report entry for a poller that missed its own join bound: it may still be
+/// inside a tick and holding the database.
+const ERR_OBS_POLLER_RUNNING: &str =
+    "observability shutdown did not complete: the poller is still running";
 
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
 /// stop signal is the shared root `shutdown_token` (cancelled by
@@ -140,9 +174,8 @@ pub struct ServerHandle {
     pub(super) observability: Option<crate::observability::ObservabilityHandle>,
     /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
     /// state). One 60s tick persists BOTH the lockout store and the
-    /// rate-limiter buckets. Awaited on shutdown so the redb file lock on
-    /// `server_meta.redb` is released cleanly before a same-data-dir
-    /// restart can succeed.
+    /// rate-limiter buckets. Awaited on shutdown so the fjall `server_meta`
+    /// store lock is released cleanly before a same-data-dir restart can succeed.
     pub(super) meta_snapshot_task: Option<MetaSnapshotTask>,
     /// Phase B Stage 6 — periodic reaper for expired interactive txs.
     /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
@@ -181,7 +214,7 @@ pub struct ServerHandle {
     /// when this `File` is dropped (or the process crashes), so a second
     /// `shamir-server` that tries to open the same `data_dir` gets
     /// `BootError::AlreadyRunning` instead of silently corrupting the
-    /// redb stores. Do NOT explicitly unlock — drop is the release.
+    /// fjall stores. Do NOT explicitly unlock — drop is the release.
     /// `None` once [`ServerHandle::take_shutdown_owner`] moved it out for the
     /// embedding path.
     pub(super) data_dir_lock: Option<std::fs::File>,
@@ -289,11 +322,13 @@ fn fire_scheduled_join_probe() {
     }
 }
 
-/// One-shot probe fired immediately BEFORE the ordered shutdown's repository
-/// flush. A shutdown test compares its order with [`arm_scheduled_join_probe`]:
-/// the scheduled worker and its in-flight run are joined BEFORE the flush, so
-/// the join marker must fire first (mutant: the worker awaited after the
-/// flush).
+/// One-shot probe fired immediately BEFORE the ordered shutdown's REAL
+/// repository flush call (`ShamirDb::flush_all_report`) — never at the point
+/// the flush would have started, so a SKIPPED flush leaves the probe unfired
+/// and cannot look like an entered one. A shutdown test compares its order with
+/// [`arm_scheduled_join_probe`]: the scheduled worker and its in-flight run are
+/// joined BEFORE the flush, so the join marker must fire first (mutant: the
+/// worker awaited after the flush).
 #[cfg(test)]
 static REPO_FLUSH_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
@@ -369,6 +404,30 @@ impl ShutdownOwner {
     }
 }
 
+/// The ABSOLUTE bound and the duration a late teardown stage may spend.
+///
+/// `cap` is the stage's own constant. Inside an outer shutdown budget the stage
+/// may only spend what is left of it, so an outer expiry can never replace the
+/// stage's own verdict with the generic deadline message. The returned instant
+/// is the outer deadline ITSELF when that comes first (not `now + remaining`,
+/// which lands a few nanoseconds later), so a stage that expires exactly at the
+/// outer deadline still records its verdict in the same poll instead of being
+/// dropped with the abandoned future.
+fn stage_bound(
+    deadline_at: Option<tokio::time::Instant>,
+    cap: Duration,
+) -> (tokio::time::Instant, Duration) {
+    let now = tokio::time::Instant::now();
+    let own = now + cap;
+    match deadline_at {
+        Some(at) => {
+            let until = at.min(own);
+            (until, until.saturating_duration_since(now))
+        }
+        None => (own, cap),
+    }
+}
+
 /// Store-root names for the release report: bounded tokens, never full paths.
 fn store_names(locked: &[std::path::PathBuf]) -> String {
     locked
@@ -419,10 +478,38 @@ impl ServerHandle {
     /// repository outcomes and marks deadline expiry as unclean. `owner` is
     /// borrowed, not taken: dropping this future must never drop the
     /// scheduled worker or the instance lock.
+    ///
+    /// The outer-deadline-less entry: the late stages spend their own constants
+    /// ([`META_SNAPSHOT_JOIN_TIMEOUT`], [`STORE_RELEASE_TIMEOUT`]). Callers that
+    /// wrap this future in a deadline use [`Self::shutdown_with_budget`]
+    /// instead, so the late stages can report what they could not settle
+    /// BEFORE that deadline erases them.
     pub(crate) async fn shutdown_with_report(
         self,
         report: &mut ShutdownReport,
         owner: &mut ShutdownOwner,
+    ) {
+        self.shutdown_with_budget(report, owner, None).await;
+    }
+
+    /// The teardown, with the instant its caller's outer deadline expires.
+    ///
+    /// `deadline_at` is the same instant the caller's own `timeout` is bounded
+    /// by, computed BEFORE that timeout starts. The late teardown stages
+    /// (the meta-snapshot join and the store-release barrier) then spend only
+    /// the budget that is really left, so their verdict — "this snapshot did
+    /// not settle", "this store still holds its lock", "the release could not
+    /// be verified" — reaches the report instead of being dropped with the
+    /// future the outer deadline abandons. `None` means "no outer deadline":
+    /// each stage falls back to its own constant, exactly as
+    /// [`Self::shutdown_with_report`] always did.
+    ///
+    /// cancel-safe: NO — same as [`Self::shutdown_with_report`].
+    pub(crate) async fn shutdown_with_budget(
+        self,
+        report: &mut ShutdownReport,
+        owner: &mut ShutdownOwner,
+        deadline_at: Option<tokio::time::Instant>,
     ) {
         // 1. Tell all accept loops to stop. CancellationToken::cancel() is
         //    persistent: every existing `.cancelled().await` resolves on the
@@ -508,11 +595,9 @@ impl ServerHandle {
         // after the deadline).
         owner.join_schedule(report).await;
         // 4. Flush all repo MemBuffers to durable backing so buffered
-        #[cfg(test)]
-        fire_repo_flush_probe();
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
-        //    writes can arrive) and BEFORE redb locks are released.
+        //    writes can arrive) and BEFORE store locks are released.
         if !quiesced {
             report.add_error("repository flush skipped: connection tasks still alive".to_string());
             tracing::error!(
@@ -520,6 +605,11 @@ impl ServerHandle {
                 "shutdown: repository flush skipped because connection tasks remain",
             );
         } else {
+            // The probe belongs to the REAL flush call, not to this point: a
+            // skipped flush (unclean connection drain) must not look like an
+            // entered one to a shutdown test.
+            #[cfg(test)]
+            fire_repo_flush_probe();
             self.shamir
                 .flush_all_report(REPO_FLUSH_BUDGET, report)
                 .await;
@@ -532,26 +622,68 @@ impl ServerHandle {
         //    private cancel-on-drop field), so the tasks stop on their own at
         //    their next cancellation point.
         if let Some(obs) = self.observability {
-            if tokio::time::timeout(OBS_SHUTDOWN_TIMEOUT, obs.shutdown())
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    timeout = ?OBS_SHUTDOWN_TIMEOUT,
-                    "shutdown: observability server did not finish stopping",
-                );
-                report.add_error(ERR_OBS_SHUTDOWN.to_string());
+            match tokio::time::timeout(OBS_SHUTDOWN_TIMEOUT, obs.shutdown()).await {
+                // The call returned: name exactly the side(s) that missed their
+                // own join bound. A generic message here would blame a side
+                // that did stop and hand the operator the wrong subsystem.
+                Ok(outcome) => {
+                    if !outcome.listener_joined {
+                        tracing::warn!(
+                            timeout = ?OBS_SHUTDOWN_TIMEOUT,
+                            "shutdown: the observability metrics listener is still draining",
+                        );
+                        report.add_error(ERR_OBS_LISTENER_DRAINING.to_string());
+                    }
+                    if !outcome.poller_joined {
+                        tracing::warn!(
+                            timeout = ?OBS_SHUTDOWN_TIMEOUT,
+                            "shutdown: the observability poller is still running",
+                        );
+                        report.add_error(ERR_OBS_POLLER_RUNNING.to_string());
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout = ?OBS_SHUTDOWN_TIMEOUT,
+                        "shutdown: observability server did not finish stopping",
+                    );
+                    report.add_error(ERR_OBS_SHUTDOWN.to_string());
+                }
             }
         }
         // 6. Join the meta-snapshot task. It was already told to stop by the
         //    `shutdown_token.cancel()` at the top of this method (it holds a
         //    clone of the root token). Awaiting its handle lets it drop its
-        //    Arc<ServerMetaStore> reference so the redb file lock on
-        //    `server_meta.redb` releases for a same-data-dir restart. The
+        //    Arc<ServerMetaStore> reference so the fjall `server_meta` store
+        //    lock releases for a same-data-dir restart. The
         //    task writes one final lockout + rate-limit snapshot inside its
         //    cancel branch (best-effort) before exiting.
+        //
+        //    BOUNDED and REPORTED: that final write is a synchronous store
+        //    write submitted to the blocking pool, so a starved pool keeps the
+        //    join pending for as long as the pool is starved. An unbounded
+        //    await here would let an outer expiry replace this stage's own
+        //    verdict with the generic deadline message, so the wait spends
+        //    only what is left of the shutdown budget, capped by
+        //    META_SNAPSHOT_JOIN_TIMEOUT. Join errors stay ignored exactly as
+        //    before: only an EXPIRY means the store may still be locked.
         if let Some(snap) = self.meta_snapshot_task {
-            let _ = snap.handle.await;
+            let (bound_at, bound) = stage_bound(deadline_at, META_SNAPSHOT_JOIN_TIMEOUT);
+            if tokio::time::timeout_at(bound_at, snap.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    ?bound,
+                    "shutdown: the meta snapshot task did not stop in time",
+                );
+                report.add_error(format!(
+                    "{ERR_META_SNAPSHOT_UNSETTLED} {bound:?}: the periodic metadata snapshot \
+                     task has not dropped its `server_meta` store handle, so the `server_meta` \
+                     store may still be locked and an immediate reboot on the same data \
+                     directory can fail"
+                ));
+            }
         }
         // 7. Join the interactive-tx reaper (also cancelled by the root token
         //    above) so its Arc<TxRegistry> drops and any lingering open txs
@@ -587,34 +719,52 @@ impl ServerHandle {
         // The barrier's outcome belongs in the report, not only in a log line,
         // and the two failures stay distinct: a lock that is still HELD names
         // the store, while a probe that could not run (a saturated blocking
-        // pool) says that the release could not be verified at all.
-        match release_stores(&data_dir, STORE_RELEASE_TIMEOUT).await {
-            ReleaseOutcome::Released => {}
-            ReleaseOutcome::StillLocked(still_locked) => {
-                let stores = store_names(&still_locked);
-                tracing::warn!(
-                    ?still_locked,
-                    timeout = ?STORE_RELEASE_TIMEOUT,
-                    "shutdown: stores still held after the release timeout",
-                );
-                report.add_error(format!(
-                    "stores still held after the release timeout {STORE_RELEASE_TIMEOUT:?}: \
-                     {stores} — a writer outside this teardown still holds the store (a detached \
-                     task or an external process); an immediate relaunch of the same data \
-                     directory can fail with `Locked`"
-                ));
-            }
-            ReleaseOutcome::Unverified => {
-                tracing::warn!(
-                    timeout = ?STORE_RELEASE_TIMEOUT,
-                    "shutdown: store release could not be verified in time",
-                );
-                report.add_error(format!(
-                    "store release could not be verified within {STORE_RELEASE_TIMEOUT:?}: the \
-                     blocking pool did not run the lock probe, so whether every store released \
-                     its directory lock is UNKNOWN; an immediate relaunch of the same data \
-                     directory can fail with `Locked`"
-                ));
+        // pool) says that the release could not be verified at all. The bound
+        // is what is LEFT of the shutdown budget, capped by
+        // STORE_RELEASE_TIMEOUT, and every line below names the bound it used
+        // rather than the constant: an outer expiry must not swallow this
+        // stage's verdict.
+        let (_, release_budget) = stage_bound(deadline_at, STORE_RELEASE_TIMEOUT);
+        if release_budget.is_zero() {
+            // Nothing is left to wait with. A probe submitted now would park
+            // until the outer deadline erased it, so the honest verdict is the
+            // UNKNOWN one — without spending the store-release wait.
+            tracing::warn!("shutdown: no shutdown budget left to verify the store release");
+            report.add_error(format!(
+                "store release could not be verified within {release_budget:?} (no shutdown \
+                 budget left for the store-release probe): the lock probe was not started, so \
+                 whether every store released its directory lock is UNKNOWN; an immediate \
+                 relaunch of the same data directory can fail with `Locked`"
+            ));
+        } else {
+            match release_stores(&data_dir, release_budget).await {
+                ReleaseOutcome::Released => {}
+                ReleaseOutcome::StillLocked(still_locked) => {
+                    let stores = store_names(&still_locked);
+                    tracing::warn!(
+                        ?still_locked,
+                        timeout = ?release_budget,
+                        "shutdown: stores still held after the release timeout",
+                    );
+                    report.add_error(format!(
+                        "stores still held after the release timeout {release_budget:?}: \
+                         {stores} — a writer outside this teardown still holds the store (a \
+                         detached task or an external process); an immediate relaunch of the \
+                         same data directory can fail with `Locked`"
+                    ));
+                }
+                ReleaseOutcome::Unverified => {
+                    tracing::warn!(
+                        timeout = ?release_budget,
+                        "shutdown: store release could not be verified in time",
+                    );
+                    report.add_error(format!(
+                        "store release could not be verified within {release_budget:?}: the \
+                         blocking pool did not run the lock probe, so whether every store \
+                         released its directory lock is UNKNOWN; an immediate relaunch of the \
+                         same data directory can fail with `Locked`"
+                    ));
+                }
             }
         }
     }

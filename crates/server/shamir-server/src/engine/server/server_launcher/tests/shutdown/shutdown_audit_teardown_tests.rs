@@ -9,9 +9,26 @@
 //!   REAL checkpoint on a blocking thread inside it, so the checkpoint owns
 //!   the real `parking_lot` persistence gate for as long as the test keeps
 //!   it. The audit deadline must fire while that gate is still held: shutdown
-//!   returns with the `audit teardown exceeded` prefix and the repository
-//!   teardown still completes. The gate is released before any assertion
-//!   runs, so a failing claim can never strand the checkpoint inside it.
+//!   returns with the `audit teardown exceeded` prefix exactly ONCE and the
+//!   repository teardown still completes. The gate is released before any
+//!   assertion runs, so a failing claim can never strand the checkpoint
+//!   inside it.
+//!
+//!   Post-close contract this window pins: a checkpoint that was admitted AND
+//!   already passed the DECISIVE in-gate check
+//!   (`refuse_closed_checkpoint_under_gate`) before the stop finishes `Ok`
+//!   and writes its anchor, while a checkpoint that only reaches the gate
+//!   after the stop is refused with the typed post-close refusal and writes
+//!   nothing. The persistence-gate hook fires inside
+//!   `acquire_persistence_gate`, i.e. BEFORE that decisive check, so this test
+//!   parks in the second case and pins the REFUSAL half: the resumed
+//!   checkpoint comes back as
+//!   `AuditError::Persistence("... refusing a post-close checkpoint")`, the
+//!   fence counts it exactly once (the refusal returns before
+//!   `checkpoint_locked`, the only anchor writer on that path) and the report
+//!   still names the audit timeout exactly once. The "finishes `Ok`" half is
+//!   NOT covered by this test: no test hook exists between the decisive check
+//!   and `checkpoint_locked`.
 //! * [`shutdown_report_is_unclean_when_audit_flush_fails`] arms the
 //!   appender's one-shot flush fault and asserts the failed final flush
 //!   reaches `ShutdownReport` exactly once (unclean, exit code 70) instead of
@@ -40,7 +57,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use shamir_connect::common::time::UnixNanos;
-use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditError,
+};
 use shamir_connect::server::lockout::InMemoryLockoutStore;
 use shamir_connect::server::rate_limit::InMemoryRateLimiter;
 use shamir_connect::server::resume::InMemoryConsumedCounters;
@@ -100,6 +119,14 @@ async fn run_audit_timeout_while_gate_held() {
     .expect("production boot");
     guard.mark("launched");
 
+    // Stop/join the periodic flusher before arming the one-shot gate hook: a
+    // flush job must not take the gate ahead of this checkpoint rendezvous.
+    handle.audit_appender.request_flusher_stop();
+    tokio::time::timeout(CALL_TIMEOUT, handle.audit_appender.join_flusher())
+        .await
+        .expect("pre-checkpoint flusher stop deadline")
+        .expect("pre-checkpoint flusher stopped cleanly");
+
     // Arm the one-shot gate hook, then run a REAL checkpoint on its own
     // thread. The hook runs while that thread owns the persistence gate, so
     // blocking in it keeps the gate held for the whole shutdown stage.
@@ -120,6 +147,12 @@ async fn run_audit_timeout_while_gate_held() {
             wait_until(&gate, "gate release", |state| state.released);
         })
     });
+    // Unconditional release on EVERY exit path (return, `?` or panic): the
+    // parked hook's own wait is bounded, and this guard frees it immediately
+    // instead of leaving the suite to wait out [`CALL_TIMEOUT`]. The explicit
+    // release below still runs first on the happy path; releasing twice is
+    // idempotent.
+    let _release_on_drop = GateRelease(&gate);
     // The SCHEDULER's own checkpoint path, not a bare appender call: the
     // periodic tick runs `AuditChainWriter::checkpoint_with_appender` on a
     // blocking thread (`boot/scheduler.rs`), so holding the gate from inside
@@ -140,9 +173,10 @@ async fn run_audit_timeout_while_gate_held() {
     wait_until(&gate, "gate rendezvous", |state| state.entered);
     guard.mark("real checkpoint holds the audit persistence gate");
 
-    // Observations only until the gate is released: the watchdog only logs,
-    // so a panic here would park the checkpoint inside the real persistence
-    // gate for the rest of the process. No refusal is queued, so the drain is
+    // Observations only until the gate is released: a panic here could not
+    // strand the checkpoint (the `GateRelease` guard above releases it and the
+    // hook's own wait is bounded), but the assertions still run only after the
+    // unconditional release below. No refusal is queued, so the drain is
     // immediate and the deadline is spent on the flusher join / final flush
     // that need the held gate.
     let shutdown = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown())).await;
@@ -152,24 +186,61 @@ async fn run_audit_timeout_while_gate_held() {
 
     // Unconditional release, then join; assertions run only afterwards.
     release_gate(&gate);
-    let checkpoint = tokio::time::timeout(CALL_TIMEOUT, holder)
+    let refusal = tokio::time::timeout(CALL_TIMEOUT, holder)
         .await
         .expect("released checkpoint deadline")
-        .expect("checkpoint task");
-    checkpoint.expect("held checkpoint must succeed");
+        .expect("checkpoint task")
+        .expect_err(
+            "the resumed checkpoint only reached the persistence gate AFTER the close set \
+             the shutdown flag, so the DECISIVE in-gate recheck must refuse it instead of \
+             writing the anchor",
+        );
     guard.mark("released gate and joined the checkpoint");
+
+    // The checkpoint parked INSIDE `acquire_persistence_gate`, i.e. after the
+    // cheap pre-gate fence returned `Ok` and BEFORE the decisive
+    // `refuse_closed_checkpoint_under_gate` recheck that runs first inside
+    // `persistence_section`. The close then set the shutdown flag and took the
+    // gate, so the resumed call is exactly the second contract case: it must
+    // come back as the TYPED post-close refusal and must write nothing.
+    assert!(
+        matches!(&refusal, AuditError::Persistence(_)),
+        "the resumed checkpoint must fail as a persistence refusal, not {refusal:?}"
+    );
+    let refusal_text = refusal.to_string();
+    assert!(
+        refusal_text.contains("refusing a post-close checkpoint"),
+        "the refusal must be the typed post-close fence, not any other failure: {refusal_text}"
+    );
+    // `refused_checkpoint_attempts` is bumped ONLY by the two fence halves,
+    // and the cheap half cannot be the one that refused here: it returned `Ok`
+    // before the gate hook parked the call (a refusal there would have skipped
+    // the hook and the rendezvous above). The decisive half returns BEFORE
+    // `checkpoint_locked`, the only writer of the anchor row on this path, so
+    // the resumed checkpoint wrote no anchor.
+    assert_eq!(
+        appender.refused_checkpoint_attempts(),
+        1,
+        "the in-gate recheck must refuse the resumed checkpoint exactly once and before \
+         `checkpoint_locked`, so the resumed checkpoint writes no anchor row"
+    );
 
     let report = shutdown_report.expect("shutdown future must finish inside the bound");
     assert!(
         shutdown_returned_while_gate_held,
         "shutdown must return while the real checkpoint still holds the gate: {report:?}"
     );
-    assert!(
-        report
-            .errors()
-            .iter()
-            .any(|error| error.contains("audit teardown exceeded")),
-        "an audit timeout must be reported: {report:?}"
+    // Exactly ONE audit timeout: the held gate makes the submitted final
+    // close the only thing that expires in this stage, and the shutdown report
+    // must name it once — not once per observer.
+    let audit_timeouts = report
+        .errors()
+        .iter()
+        .filter(|error| error.contains("audit teardown exceeded"))
+        .count();
+    assert_eq!(
+        audit_timeouts, 1,
+        "exactly one audit timeout must be reported: {report:?}"
     );
     // Repository teardown ran and succeeded while the audit stage gave up:
     // the timeout bounds the audit wait, it does not skip the flush.
@@ -507,6 +578,9 @@ async fn run_panicking_flusher() {
     assert_eq!(report.exit_code(), 70, "supervisor exit code");
 }
 
+#[path = "audit_flusher/mod.rs"]
+mod audit_flusher_tests;
+
 /// A final close is skipped when the refusal-audit drain itself did not
 /// settle — even though the scheduler and the flusher both stopped — because
 /// an admitted refusal append may still reach its own inline checkpoint.
@@ -771,6 +845,18 @@ fn release_gate(gate: &(Mutex<GateState>, Condvar)) {
     let mut state = lock.lock().expect("gate state");
     state.released = true;
     condvar.notify_all();
+}
+
+/// [`release_gate`] on `Drop`, so a panic between arming the gate hook and the
+/// explicit release cannot wedge the parked checkpoint (and the suite) for the
+/// rest of the process. Releasing is idempotent; the parked hook's own wait
+/// stays bounded by [`CALL_TIMEOUT`] as a second line of defence.
+struct GateRelease<'a>(&'a (Mutex<GateState>, Condvar));
+
+impl Drop for GateRelease<'_> {
+    fn drop(&mut self) {
+        release_gate(self.0);
+    }
 }
 
 fn on_big_stack<F, Fut>(body: F)

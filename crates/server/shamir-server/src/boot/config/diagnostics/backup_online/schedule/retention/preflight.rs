@@ -61,23 +61,20 @@ pub(super) fn verified_time(
     match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
             // The verifier reads the stamp three times: `format_stamp::inspect`
-            // (charged here, with the verdict) and `check_stamp_agreement`
-            // (charged right below), plus the manifest-file loop's hash
-            // (charged with the claimed files below).
+            // (charged here, before its verdict) twice — the preflight's own
+            // verdict and the verifier's `check_stamp_agreement` — plus the
+            // manifest-file loop's hash (charged with the claimed files below).
             let size = file_size(&tree, STAMP_FILE_NAME)?;
             if size > MAX_STAMP {
                 return Err(Refusal::Budget);
             }
             // Decide the stamp verdict BEFORE the payload is charged: the
-            // verifier inspects the same bytes (`check_stamp_agreement`) and
-            // refuses a corrupt or newer-layout stamp, so charging the whole
-            // candidate first made a large WAL pay for a copy that could never
-            // verify. This is the inspect read; the verifier's own inspect
-            // read is debited right after it.
-            budget.bytes(size)?;
-            // The verifier inspects the same bytes AGAIN for
-            // `check_stamp_agreement`, so that read is debited too: the budget
-            // must stay an upper bound of the reads this route performs.
+            // preflight's own `inspect` reads the stamp bytes once, and that
+            // single read is the only stamp debit a corrupt, newer-layout or
+            // epoch-mismatched copy pays. Charging the whole candidate first
+            // made a large WAL pay for a copy that could never verify, and
+            // charging the verifier's read before the verdict made a refusal
+            // pay for a read the verifier never performs.
             budget.bytes(size)?;
             match inspect(dir) {
                 StampState::Valid(stamp) => match decoded.format_epoch {
@@ -90,6 +87,14 @@ pub(super) fn verified_time(
                     return Err(Refusal::Unverifiable);
                 }
             }
+            // Only a stamp that passed the verdict reaches the verifier's
+            // `check_stamp_agreement`, which inspects the same bytes AGAIN:
+            // that second read is debited here, after the verdict and before
+            // any payload byte, so a valid listed stamp totals two inspection
+            // debits plus the files-loop hash while a refusal pays no extra
+            // read. The budget stays an upper bound of the reads this route
+            // performs.
+            budget.bytes(size)?;
         }
         Err(Refusal::Unverifiable) => {} // Absent stamp is permitted by v2.
         Err(error) => return Err(error),
@@ -228,6 +233,13 @@ fn classify_verifier_error(error: BackupError) -> Refusal {
         BackupError::Io(_) => Refusal::Incomplete,
         _ => Refusal::Unverifiable,
     }
+}
+
+/// Test-only entry point to the private classifier above, so its unit test
+/// exercises the production mapping without widening it.
+#[cfg(test)]
+pub(super) fn classify_verifier_error_for_test(error: BackupError) -> Refusal {
+    classify_verifier_error(error)
 }
 
 fn file_size(tree: &BTreeMap<String, Option<u64>>, path: &str) -> Result<u64, Refusal> {

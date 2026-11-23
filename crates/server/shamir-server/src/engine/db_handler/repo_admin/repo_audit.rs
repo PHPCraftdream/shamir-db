@@ -131,11 +131,12 @@ pub(crate) struct CancelRefusalAudit {
     idle: Notify,
     /// Queued + running jobs per principal NAME. A name's entry is inserted
     /// with its first refusal and removed when its count returns to zero. The
-    /// global slot is reserved BEFORE the entry is created (see
-    /// [`CancelRefusalAudit::try_reserve`]), so every non-zero entry implies a
-    /// held slot: at most `CANCEL_AUDIT_CAPACITY` entries with a non-zero
-    /// count, plus zero entries whose removal raced a reservation (retired by
-    /// that name's next release).
+    /// global slot is reserved inside the SAME bucket-locked decision that
+    /// increments the count, and only when the share still has room (see
+    /// [`CancelRefusalAudit::reserve_share_and_global`]), so every non-zero
+    /// entry implies a held slot: at most `CANCEL_AUDIT_CAPACITY` entries with a
+    /// non-zero count, plus zero entries whose removal raced a reservation
+    /// (retired by that name's next release).
     ///
     /// Contention: one `update_sync`/`insert_sync` per refusal and one per
     /// release on the scc bucket of that name — the map's own bucket lock for
@@ -159,41 +160,42 @@ pub(crate) struct CancelRefusalAudit {
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+/// Outcome of the single bucket-locked admission decision. A `bool` cannot carry
+/// it: a share refusal has to log and record its own drop, while a global
+/// refusal already recorded and logged both inside
+/// [`CancelRefusalAudit::reserve_global_slot`].
+enum ShareAdmission {
+    Reserved,
+    ShareFull,
+    GlobalRefused,
+}
+
 impl CancelRefusalAudit {
-    /// Reserve one share slot for `principal`, or refuse without waiting.
+    /// Reserve one slot of `principal`'s share AND one global slot as ONE
+    /// bounded, non-waiting decision, or refuse.
     ///
-    /// Exact per NAME: the share test and the increment run in one
-    /// `update_sync` inside the map's own bucket lock, so two principals never
-    /// share a counter and the count cannot drift from the live slots.
+    /// The share test, the global reservation and the increment run under the
+    /// SAME bucket lock (see [`Self::reserve_share_and_global`]), so the global
+    /// slot is taken only when the share still has room: a doomed request from
+    /// a principal already at its share never consumes — and never refuses
+    /// another principal — a global slot. `reserve_global_slot` is a lock-free
+    /// CAS loop, so it takes no second lock and cannot block inside the closure.
+    ///
+    /// A principal entry therefore always implies a reserved slot, so the map
+    /// can never hold more live entries than `CANCEL_AUDIT_CAPACITY` (the bound
+    /// its doc states).
     fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
-        // Admission and the GLOBAL slot come FIRST: a principal entry then
-        // always implies a reserved slot, so the map can never hold more live
-        // entries than `CANCEL_AUDIT_CAPACITY` (the bound its doc states).
-        // Taking the share first let a burst of callers create entries before
-        // they knew whether a global slot existed -- above that bound.
-        // READ-ONLY pre-check first: an already-capped principal is refused
-        // without touching a global slot, so it can neither take the last one
-        // while it stalls on the map nor refuse another principal meanwhile.
+        // READ-ONLY pre-check: an already-capped principal is refused without
+        // reaching the map update at all. It no longer decides anything -- the
+        // same share test runs under the bucket lock below -- it only spares
+        // the saturated case one state CAS and one entry lookup.
         if self.share_is_full(principal) {
-            let dropped = self.record_drop();
-            tracing::warn!(
-                share = CANCEL_AUDIT_PRINCIPAL_SHARE,
-                dropped,
-                "cancel refusal audit principal share full; dropping event"
-            );
+            self.refuse_share_full();
             return None;
         }
-        if !self.reserve_global_slot() {
-            return None;
-        }
-        if !self.reserve_share(principal) {
-            self.release_global_slot();
-            let dropped = self.record_drop();
-            tracing::warn!(
-                share = CANCEL_AUDIT_PRINCIPAL_SHARE,
-                dropped,
-                "cancel refusal audit principal share full; dropping event"
-            );
+        #[cfg(test)]
+        fire_share_decision_probe();
+        if !self.reserve_share_and_global(principal) {
             return None;
         }
         Some(CancelAuditSlot {
@@ -210,31 +212,63 @@ impl CancelRefusalAudit {
             .unwrap_or(false)
     }
 
-    /// Take one slot of `principal`'s share, or `false` when the share is full.
+    /// Take one slot of `principal`'s share AND one global slot in ONE
+    /// bucket-locked decision, or refuse without waiting.
     ///
-    /// The share test and the increment run in one `update_sync` inside the
-    /// map's own bucket lock, so two principals never share a counter and the
-    /// count cannot drift from the live slots.
-    fn reserve_share(&self, principal: &str) -> bool {
+    /// The share test, the global CAS and the increment run inside the same
+    /// `update_sync`, so no global slot is ever held by a request that the
+    /// share check then refuses: the slot another principal needs is never
+    /// consumed by a doomed reservation, not even for an instant. Exact per
+    /// NAME: two principals never share a counter and the count cannot drift
+    /// from the live slots.
+    fn reserve_share_and_global(&self, principal: &str) -> bool {
         loop {
             match self.principals.update_sync(principal, |_, held| {
                 if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
-                    return false;
+                    return ShareAdmission::ShareFull;
+                }
+                // Lock-free CAS: no second lock is taken under this bucket.
+                if !self.reserve_global_slot() {
+                    return ShareAdmission::GlobalRefused;
                 }
                 *held += 1;
-                true
+                ShareAdmission::Reserved
             }) {
-                Some(accepted) => return accepted,
+                Some(ShareAdmission::Reserved) => return true,
+                Some(ShareAdmission::ShareFull) => {
+                    self.refuse_share_full();
+                    return false;
+                }
+                // The global refusal already recorded its drop and logged it.
+                Some(ShareAdmission::GlobalRefused) => return false,
                 None => {
-                    // First refusal for this name: insert it already holding
-                    // our slot. A concurrent insert wins the entry, and the next
-                    // pass increments against that winner instead.
+                    // First refusal for this name: a brand-new entry can never
+                    // be share-capped, so take the global slot first and insert
+                    // it already holding our slot. A concurrent insert wins the
+                    // entry; hand the slot back and increment against that
+                    // winner on the next pass (bounded, as before: the winner's
+                    // entry is present, so the next `update_sync` sees it).
+                    if !self.reserve_global_slot() {
+                        return false;
+                    }
                     if self.principals.insert_sync(principal.to_owned(), 1).is_ok() {
                         return true;
                     }
+                    self.release_global_slot();
                 }
             }
         }
+    }
+
+    /// Record one refused submission: exactly one drop and one warn line, the
+    /// same accounting for the read-only pre-check and for the decision.
+    fn refuse_share_full(&self) {
+        let dropped = self.record_drop();
+        tracing::warn!(
+            share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+            dropped,
+            "cancel refusal audit principal share full; dropping event"
+        );
     }
 
     /// Take one GLOBAL slot, or refuse: admission closed, capacity reached, or
@@ -325,8 +359,33 @@ impl CancelRefusalAudit {
         // no job can still be spawned, and the handle of every already spawned
         // job sits in the list `discard_queued` drains. Setting the bit without
         // the mutex left exactly that window open.
-        let _decision = self.unfinished.lock();
+        let _decision = self.lock_close_decision();
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
+    }
+
+    /// Acquire the spawn-decision mutex; the test rendezvous observes an actual
+    /// failed try-lock before this call blocks on that same mutex.
+    fn lock_close_decision(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, Vec<tokio::task::AbortHandle>>> {
+        #[cfg(test)]
+        if matches!(
+            self.unfinished.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            fire_close_decision_probe();
+        }
+        self.unfinished.lock()
+    }
+
+    /// Test-only hook fired when `close()` observes the spawn-decision mutex
+    /// already held, before it waits to acquire it.
+    #[cfg(test)]
+    pub(crate) fn arm_close_decision_probe(
+        probe: impl FnOnce() + 'static,
+    ) -> CloseDecisionProbeGuard {
+        CLOSE_DECISION_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+        CloseDecisionProbeGuard
     }
 
     /// Abort audit jobs that have not started yet.
@@ -361,6 +420,18 @@ impl CancelRefusalAudit {
     pub(crate) fn arm_spawn_window_probe(probe: impl FnOnce() + 'static) -> SpawnWindowProbeGuard {
         SPAWN_WINDOW_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
         SpawnWindowProbeGuard
+    }
+
+    /// Test-only hook fired BETWEEN the read-only share pre-check and the
+    /// bucket-locked admission decision, on the caller's thread and holding no
+    /// lock. A fairness test parks a doomed reservation there to prove it holds
+    /// no global slot while another principal is admitted.
+    #[cfg(test)]
+    pub(crate) fn arm_share_decision_probe(
+        probe: impl FnOnce() + 'static,
+    ) -> ShareDecisionProbeGuard {
+        SHARE_DECISION_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+        ShareDecisionProbeGuard
     }
 
     /// Spawn one accepted job and register its abort handle as ONE decision
@@ -401,6 +472,59 @@ impl CancelRefusalAudit {
             .expect("refusal admission must be open")
     }
 
+    /// Test-only: the admission width, so a test can size a fill without
+    /// restating the constant.
+    #[cfg(test)]
+    pub(crate) fn global_capacity_for_test() -> usize {
+        CANCEL_AUDIT_CAPACITY
+    }
+
+    /// Test-only: global slots currently reserved, read from the same counter
+    /// the admission CAS loop maintains.
+    #[cfg(test)]
+    pub(crate) fn global_held_for_test(&self) -> usize {
+        self.state.load(Ordering::Acquire) & COUNT_MASK
+    }
+
+    /// Test-only: `principal`'s live share count, read from the same map the
+    /// admission decision updates.
+    #[cfg(test)]
+    pub(crate) fn principal_held_for_test(&self, principal: &str) -> usize {
+        self.principals
+            .read_sync(principal, |_, held| *held)
+            .unwrap_or(0)
+    }
+
+    /// Test-only: ONE real reservation through the production admission path.
+    #[cfg(test)]
+    pub(crate) fn try_reserve_for_test(
+        self: &Arc<Self>,
+        principal: &str,
+    ) -> Option<HeldReservations> {
+        self.try_reserve(principal)
+            .map(|slot| HeldReservations(vec![slot]))
+    }
+
+    /// Test-only: `count` real reservations charged to `principal`, kept alive
+    /// by the returned slots. They go through [`Self::try_reserve`], so the
+    /// global table and the principal counter are filled by the SAME counters
+    /// production uses.
+    #[cfg(test)]
+    pub(crate) fn seed_reservations_for_test(
+        self: &Arc<Self>,
+        principal: &str,
+        count: usize,
+    ) -> HeldReservations {
+        HeldReservations(
+            (0..count)
+                .map(|_| {
+                    self.try_reserve(principal)
+                        .expect("seeded reservation must be admitted")
+                })
+                .collect(),
+        )
+    }
+
     pub(crate) async fn drain(&self) -> bool {
         let drained = tokio::time::timeout(DRAIN_BUDGET, async {
             // Cancel-safe: no jobs are consumed by waiting.
@@ -432,6 +556,50 @@ impl CancelRefusalAudit {
 thread_local! {
     static SPAWN_WINDOW_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static SHARE_DECISION_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static CLOSE_DECISION_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears an unfired share-decision probe; a probe that fires removes itself.
+#[cfg(test)]
+pub(crate) struct ShareDecisionProbeGuard;
+
+#[cfg(test)]
+impl Drop for ShareDecisionProbeGuard {
+    fn drop(&mut self) {
+        SHARE_DECISION_PROBE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Fire and consume the current thread's share-decision probe, if any. Fired
+/// between the read-only share pre-check and the bucket-locked decision, so a
+/// parked probe holds NO lock and NO global slot.
+#[cfg(test)]
+fn fire_share_decision_probe() {
+    let probe = SHARE_DECISION_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct CloseDecisionProbeGuard;
+
+#[cfg(test)]
+impl Drop for CloseDecisionProbeGuard {
+    fn drop(&mut self) {
+        CLOSE_DECISION_PROBE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn fire_close_decision_probe() {
+    let probe = CLOSE_DECISION_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe();
+    }
 }
 
 /// Clears an unfired spawn-window probe; a probe that fires removes itself.
@@ -451,6 +619,20 @@ fn fire_spawn_window_probe() {
     let probe = SPAWN_WINDOW_PROBE.with(|slot| slot.borrow_mut().take());
     if let Some(probe) = probe {
         probe();
+    }
+}
+
+/// Test-only holder for reservations seeded through the production admission
+/// path. Its inner `Vec` sits in a PRIVATE field, so the `pub(crate)` helpers
+/// above can return live slots without naming the private [`CancelAuditSlot`].
+#[cfg(test)]
+pub(crate) struct HeldReservations(Vec<CancelAuditSlot>);
+
+#[cfg(test)]
+impl HeldReservations {
+    /// Take over every slot of `other`, keeping all of them alive.
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.0.append(&mut other.0);
     }
 }
 

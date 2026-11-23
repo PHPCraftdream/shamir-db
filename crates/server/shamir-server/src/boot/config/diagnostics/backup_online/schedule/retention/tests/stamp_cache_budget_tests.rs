@@ -16,7 +16,7 @@ use crate::sync::durability::backup::online::manifest::{
 };
 use crate::sync::durability::backup::online::progress::CancelFlag;
 use crate::sync::durability::backup::{ManifestFileEntry, MANIFEST_FILE_NAME};
-use crate::sync::format_stamp::STAMP_FILE_NAME;
+use crate::sync::format_stamp::{CURRENT_FORMAT_EPOCH, STAMP_FILE_NAME};
 
 use sha2::Digest;
 
@@ -27,8 +27,10 @@ use super::fixture::{copy_with_payload, private_root, OWNER, WAL_FILE};
 
 const PAYLOAD: usize = 64 << 10;
 
-/// The bounded control reads up to a refusal: `manifest.len() + 1`,
-/// `sidecar.len() + 1`, plus `stamp_bytes` when the copy carries a stamp.
+/// The bounded control reads up to a stamp refusal: `manifest.len() + 1`,
+/// `sidecar.len() + 1`, plus the ONE `format_stamp::inspect` read of
+/// `stamp.len()` when the copy carries a stamp. The verifier's second stamp
+/// read is charged only for a stamp that passes the verdict.
 fn control_reads(dir: &std::path::Path, with_stamp: bool) -> u64 {
     let manifest = fs::metadata(dir.join(MANIFEST_FILE_NAME))
         .expect("manifest metadata")
@@ -46,12 +48,36 @@ fn control_reads(dir: &std::path::Path, with_stamp: bool) -> u64 {
     manifest + 1 + sidecar + 1 + stamp
 }
 
+/// Mutant (removing the early stamp verdict): the corrupt stamp is LISTED in
+/// the manifest with its real SHA-256/size and the manifest carries the epoch
+/// a valid stamp of this layout would have, so the tree, size and listing
+/// checks all accept the copy. Without the preflight's `inspect` verdict the
+/// pass charges the listed WAL payload, the verifier's `check_stamp_agreement`
+/// then reports the corrupt stamp, and this budget — one stamp read, no
+/// payload — is exhausted first: the pass returns `Refusal::Budget` (or
+/// verifies and tags the copy) instead of the structural
+/// `Refusal::Unverifiable`, so the first assertion fails. The stamp is NOT
+/// left unlisted on purpose: then the unknown-tree check alone would refuse
+/// `Unverifiable`, and the verdict would not be the oracle.
 #[test]
 fn a_corrupt_stamp_is_refused_before_the_payload_is_charged() {
     let (_temp, root) = private_root();
     let fresh = copy_with_payload(&root, "20200101_000001", 1, None, &vec![0u8; PAYLOAD]);
-    // A stamp that does not decode, beside a large listed WAL segment.
-    fs::write(fresh.join(STAMP_FILE_NAME), b"not a format stamp").expect("corrupt stamp");
+    // A stamp body that does not decode, beside a large listed WAL segment.
+    let corrupt = b"not a format stamp";
+    fs::write(fresh.join(STAMP_FILE_NAME), corrupt).expect("corrupt stamp");
+    // List the corrupt stamp with its REAL digest and size and keep the epoch
+    // a valid stamp of this layout would carry, so only the stamp verdict can
+    // refuse the copy.
+    let raw = fs::read(fresh.join(MANIFEST_FILE_NAME)).expect("manifest");
+    let mut manifest = decode(std::str::from_utf8(&raw).expect("utf-8")).expect("decode");
+    manifest.format_epoch = Some(CURRENT_FORMAT_EPOCH);
+    manifest.files.push(ManifestFileEntry {
+        path: STAMP_FILE_NAME.to_owned(),
+        sha256: hex::encode(sha2::Sha256::digest(corrupt)),
+        size_bytes: u64::try_from(corrupt.len()).expect("size"),
+    });
+    write_manifest(&fresh, &encode(&manifest).expect("encode")).expect("rewrite manifest");
     let budget_bytes = control_reads(&fresh, true);
     let cancel = CancelFlag::default();
     let mut budget = Budget::with_bytes(&cancel, budget_bytes);

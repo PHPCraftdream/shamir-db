@@ -17,6 +17,14 @@
 //! Nothing synchronises with a sleep: the worker rendezvous is a semaphore
 //! signalled from the runner thread, the release is a condition variable, and
 //! every await is bounded by [`BOUND`].
+//!
+//! [`late_teardown_stages_report_the_remaining_shutdown_budget`] covers the
+//! OTHER half of the same deadline: the two stages that run after the audit and
+//! repository teardown (the meta-snapshot join and the store-release barrier).
+//! It parks the runtime's ONLY blocking thread — the pool both stages submit
+//! their work to — and runs the embedding shutdown with a deadline shorter than
+//! either stage constant, so the report can only contain their own verdicts if
+//! they spend the REMAINING budget instead of the constants.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -55,6 +63,16 @@ const TEST_DEADLINE: Duration = Duration::from_millis(250);
 /// parked — an order of magnitude more than the deadline, so a future that
 /// returned at the deadline cannot hide behind timing noise.
 const PENDING_WINDOW: Duration = Duration::from_secs(3);
+
+/// The outer deadline for the remaining-budget test.
+///
+/// Two orders of magnitude above the stages that run before the meta-snapshot
+/// join (they never touch the blocking pool, so even a 10x slower runner
+/// reaches step 6 well inside it) and BELOW BOTH late-stage constants
+/// (`META_SNAPSHOT_JOIN_TIMEOUT` 5 s, `STORE_RELEASE_TIMEOUT` 10 s): neither
+/// late stage can finish on its own constant, so the report can only name their
+/// verdicts if they spend what is left of this budget.
+const REMAINING_BUDGET_DEADLINE: Duration = Duration::from_secs(3);
 
 #[test]
 fn shutdown_deadline_does_not_abandon_the_scheduled_worker() {
@@ -344,6 +362,194 @@ async fn run_normal_order() {
         "the scheduled worker and its run are joined BEFORE the repository flush \
          (mutant: the worker awaited after the flush): {shutdown:?}"
     );
+    // A repository outcome is the FLUSH's own result, not the fact that the
+    // stage was entered: a skipped flush leaves every repository outcome
+    // unrecorded, which `repository_failures` reports as "shutdown did not
+    // complete". (Mutants: a flush that is skipped, and a teardown that waits
+    // only for the outcome instead of running the flush.)
+    assert!(
+        shutdown.repository_failures().is_empty(),
+        "every repository must flush successfully on a normal shutdown, not only be \
+         waited for: {:?}",
+        shutdown.repository_failures()
+    );
+}
+
+/// The LATE teardown stages must spend the ACTUAL remaining shutdown budget and
+/// report what they could not settle.
+///
+/// The runtime has ONE blocking thread and this test parks it before the
+/// shutdown starts. Both late stages submit their real work to that pool — the
+/// meta-snapshot task its final lockout/rate-limit write, the store-release
+/// barrier its discovery walk and lock probe — so neither can finish on its own
+/// while the pool is parked. With an outer deadline of
+/// [`REMAINING_BUDGET_DEADLINE`] (below both stage constants) the report must
+/// still carry:
+///
+/// * the meta-snapshot verdict (step 6): the snapshot did not settle, so the
+///   `server_meta` store may still be locked;
+/// * a store-release verdict (step 9) naming the budget it really had — none
+///   left — instead of the 10 s constant.
+///
+/// Mutants this kills:
+/// * the meta join awaited UNBOUNDED (`let _ = snap.handle.await`): the
+///   teardown never reaches step 9 at all, so neither stage verdict appears;
+/// * step 9 passing `STORE_RELEASE_TIMEOUT` unchanged: the barrier parks for
+///   the whole 10 s constant, the outer deadline expires inside it, and the
+///   report carries only the generic `graceful shutdown exceeded deadline`
+///   message and no store-release line.
+///
+/// The report must also come back while the pool is STILL parked: a teardown
+/// that waits for the pool instead of for its budget returns after the pool is
+/// released, which the `finished` flag catches.
+#[test]
+fn late_teardown_stages_report_the_remaining_shutdown_budget() {
+    on_single_blocking_thread(|| async {
+        timeout(BOUND, run_remaining_budget())
+            .await
+            .expect("remaining-budget deadline test bounded");
+    });
+}
+
+async fn run_remaining_budget() {
+    let guard = FlakeGuard::with_watchdog(
+        "late_teardown_stages_report_the_remaining_shutdown_budget",
+        Duration::from_secs(300),
+    );
+    try_install_global_tracing_ring();
+    let temp = tempfile::tempdir().expect("test root");
+    let data_dir = temp.path().join("data");
+    create_private_dir(&data_dir).expect("private data directory");
+
+    // No backup schedule: the scheduled worker's wait is a separate stage, and
+    // this test is about the stages AFTER the audit and repository teardown.
+    let handle = ServerLauncher {
+        config: bind_config(
+            data_dir.clone(),
+            "127.0.0.1:0".to_owned(),
+            "127.0.0.1:0".to_owned(),
+        ),
+        bootstrap: BootstrapMode::Skip,
+        node_mode: NodeMode::ReadWrite,
+    }
+    .launch()
+    .await
+    .expect("launch real server");
+    guard.mark("launched");
+
+    // Occupy the ONLY blocking thread for the whole shutdown. The job parks on
+    // a channel the test releases after the report is in hand — never a sleep.
+    let occupant = BlockingPoolOccupant::park();
+    occupant.await_started();
+    guard.mark("blocking pool occupied");
+
+    let report = timeout(
+        BOUND,
+        crate::runtime::drain_server(handle, REMAINING_BUDGET_DEADLINE),
+    )
+    .await
+    .expect("the shutdown must settle inside the bound even with a starved pool");
+    let pool_still_occupied = !occupant.finished();
+    guard.mark("shutdown returned with the blocking pool still occupied");
+
+    // Unconditional release, then assertions: a failing claim must never leave
+    // a parked job behind for the next test (`Drop` releases it too).
+    drop(occupant);
+
+    let errors = report.errors();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("meta snapshot task did not stop within")),
+        "the meta-snapshot join must report the snapshot it could not settle while the \
+         blocking pool is parked (mutant: the unbounded join never reaches step 7): {report:?}"
+    );
+    let Some(store_line) = errors
+        .iter()
+        .find(|error| error.contains("store release could not be verified within"))
+    else {
+        panic!(
+            "the store-release stage must reach the report with its own verdict (mutant: \
+             `release_stores(&data_dir, STORE_RELEASE_TIMEOUT)` parks for the whole 10 s \
+             constant, the outer deadline expires inside it, and only the generic message \
+             remains): {report:?}"
+        );
+    };
+    assert!(
+        store_line.contains("no shutdown budget left") && !store_line.contains("10s"),
+        "the store-release line must name the budget it actually used, not the 10 s constant: \
+         {store_line}"
+    );
+    assert!(
+        pool_still_occupied,
+        "the report must come back while the blocking pool is still parked — the late stages \
+         wait for their BUDGET, not for the pool: {report:?}"
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error.contains("graceful shutdown exceeded deadline")),
+        "the late stages must settle INSIDE the outer deadline, so the generic expiry message \
+         must not stand in for their verdict: {report:?}"
+    );
+    assert!(
+        !report.is_clean(),
+        "a teardown whose late stages could not settle is unclean: {report:?}"
+    );
+    assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
+}
+
+/// A job that occupies the runtime's blocking pool until it is released.
+///
+/// The release is a channel send, never a sleep, and `Drop` sends it
+/// unconditionally: an assertion that fails between parking and the explicit
+/// release can never wedge the next test behind a parked pool.
+struct BlockingPoolOccupant {
+    release: std::sync::mpsc::Sender<()>,
+    started: std::sync::mpsc::Receiver<()>,
+    finished: Arc<AtomicBool>,
+}
+
+impl BlockingPoolOccupant {
+    /// Submit the occupying job to the ONE blocking thread of this runtime.
+    fn park() -> Self {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let job_finished = Arc::clone(&finished);
+        let job = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            // Parks the pool's only thread until the test releases it.
+            let _ = release_rx.recv();
+            job_finished.store(true, Ordering::SeqCst);
+        });
+        // Detached on purpose: `Drop` is what releases the job, and no await is
+        // possible there.
+        drop(job);
+        Self {
+            release: release_tx,
+            started: started_rx,
+            finished,
+        }
+    }
+
+    /// Block until the job really owns the blocking thread.
+    fn await_started(&self) {
+        self.started
+            .recv_timeout(BOUND)
+            .expect("the occupying job must start on the only blocking thread");
+    }
+
+    /// Has the occupying job returned (i.e. is the pool free again)?
+    fn finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for BlockingPoolOccupant {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+    }
 }
 
 /// The runner-side rendezvous state.
@@ -521,6 +727,24 @@ where
     run_blocking(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(body())
+    })
+}
+
+/// Like [`on_big_stack`], but with EXACTLY ONE blocking thread: the test can
+/// then occupy the whole pool with one parked job instead of guessing how many
+/// workers a default pool would hand out.
+fn on_single_blocking_thread<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    run_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
             .build()
             .expect("test runtime")
             .block_on(body())

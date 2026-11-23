@@ -49,11 +49,10 @@ use axum::{
     routing::get,
     Router,
 };
-use metrics_exporter_prometheus::PrometheusHandle;
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::byte_budget::ByteBudget;
@@ -62,6 +61,8 @@ pub mod logging;
 
 mod durability_export;
 mod export;
+#[path = "logging/lifecycle/mod.rs"]
+mod lifecycle;
 mod login_histogram;
 mod visibility_export;
 
@@ -82,6 +83,8 @@ pub use crate::security::backup_metrics::{install_backup_metrics_source, BackupM
 pub use export::activity::ActivityMetricsSnapshot;
 pub use export::activity::LoadMetricsSnapshot;
 
+pub use lifecycle::{ObservabilityHandle, ObservabilityShutdownOutcome, OBS_TASK_JOIN_TIMEOUT};
+
 use crate::security::backup_metrics::{
     backup_scrape_snapshot, record_backup_metrics, register_backup_metrics,
     render_backup_scrape_gauges,
@@ -95,6 +98,7 @@ use export::{
     register_engine_metrics, register_index_interner_metrics, register_storage_metrics,
     register_transactions_metrics, sample_index_interner_metrics,
 };
+use lifecycle::CancelOnDrop;
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
 /// Live state shared between the HTTP handlers and the boot path.
@@ -167,134 +171,6 @@ impl ObservabilityState {
 
     pub fn set_bound_addrs(&self, addrs: Vec<SocketAddr>) {
         self.bound_addrs.store(Arc::new(addrs));
-    }
-}
-
-/// Handle to a running observability server.
-///
-/// [`Self::shutdown`] stops it AND waits for both tasks. Dropping the handle
-/// cancels the same token (via the private `shutdown_on_drop` field), so a
-/// shutdown future abandoned by its deadline cannot leave the poller and the
-/// router alive holding the database; the two `JoinHandle`s are still not
-/// awaited by the drop, so a dropped handle does not block — the tasks stop on
-/// their own at their next cancellation point.
-///
-/// The cancel-on-drop lives in a PRIVATE FIELD, not in an `impl Drop for
-/// ObservabilityHandle`: a type-level `Drop` would make this public type
-/// non-move-partial and stop a caller from moving the public `state` field out
-/// of it.
-pub struct ObservabilityHandle {
-    pub bound_addr: SocketAddr,
-    pub state: Arc<ObservabilityState>,
-    /// Cancels the shared token when the handle is dropped without
-    /// [`Self::shutdown`]. Private, so moving `state` out stays legal.
-    shutdown_on_drop: CancelOnDrop,
-    // `Option` so `shutdown(self)` can TAKE the handles (a field cannot be
-    // moved out of `self` directly in a method that owns it and is also
-    // dropped at its end).
-    listener_task: Option<JoinHandle<()>>,
-    poller_task: Option<JoinHandle<()>>,
-}
-
-/// Cancels an observability server when its handle is dropped without
-/// [`ObservabilityHandle::shutdown`].
-///
-/// A handle dropped without `shutdown()` — the ordered shutdown's future was
-/// abandoned by its deadline — must still stop both tasks: they hold an
-/// `Arc<ShamirDb>` and the router, and leaving them live would keep the stores
-/// locked past the teardown. The awaits stay in `shutdown()`. The cancel sits
-/// on this private newtype's own `Drop` rather than on `ObservabilityHandle` so
-/// the handle itself stays move-partial.
-struct CancelOnDrop(CancellationToken);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
-}
-
-impl ObservabilityHandle {
-    /// Ask both tasks to stop WITHOUT waiting for them.
-    ///
-    /// The shutdown path signals this BEFORE any wait a deadline can abandon,
-    /// so an expiry never depends on the handle's `Drop` having run yet.
-    pub fn cancel(&self) {
-        self.shutdown_on_drop.0.cancel();
-    }
-
-    /// Stop the HTTP listener and the process-metrics poller.
-    ///
-    /// F-68 (#895) cluster D / task #124 added timestamped `tracing` events
-    /// around each of the two `JoinHandle` awaits individually, suspecting
-    /// `axum::serve`'s graceful shutdown waiting on a lingering keep-alive
-    /// connection (`listener_task`). Task #922 / F-68b used that
-    /// instrumentation on a real ubuntu-latest CI hang
-    /// (`metrics_exposes_unbounded_sentinel_when_no_byte_budget` /
-    /// `metrics_exposes_finite_byte_budget_gauges`, run `30757334929`) and it
-    /// disproved that hypothesis: the log showed `listener_task.await`
-    /// returning in ~100µs, then hanging forever on `poller_task.await` with
-    /// no further output. Root cause: `poller_task` (below, in
-    /// `spawn_with_byte_budget`) used to wait on `shutdown_for_poller
-    /// .notified()` inside a `tokio::select!` — `Notify::notify_waiters()`
-    /// only wakes tasks that are actively polling `.notified()` AT THE
-    /// MOMENT it is called; it stores no permit. Same class of race
-    /// `Scheduler`'s own doc comment (`scheduler.rs`, near its
-    /// `shutdown_tx` field) already names precisely: if `notify_waiters()`
-    /// fires before the spawned task has been polled for the first time
-    /// (not yet inside its `select!` at all) — plausible here since
-    /// `tokio::spawn` only schedules the task, it doesn't run it
-    /// synchronously — the notify is silently dropped and the task waits
-    /// out its next `interval.tick()` (5s here) instead. The same is also
-    /// true of the narrower "between loop iterations" window (each
-    /// `select!` re-evaluation creates a *new* `Notified` future with its
-    /// own dead zone) — either window reproduces the observed hang;
-    /// `CancellationToken`'s fix below closes both by construction, so
-    /// distinguishing which one fired in the specific CI repro isn't load
-    /// bearing for the fix. This is the exact same lossy-`Notify` class
-    /// already documented and fixed once in this crate for the root
-    /// shutdown signal (see `ServerHandle::shutdown_token`'s doc comment in
-    /// `server/server_handle.rs`, and `Scheduler`'s broadcast-based fix) —
-    /// this call site was missed during that remediation. Fixed here by
-    /// switching to `tokio_util::sync::
-    /// CancellationToken`, whose `cancel()` is a persistent flag: any
-    /// `.cancelled()` future (existing or newly created) resolves
-    /// immediately once cancelled, closing the race by construction. The
-    /// `tracing` instrumentation is kept (still useful if some other stall
-    /// appears here later).
-    pub async fn shutdown(mut self) {
-        let shutdown_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: enter, calling cancel()");
-        self.shutdown_on_drop.0.cancel();
-        tracing::debug!(
-            elapsed = ?shutdown_started.elapsed(),
-            "ObservabilityHandle::shutdown: cancel() returned"
-        );
-
-        let listener_wait_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: awaiting listener_task");
-        if let Some(listener_task) = self.listener_task.take() {
-            let _ = listener_task.await;
-        }
-        tracing::debug!(
-            elapsed = ?listener_wait_started.elapsed(),
-            "ObservabilityHandle::shutdown: listener_task.await returned \
-             (axum::serve's with_graceful_shutdown resolved)"
-        );
-
-        let poller_wait_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: awaiting poller_task");
-        if let Some(poller_task) = self.poller_task.take() {
-            let _ = poller_task.await;
-        }
-        tracing::debug!(
-            elapsed = ?poller_wait_started.elapsed(),
-            "ObservabilityHandle::shutdown: poller_task.await returned"
-        );
-
-        tracing::debug!(
-            total_elapsed = ?shutdown_started.elapsed(),
-            "ObservabilityHandle::shutdown: exit"
-        );
     }
 }
 
@@ -385,6 +261,28 @@ pub async fn spawn(
     .await
 }
 
+/// Histogram bucket layout for the HTTP login duration metrics.
+///
+/// Fixed upper bounds (seconds) around the 50-75 ms policy padding, up to the
+/// request deadline.
+const BUCKETS: &[f64] = &[
+    0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.1, 0.25, 0.5, 1.0, 5.0, 120.0,
+];
+
+/// A builder with the login BEGIN and FINISH duration histograms configured.
+fn builder_with_login_buckets() -> Result<PrometheusBuilder, ObservabilityError> {
+    let mut builder = PrometheusBuilder::new();
+    for metric in [
+        "shamir_login_http_begin_duration_seconds",
+        "shamir_login_http_finish_duration_seconds",
+    ] {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full(metric.into()), BUCKETS)
+            .map_err(|error| ObservabilityError::RecorderInstall(error.to_string()))?;
+    }
+    Ok(builder)
+}
+
 /// Same as [`spawn`], plus an optional [`ByteBudget`] sampled on each
 /// `/metrics` scrape. The existing `shamir_inflight_response_bytes_used` and
 /// `shamir_inflight_response_bytes_cap` names are preserved, alongside
@@ -419,7 +317,7 @@ pub async fn spawn_with_byte_budget(
     //    spawn multiple servers in the same process pass
     //    `install_recorder = false` for the second+ instance.
     let prom_handle = if install_recorder {
-        let builder = login_histogram::builder_with_login_buckets()?;
+        let builder = builder_with_login_buckets()?;
         match builder.install_recorder() {
             Ok(h) => Some(h),
             Err(e) => return Err(ObservabilityError::RecorderInstall(e.to_string())),
@@ -561,7 +459,7 @@ pub async fn spawn_with_byte_budget(
     tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
 
     // F-68b (#922): `CancellationToken`, not `Notify::notify_waiters()` — see
-    // `ObservabilityHandle::shutdown`'s doc comment (this file) for the
+    // `ObservabilityHandle::shutdown`'s doc comment (`lifecycle/handle.rs`) for the
     // lossy-`Notify` missed-wakeup bug this replaced (confirmed root cause of
     // a real 600s ubuntu-latest CI hang) and the precedent in
     // `server/server_handle.rs`'s `shutdown_token` doc comment.
@@ -622,6 +520,7 @@ pub async fn spawn_with_byte_budget(
         prom: prom_handle,
         db: shamir_db,
         byte_budget,
+        shutdown: shutdown.clone(),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -675,6 +574,11 @@ struct AppState {
     prom: Option<PrometheusHandle>,
     byte_budget: Option<ByteBudget>,
     db: Option<Arc<shamir_db::ShamirDb>>,
+    /// The server's own cancellation token (the one the listener and the
+    /// poller wait on). `/metrics` races its database sample against it, so a
+    /// scrape in flight during shutdown answers promptly instead of holding an
+    /// `Arc<ShamirDb>` for the whole length of the await.
+    shutdown: CancellationToken,
 }
 
 // --------------------------------------------------------------------------
@@ -697,9 +601,25 @@ async fn readyz(State(s): State<AppState>) -> Response {
 async fn metrics_handler(State(s): State<AppState>) -> Response {
     match &s.prom {
         Some(h) => {
-            if let Some(db) = &s.db {
-                sample_gate_metrics(db);
-                sample_index_interner_metrics(db).await;
+            // The database sample below is the only part of a scrape that can
+            // take real time, and `axum::serve`'s graceful shutdown WAITS for
+            // this handler: a cancelled server must not stay reachable (and
+            // must not keep an `Arc<ShamirDb>` alive) for the length of the
+            // await. Race the whole sample against the server's own token, so
+            // the answer is a prompt 503 — same body and status as the
+            // not-ready path — instead of a held database.
+            let sample_db = async {
+                if let Some(db) = &s.db {
+                    sample_gate_metrics(db);
+                    sample_index_interner_metrics(db).await;
+                }
+            };
+            tokio::select! {
+                biased;
+                () = s.shutdown.cancelled() => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response();
+                }
+                () = sample_db => {}
             }
             record_functions_metrics();
             record_replication_metrics();

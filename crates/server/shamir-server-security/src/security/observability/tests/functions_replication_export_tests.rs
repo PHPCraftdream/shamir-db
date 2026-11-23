@@ -268,6 +268,7 @@ async fn metrics_handler_samples_replication_without_a_database() {
         prom: Some(handle),
         db: None,
         byte_budget: None,
+        shutdown: tokio_util::sync::CancellationToken::new(),
     };
     let response = metrics::with_local_recorder(&recorder, || {
         register_functions_metrics();

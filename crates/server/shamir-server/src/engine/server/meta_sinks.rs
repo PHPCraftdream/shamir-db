@@ -1,5 +1,5 @@
 //! Durable snapshot sinks that bridge the in-memory lockout and rate-limit
-//! stores to the `ServerMetaStore` redb backend.
+//! stores to the fjall-backed `ServerMetaStore`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::server::server_handle::MetaSnapshotTask;
 use crate::server_meta::ServerMetaStore;
 
 /// Default interval between lockout-snapshot writes. 60s matches the
-/// audit-checkpoint cadence and balances disk pressure (one redb write
+/// audit-checkpoint cadence and balances disk pressure (one fjall store write
 /// per minute) against the loss window for failed-auth bookkeeping
 /// (worst-case ~60s of new failures lost on hard crash). The spec IMPL
 /// §1.3 ceiling is 5s but is not normative for failed-auth state —
@@ -91,8 +91,8 @@ impl RateLimitSnapshotSink for MetaRateLimitSink {
 /// on its next `select!` poll. The task writes one final snapshot of each on
 /// the way out so a clean restart sees the freshest possible state —
 /// important for both the durability story and for integration tests that
-/// boot, do work, shut down, and reboot from the same data dir (the redb file
-/// lock on `server_meta.redb` cannot be re-acquired until this task drops its
+/// boot, do work, shut down, and reboot from the same data dir (the fjall
+/// lock on the `server_meta` store cannot be re-acquired until this task drops its
 /// `Arc<ServerMetaStore>`).
 ///
 /// CancellationToken (not `Notify`) closes the lossy subscribe-window race:

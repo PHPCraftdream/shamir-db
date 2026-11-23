@@ -90,6 +90,13 @@ pub async fn serve(
 /// future is dropped with the owner intact, the report is marked unclean, and
 /// the worker is still awaited here before the data-directory lock is released
 /// by `ShutdownOwner::drain`.
+///
+/// The deadline instant is also HANDED to the teardown, so its late stages
+/// (the meta-snapshot join and the store-release barrier) spend only the budget
+/// that is really left instead of their own constants: a stage that misses its
+/// bound then reaches the report with its own verdict — which snapshot did not
+/// settle, which store still holds its lock — instead of being erased by the
+/// generic expiry message.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,
@@ -100,9 +107,15 @@ pub(crate) async fn drain_server(
     // running native backup thread plus the instance lock must survive that.
     // The future borrows the owner (`&mut`), it never takes it.
     let mut owner = handle.take_shutdown_owner();
-    let expired = tokio::time::timeout(
-        deadline,
-        handle.shutdown_with_report(&mut report, &mut owner),
+    // ONE instant for both sides: the wait below ends exactly at it, and the
+    // teardown's late stages (the meta-snapshot join, the store-release
+    // barrier) spend only what is left of it, so a stage that expires at the
+    // deadline still records its own verdict instead of being dropped with the
+    // abandoned future.
+    let deadline_at = tokio::time::Instant::now() + deadline;
+    let expired = tokio::time::timeout_at(
+        deadline_at,
+        handle.shutdown_with_budget(&mut report, &mut owner, Some(deadline_at)),
     )
     .await
     .is_err();

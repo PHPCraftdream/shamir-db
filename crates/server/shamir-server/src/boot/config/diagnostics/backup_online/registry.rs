@@ -84,11 +84,11 @@
 //! ONE retention failure, never a copy one); `record.running` stays `true`
 //! until the final record publication sets it `false` LAST, and the guard
 //! is disarmed only then. The same accounting holds for an unwind in the
-//! window between publication and the end of retention: the guard sees the
-//! already-taken `outcome` sender, so it records ONE retention failure for
-//! a SCHEDULED run and no counter at all for a MANUAL one (manual runs
-//! have no retention pass) — a copy outcome that was already published is
-//! never counted a second time and the copy counters are never touched
+//! window between publication and the end of retention: the guard reads its
+//! `copy_accounted` flag, set when `publish_outcome` publishes the copy
+//! (independently of taking the sender), so it records ONE retention
+//! failure for a SCHEDULED run and none for a MANUAL one (no retention
+//! pass); a copy outcome already published is never counted
 //! twice. Only a panic BEFORE publication costs the guard's own copy
 //! failure. `last_error` is path-free (`stage: reason`) for a SCHEDULED
 //! run and the full `Display` chain for a MANUAL one; either way it
