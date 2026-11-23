@@ -34,6 +34,8 @@ pub(super) fn verified_time(
     budget: &mut Budget<'_>,
     want_digest: bool,
 ) -> Result<(u128, Option<String>), Refusal> {
+    // The manifest is charged once by `budget.read` here; the verifier is
+    // handed these bytes and never re-reads the manifest, so no second charge.
     let raw = budget.read(&dir.join(MANIFEST_FILE_NAME), root_meta, MAX_MANIFEST)?;
     let text = std::str::from_utf8(&raw).map_err(|_| Refusal::Unverifiable)?;
     let decoded = manifest::decode(text).map_err(|_| Refusal::Unverifiable)?;
@@ -53,10 +55,11 @@ pub(super) fn verified_time(
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
-    // Account for verifier reads in addition to our own reads.
-    budget.bytes(raw.len() as u64)?;
     match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
+            // The verifier reads the stamp twice: `format_stamp::inspect`
+            // reads it, then the manifest-file loop hashes it (charged in the
+            // claimed-file loop below). This is the first of the two reads.
             let size = file_size(&tree, STAMP_FILE_NAME)?;
             if size > MAX_STAMP {
                 return Err(Refusal::Budget);
@@ -66,6 +69,11 @@ pub(super) fn verified_time(
         Err(Refusal::Unverifiable) => {} // Absent stamp is permitted by v2.
         Err(error) => return Err(error),
     }
+    // Byte charges mirror the verifier's real reads: every manifest-listed
+    // file is hashed once by its file loop (charged here); a WAL segment is
+    // hashed a second time by its WAL loop and the stamp is read a second time
+    // by `inspect` (both charged where they are bound). The walk charges no
+    // bytes and the manifest is handed to the verifier, never re-read.
     let mut claimed = BTreeSet::new();
     for entry in &decoded.files {
         budget.checkpoint()?;
@@ -87,6 +95,7 @@ pub(super) fn verified_time(
             {
                 return Err(Refusal::Unverifiable);
             }
+            // The verifier's WAL loop hashes each segment a second time.
             budget.bytes(file_size(&tree, &segment.file)?)?;
             if let Some(sidecar) = &segment.sidecar {
                 if !claimed.contains(sidecar.as_str()) {
@@ -181,9 +190,8 @@ fn walk(
             tree.insert(relative.clone(), None);
             walk(&path, &relative, depth + 1, root_meta, budget, tree)?;
         } else {
-            // Charge every regular file visited, including unknown files in
-            // copies that will be rejected. Verifier reads are charged again.
-            budget.bytes(meta.len())?;
+            // Directory entry only: bytes are charged in `verified_time`, for
+            // the reads the verifier really performs.
             tree.insert(relative, Some(meta.len()));
         }
     }

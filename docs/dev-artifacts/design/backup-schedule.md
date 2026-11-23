@@ -16,8 +16,9 @@ absolute/outside-source check and authorization.
 | `backup.interval` | Required. One positive ASCII whole number immediately followed by `s`, `m`, `h`, or `d` (`d` = 24 hours). No fractions, compounds, signs or whitespace. Checked parse, multiplication and monotonic deadline; reject less than 60 seconds. No existing humantime parser assumed. |
 | `backup.window` | Optional, no restriction by default. Strict local `HH:MM-HH:MM`, 00:00–23:59; reject malformed or equal endpoints. |
 | `backup.run_on_start` | Boolean, default false. |
-| `backup.retention.keep_last` | Integer, default 7; reject less than 1. |
-| `backup.retention.max_age_days` | Optional positive whole 24-hour days; reject zero and conversion overflow. |
+| `backup.retention.keep_last` | Integer, default 7; reject less than 1 and more than 1000 (one pass scans at most 4,096 root entries, shared with foreign entries). |
+
+Validation is syntax-only (`Config::validate`); the destination's existence, privacy and disjointness from `data_dir` are checked when the server resolves the schedule for launch, so `restore --from` with an absent backup mount still validates.
 
 Retain the canonical root and recheck its path and privacy before use;
 never fall back to admin's create-if-missing behavior for the scheduled path.
@@ -63,9 +64,12 @@ deleted copy. Do not start retention during shutdown. Protocol directories use U
 ## Ownership, verification and pruning
 
 A v2 manifest proves integrity, not who created it. After scheduled protocol
-success, retention scans and verifies candidates before atomically tagging the
-fresh copy in the verifier-exempt `backup.meta.json` (preserve existing fields;
-stage on the same filesystem, flush and atomically replace). The versioned tag
+success, retention verifies and atomically tags the fresh copy in the
+verifier-exempt `backup.meta.json` BEFORE scanning the rest of the root, so a
+scan that then refuses (budget, cancellation, an unreadable foreign entry)
+still leaves the fresh copy owned; an unverifiable fresh copy is never tagged
+(preserve existing fields; stage on the same filesystem, flush and atomically
+replace). The versioned tag
 uses a digest of the stable random ID in `server_meta` and canonical `data_dir`.
 The ID is created on first enablement if absent and reused across restarts.
 Neither the server's public identity nor its keys are inputs, so rotating keys
@@ -86,17 +90,23 @@ skip pruning, even if a temp sidecar remains. No manifest, protocol or restore c
    before calling existing v2 `verify_manifest`. Require parsed v2 online manifest.
 2. Use sequential checked budgets: 4,096 root entries, 32 tree levels, 64 KiB
    sidecar, 16 MiB manifest, 100,000 tree entries per candidate, and 1,000,000
-   tree entries and 1 TiB of input per pass (budget verifier rereads too).
-   Exhausted budget or incomplete root scan means no deletion; count failure.
+   tree entries and 1 TiB of input per pass. Byte budget: the pass charges the
+   verifier's real reads, by size, when the manifest's file set is known. Each
+   manifest-listed file is charged once (the claimed-file loop); a WAL segment
+   is charged a second time (the verifier's WAL loop hashes it again) and the
+   stamp a second time (`inspect` reads it before the manifest-file hash). The
+   manifest is handed to the verifier and never re-read, the tree walk charges
+   directory entries only, so unknown files in a rejected candidate cost one
+   entry each. Exhausted budget or incomplete root scan means no deletion;
+   count failure.
    Foreign files, partial or corrupt copies, unsafe trees, other owners and
    unmarked R2a/admin copies stay untouched and are counted. If the just-created
    copy cannot be verified within the same pass, do not delete anything.
 3. Sort verified owned copies by manifest creation nanoseconds, then directory
    name. Protect the newest `keep_last` and separately the just-created copy
    (clock rollback can put it outside that set). Delete oldest eligible first.
-   `max_age_days` adds age eligibility only outside the protected set; with a
-   hard N bound this adds no deletions. Even if all copies are old, the newest
-   floor stays. The verified protected set is never a deletion target.
+   Even if all copies are old, the newest floor stays. The verified protected
+   set is never a deletion target.
 4. Use existing cleanup primitive `std::fs::remove_dir_all` on each eligible
    directory, one at a time. Check cancellation between calls and join an active
    call; do not abandon it. Log and count deletion errors without failing the

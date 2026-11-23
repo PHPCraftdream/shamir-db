@@ -453,9 +453,14 @@ impl Config {
     /// Sanity-check a parsed [`Config`]. Returns
     /// [`ConfigError::Validation`] with a human-readable message at the
     /// first violation; callers can surface that as a startup error.
+    /// `backup.destination` is checked for syntax only here; its existence,
+    /// privacy and disjointness from `data_dir` are checked when the server
+    /// resolves the schedule for launch ([`BackupScheduleConfig::resolve`]), so
+    /// offline subcommands such as `restore --from` do not depend on the backup
+    /// mount.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(backup) = &self.backup {
-            backup.validate(&self.data_dir)?;
+            backup.validate()?;
         }
         self.durability.resolve_policy()?;
         self.transactions.validate()?;

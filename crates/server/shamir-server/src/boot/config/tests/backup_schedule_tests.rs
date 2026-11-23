@@ -55,7 +55,6 @@ fn omitted_backup_is_disabled_and_enabled_block_has_defaults() {
         assert!(schedule.window.is_none());
         assert!(!schedule.run_on_start);
         assert_eq!(schedule.retention.keep_last, 7);
-        assert_eq!(schedule.retention.max_age_days, None);
     }
 }
 
@@ -68,7 +67,7 @@ fn ktav_accepts_custom_values_and_refuses_invalid_schema() {
         Config::from_file(&file)
     };
     let mut config = parse(
-        "destination: copies\ninterval: 2h\nwindow: 22:00-06:00\nrun_on_start: true\nretention: {\nkeep_last: 3\nmax_age_days: 14\n}",
+        "destination: copies\ninterval: 2h\nwindow: 22:00-06:00\nrun_on_start: true\nretention: {\nkeep_last: 3\n}",
     )
     .unwrap();
     let schedule = config.backup.as_mut().unwrap();
@@ -77,7 +76,6 @@ fn ktav_accepts_custom_values_and_refuses_invalid_schema() {
     assert_eq!(schedule.window.as_deref(), Some("22:00-06:00"));
     assert!(schedule.run_on_start);
     assert_eq!(schedule.retention.keep_last, 3);
-    assert_eq!(schedule.retention.max_age_days, Some(14));
     schedule.destination = private(dir.path(), "copies");
     config.data_dir = private(dir.path(), "source");
     config.validate().unwrap();
@@ -86,7 +84,6 @@ fn ktav_accepts_custom_values_and_refuses_invalid_schema() {
     assert_eq!(resolved.interval, Duration::from_secs(7_200));
     assert!(resolved.window.unwrap().contains(0));
     assert_eq!(resolved.retention.keep_last, 3);
-    assert_eq!(resolved.retention.max_age_days, Some(14));
 
     for missing in ["", "destination: copies", "interval: 1m"] {
         assert!(
@@ -99,9 +96,7 @@ fn ktav_accepts_custom_values_and_refuses_invalid_schema() {
         "run_on_start: maybe",
         "retention: {\nkeep_lats: 3\n}",
         "retention: {\nkeep_last: -1\n}",
-        "retention: {\nmax_age_days: -1\n}",
-        "retention: {\nmax_age_days: 4294967296\n}",
-        "retention: {\nmax_age_days: 1.5\n}",
+        "retention: {\nkeep_last: 3\nmax_age_days: 14\n}",
     ] {
         let block = format!("destination: copies\ninterval: 1m\n{extra}");
         assert!(
@@ -184,24 +179,29 @@ fn windows_are_strict_and_half_open_including_midnight() {
 }
 
 #[test]
-fn retention_requires_positive_values_and_widens_days_without_overflow() {
+fn retention_bounds_keep_last() {
     let dir = TempDir::new().unwrap();
     let source = private(dir.path(), "source");
     let mut schedule = backup(private(dir.path(), "backups"));
     schedule.retention.keep_last = 0;
     assert_invalid(schedule.resolve(&source), "backup.retention.keep_last");
-    schedule.retention.keep_last = 1;
-    schedule.retention.max_age_days = Some(0);
-    assert_invalid(schedule.resolve(&source), "backup.retention.max_age_days");
-    schedule.retention.max_age_days = Some(u32::MAX);
-    assert_eq!(
-        schedule.resolve(&source).unwrap().retention,
-        schedule.retention
-    );
+    schedule.retention.keep_last = 1001;
+    assert_invalid(schedule.resolve(&source), "at most 1000");
+    schedule.retention.keep_last = 1000;
+    assert_eq!(schedule.resolve(&source).unwrap().retention.keep_last, 1000);
+
+    // The same bound is a syntax check, so it is refused by plain validation
+    // (what a restore or a format-migration subcommand runs).
+    let mut config: Config = ktav::from_str(EXAMPLE).unwrap();
+    config.backup = Some(backup(private(dir.path(), "backups-validation")));
+    config.backup.as_mut().unwrap().retention.keep_last = 1001;
+    assert_invalid(config.validate(), "at most 1000");
+    config.backup.as_mut().unwrap().retention.keep_last = 1000;
+    config.validate().unwrap();
 }
 
 #[test]
-fn boot_validation_requires_existing_private_root_but_not_existing_source() {
+fn syntax_validation_tolerates_a_missing_backup_mount_but_launch_resolution_refuses() {
     let dir = TempDir::new().unwrap();
     let mut config: Config = ktav::from_str(EXAMPLE).unwrap();
     config.data_dir = dir.path().join("source");
@@ -220,35 +220,56 @@ fn boot_validation_requires_existing_private_root_but_not_existing_source() {
         destination.canonicalize().unwrap()
     );
 
+    // Restore-style validation: the production config names the original
+    // backup mount, absent here. Every subcommand validates it, so only the
+    // launch-time resolution may refuse.
     let missing = dir.path().join("missing");
     config.backup = Some(backup(missing.clone()));
-    assert_invalid(config.validate(), "backup.destination must be private");
+    config.validate().unwrap();
     assert!(!missing.exists());
+    assert_invalid(
+        config.backup.as_ref().unwrap().resolve(&config.data_dir),
+        "backup.destination must be private",
+    );
     let file = dir.path().join("file");
     fs::write(&file, []).unwrap();
     config.backup = Some(backup(file));
-    assert_invalid(config.validate(), "backup.destination must be private");
+    config.validate().unwrap();
+    assert_invalid(
+        config.backup.as_ref().unwrap().resolve(&config.data_dir),
+        "backup.destination must be private",
+    );
     let public = dir.path().join("public");
     fs::create_dir(&public).unwrap();
     #[cfg(unix)]
     fs::set_permissions(&public, fs::Permissions::from_mode(0o755)).unwrap();
     config.backup = Some(backup(public));
-    assert_invalid(config.validate(), "backup.destination must be private");
+    config.validate().unwrap();
+    assert_invalid(
+        config.backup.as_ref().unwrap().resolve(&config.data_dir),
+        "backup.destination must be private",
+    );
 }
 
 #[test]
-fn rejects_lexical_overlap_and_invalid_root_spellings() {
+fn launch_resolution_rejects_overlap_and_syntax_rejects_invalid_roots() {
     let dir = TempDir::new().unwrap();
     let root = private(dir.path(), "backups");
     let drive_root = root.ancestors().last().unwrap();
     let mut config: Config = ktav::from_str(EXAMPLE).unwrap();
     config.data_dir = root.join("not_created");
     config.backup = Some(backup(root.clone()));
-    assert_invalid(config.validate(), "must be disjoint");
+    assert_invalid(
+        config.backup.as_ref().unwrap().resolve(&config.data_dir),
+        "must be disjoint",
+    );
     config.data_dir.clone_from(&root);
     for path in [root.clone(), root.join("nested")] {
         config.backup = Some(backup(path));
-        assert_invalid(config.validate(), "must be disjoint");
+        assert_invalid(
+            config.backup.as_ref().unwrap().resolve(&config.data_dir),
+            "must be disjoint",
+        );
     }
     for path in [
         PathBuf::from("relative"),
@@ -288,7 +309,10 @@ fn refuses_link_roots_and_canonical_overlap_via_alias() {
     config.data_dir = dir.path().join("source");
     for path in [alias.clone(), alias.join(""), alias.join(".")] {
         config.backup = Some(backup(path));
-        assert_invalid(config.validate(), "backup.destination must be private");
+        assert_invalid(
+            config.backup.as_ref().unwrap().resolve(&config.data_dir),
+            "backup.destination must be private",
+        );
     }
 
     for (destination, source) in [
