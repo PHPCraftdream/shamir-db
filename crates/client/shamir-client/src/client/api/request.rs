@@ -348,9 +348,7 @@ impl Client {
     pub async fn ping(&self) -> Result<(), ClientError> {
         match self.roundtrip(&DbRequest::Ping).await? {
             DbResponse::Pong => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected Pong, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol("expected Pong response".into())),
         }
     }
 
@@ -387,11 +385,7 @@ impl Client {
         };
         let response = match self.roundtrip(&req).await? {
             DbResponse::Batch { response } => response,
-            other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Batch, got {other:?}"
-                )))
-            }
+            _ => return Err(ClientError::Protocol("expected Batch response".into())),
         };
 
         // AFTER receive: merge interner_delta into the cache. Ids come ONLY
@@ -420,9 +414,7 @@ impl Client {
         self.require_scram()?;
         match self.roundtrip(&DbRequest::Repl(req)).await? {
             DbResponse::Repl(r) => Ok(r),
-            other => Err(ClientError::Protocol(format!(
-                "expected Repl, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol("expected Repl response".into())),
         }
     }
 
@@ -463,9 +455,9 @@ impl Client {
         };
         match self.roundtrip(&req).await? {
             DbResponse::DdlOpStatus { status } => Ok(status),
-            other => Err(ClientError::Protocol(format!(
-                "expected DdlOpStatus, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected DdlOpStatus response".into(),
+            )),
         }
     }
 
@@ -730,9 +722,93 @@ impl Client {
             .await?
         {
             DbResponse::ActivityPage { page } => Ok(page),
-            other => Err(ClientError::Protocol(format!(
-                "expected ActivityPage, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected ActivityPage response".into(),
+            )),
+        }
+    }
+
+    /// Read-only per-shape statistics for one repository (release-1 R4b
+    /// step 4).
+    ///
+    /// Sends the typed
+    /// `shamir_query_types::batch::BatchOp::ListShapeStats` operation as
+    /// the sole entry of a standalone nontransactional batch; the server
+    /// answers with the dedicated typed page `ShapeStatsPage` wrapped in
+    /// the top-level `DbResponse::ShapeStatsPage` (NOT a `Batch`), returned
+    /// here unwrapped. Authorization is server-side: the operation is a
+    /// SCRAM-session surface only (API-token callers are refused with
+    /// `token_request_denied`), and the `ActivityView` resource with
+    /// `Action::Manage` is required. The page carries shape-key hashes and
+    /// counters only — never literals, field names, table names or
+    /// identities.
+    pub async fn list_shape_stats(
+        &self,
+        db: &str,
+        request: shamir_query_types::admin::shape_stats::ListShapeStatsReq,
+    ) -> Result<shamir_query_types::admin::shape_stats::ShapeStatsPage, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "list_shape_stats",
+            shamir_query_builder::wire::admin::list_shape_stats(request),
+        );
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::ShapeStatsPage { page } => Ok(page),
+            _ => Err(ClientError::Protocol(
+                "expected ShapeStatsPage response".into(),
+            )),
+        }
+    }
+
+    /// Wipe one repository's query-shape statistics registry (release-1 R4b
+    /// step 4).
+    ///
+    /// Sends the typed
+    /// `shamir_query_types::batch::BatchOp::ResetShapeStats` operation as
+    /// the sole entry of a standalone nontransactional batch; the server
+    /// answers with `DbResponse::ShapeStatsReset`, mapped to `Ok(())` here.
+    /// Authorization is server-side: the operation is a SCRAM-session
+    /// surface only (API-token callers are refused with
+    /// `token_request_denied`), and the `ActivityView` resource with
+    /// `Action::Manage` is required. The reset wipes the repository's
+    /// registry, including the `(other)` fold row, and is audited.
+    pub async fn reset_shape_stats(
+        &self,
+        db: &str,
+        request: shamir_query_types::admin::shape_stats::ResetShapeStatsReq,
+    ) -> Result<(), ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "reset_shape_stats",
+            shamir_query_builder::wire::admin::reset_shape_stats(request),
+        );
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::ShapeStatsReset => Ok(()),
+            _ => Err(ClientError::Protocol(
+                "expected ShapeStatsReset response".into(),
+            )),
         }
     }
 
@@ -760,9 +836,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 
@@ -787,9 +863,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 
@@ -819,9 +895,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 

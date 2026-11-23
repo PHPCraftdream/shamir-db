@@ -15,6 +15,7 @@ use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, Functio
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
+use crate::query::shapes::ShapeKey;
 use crate::query::TableRef;
 use crate::table::TableManager;
 
@@ -52,6 +53,11 @@ pub struct QueryRunner<'a> {
     /// checkpoints and borrowed by every nested `Batch`/`ForEach` body.
     /// The borrow is bounded by this runner's execution lifetime.
     pub scope: &'a ExecScope,
+    /// Canonical shape of the data op this runner executes, recorded once
+    /// the table and interner are resolved. Never cleared: both call sites
+    /// (`run` and `execute_plan`) construct one runner per op, so exactly one
+    /// execution reaches `observe_op`.
+    pub(crate) pending_shape: Option<[u8; 16]>,
 }
 /// Everything a per-op data arm (read / insert / update / delete / set)
 /// needs once `run_with_wait` has resolved the table: bundled so each arm
@@ -95,9 +101,14 @@ impl<'a> QueryRunner<'a> {
             _ => return,
         };
         if let Some(sink) = self.resolver.query_metrics(repo_name) {
-            sink.record_duration(op, elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            let failed = error.is_some();
+            sink.record_duration(op, elapsed_ns);
             if let Some(error) = error {
                 sink.record_error(error.code());
+            }
+            if let Some(key) = self.pending_shape {
+                sink.record_shape(key, elapsed_ns, failed);
             }
         }
     }
@@ -337,6 +348,22 @@ impl<'a> QueryRunner<'a> {
             }
         }
 
+        // Only the five data ops reach this point: `run_with_wait` dispatches
+        // them above and rejects every other op as admin/unreachable.
+        debug_assert!(
+            matches!(
+                &entry.op,
+                BatchOp::Read(_)
+                    | BatchOp::Insert(_)
+                    | BatchOp::Update(_)
+                    | BatchOp::Delete(_)
+                    | BatchOp::Set(_)
+            ),
+            "only the five data operations may fold a shape key"
+        );
+        self.pending_shape =
+            Some(ShapeKey::fold(&entry.op, &table_ref.table, interner).into_bytes());
+
         let arm = DataArm {
             alias,
             entry,
@@ -390,6 +417,7 @@ pub(in crate::query::batch) async fn execute_single_impl(
         params,
         result_encoding,
         scope,
+        pending_shape: None,
     };
     runner.run(alias, entry, resolved_refs).await
 }

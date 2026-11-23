@@ -35,9 +35,11 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
 use shamir_query_types::admin::activity::{
     ActivityKind, ActivityRequestState, ActivityRow, ActivityScope, CancelOutcome, ListActivityReq,
 };
+use shamir_query_types::admin::shape_stats::ListShapeStatsReq;
 use shamir_query_types::batch::BatchLimits;
 
 use crate::byte_budget::ByteBudget;
@@ -50,6 +52,16 @@ use crate::version::CURRENT_QUERY_LANG_VERSION;
 const CANARY: &str = "PRIVACY-CANARY-9f31c4d7e2b8";
 /// The fixture session's bearer sid bytes (distinctive tag prefix).
 const SID_TAG: u8 = 0x5A;
+
+// R4b step 4 — the shape-statistics half's distinctive traffic material:
+// a dedicated table (schema-less, so the insert interns the fields), two
+// field names, one string literal and one `$param` name. All of them ride
+// the serialized REQUEST; none may ride the serialized `ShapeStatsPage`.
+const SHAPE_TABLE: &str = "privacy_shape_table_4c1d9e";
+const SHAPE_FIELD: &str = "privacy_field_9f31c4d7";
+const SHAPE_FIELD_ALT: &str = "privacy_field_alt_38ab07";
+const SHAPE_LITERAL: &str = "PRIVACY-SHAPE-LITERAL-7b2a5e";
+const SHAPE_PARAM: &str = "privacy_param_5e8b1c";
 
 /// Hard per-call bound: every await is bounded, never an unbounded
 /// engine await.
@@ -103,7 +115,10 @@ async fn fixture(root: &Path) -> (ShamirDbHandler, Arc<Session>, Arc<SessionStor
     db.add_repo_as(
         "app",
         RepoConfig::new("main", BoxRepoFactory::fjall_raw(root.join("repos/main")))
-            .add_table(TableConfig::new("items")),
+            .add_table(TableConfig::new("items"))
+            // R4b step 4: a table of its own for the shape-statistics half,
+            // so the page scan also covers a DISTINCTIVE table name.
+            .add_table(TableConfig::new(SHAPE_TABLE)),
         owner.clone(),
     )
     .await
@@ -113,6 +128,7 @@ async fn fixture(root: &Path) -> (ShamirDbHandler, Arc<Session>, Arc<SessionStor
         shamir_types::access::ResourcePath::database("app"),
         shamir_types::access::ResourcePath::store("app", "main"),
         shamir_types::access::ResourcePath::table("app", "main", "items"),
+        shamir_types::access::ResourcePath::table("app", "main", SHAPE_TABLE),
     ] {
         db.set_resource_meta(&path, &open)
             .await
@@ -168,6 +184,70 @@ fn list_req() -> DbRequest {
         db: "app".into(),
         batch: b.build(),
     }
+}
+
+/// R4b step 4 — one bounded per-shape statistics page for `app/main`.
+fn shape_list_req() -> DbRequest {
+    let mut b = Batch::new();
+    b.op(
+        "list_shape_stats",
+        shamir_query_builder::wire::admin::list_shape_stats(ListShapeStatsReq {
+            repo: "main".into(),
+            limit: Some(64),
+        }),
+    );
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".into(),
+        batch: b.build(),
+    }
+}
+
+/// R4b step 4 — the distinctive shape traffic: an insert that interns the
+/// two field names on [`SHAPE_TABLE`], then one read carrying the literal
+/// and one carrying the `$param` name. Returns `(seed, literal, param)`.
+fn shape_traffic() -> (DbRequest, DbRequest, DbRequest) {
+    let mut seed = Batch::new();
+    seed.insert(
+        "shape_seed",
+        shamir_query_builder::write::insert(SHAPE_TABLE).row(
+            shamir_query_builder::write::doc()
+                .set(SHAPE_FIELD, "seed")
+                .expect("shape field")
+                .set(SHAPE_FIELD_ALT, "seed")
+                .expect("shape field alt"),
+        ),
+    );
+    let mut literal = Batch::new();
+    literal.query(
+        "shape_literal",
+        Query::from(SHAPE_TABLE).where_eq(SHAPE_FIELD, SHAPE_LITERAL),
+    );
+    let mut param = Batch::new();
+    param.query(
+        "shape_param",
+        Query::from(SHAPE_TABLE).where_eq(
+            SHAPE_FIELD_ALT,
+            shamir_query_builder::val::param(SHAPE_PARAM),
+        ),
+    );
+    (
+        DbRequest::Execute {
+            query_version: CURRENT_QUERY_LANG_VERSION,
+            db: "app".into(),
+            batch: seed.build(),
+        },
+        DbRequest::Execute {
+            query_version: CURRENT_QUERY_LANG_VERSION,
+            db: "app".into(),
+            batch: literal.build(),
+        },
+        DbRequest::Execute {
+            query_version: CURRENT_QUERY_LANG_VERSION,
+            db: "app".into(),
+            batch: param.build(),
+        },
+    )
 }
 
 /// Encode the request up front (bytes copied into the future) and drive
@@ -367,6 +447,105 @@ fn activity_privacy_no_literals_or_credentials() {
             0,
             "in-flight mirror must return to zero after completion"
         );
+
+        // ---- R4b step 4: the shape-statistics half of this privacy test ----
+        // The traffic below carries a distinctive TABLE name, two distinctive
+        // FIELD names, a distinctive LITERAL and a distinctive `$param` name.
+        // The serialized REQUESTS must carry them (the control below), while
+        // the serialized `ShapeStatsPage` — which renders hash + counters
+        // only — must carry none of them, nor either session's bearer sid.
+        let (shape_seed, shape_literal, shape_param) = shape_traffic();
+        let mut control = rmp_serde::to_vec_named(&shape_seed).expect("encode shape seed");
+        control.extend(rmp_serde::to_vec_named(&shape_literal).expect("encode shape literal read"));
+        control.extend(rmp_serde::to_vec_named(&shape_param).expect("encode shape param read"));
+        for needle in [
+            SHAPE_TABLE,
+            SHAPE_FIELD,
+            SHAPE_FIELD_ALT,
+            SHAPE_LITERAL,
+            SHAPE_PARAM,
+        ] {
+            assert!(
+                control
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_bytes()),
+                "internal: the shape traffic must carry its distinctive needle"
+            );
+        }
+        let (seed_resp, _) =
+            tokio::time::timeout(CALL_TIMEOUT, call_raw(&handler, &session, &shape_seed))
+                .await
+                .expect("shape seed completes within the per-call timeout");
+        match seed_resp {
+            DbResponse::Batch { .. } => {}
+            // Response bodies can echo query literals — never print them.
+            _ => panic!("the shape seed insert must complete as a Batch"),
+        }
+        let (literal_resp, _) =
+            tokio::time::timeout(CALL_TIMEOUT, call_raw(&handler, &session, &shape_literal))
+                .await
+                .expect("shape literal read completes within the per-call timeout");
+        match literal_resp {
+            DbResponse::Batch { .. } => {}
+            _ => panic!("the shape literal read must complete as a Batch"),
+        }
+        let (param_resp, _) =
+            tokio::time::timeout(CALL_TIMEOUT, call_raw(&handler, &session, &shape_param))
+                .await
+                .expect("shape param read completes within the per-call timeout");
+        match param_resp {
+            // An unbound `$param` is a silent non-match in this engine; a
+            // typed refusal would be acceptable too, because the shape is
+            // folded and recorded BEFORE the read arm runs. This half only
+            // asserts what the rendered PAGE carries.
+            DbResponse::Batch { .. } | DbResponse::Error { .. } => {}
+            _ => panic!("unexpected shape-param read response shape"),
+        }
+
+        let (shapes_resp, shapes_raw) =
+            tokio::time::timeout(CALL_TIMEOUT, call_raw(&handler, &admin, &shape_list_req()))
+                .await
+                .expect("shape listing completes within the per-call timeout");
+        let shapes_page = match shapes_resp {
+            DbResponse::ShapeStatsPage { page } => page,
+            // Never print the non-matching response: it may echo request
+            // material (literals) and this is a privacy test.
+            _ => panic!("expected ShapeStatsPage"),
+        };
+        assert!(
+            !shapes_page.rows.is_empty(),
+            "the traffic must have produced at least one shape row"
+        );
+
+        let mut shape_needles = forbidden_needles(&session);
+        shape_needles.extend(forbidden_needles(&admin));
+        for text in [
+            SHAPE_TABLE,
+            SHAPE_FIELD,
+            SHAPE_FIELD_ALT,
+            SHAPE_LITERAL,
+            SHAPE_PARAM,
+        ] {
+            shape_needles.push(text.as_bytes().to_vec());
+        }
+        assert_absent("raw shape response", &shapes_raw, &shape_needles);
+        let encoded_shape_page = rmp_serde::to_vec_named(&shapes_page).expect("encode shape page");
+        assert_absent("encoded shape page", &encoded_shape_page, &shape_needles);
+        for row in &shapes_page.rows {
+            assert_eq!(
+                row.shape_hex.len(),
+                32,
+                "a shape key is exactly 32 lowercase hex characters"
+            );
+            assert!(
+                row.shape_hex
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "a shape key carries lowercase hex only"
+            );
+            let row_bytes = rmp_serde::to_vec_named(row).expect("encode shape row");
+            assert_absent("encoded shape row", &row_bytes, &shape_needles);
+        }
     });
 }
 

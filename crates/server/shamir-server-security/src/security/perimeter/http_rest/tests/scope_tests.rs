@@ -52,6 +52,49 @@ fn scoped_tokens_cannot_cancel_requests() {
 }
 
 #[test]
+fn shape_statistics_are_denied_for_every_token_mode_channel_and_scope() {
+    // R4b-4: the shape-statistics surface is a SCRAM-session surface only.
+    // A scoped database allowlist must never admit the listing, and no
+    // token may wipe the registry, on either endpoint.
+    let ops = [
+        shamir_query_builder::wire::admin::list_shape_stats(
+            shamir_query_types::admin::shape_stats::ListShapeStatsReq {
+                repo: "main".into(),
+                limit: None,
+            },
+        ),
+        shamir_query_builder::wire::admin::reset_shape_stats(
+            shamir_query_types::admin::shape_stats::ResetShapeStatsReq {
+                repo: "main".into(),
+            },
+        ),
+    ];
+    let allow = [String::from("db")];
+    for op in ops {
+        let direct = execute(op.clone(), "db");
+        let nested = execute(
+            BatchOp::Batch(shamir_query_types::batch::SubBatchOp {
+                batch: batch_with(op),
+                bind: new_map(),
+            }),
+            "db",
+        );
+        for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+            for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+                for databases in [None, Some(allow.as_slice())] {
+                    for request in [&direct, &nested] {
+                        assert_eq!(
+                            classify_request(request, mode, databases, endpoint),
+                            Decision::Denied("token_request_denied")
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
     for request in [
         DbRequest::Ping,

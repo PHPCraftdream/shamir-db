@@ -94,6 +94,8 @@ define_op_kinds! {
     BackupStatus => "backup_status",
     CancelBackup => "cancel_backup",
     ListActivity => "list_activity",
+    ListShapeStats => "list_shape_stats",
+    ResetShapeStats => "reset_shape_stats",
     CancelRequest => "cancel_request",
     CancelTx => "cancel_tx",
     CancelCursorAdmin => "cancel_cursor_admin",

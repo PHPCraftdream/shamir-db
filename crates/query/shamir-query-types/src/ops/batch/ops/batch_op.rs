@@ -17,11 +17,12 @@ use crate::admin::{
     DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp, DropReplicationProfileOp,
     DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp, ExportFunctionOp,
     GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListActivityReq, ListOp,
-    ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
-    RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
-    ReplicationStatusOp, RequestExecId, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
-    SetTableSchemaOp, StartBackupOp, StartMigrationOp, UnbindValidatorOp,
+    ListPublicationsOp, ListShapeStatsReq, ListSubscriptionsOp, ListValidatorsOp,
+    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp,
+    RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp, RenameIndexOp, RenameRepoOp,
+    RenameTableOp, RenameValidatorOp, ReplicationStatusOp, RequestExecId, ResetShapeStatsReq,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartBackupOp,
+    StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -217,6 +218,20 @@ pub enum BatchOp {
     CancelTx(u64),
     /// Operator cancellation of another session's result cursor (R4b step 3).
     CancelCursorAdmin(CursorId),
+    /// Per-shape execution statistics for one repository (read-only, R4b
+    /// step 4): introspection of the node-local shape registry. Must be the
+    /// sole operation of a standalone nontransactional batch; authorization
+    /// (`ActivityView` + `Manage`) is enforced in the server handler, so
+    /// `required_access` returns `None`. The server answers with
+    /// `DbResponse::ShapeStatsPage`.
+    ListShapeStats(ListShapeStatsReq),
+    /// Wipe one repository's node-local shape registry, including the
+    /// `(other)` fold row (R4b step 4). Audited as an admin op, not as data;
+    /// it destroys local telemetry only. Must be the sole operation of a
+    /// standalone nontransactional batch; authorization is enforced in the
+    /// server handler (`ActivityView` + `Manage`), so `required_access`
+    /// returns `None`. The server answers with `DbResponse::ShapeStatsReset`.
+    ResetShapeStats(ResetShapeStatsReq),
 }
 
 #[derive(Deserialize)]
@@ -339,6 +354,8 @@ impl Serialize for BatchOp {
             BatchOp::BackupStatus(op) => op.serialize(serializer),
             BatchOp::CancelBackup(op) => op.serialize(serializer),
             BatchOp::ListActivity(op) => op.serialize(serializer),
+            BatchOp::ListShapeStats(op) => op.serialize(serializer),
+            BatchOp::ResetShapeStats(op) => op.serialize(serializer),
             BatchOp::CancelRequest(id) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("cancel_request", id)?;
@@ -381,6 +398,12 @@ impl<'de> Deserialize<'de> for BatchOp {
                             "cancel_tx" => return Err(DeError::duplicate_field("cancel_tx")),
                             "cancel_cursor_admin" => {
                                 return Err(DeError::duplicate_field("cancel_cursor_admin"))
+                            }
+                            "list_shape_stats" => {
+                                return Err(DeError::duplicate_field("list_shape_stats"))
+                            }
+                            "reset_shape_stats" => {
+                                return Err(DeError::duplicate_field("reset_shape_stats"))
                             }
                             _ => {}
                         }
@@ -597,6 +620,12 @@ impl<'de> Deserialize<'de> for BatchOp {
                     }
                     OpKind::ListActivity => {
                         ListActivityReq::deserialize(value).map(BatchOp::ListActivity)
+                    }
+                    OpKind::ListShapeStats => {
+                        ListShapeStatsReq::deserialize(value).map(BatchOp::ListShapeStats)
+                    }
+                    OpKind::ResetShapeStats => {
+                        ResetShapeStatsReq::deserialize(value).map(BatchOp::ResetShapeStats)
                     }
                     OpKind::CancelRequest => CancelRequestWire::deserialize(value)
                         .map(|op| BatchOp::CancelRequest(op.cancel_request)),

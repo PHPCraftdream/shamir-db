@@ -290,6 +290,7 @@ async fn query_runner_call_with_tx_none_passes_guard() {
         params: &empty_params,
         result_encoding: ResultEncoding::Name,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result = runner.run("c", &entry, &new_map()).await;
 
