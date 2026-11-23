@@ -307,6 +307,12 @@ impl ShamirDbHandler {
         //    answers `None` exactly when the name is not configured (it
         //    inserts no cell), so a missing token is `unknown_table`, not a
         //    changed registration.
+        //
+        //    This is ONE observation: absence HERE answers `unknown_table`.
+        //    It does not pin the rest of the request — a DROP→CREATE after
+        //    the last comparison at step 7, or a parent that vanishes and
+        //    returns before `final_lookup_error_response` re-probes, are
+        //    pre-existing windows, not new behaviour.
         let repo = match resolve_repo(&self.db, db_name, repo_name) {
             Ok(repo) => repo,
             Err(parent) => return error_response(&parent),
@@ -340,6 +346,12 @@ impl ShamirDbHandler {
         //    paths, and the re-run only narrows the park→resolve window — it
         //    does NOT close a DDL racing between this re-check and the handle
         //    acquisition below. No new ACL seam may be invented here.
+        //
+        //    Like step 5 this re-probe is an OBSERVATION, not a lock:
+        //    absence HERE answers `unknown_table`, but a DROP→CREATE landing
+        //    after the comparison below, or a parent that vanishes and
+        //    returns before `final_lookup_error_response` re-probes, are
+        //    pre-existing windows, not new behaviour.
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await
         {
@@ -352,7 +364,9 @@ impl ShamirDbHandler {
         // Absence is reported as absence: a table that disappeared with no
         // replacement stays `unknown_table`; only a replacement is the
         // changed-registration refusal. `table_registration` answering `None`
-        // is the same absence — `None` ⇔ the name is not configured.
+        // is the same absence — `None` ⇔ the name is not configured at THIS
+        // single observation; it is not a guarantee the table stays absent
+        // after the last comparison.
         if !repo.has_table(table_name) {
             return unknown_table_response();
         }

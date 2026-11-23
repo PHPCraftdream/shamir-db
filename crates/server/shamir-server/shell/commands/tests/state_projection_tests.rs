@@ -163,38 +163,54 @@ fn head_tail_checks_the_deadline_after_the_credential_scan() {
 }
 
 /// The oracle for the ORDERING, driven by an INJECTED clock instead of a
-/// sleep: the deadline is consulted BEFORE the scan (call 1 returns `t0`,
-/// not yet elapsed) and must be consulted AGAIN after it, where call 2
-/// returns `t0 + 40ms` — past the 10 ms budget — so a clean scan must still
-/// refuse with the typed `head_wall_time`. The old ordering (deadline
-/// consulted only before the scan) reads the clock once, sees a live budget
-/// and returns the payload, failing both assertions here — unlike the
-/// already-elapsed cases above, which both orderings refuse.
+/// sleep. The clock is a `Cell` that only the SCAN flips: before the scan
+/// `now()` returns `t0` (live 10 ms budget), after it `t0 + 40ms` (past the
+/// budget), so a clean scan must still refuse with the typed
+/// `head_wall_time`. Kills two mutations: "post-scan check removed" — the
+/// refusal is gone and the payload comes back; and "check moved before the
+/// scan" — the only read happens pre-scan, sees a live budget, and the
+/// payload comes back. The negative control below (a scan that does NOT
+/// flip the cell must return the payload) keeps the seam honest, so the
+/// test cannot pass by refusing unconditionally.
 #[test]
 fn head_tail_rechecks_the_deadline_after_the_scan() {
     let t0 = tokio::time::Instant::now();
     let deadline = t0 + Duration::from_millis(10);
     let payload = serde_json::json!({ "rows": [] });
-    let consultations = std::cell::Cell::new(0usize);
+    let expired = std::cell::Cell::new(false);
     let now = || {
-        let call = consultations.get();
-        consultations.set(call + 1);
-        if call == 0 {
-            t0
-        } else {
+        if expired.get() {
             t0 + Duration::from_millis(40)
+        } else {
+            t0
         }
     };
-    let out = head_tail_with_now(deadline, Ok(payload), |_| Ok(()), &now);
+    let out = head_tail_with_now(
+        deadline,
+        Ok(payload.clone()),
+        |_| {
+            expired.set(true);
+            Ok(())
+        },
+        &now,
+    );
     assert_eq!(
         out,
         Err(ShellError::HeadWallTime),
         "an expiry crossed by the scan must beat a clean scan result"
     );
-    assert!(
-        consultations.get() >= 2,
-        "the deadline must be consulted again after the scan"
-    );
+    // Negative control: same seam, but the scan never flips the cell, so
+    // the budget stays live and the payload must come back.
+    let expired = std::cell::Cell::new(false);
+    let now = || {
+        if expired.get() {
+            t0 + Duration::from_millis(40)
+        } else {
+            t0
+        }
+    };
+    let out = head_tail_with_now(deadline, Ok(payload.clone()), |_| Ok(()), &now);
+    assert_eq!(out, Ok(payload), "a live budget must return the payload");
 }
 
 /// A deadline far in the future (deterministic seam) lets a normal small

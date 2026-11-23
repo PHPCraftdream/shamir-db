@@ -646,7 +646,8 @@ fn head_tail(
 
 /// [`head_tail`] with its clock injected: every deadline consultation reads
 /// `now()` instead of the ambient clock, so a test can drive the ordering
-/// (before vs. after the scan) without sleeping.
+/// (before vs. after the scan) without sleeping. That covers BOTH
+/// consultations: the projection refusal and the post-scan recheck.
 pub(super) fn head_tail_with_now<R>(
     deadline: tokio::time::Instant,
     payload: Result<R, ShellError>,
@@ -655,8 +656,17 @@ pub(super) fn head_tail_with_now<R>(
 ) -> Result<R, ShellError> {
     // A projection refusal keeps the deadline's typed outcome when the budget
     // has elapsed by the time the tail runs (a runner descheduled between the
-    // row error and here must still report exit 7, not exit 5).
-    let payload = payload.map_err(|error| head_error(deadline, error))?;
+    // row error and here must still report exit 7, not exit 5). This reads the
+    // injected clock, like the post-scan recheck below.
+    let payload = match payload {
+        Ok(value) => value,
+        Err(error) => {
+            if now() >= deadline {
+                return Err(ShellError::HeadWallTime);
+            }
+            return Err(error);
+        }
+    };
     let scanned = scan(&payload);
     if now() >= deadline {
         return Err(ShellError::HeadWallTime);

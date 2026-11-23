@@ -226,16 +226,34 @@ impl TableCatalog {
     /// so this read is serialized against both mutations instead of racing
     /// them across two separate map operations.
     ///
-    /// Contract:
-    /// - `None` ⇔ `name` is NOT configured. Nothing is inserted — the entry is
-    ///   dropped without `or_insert_with`, so an unconfigured name can never
-    ///   have a cell reserved (or an empty one resurrected between a caller's
-    ///   earlier `table_config` read and this call). Every caller MUST report
-    ///   this as "unknown table", never as a changed registration.
-    /// - `Some` ⇔ the registration identity of a configured table: the cell
+    /// Contract (LIMITED — one observation, not a lease):
+    /// - `None` ⇔ `name` is NOT configured at this single observation. Nothing
+    ///   is inserted — the entry is dropped without `or_insert_with`, so an
+    ///   unconfigured name can never have a cell reserved (or an empty one
+    ///   resurrected between a caller's earlier `table_config` read and this
+    ///   call). Every caller MUST report this as "unknown table", never as a
+    ///   changed registration.
+    /// - `Some` ⇔ the catalogue CELL identity of a configured table: the cell
     ///   the registration reserved, created on demand exactly as
     ///   `insert_table_cell` does when the registration path did not reserve
-    ///   one (boot-loaded legacy tables). Never instantiates the table.
+    ///   one (boot-loaded legacy tables). It pins that cell only — NOT the
+    ///   table's lifetime, its ACL, or its parent (database/repository) route.
+    ///   Never instantiates the table.
+    ///
+    /// What this does NOT close: a `DROP` after the caller's final comparison
+    /// and the caller's name-based reacquisition remain pre-existing windows;
+    /// the token only tells a caller whether two observations name the same
+    /// cell. There is no deterministic seam to schedule a `DROP` between the
+    /// old implementation's probe and insert, so no test reproduces the
+    /// original split-operation race — only the post-capture windows above are
+    /// observable.
+    ///
+    /// Callers: the repo facade
+    /// `crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs`
+    /// (`RepoInstance::table_registration`) and the point-read handler
+    /// `crates/server/shamir-server/src/engine/db_handler/repo_admin/operator_state.rs`
+    /// (`get_record`, steps 5 and 7); contract tests live in
+    /// `crates/engine/shamir-engine-table/src/tests/table_core/manager/catalog_registration_tests.rs`.
     pub fn table_registration(&self, name: &str) -> Option<TableRegistration> {
         let entry = self.tables.entry(name.to_string());
         if !self.configs.contains_key(name) {

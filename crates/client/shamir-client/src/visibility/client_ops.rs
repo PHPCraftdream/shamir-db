@@ -1,7 +1,5 @@
-use shamir_query_types::batch::{
-    BatchRequest, BatchResponse, IsolationLevel, VisibilityState, VisibilityWait,
-};
-use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+use shamir_query_types::batch::{BatchRequest, BatchResponse, VisibilityState, VisibilityWait};
+use shamir_query_types::wire::{DbRequest, CURRENT_QUERY_LANG_VERSION};
 
 use super::CommitResult;
 use crate::{Client, ClientError};
@@ -24,75 +22,6 @@ impl Client {
             wait,
         )
         .await
-    }
-
-    /// Open one interactive (multi-call) transaction on `repo`.
-    ///
-    /// The server parks the transaction against this session and mints the
-    /// opaque handle returned here; it stays open until [`Self::tx_commit`]
-    /// or [`Self::tx_rollback`], or the session ends.
-    ///
-    /// cancel-safe: NO — a cancelled call may leave a transaction open.
-    pub async fn tx_begin(
-        &self,
-        db: &str,
-        repo: &str,
-        isolation: Option<IsolationLevel>,
-    ) -> Result<u64, ClientError> {
-        let request = DbRequest::TxBegin {
-            query_version: CURRENT_QUERY_LANG_VERSION,
-            db: db.into(),
-            repo: repo.into(),
-            isolation,
-        };
-        match self.roundtrip(&request).await? {
-            DbResponse::TxOpened { tx_handle, .. } => Ok(tx_handle),
-            other => Err(ClientError::Protocol(format!(
-                "expected TxOpened, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Run one batch inside the open interactive transaction `tx_handle`
-    /// without committing it.
-    ///
-    /// cancel-safe: NO — a cancelled call may leave a statement in flight.
-    pub async fn tx_execute(
-        &self,
-        db: &str,
-        tx_handle: u64,
-        batch: BatchRequest,
-    ) -> Result<BatchResponse, ClientError> {
-        let request = DbRequest::TxExecute {
-            query_version: CURRENT_QUERY_LANG_VERSION,
-            db: db.into(),
-            tx_handle,
-            batch,
-        };
-        match self.roundtrip(&request).await? {
-            DbResponse::TxBatch { response } => Ok(response),
-            other => Err(ClientError::Protocol(format!(
-                "expected TxBatch, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Roll back an open interactive transaction, dropping every staged write.
-    ///
-    /// cancel-safe: NO — a cancelled call may leave the outcome unknown.
-    pub async fn tx_rollback(&self, db: &str, tx_handle: u64) -> Result<(), ClientError> {
-        let request = DbRequest::TxRollback {
-            db: db.into(),
-            tx_handle,
-        };
-        match self.roundtrip(&request).await? {
-            DbResponse::TxRolledBack {
-                tx_handle: rolled_back,
-            } if rolled_back == tx_handle => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected TxRolledBack({tx_handle}), got {other:?}"
-            ))),
-        }
     }
 
     /// No replay or rollback on pending, durability warnings or unknown acknowledgements.

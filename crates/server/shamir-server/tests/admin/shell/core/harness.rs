@@ -154,15 +154,20 @@ impl TestRuntime {
         F::Output: Send + 'static,
     {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<F::Output>();
-        self.sender()
-            .blocking_send(Box::pin(async move {
-                let value = future.await;
-                let _ = done_tx.send(value);
-            }))
-            .expect("runtime thread alive and accepting jobs");
-        done_rx
-            .blocking_recv()
-            .expect("runtime job completes and reports")
+        match self.sender().blocking_send(Box::pin(async move {
+            let value = future.await;
+            let _ = done_tx.send(value);
+        })) {
+            Ok(()) => {}
+            Err(_) => panic!("the shell-test runtime thread is gone"),
+        }
+        match done_rx.blocking_recv() {
+            Ok(value) => value,
+            Err(_) => panic!(
+                "the runtime job panicked (its own panic is the real failure); \
+                 the job sender was dropped without a value"
+            ),
+        }
     }
 }
 
@@ -250,27 +255,44 @@ impl Drop for ShellFixture {
 /// Boot the full fixture; the returned fixture owns everything and shuts
 /// down gracefully on drop.
 pub fn boot(name: &str) -> ShellFixture {
-    boot_with(name, false, Default::default(), |_| {}).0
+    boot_with(name, false, Default::default(), |_| {}, |_| None).0
 }
 
 /// Boot the same fixture on a READ-ONLY node (a follower).
 pub fn boot_follower(name: &str) -> ShellFixture {
-    boot_with(name, false, NodeMode::ReadOnly, |_| {}).0
+    boot_with(name, false, NodeMode::ReadOnly, |_| {}, |_| None).0
 }
 
 /// Extend the PR1 listener configuration and return the actual bind slots
 /// (in configuration order) and the generated public certificate path.
+///
+/// `seed_root_owner` runs on THIS thread after the empty-directory stamp
+/// and before the offline Root ACL write. It may mint principals in the
+/// user directory and return the principal64 that must own
+/// `ResourcePath::Root`: Root is not addressable by any wire ACL op, so a
+/// non-bootstrap owner has to be in place before the launcher takes the
+/// store lock.
 fn boot_with(
     name: &str,
     root_list: bool,
     node_mode: NodeMode,
     extend: impl FnOnce(&mut Config) + Send + 'static,
+    seed_root_owner: impl FnOnce(&Path) -> Option<u64> + Send + 'static,
 ) -> (ShellFixture, Vec<Option<SocketAddr>>, PathBuf) {
     let guard = FlakeGuard::with_watchdog(name, WATCHDOG_AFTER);
     let data_dir = TempDir::new().expect("fixture tempdir");
     if root_list {
+        guard.mark("seed: stamp empty data dir");
+        secure_fixture::stamp_data_dir(data_dir.path());
+    }
+    let root_owner = seed_root_owner(data_dir.path());
+    assert!(
+        root_owner.is_none() || root_list,
+        "a pre-launch Root owner needs the offline Root ACL seed"
+    );
+    if root_list {
         guard.mark("seed: offline Root List ACL");
-        secure_fixture::seed_root_list(data_dir.path());
+        secure_fixture::seed_root_acl(data_dir.path(), root_owner);
     }
     let rt = TestRuntime::new();
     let canary = unique_canary();

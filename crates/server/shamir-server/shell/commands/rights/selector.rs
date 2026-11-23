@@ -56,6 +56,20 @@ pub(in crate::shell) const MAX_FUNCTION_NAME_BYTES: usize = 1024;
 /// server stays the authority for names between the guaranteed-fit length and
 /// this bound. A longer component can never exist, so the shell refuses it
 /// instead of signing a request for an impossible target.
+///
+/// This is a LOCAL shell-side FEASIBILITY gate on a Fjall physical-store
+/// limit, NOT parity with an engine refusal: a 245-byte component is refused
+/// here as [`ShellError::Usage`], while the engine would answer with its own
+/// typed validation error (the shell cannot know a name between the
+/// guaranteed-fit length and 244).
+///
+/// An ID-less embedded in-memory table is not subject to the fjall store-name
+/// check at all (`crates/storage/shamir-storage/src/stores/storage_in_memory.rs`,
+/// memory backend), so this ceiling is conservative for it too.
+///
+/// [`MAX_FUNCTION_NAME_BYTES`] (1024) is deliberately independent of this
+/// rule and stays: the engine persists function names verbatim with no
+/// physical-name rule (`create_function_with_opts_as`); do not merge the two.
 pub(in crate::shell) const MAX_TABLE_NAME_BYTES: usize = 244;
 
 /// The target a `rights show` / mutation path selector resolved to.

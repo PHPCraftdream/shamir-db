@@ -12,6 +12,8 @@
 //!      user is ALLOWED.
 
 mod coarse_gate;
-mod common;
+// `pub(crate)`: the raw-SCRAM login/roundtrip support is shared with the
+// shell tests in this binary (`shell::access_activity::parked_cancel`).
+pub(crate) mod common;
 mod modes;
 mod nested_batch;

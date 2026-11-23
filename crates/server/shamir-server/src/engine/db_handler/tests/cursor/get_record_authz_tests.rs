@@ -59,21 +59,21 @@ use crate::version::CURRENT_QUERY_LANG_VERSION;
 const ALICE_SID: [u8; 32] = [0xAA; 32];
 /// Generous per-call bound (hang detector; slow Windows runner).
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
-/// The byte budget the TEST holds for the whole parked window. The handler's
-/// `max_result_size_bytes` is deliberately bigger, so its upfront
-/// reservation cannot fit while the test holds this slice.
+/// The byte budget the TEST holds for the whole parked window; the handler's
+/// deliberately bigger `max_result_size_bytes` cannot fit while it is held.
 const SMALL_BUDGET: usize = 64;
-/// The handler result cap used by the parked fixtures (bigger than
-/// `SMALL_BUDGET`, bigger than the seeded record's encoded size).
+/// The handler result cap used by the parked fixtures (above `SMALL_BUDGET` and the seeded record).
 const PARKED_RESULT_CAP: usize = 1024;
 /// Payload value of the seeded control row.
 const SEEDED_V: i64 = 42;
 /// Payload value of the row seeded in the REPLACEMENT table.
 const REPLACEMENT_V: i64 = 99;
-/// The fixed-text refusal of a table whose authorized registration changed
-/// while the read was parked. Asserted exactly, so a payload can never
-/// satisfy it.
+/// The fixed-text refusal of a table whose authorized registration changed while
+/// the read was parked; asserted exactly, so a payload can never satisfy it.
 const REGISTRATION_CHANGED: &str = "the authorized table registration changed during the request";
+/// The fixed-text refusal for a table that is not configured in the
+/// repository (`unknown_table_response`, `operator_state.rs:149-154`).
+const UNKNOWN_TABLE_MESSAGE: &str = "table is not registered in the repository";
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -197,12 +197,23 @@ fn expect_error(resp: DbResponse, code: &str, context: &str) {
     }
 }
 
-/// Drive the point read until it is parked at the upfront budget reservation
-/// with the pre-budget resolution already done. The session's single request
-/// slot is the observable: while we can still take it ourselves the child has
-/// not reached step 3, so poll the child once (it must stay Pending, the
-/// budget is held); once we cannot take it, the child took it and ran the
-/// synchronous step 4/5 code in the same poll, so the capture is done.
+/// Assert the typed ABSENCE refusal: the `unknown_table` code and the fixed text
+/// from `unknown_table_response` (`operator_state.rs:149-154`); no payload passes.
+fn expect_unknown_table(resp: DbResponse, context: &str) {
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "unknown_table", "{context}");
+            assert_eq!(message, UNKNOWN_TABLE_MESSAGE, "{context}");
+        }
+        other => panic!("{context}: expected the fixed unknown_table refusal, got {other:?}"),
+    }
+}
+
+/// Drive the point read until it parks at the upfront budget reservation with
+/// the pre-budget resolution done. The session's single request slot is the
+/// observable: while we can still take it the child has not reached step 3, so
+/// poll the child once (it must stay Pending, the budget is held); once we
+/// cannot, the child took it and ran the synchronous step 4/5 code in that poll.
 async fn drive_to_capture<F: Future<Output = DbResponse>>(
     read: &mut Pin<Box<F>>,
     session: &Session,
@@ -259,11 +270,9 @@ async fn chmod_items_table(handler: &ShamirDbHandler, mode: u16) {
     .expect("admin chmod must succeed");
 }
 
-/// The LIVE registration of `app.main.items`: its `store_id` (as carried by
-/// the repository catalogue) and whether the name is registered at all.
-///
-/// Read through the repository handle the request would resolve, never from
-/// the request itself, so the assertions below observe the real state a
+/// The LIVE registration of `app.main.items`: its catalogue `store_id` and
+/// whether the name is registered at all. Read through the repository handle
+/// the request would resolve, so the assertions observe the real state a
 /// parked read compares against.
 fn items_registration(handler: &ShamirDbHandler) -> (Option<RecordId>, bool) {
     let repo = handler
@@ -278,15 +287,14 @@ fn items_registration(handler: &ShamirDbHandler) -> (Option<RecordId>, bool) {
     (store_id, repo.has_table("items"))
 }
 
-/// Drop `app.main.items` and create a fresh `items` in the same repo, as
-/// alice, through the REAL handler dispatch; then seed one row in the
-/// REPLACEMENT table with a unique payload, re-keyed at the caller-supplied
-/// `replacement_id` because the parked read was built before the park (a
-/// random insert id cannot be known then). A second handler over the SAME
-/// `ShamirDb` is used with an unbounded budget: dispatching the DDL on the
-/// bounded handler would park it on the very reservation the test holds (its
-/// upfront reserve is `batch.limits.max_result_size`, 10 MB by default), which
-/// would deadlock the rendezvous.
+/// Drop `app.main.items` and create a fresh `items` in the same repo as alice
+/// through the REAL handler dispatch, then seed a unique-payload row in the
+/// REPLACEMENT table, re-keyed at the caller-supplied `replacement_id` because
+/// the parked read predates the park (a random insert id cannot be known then).
+/// A second handler over the SAME `ShamirDb` uses an unbounded budget: the
+/// bounded handler would park on the reservation the test holds (its upfront
+/// reserve is `batch.limits.max_result_size`, 10 MB by default), deadlocking
+/// the rendezvous.
 ///
 /// Returns the live `store_id` read BEFORE the drop, the one read back AFTER
 /// the create and the unbounded handler (so the caller can drive the control
@@ -444,14 +452,18 @@ async fn replace_items_table(
         .await
         .expect("the seeded row read must complete within the 120s bound")
         .expect("the seeded replacement row must be readable");
-    let rekeyed = tokio::time::timeout(CALL_TIMEOUT, table.set(replacement_id, &inner))
+    // `TableManager::set` / `TableManager::delete` are explicitly NOT
+    // cancel-safe, so they are awaited directly and never wrapped in
+    // `tokio::time::timeout`: a timeout between the row mutation and the
+    // index/counter maintenance would leave a half-applied fixture.
+    let rekeyed = table
+        .set(replacement_id, &inner)
         .await
-        .expect("the keyed re-seed must complete within the 120s bound")
         .expect("re-keying the replacement row must succeed");
     assert!(rekeyed, "the keyed re-seed must CREATE the replacement row");
-    let removed = tokio::time::timeout(CALL_TIMEOUT, table.delete(inserted_id))
+    let removed = table
+        .delete(inserted_id)
         .await
-        .expect("the duplicate delete must complete within the 120s bound")
         .expect("removing the random-key duplicate must succeed");
     assert!(
         removed,
@@ -461,6 +473,76 @@ async fn replace_items_table(
     (pre_drop_store_id, post_create_store_id, ddl_handler)
 }
 
+/// Drop `app.main.items` (no replacement) through the REAL handler dispatch,
+/// leaving the name UNCONFIGURED: the destroy alias must report `existed: true`
+/// and the name must be absent afterwards, so a silent no-op DDL cannot leave
+/// the parked read vacuous. Unbounded second handler (the test holds the budget).
+async fn drop_items_table(handler: &ShamirDbHandler) -> ShamirDbHandler {
+    let session = superuser_alice_session();
+    // The builder refuses to build without the confirmation tag, so the
+    // canonical form is taken from the unsigned wire op itself.
+    let unsigned = BatchOp::DropTable(DropTableOp {
+        drop_table: "items".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
+    let tag = compute_tag_hex(
+        &session.hmac_key(),
+        &canonical_batch_op("app", &unsigned).expect("drop-table canonical form"),
+    );
+    let drop_op = drop_table("items")
+        .repo("main")
+        .hmac(tag)
+        .build()
+        .expect("build signed drop table");
+
+    let mut drop_batch = Batch::new();
+    drop_batch.drop_table("destroy", drop_op);
+
+    let ddl_handler =
+        ShamirDbHandler::new(Arc::clone(handler.db())).with_byte_budget(ByteBudget::unbounded());
+
+    let drop_resp = tokio::time::timeout(
+        CALL_TIMEOUT,
+        send(
+            &ddl_handler,
+            &session,
+            DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: "app".into(),
+                batch: drop_batch.build(),
+            },
+        ),
+    )
+    .await
+    .expect("the drop dispatch must complete within the 120s bound");
+    let drop_response = match drop_resp {
+        DbResponse::Batch { response } => response,
+        other => panic!("drop through the handler must succeed, got {other:?}"),
+    };
+    // `handle_drop_table` renders success as
+    // `{"dropped_table": <name>, "existed": <removed>}` (see
+    // `shamir-db` `admin_table_index.rs`), so the real leaf is `existed`.
+    assert_eq!(
+        drop_response.results["destroy"].records[0].get_value_bool("existed"),
+        Some(true),
+        "the destroy alias must report that the table existed"
+    );
+
+    let repo = ddl_handler
+        .db()
+        .get_db("app")
+        .and_then(|db| db.get_repo("main"))
+        .expect("app.main must be registered");
+    assert!(
+        !repo.has_table("items"),
+        "the drop must leave `items` unconfigured"
+    );
+    ddl_handler
+}
+
 /// Replace the whole `app.main` REGISTRATION with a LEGACY one
 /// (`table_config("items").store_id == None`), minting no store id.
 ///
@@ -468,10 +550,9 @@ async fn replace_items_table(
 /// table (`add_repo_as_with_durability_locked` loops over `config.tables` and
 /// calls `with_new_store_id`), so it can NEVER produce a legacy live
 /// registration. `DbInstance::add_repo` installs the supplied `RepoConfig` as
-/// given and is the route that keeps `store_id: None` — which is what makes
-/// the parked comparison `None == None` before the identity fix. The
-/// `remove_repo` bool is asserted here so a silent no-op removal cannot make
-/// the replacement vacuous.
+/// given, keeping `store_id: None` — which makes the parked comparison
+/// `None == None` before the identity fix. The `remove_repo` bool is asserted
+/// here so a silent no-op removal cannot make the replacement vacuous.
 async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
     let removed = tokio::time::timeout(CALL_TIMEOUT, handler.db().remove_repo("app", "main"))
         .await
@@ -492,12 +573,11 @@ async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
 // P1#1 — authorization must stay bound to the incarnation that is read.
 // ---------------------------------------------------------------------------
 
-/// The read passes the early ACL, parks on the held budget, the table's Read
-/// right is revoked, the budget is released: the reply must be the typed
-/// `access_denied`, never a record payload.
-///
-/// WITHOUT the fix the handler never re-authorizes, so the parked read
-/// resolves the table and returns the seeded `DbResponse::Record`.
+/// The read passes the early ACL and parks on the held budget, the table's
+/// Read right is revoked, the budget is released: the reply must be the typed
+/// `access_denied`, never a record payload. WITHOUT the fix the handler never
+/// re-authorizes: the parked read resolves the table and returns the seeded
+/// `DbResponse::Record`.
 #[tokio::test]
 async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
@@ -536,9 +616,9 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
 /// The read passes the early ACL and parks on the held budget; the table is
 /// then dropped and recreated under the SAME name in the same repo, and a row
 /// is seeded in the replacement. The name is configured and the ACL still
-/// passes — the CONTROL below reads the replacement's row back as the SAME
-/// non-admin alice — so only the captured registration comparison can refuse
-/// it, with the fixed typed `access_denied`.
+/// passes — the CONTROL below reads that row back as the SAME non-admin alice
+/// — so only the captured registration comparison can refuse it with the fixed
+/// typed `access_denied`.
 ///
 /// WITHOUT the identity fix the read resolves the NEW table, finds the
 /// replacement row under this same `replacement_id`, and returns THAT PAYLOAD
@@ -606,9 +686,17 @@ async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked()
                 code, "access_denied",
                 "authorized table registration replaced while parked"
             );
+            assert_ne!(
+                code, "unknown_table",
+                "a REPLACEMENT is a changed registration, not an absent table"
+            );
             assert_eq!(
                 message, REGISTRATION_CHANGED,
                 "the parked refusal must be the fixed registration text, never a payload"
+            );
+            assert_ne!(
+                message, UNKNOWN_TABLE_MESSAGE,
+                "the two absence arms must stay distinguishable by text too"
             );
         }
         other => panic!("expected the fixed access_denied refusal, got {other:?}"),
@@ -623,9 +711,8 @@ async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked()
 /// repository is first re-registered through
 /// [`replace_repo_with_legacy_items`] (the only route that installs an
 /// id-less table as-is). While the read is parked the whole registration is
-/// replaced the same legacy way: no store id is ever minted, and the
-/// `None`-before / `None`-after assertions below are what make this
-/// legacy-vs-legacy.
+/// replaced the same legacy way; no store id is ever minted, and the
+/// `None`-before / `None`-after assertions below make this legacy-vs-legacy.
 ///
 /// WITHOUT the registration identity the comparison is `None == None`, the
 /// read proceeds into the replacement repository and returns `not_found`, so
@@ -738,12 +825,10 @@ async fn get_record_granted_control_returns_the_seeded_row_after_parking() {
 // P1#2 — an unregistered table name must not reach the cold table resolver.
 // ---------------------------------------------------------------------------
 
-/// Eight DISTINCT never-created table names, each a typed `unknown_table`,
-/// must leave the repository's direct cell map byte-for-byte unchanged:
-/// `ShamirDb::get_table` would otherwise insert one catalogue cell per probe
-/// before checking configuration.
-///
-/// WITHOUT the fix these eight requests grow the cell map by eight.
+/// Eight DISTINCT never-created table names, each a typed `unknown_table`, must
+/// leave the repository's direct cell map byte-for-byte unchanged:
+/// `ShamirDb::get_table` inserts one catalogue cell per probe. WITHOUT the fix
+/// these eight requests grow the cell map by eight.
 #[tokio::test]
 async fn missing_table_names_do_not_grow_the_catalogue_cells() {
     let (handler, _seeded) =
@@ -766,7 +851,10 @@ async fn missing_table_names_do_not_grow_the_catalogue_cells() {
             get_record("app", "main", name.as_str(), RecordId([9u8; 16])),
         )
         .await;
-        expect_error(resp, "unknown_table", "unregistered table name");
+        // Extends the original code-only check: the STEP-5 absence arm must
+        // answer BOTH the typed code and the fixed text from
+        // `unknown_table_response` (`operator_state.rs:149-154`).
+        expect_unknown_table(resp, "unregistered table name");
     }
 
     assert_eq!(
@@ -774,6 +862,52 @@ async fn missing_table_names_do_not_grow_the_catalogue_cells() {
         before,
         "a refused missing-table probe must not insert a catalogue cell"
     );
+}
+
+/// The read captures `items` at step 5, parks on the held byte budget, and the
+/// table is then DROPPED with no replacement through the REAL handler dispatch
+/// (`drop_items_table`). The step-7 re-probe therefore observes absence and
+/// must answer the fixed `unknown_table` — never the changed-registration
+/// refusal and never a `not_found` from the cold resolver.
+///
+/// The reading session is a store-stamped superuser so the re-run ACL cannot
+/// mask the absence subject with an `access_denied`; this test is about the
+/// step-7 `None` branch, not authorization.
+///
+/// WITHOUT the typed-absence branch the dropped name would fall through to
+/// `ShamirDb::get_table` and surface `not_found`, so this test fails.
+#[tokio::test]
+async fn get_record_reports_unknown_table_when_the_table_is_dropped_while_parked() {
+    let budget = ByteBudget::new(Some(SMALL_BUDGET));
+    let (handler, seeded) =
+        tokio::time::timeout(CALL_TIMEOUT, build_handler(budget.clone(), parked_limits()))
+            .await
+            .expect("the handler fixture must build within the 120s bound");
+    let store = SessionStore::new();
+    let session = store.insert(ALICE_SID, superuser_alice_session());
+    assert_ne!(
+        session.activity_handle(),
+        0,
+        "the store-stamped session is the park observable"
+    );
+
+    let held = tokio::time::timeout(CALL_TIMEOUT, budget.acquire(SMALL_BUDGET))
+        .await
+        .expect("the test must reserve the byte budget within the 120s bound");
+    let mut read = Box::pin(send(&handler, &session, get_record_req(seeded)));
+    tokio::time::timeout(CALL_TIMEOUT, drive_to_capture(&mut read, &session))
+        .await
+        .expect("the read must reach the budget park within the 120s bound");
+
+    tokio::time::timeout(CALL_TIMEOUT, drop_items_table(&handler))
+        .await
+        .expect("the drop must complete within the 120s bound");
+    drop(held);
+
+    let resp = tokio::time::timeout(CALL_TIMEOUT, read)
+        .await
+        .expect("the released read must complete within the 120s bound");
+    expect_unknown_table(resp, "table removed between the two re-probes");
 }
 
 // ---------------------------------------------------------------------------
@@ -798,11 +932,10 @@ fn expect_invalid_name(resp: DbResponse, context: &str) {
 }
 
 /// A 256-byte `db`, `repo` or `table` name is the fixed `invalid_request`
-/// refusal that never echoes the input; a 255-byte table name passes the
-/// bound (it then fails later with `unknown_table`, proving the boundary).
-///
-/// WITHOUT the fix the over-long name is echoed back in a resolution error
-/// and reaches the catalogue/resolver instead of being refused up front.
+/// refusal that never echoes the input; a 255-byte table name passes the bound
+/// (it then fails later with `unknown_table`, proving the boundary). WITHOUT
+/// the fix the over-long name is echoed back in a resolution error and reaches
+/// the catalogue/resolver instead of being refused up front.
 #[tokio::test]
 async fn get_record_refuses_over_long_names_without_echoing_them() {
     let (handler, _seeded) =

@@ -31,6 +31,7 @@ use shamir_query_types::admin::activity::{
 };
 
 use shamir_connect::common::types::limits::USERNAME_MAX_BYTES;
+use shamir_connect::common::username::NormalizedUsername;
 
 use super::super::output::{self, ShellError};
 use crate::shell::connect::SessionClient;
@@ -368,31 +369,43 @@ fn name_field(raw: &str, cap: usize) -> String {
     }
 }
 
-/// One principal name, projected ONLY when the shell can vouch for it from
-/// the login rule the server enforces:
-/// `crates/net/shamir-connect/src/common/user/username.rs`
-/// (`NormalizedUsername::from_raw`) applies the RFC 8265 PRECIS
-/// `UsernameCaseMapped` profile, which keeps the full Unicode repertoire,
-/// case-maps it, normalises it to NFC and caps it at
-/// [`USERNAME_MAX_BYTES`] = 255 bytes. This allowlist therefore requires
-/// non-empty, at most `cap` bytes, and no character that is a control, a
-/// whitespace or a display control (the bidi/zero-width/line-separator set
-/// `output::sanitize` escapes). Anything else becomes the fixed
+/// The `shk1.` prefix of the shell's own API-token wire shape, mirrored from
+/// the credential check in `crate::shell::connect::token`
+/// (`check_catalogue_output`, whose comment names the canonical
+/// `shk1.<id>.<secret>` format that this shell refuses to echo). A `user`
+/// cell carrying that prefix is redacted even though the login rule itself
+/// would accept the text: over-redacting a token-shaped name is the owner's
+/// accepted choice.
+const API_TOKEN_PREFIX: &str = "shk1.";
+
+/// One principal name, projected ONLY when the SERVER would accept it as a
+/// login: [`NormalizedUsername::from_raw`]
+/// (`crates/net/shamir-connect/src/common/user/username.rs`), the RFC 8265
+/// PRECIS `UsernameCaseMapped` validator, must return `Ok(normalized)` with
+/// `normalized.as_str() == raw` — the canonical wire text — and `raw` must
+/// fit `cap` bytes, carry no display control, and not be shaped like an API
+/// token ([`API_TOKEN_PREFIX`]). Anything else becomes the fixed
 /// [`INVALID_FIELD`] placeholder.
 ///
-/// This is a PERMISSIVE shell-side allowlist, not a copy of the profile: it
-/// does not run the PRECIS width mapping, case mapping, NFC normalisation or
-/// the Bidi rule (no `precis-profiles` dependency in this crate), so a name
-/// the server would reject on one of those steps still passes here. It is
-/// only shape filtering: terminal safety comes from `output::sanitize`
-/// downstream, which escapes control, display-control and backslash
-/// characters, so non-ASCII letters are safe to pass through.
+/// This delegates to the server's own validator and does NOT re-implement
+/// PRECIS: no width mapping, case mapping, NFC normalisation or Bidi rule
+/// lives here, so a name the server normalises away (decomposed NFC, a
+/// private-use code point, a soft hyphen, an uppercase letter) is rejected
+/// because it is not the text the server would store, and a name the server
+/// rejects is never admitted. The token check on top of the login rule is
+/// deliberate over-redaction. Terminal safety still comes from
+/// `output::sanitize` downstream, which escapes control, display-control and
+/// backslash characters.
 fn user_field(raw: &str, cap: usize) -> String {
-    let allowed = !raw.is_empty()
-        && raw.len() <= cap
-        && raw.chars().all(|character| {
-            !character.is_control() && !character.is_whitespace() && !is_display_control(character)
-        });
+    let canonical =
+        NormalizedUsername::from_raw(raw).is_ok_and(|normalized| normalized.as_str() == raw);
+    // Belt and braces: the validator already rejects these, but the
+    // terminal-safety rule stays explicit here.
+    let display_safe = raw
+        .chars()
+        .all(|character| !character.is_control() && !is_display_control(character));
+    let allowed =
+        canonical && raw.len() <= cap && display_safe && !raw.starts_with(API_TOKEN_PREFIX);
     if allowed {
         raw.to_owned()
     } else {

@@ -1,10 +1,11 @@
 //! A genuinely PARKED request cancelled through the real shell.
 //!
-//! Topology: one real [`shamir_client::Client`] session A and the production
-//! shell as bootstrap admin (session B). A opens a pessimistic interactive
-//! transaction, stages a row write (which holds the row's Level-3 record
-//! lock), and then issues a conflicting pessimistic write. The server parks
-//! that second A request as `waiting_lock`; the shell observes it through
+//! Topology: raw-SCRAM session A as the holder (`conn1`) — it seeds the row,
+//! opens a pessimistic interactive transaction and stages a row write (which
+//! holds the row's Level-3 record lock). A second raw-SCRAM session of the
+//! same user (`conn2`) issues the conflicting pessimistic write; the server
+//! parks that request as `waiting_lock`. The production shell runs as
+//! bootstrap admin (session B): it observes the park through
 //! `activity requests --all` and cancels it with `activity cancel <id> --yes`.
 //!
 //! Every await is hang-bounded by [`BOUND`]; the park is confirmed by a
@@ -12,17 +13,22 @@
 //! the loop yields to the runtime and to the parked request).
 
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use shamir_client::{BatchResponse, Client, ClientError, ConnectOptions};
 use shamir_query_builder::batch::{Batch, Isolation};
 use shamir_query_builder::{doc, filter, write};
 use shamir_query_types::admin::ResourceRef;
-use shamir_query_types::batch::IsolationLevel;
+use shamir_query_types::batch::{BatchResponse, IsolationLevel};
 use shamir_query_types::write::UpdateOp;
+use shamir_server::db_handler::{DbRequest, DbResponse};
+use shamir_server::version::CURRENT_QUERY_LANG_VERSION;
+use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 use zeroize::Zeroizing;
+
+use crate::permission_e2e::common::{roundtrip, scram_login};
 
 use super::harness::{
     boot, overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellFixture, ShellRun,
@@ -74,47 +80,90 @@ fn keys_exact(value: &Value, expected: &[&str], context: &str) {
     assert_eq!(actual, wanted, "{context} field set");
 }
 
+// ── Raw session transport ────────────────────────────────────────────
+//
+// The SDK's `tx_begin`/`tx_execute`/`tx_rollback` helpers are gone; the
+// sessions below speak the wire directly through the raw-SCRAM support the
+// `permission_e2e` tests already own (`scram_login` + `roundtrip`), so the
+// bytes on the wire and the assertions on the replies are the same as the
+// old `Client` calls.
+
+/// Response side of one raw session's TLS transport.
+type TlsRead = ReadHalf<TlsStream<TcpStream>>;
+/// Request side of one raw session's TLS transport.
+type TlsWrite = WriteHalf<TlsStream<TcpStream>>;
+
+/// One live raw-SCRAM session: its server-minted id, the running request id
+/// and its split TLS halves.
+struct RawSession {
+    /// Session id minted by SCRAM `auth_ok` (never logged, never printed).
+    sid: [u8; 32],
+    /// Next request id to stamp on the envelope.
+    next_rid: u32,
+    /// Response side of the session transport.
+    read: TlsRead,
+    /// Request side of the session transport.
+    write: TlsWrite,
+}
+
+impl RawSession {
+    /// One bounded request/reply on this session; hands the session back so
+    /// the same connection carries the next call.
+    fn ask(mut self, fixture: &ShellFixture, req: DbRequest) -> (Self, DbResponse) {
+        fixture.rt.run(async move {
+            let response = exchange(&mut self, &req).await;
+            (self, response)
+        })
+    }
+}
+
+/// Open one raw session as `SHELL_USER` (the password bytes are zeroized on
+/// drop, like the old `ConnectOptions` carried them).
+fn login(fixture: &ShellFixture, password: &[u8]) -> RawSession {
+    let addr = fixture.tls_addr;
+    let password = Zeroizing::new(password.to_vec());
+    // The `within` bound is built INSIDE the runtime job: the timeout's
+    // timer handle comes from the runtime context.
+    let (sid, read, write, next_rid) = fixture
+        .rt
+        .run(async move { within(scram_login(addr, SHELL_USER, &password)).await });
+    RawSession {
+        sid,
+        next_rid,
+        read,
+        write,
+    }
+}
+
+/// One bounded request/reply on a borrowed session (also used from the
+/// spawned task, which owns its session for the whole call).
+async fn exchange(session: &mut RawSession, req: &DbRequest) -> DbResponse {
+    within(roundtrip(
+        req,
+        session.sid,
+        &mut session.next_rid,
+        &mut session.write,
+        &mut session.read,
+    ))
+    .await
+}
+
+/// Unwrap one successful batch-shaped reply; any other shape is a failure of
+/// `context` (an `Error` reply names its server-side code).
+fn batch_reply(response: DbResponse, context: &str) -> BatchResponse {
+    match response {
+        DbResponse::Batch { response } | DbResponse::TxBatch { response } => response,
+        DbResponse::Error { code, .. } => panic!("{context}: server replied `{code}`"),
+        _ => panic!("{context}: unexpected reply shape"),
+    }
+}
+
 // ── Fixture helpers ──────────────────────────────────────────────────
 
 /// Point the shell's profile at the bootstrap admin over TLS-TCP.
 fn use_admin_profile(fixture: &ShellFixture) {
     let text = scram_profile(fixture, "tls-tcp", &fixture.tls_addr.to_string());
     overwrite_profile(fixture, &text);
-}
-
-/// Connect one REAL second session as `SHELL_USER` and keep it open.
-fn open_shell_user_session(fixture: &ShellFixture, password: Zeroizing<String>) -> Client {
-    let addr = fixture.tls_addr;
-    let pin = fixture.pin;
-    fixture.rt.run(async move {
-        // `ConnectOptions` carries the password as bytes (zeroized on drop).
-        let password = Zeroizing::new(password.as_bytes().to_vec());
-        let options = ConnectOptions {
-            addr,
-            server_name: String::from("localhost"),
-            username: String::from(SHELL_USER),
-            password,
-            accept_new_host: false,
-            trusted_pin: Some(pin),
-            connect_timeout: Some(BOUND),
-            handshake_timeout: Some(BOUND),
-            request_timeout: Some(BOUND),
-        };
-        tokio::time::timeout(BOUND, Client::connect(options))
-            .await
-            .expect("second-session connect hang bound")
-            .expect("second-session verified TLS connect")
-    })
-}
-
-/// Close one live session under a hang bound (`close` awaits the transport
-/// shutdown).
-fn close_session(fixture: &ShellFixture, client: Client) {
-    fixture.rt.run(async move {
-        tokio::time::timeout(BOUND, client.close())
-            .await
-            .expect("second-session close hang bound");
-    });
 }
 
 /// One bounded await; an elapse is a genuine hang.
@@ -151,28 +200,30 @@ fn grant_write_access(fixture: &ShellFixture) {
 }
 
 /// Insert the one row A's interactive transaction will lock.
-fn insert_target_row(fixture: &ShellFixture, client: &Arc<Client>) {
-    let client = Arc::clone(client);
-    fixture.rt.run(async move {
-        let mut batch = Batch::new();
-        batch.id("seed_target");
-        batch.insert(
-            "row",
-            write::Insert::with_repo(REPO_NAME, PLAIN_TABLE).rows([doc! { "n" => 1_i64 }]),
-        );
-        let response = within(client.execute(DB_NAME, batch.build()))
-            .await
-            .expect("seed target row executes");
-        let inserted = response
-            .results
-            .get("row")
-            .expect("seed target alias present");
-        assert_eq!(
-            inserted.records.len(),
-            1,
-            "the target insert must echo one row"
-        );
-    });
+fn insert_target_row(fixture: &ShellFixture, session: RawSession) -> RawSession {
+    let mut batch = Batch::new();
+    batch.id("seed_target");
+    batch.insert(
+        "row",
+        write::Insert::with_repo(REPO_NAME, PLAIN_TABLE).rows([doc! { "n" => 1_i64 }]),
+    );
+    let request = DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: DB_NAME.into(),
+        batch: batch.build(),
+    };
+    let (session, reply) = session.ask(fixture, request);
+    let response = batch_reply(reply, "seed target row executes");
+    let inserted = response
+        .results
+        .get("row")
+        .expect("seed target alias present");
+    assert_eq!(
+        inserted.records.len(),
+        1,
+        "the target insert must echo one row"
+    );
+    session
 }
 
 /// The one conflicting update both transactions target.
@@ -185,57 +236,113 @@ fn update_n(from: i64, to: i64) -> UpdateOp {
 }
 
 /// Begin A's pessimistic interactive transaction.
-fn begin_pessimistic_tx(fixture: &ShellFixture, client: &Arc<Client>) -> u64 {
-    let client = Arc::clone(client);
-    fixture.rt.run(async move {
-        within(client.tx_begin(DB_NAME, REPO_NAME, Some(IsolationLevel::Pessimistic)))
-            .await
-            .expect("session A begins its interactive transaction")
-    })
+fn begin_pessimistic_tx(fixture: &ShellFixture, session: RawSession) -> (RawSession, u64) {
+    let request = DbRequest::TxBegin {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: DB_NAME.into(),
+        repo: REPO_NAME.into(),
+        isolation: Some(IsolationLevel::Pessimistic),
+    };
+    let (session, reply) = session.ask(fixture, request);
+    match reply {
+        DbResponse::TxOpened { tx_handle, .. } => (session, tx_handle),
+        DbResponse::Error { code, .. } => {
+            panic!("session A begins its interactive transaction: server replied `{code}`")
+        }
+        _ => panic!("session A begins its interactive transaction: unexpected reply shape"),
+    }
 }
 
 /// Stage the row write inside A's open transaction; the staged write keeps
 /// the row's record lock until commit or rollback.
-fn stage_write(fixture: &ShellFixture, client: &Arc<Client>, tx_handle: u64) {
-    let client = Arc::clone(client);
-    fixture.rt.run(async move {
-        let mut batch = Batch::new();
-        batch.id("stage");
-        batch.update("staged", update_n(1, -1));
-        let response = within(client.tx_execute(DB_NAME, tx_handle, batch.build()))
-            .await
-            .expect("staged write executes inside the transaction");
-        let staged = response
-            .results
-            .get("staged")
-            .expect("staged alias present");
-        assert_eq!(
-            staged.records.len(),
-            1,
-            "the staged update must hit one row"
-        );
-    });
+fn stage_write(fixture: &ShellFixture, session: RawSession, tx_handle: u64) -> RawSession {
+    let mut batch = Batch::new();
+    batch.id("stage");
+    batch.update("staged", update_n(1, -1));
+    let request = DbRequest::TxExecute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: DB_NAME.into(),
+        tx_handle,
+        batch: batch.build(),
+    };
+    let (session, reply) = session.ask(fixture, request);
+    let response = batch_reply(reply, "staged write executes inside the transaction");
+    let staged = response
+        .results
+        .get("staged")
+        .expect("staged alias present");
+    let stats = staged
+        .stats
+        .as_ref()
+        .expect("the staged update result carries stats");
+    assert_eq!(
+        stats.records_returned, 1,
+        "the staged update must hit one row"
+    );
+    session
 }
 
 /// Spawn A's second, conflicting request. It blocks on the row lock the open
 /// transaction already holds, so the server parks it as `waiting_lock`.
 fn spawn_parked_request(
     fixture: &ShellFixture,
-    client: &Arc<Client>,
-) -> tokio::task::JoinHandle<Result<BatchResponse, ClientError>> {
-    let client = Arc::clone(client);
+    mut session: RawSession,
+) -> tokio::task::JoinHandle<DbResponse> {
+    let mut batch = Batch::new();
+    batch.id("parked");
+    batch.transactional().isolation(Isolation::Pessimistic);
+    batch.update("blocked", update_n(1, 2));
+    let request = DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: DB_NAME.into(),
+        batch: batch.build(),
+    };
+    // The task owns its session until the server answers, exactly like the
+    // old `tokio::spawn(client.execute(...))`.
     fixture
         .rt
         .run(async move {
             (tokio::spawn(async move {
-                let mut batch = Batch::new();
-                batch.id("parked");
-                batch.transactional().isolation(Isolation::Pessimistic);
-                batch.update("blocked", update_n(1, 2));
-                within(client.execute(DB_NAME, batch.build())).await
+                exchange(&mut session, &request).await
             }),)
         })
         .0
+}
+
+/// Roll back A's open transaction under a hang bound.
+fn rollback_tx(fixture: &ShellFixture, session: RawSession, tx_handle: u64) -> RawSession {
+    let request = DbRequest::TxRollback {
+        db: DB_NAME.into(),
+        tx_handle,
+    };
+    let (session, reply) = session.ask(fixture, request);
+    match reply {
+        DbResponse::TxRolledBack {
+            tx_handle: rolled_back,
+        } => assert_eq!(
+            rolled_back, tx_handle,
+            "session A rolls back the handle it opened"
+        ),
+        DbResponse::Error { code, .. } => {
+            panic!("session A rolls back its transaction: server replied `{code}`")
+        }
+        _ => panic!("session A rolls back its transaction: unexpected reply shape"),
+    }
+    session
+}
+
+/// Close one raw session: a bounded TLS `close_notify` on the write half
+/// replaces `Client::close`, then both halves drop and the socket closes.
+fn close_session(fixture: &ShellFixture, session: RawSession) {
+    let RawSession {
+        mut write, read, ..
+    } = session;
+    fixture.rt.run(async move {
+        within(write.shutdown())
+            .await
+            .expect("session A close hang bound");
+        drop(read);
+    });
 }
 
 // ── Output and leak helpers ──────────────────────────────────────────
@@ -343,9 +450,10 @@ fn await_parked_row(fixture: &ShellFixture, needles: &[&str]) -> Value {
 }
 
 /// Prove, from the same `activity sessions --all` page, that `parked_handle`
-/// is A's live session and return the shell's OWN admin handle. Handles are
-/// minted monotonically, so the listing shell's (newest) admin session is the
-/// maximum admin handle on the page.
+/// is one of A's live sessions (A holds TWO raw sessions: the transaction
+/// holder and the parked victim) and return the shell's OWN admin handle.
+/// Handles are minted monotonically, so the listing shell's (newest) admin
+/// session is the maximum admin handle on the page.
 fn shell_own_handle(fixture: &ShellFixture, needles: &[&str], parked_handle: &str) -> String {
     let run = checked_shell(fixture, needles, &["activity", "sessions", "--all"]);
     let payload = data(&run, "sessions");
@@ -353,19 +461,19 @@ fn shell_own_handle(fixture: &ShellFixture, needles: &[&str], parked_handle: &st
     let rows = payload["rows"]
         .as_array()
         .expect("activity sessions `rows` is not an array");
-    let foreign_rows: Vec<&Value> = rows
+    let foreign_handles: Vec<String> = rows
         .iter()
         .filter(|row| row["user"].as_str() == Some(SHELL_USER))
+        .map(|row| decimal(&row["session_handle"], "session A handle"))
         .collect();
     assert_eq!(
-        foreign_rows.len(),
-        1,
-        "the page must carry exactly A's live session"
+        foreign_handles.len(),
+        2,
+        "the page must carry exactly A's two live sessions"
     );
-    let a_handle = decimal(&foreign_rows[0]["session_handle"], "session A handle");
-    assert_eq!(
-        a_handle, parked_handle,
-        "the parked request row belongs to A's live session"
+    assert!(
+        foreign_handles.iter().any(|handle| handle == parked_handle),
+        "the parked request row belongs to one of A's live sessions"
     );
     // Handles are minted monotonically, so the listing shell's own (newest)
     // admin session is the maximum admin handle on the page. Earlier batch
@@ -380,10 +488,12 @@ fn shell_own_handle(fixture: &ShellFixture, needles: &[&str], parked_handle: &st
         })
         .expect("the listing shell's own admin session must be on the page");
     let shell_handle = decimal(&shell_row["session_handle"], "shell session_handle");
-    assert_ne!(
-        shell_handle, a_handle,
-        "A and the shell are distinct sessions"
-    );
+    for handle in &foreign_handles {
+        assert_ne!(
+            handle, &shell_handle,
+            "A and the shell are distinct sessions"
+        );
+    }
     shell_handle
 }
 
@@ -411,8 +521,9 @@ fn parked_request_is_cancelled_through_the_shell() {
     grant_write_access(fixture);
     use_admin_profile(fixture);
 
-    let client = Arc::new(open_shell_user_session(fixture, a_password.clone()));
-    let session_hex = hex::encode(client.session_id());
+    let conn1 = login(fixture, a_password.as_bytes());
+    let conn2 = login(fixture, a_password.as_bytes());
+    let session_hex = hex::encode(conn2.sid);
     let needles = [
         fixture.canary.as_str(),
         a_password.as_str(),
@@ -420,16 +531,16 @@ fn parked_request_is_cancelled_through_the_shell() {
     ];
 
     fixture.guard.mark("park: seed the target row");
-    insert_target_row(fixture, &client);
+    let conn1 = insert_target_row(fixture, conn1);
 
     fixture
         .guard
         .mark("park: A opens a pessimistic transaction and stages a write");
-    let tx_handle = begin_pessimistic_tx(fixture, &client);
-    stage_write(fixture, &client, tx_handle);
+    let (conn1, tx_handle) = begin_pessimistic_tx(fixture, conn1);
+    let conn1 = stage_write(fixture, conn1, tx_handle);
 
     fixture.guard.mark("park: A issues the conflicting write");
-    let parked = spawn_parked_request(fixture, &client);
+    let parked = spawn_parked_request(fixture, conn2);
 
     fixture
         .guard
@@ -483,17 +594,17 @@ fn parked_request_is_cancelled_through_the_shell() {
     );
 
     let joined = fixture.rt.run(async move { within(parked).await });
-    let result = match joined {
-        Ok(result) => result,
+    let reply = match joined {
+        Ok(reply) => reply,
         Err(_) => panic!("the parked request task did not join"),
     };
-    match result {
-        Err(ClientError::Db { code, .. }) => assert_eq!(
+    match reply {
+        DbResponse::Error { code, .. } => assert_eq!(
             code, "cancelled",
             "the parked request must fail with the typed `cancelled` code"
         ),
-        Err(_other) => panic!("the parked request failed with an unexpected typed error"),
-        Ok(_) => panic!("the cancelled request unexpectedly completed"),
+        DbResponse::Batch { .. } => panic!("the cancelled request unexpectedly completed"),
+        _other => panic!("the parked request failed with an unexpected typed error"),
     }
 
     // ── Assertion 3: no session material in streams or the profile home ─
@@ -501,15 +612,6 @@ fn parked_request_is_cancelled_through_the_shell() {
     scan_profile_home(fixture, &needles);
 
     fixture.guard.mark("park: rollback and close session A");
-    let rollback = Arc::clone(&client);
-    fixture.rt.run(async move {
-        within(rollback.tx_rollback(DB_NAME, tx_handle))
-            .await
-            .expect("session A rolls back its transaction")
-    });
-    let client = match Arc::try_unwrap(client) {
-        Ok(client) => client,
-        Err(_) => panic!("session A is still shared at teardown"),
-    };
-    close_session(fixture, client);
+    let conn1 = rollback_tx(fixture, conn1, tx_handle);
+    close_session(fixture, conn1);
 }

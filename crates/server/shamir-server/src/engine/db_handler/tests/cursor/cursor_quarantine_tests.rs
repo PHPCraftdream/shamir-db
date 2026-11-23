@@ -54,24 +54,43 @@ fn alice_session() -> Session {
     s
 }
 
+/// Per-step wall-clock bound for fixture setup/teardown (hang DETECTOR, not
+/// a latency assertion): a stuck bootstrap fails at the step's own await
+/// instead of consuming the harness kill.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run one fixture setup/teardown await under [`SETUP_TIMEOUT`], naming the
+/// step so a hang panics with the diagnostic at the site.
+async fn bounded<T>(step: &'static str, fut: impl Future<Output = T>) -> T {
+    tokio::time::timeout(SETUP_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("the setup step `{step}` did not finish within 30s"))
+}
+
 /// Handler over an in-memory `ShamirDb` with `app/{main,side,other}.items`,
 /// owned by alice. `main` gets the quarantine in the tests below; `side`
 /// carries an ACTIVE (never quarantined) subscription; `other` has no
 /// replication at all.
 async fn build_handler() -> ShamirDbHandler {
-    let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal64([0xAB; 16]));
-    shamir
-        .create_db_as("app", owner.clone())
+    let shamir = bounded("init in-memory ShamirDb", ShamirDb::init_memory())
         .await
-        .expect("create_db");
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    bounded(
+        "create database `app`",
+        shamir.create_db_as("app", owner.clone()),
+    )
+    .await
+    .expect("create_db");
     for repo in ["main", "side", "other"] {
         let cfg =
             RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
-        shamir
-            .add_repo_as("app", cfg, owner.clone())
-            .await
-            .expect("add repo");
+        bounded(
+            "add `items` repository",
+            shamir.add_repo_as("app", cfg, owner.clone()),
+        )
+        .await
+        .expect("add repo");
     }
 
     // Seed three rows into each repo's `items` (page_size-1 cursors need a
@@ -88,8 +107,7 @@ async fn build_handler() -> ShamirDbHandler {
             );
         }
     }
-    shamir
-        .execute_as(owner, "app", &b.build())
+    bounded("seed rows", shamir.execute_as(owner, "app", &b.build()))
         .await
         .expect("seed rows");
 
@@ -113,16 +131,18 @@ async fn quarantine(handler: &ShamirDbHandler, sub: &str, profile: &str, repo: &
         ),
     );
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
-    handler
-        .db()
-        .execute_as(Actor::System, "app", &b.build())
-        .await
-        .expect("admin replication batch must succeed");
-    handler
-        .db()
-        .mark_subscription_resync_required(sub, 7, 3)
-        .await
-        .expect("mark resync_required must succeed");
+    bounded(
+        "register replication profile/subscription",
+        handler.db().execute_as(Actor::System, "app", &b.build()),
+    )
+    .await
+    .expect("admin replication batch must succeed");
+    bounded(
+        "mark subscription resync_required",
+        handler.db().mark_subscription_resync_required(sub, 7, 3),
+    )
+    .await
+    .expect("mark resync_required must succeed");
 }
 
 async fn send(handler: &ShamirDbHandler, session: &Session, req: DbRequest) -> DbResponse {
@@ -226,11 +246,12 @@ async fn cursor_reads_healthy_and_non_replicated_repos_unaffected() {
         "sub",
         subscription("side_sub", "tcp://peer:9000", "pub", "side_prof"),
     );
-    handler
-        .db()
-        .execute_as(Actor::System, "app", &b.build())
-        .await
-        .expect("admin replication batch must succeed");
+    bounded(
+        "register `side` replication profile/subscription",
+        handler.db().execute_as(Actor::System, "app", &b.build()),
+    )
+    .await
+    .expect("admin replication batch must succeed");
 
     let resp = send(
         &handler,

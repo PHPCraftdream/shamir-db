@@ -1,13 +1,14 @@
 //! Free-text activity fields are projected through an allowlist, never
 //! echoed as-is (design `admin-shell.md` §4.5, the privacy rule): `user`
-//! must be a principal name the server accepts (RFC 8265 PRECIS
-//! `UsernameCaseMapped`, which `crates/net/shamir-connect/src/common/user/
-//! username.rs` enforces, mirrored here as far as the shell can without
-//! that crate), `db` must match the engine's own component-name rule,
-//! `transport` must be one of the three labels the server emits, `op_kind`
-//! must be a wire operation discriminant. Anything else is the fixed
-//! `<invalid>` placeholder, so a peer cannot smuggle a terminal escape or an
-//! over-long blob into the operator's terminal.
+//! must be a principal name the server accepts — the shell delegates to
+//! `NormalizedUsername::from_raw`
+//! (`crates/net/shamir-connect/src/common/user/username.rs`, RFC 8265
+//! PRECIS `UsernameCaseMapped`) and keeps the value only when it is already
+//! canonical, and never a token shape — `db` must match the engine's own
+//! component-name rule, `transport` must be one of the three labels the
+//! server emits, `op_kind` must be a wire operation discriminant. Anything
+//! else is the fixed `<invalid>` placeholder, so a peer cannot smuggle a
+//! terminal escape or an over-long blob into the operator's terminal.
 //!
 //! Every assertion below names the value it forbids, so deleting the
 //! allowlist (or widening it to `output::sanitize`) fails the test instead
@@ -21,7 +22,9 @@ use super::{project_request, project_session};
 /// The fixed placeholder every out-of-shape field renders as.
 const INVALID: &str = "<invalid>";
 
-/// A credential-looking blob: a token shape the shell must never echo.
+/// A credential-looking blob: a token shape the shell must never echo, in
+/// any field (for `user` it is redundant with the login rule, and that
+/// over-redaction is deliberate).
 const TOKEN_SHAPE: &str = "shk1.7f3a9c.4b1d2e6f8a0c";
 
 /// One session row with the four free-text fields under test.
@@ -76,9 +79,9 @@ fn documented_values_pass_through() {
 /// A control/escape sequence, a whitespace, an empty value and an over-long
 /// value in ANY free-text field render as the one fixed placeholder (mutant:
 /// echoing `sanitize`d wire text — an escape-only sanitiser still lets
-/// whitespace and the long blob through). A credential shape is hostile only
-/// where it cannot be the field's real value (`db`, `transport`, `op_kind`);
-/// `user` is a login name, which is legitimately any Unicode text (see
+/// whitespace and the long blob through). A credential shape is hostile in
+/// every field, `user` included (see [`user_field_rejects_token_shaped_names`]);
+/// a login name is legitimately any Unicode text the server accepts (see
 /// [`user_field_accepts_precis_names`]).
 #[test]
 fn hostile_values_render_the_placeholder() {
@@ -291,8 +294,8 @@ fn name_caps_follow_the_engine_limits() {
     assert_eq!(request["db"], INVALID);
 
     // `db` keeps the engine's ASCII-only component rule, so a non-ASCII or
-    // dotted value the `user` field now prints is still the placeholder for a
-    // database (see `db_field_keeps_the_component_rule`).
+    // dotted value is the placeholder for a database even where a login of
+    // the same text is printable (see `db_field_keeps_the_component_rule`).
     for raw in ["ünïcode", "mixed_case.with.dot"] {
         let request = project_request(&request_row("admin", raw, "write")).expect("projects");
         assert_eq!(request["db"], INVALID, "the db charset stays ASCII-only");
@@ -302,13 +305,21 @@ fn name_caps_follow_the_engine_limits() {
 /// The `user` field follows the login profile the SERVER enforces, not the
 /// engine's ASCII component rule: `crates/net/shamir-connect/src/common/user/
 /// username.rs` accepts a PRECIS `UsernameCaseMapped` login in any script, so
-/// a legitimate non-ASCII login must be printed, never hidden. Mutant: the
-/// component rule `[A-Za-z0-9_-]` applied to a principal, which turned every
-/// non-ASCII login into `<invalid>` in a real `activity sessions` /
-/// `activity requests` listing.
+/// a legitimate canonical non-ASCII login must be printed, never hidden.
+/// Mutant: the component rule `[A-Za-z0-9_-]` applied to a principal, which
+/// turned every non-ASCII login into `<invalid>` in a real `activity
+/// sessions` / `activity requests` listing.
 #[test]
 fn user_field_accepts_precis_names() {
-    for user in ["Владимир", "иван", "Ünal", "用户", "u-1_2", "user42"] {
+    for user in [
+        "владимир",
+        "иван",
+        "ünal",
+        "用户",
+        "café",
+        "u-1_2",
+        "user42",
+    ] {
         let session = project_session(&session_row(user, "tcp")).expect("projects");
         assert_eq!(session["user"], user, "a server-accepted login is printed");
         let request = project_request(&request_row(user, "shelldb", "write")).expect("projects");
@@ -320,13 +331,13 @@ fn user_field_accepts_precis_names() {
 }
 
 /// `db` keeps the engine's own component rule, which is ASCII-only: the very
-/// text the `user` field now prints is the placeholder in `db`. Mutant:
-/// routing `db` through the principal rule, which would echo any printable
-/// Unicode as a database name.
+/// text the `user` field prints is the placeholder in `db`. Mutant: routing
+/// `db` through the principal rule, which would echo any printable Unicode as
+/// a database name.
 #[test]
 fn db_field_keeps_the_component_rule() {
     for db in [
-        "Владимир",
+        "владимир",
         "иван",
         "shelldb.prod",
         "with space",
@@ -339,6 +350,43 @@ fn db_field_keeps_the_component_rule() {
         let request = project_request(&request_row("admin", db, "write")).expect("projects");
         assert_eq!(request["db"], db, "the component rule still passes");
     }
+}
+
+/// A `user` value the server would reject or normalise, or that is not
+/// terminal-safe, is the placeholder: a private-use code point, a soft
+/// hyphen, and a decomposed NFC `cafe\u{0301}` all fail the server's own
+/// validator or its canonical-text requirement, and an uppercase (case-mapped)
+/// name is not the wire text either. Mutant: trusting a shell-side character
+/// allowlist instead of the server's validator, which would print text the
+/// server never stores.
+#[test]
+fn user_field_rejects_server_rejected_names() {
+    for user in [
+        "a\u{E000}",
+        "a\u{00AD}b",
+        "cafe\u{0301}",
+        "Владимир",
+        "Ünal",
+    ] {
+        let session = project_session(&session_row(user, "tcp")).expect("projects");
+        assert_eq!(session["user"], INVALID, "non-canonical session user");
+        let request = project_request(&request_row(user, "shelldb", "write")).expect("projects");
+        assert_eq!(request["user"], INVALID, "non-canonical request user");
+    }
+}
+
+/// A credential-shaped login is redacted even though the PRECIS profile
+/// accepts it as a name: the `shk1.<id>.<secret>` shape
+/// `crate::shell::connect::token` refuses to echo is mirrored in
+/// `user_field`, and over-redacting a token-shaped value is the owner's
+/// accepted choice. Mutant: a login rule without the token check, which would
+/// print a pasted API token in the operator's terminal.
+#[test]
+fn user_field_rejects_token_shaped_names() {
+    let session = project_session(&session_row(TOKEN_SHAPE, "tcp")).expect("projects");
+    assert_eq!(session["user"], INVALID, "a token-shaped session user");
+    let request = project_request(&request_row(TOKEN_SHAPE, "shelldb", "write")).expect("projects");
+    assert_eq!(request["user"], INVALID, "a token-shaped request user");
 }
 
 /// A `user` value that is not terminal-safe is still the placeholder, even

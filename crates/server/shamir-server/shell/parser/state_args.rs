@@ -8,7 +8,8 @@
 
 #[derive(clap::Subcommand)]
 pub(super) enum VersionCommand {
-    /// Show the observed format epoch and stamp outcome (no disk read).
+    /// Show the observed format epoch and stamp outcome (no stamp re-read;
+    /// stored durable-policy overrides are read at request time).
     Show,
     /// Show the boot-captured format-stamp state (the P1 status view).
     Stamp,
