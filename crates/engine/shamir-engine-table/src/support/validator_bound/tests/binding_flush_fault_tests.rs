@@ -114,9 +114,25 @@ impl FlushFaultStore {
         *self.table.lock().expect("attached table") = Some(table);
     }
 
-    /// Break the store -> manager -> store cycle at the end of a test.
+    /// Break the store -> manager -> store cycle; called from `DetachOnDrop`'s `Drop`, so a failing test releases it too.
     fn detach(&self) {
         self.table.lock().expect("attached table").take();
+    }
+
+    /// Whether a live `TableManager` clone is still attached (the cycle).
+    fn is_attached(&self) -> bool {
+        self.table.lock().expect("attached table").is_some()
+    }
+}
+
+/// Breaks the fixture's store -> manager -> store cycle on EVERY exit path,
+/// including a panicking assertion or the deadline: the old trailing
+/// `detach()` call could not guarantee that.
+struct DetachOnDrop<'a>(&'a FlushFaultStore);
+
+impl Drop for DetachOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.detach();
     }
 }
 
@@ -211,6 +227,7 @@ async fn fixture() -> (TableManager, Arc<FlushFaultStore>, RecordId, Arc<dyn Sto
 async fn bind_flush_fault_restores_the_backing_record_and_retry_succeeds() {
     bounded(async {
         let (table, fault, id, info) = fixture().await;
+        let _detach = DetachOnDrop(&fault);
         let flushes_before = fault.flush_calls();
         fault.fail_next_flushes(1);
 
@@ -252,7 +269,6 @@ async fn bind_flush_fault_restores_the_backing_record_and_retry_succeeds() {
         let stored = load_validators_metadata(&info).await.unwrap().unwrap();
         assert_eq!(stored.bindings.len(), 1);
         assert_eq!(stored.bindings[0].validator_id, id);
-        fault.detach();
     })
     .await;
 }
@@ -261,6 +277,7 @@ async fn bind_flush_fault_restores_the_backing_record_and_retry_succeeds() {
 async fn bind_compensation_flush_fault_marks_the_table_in_doubt() {
     bounded(async {
         let (table, fault, id, _info) = fixture().await;
+        let _detach = DetachOnDrop(&fault);
         let flushes_before = fault.flush_calls();
         // Every flush fails: the forward write and all compensation attempts.
         fault.fail_next_flushes(usize::MAX);
@@ -303,7 +320,6 @@ async fn bind_compensation_flush_fault_marks_the_table_in_doubt() {
             .insert(&InnerValue::Map(new_map()))
             .await
             .expect("ordinary writes are not gated by the in-doubt flag");
-        fault.detach();
     })
     .await;
 }
@@ -312,6 +328,7 @@ async fn bind_compensation_flush_fault_marks_the_table_in_doubt() {
 async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
     bounded(async {
         let (table, fault, id, info) = fixture().await;
+        let _detach = DetachOnDrop(&fault);
         table.add_validator_binding(binding(id)).await.unwrap();
         let before = load_validators_metadata(&info).await.unwrap().unwrap();
         assert_eq!(before.bindings.len(), 1);
@@ -365,7 +382,6 @@ async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
             .unwrap()
             .bindings
             .is_empty());
-        fault.detach();
     })
     .await;
 }
@@ -374,6 +390,7 @@ async fn unbind_flush_fault_keeps_the_live_binding_and_restores_the_envelope() {
 async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
     bounded(async {
         let (table, fault, id, _info) = fixture().await;
+        let _detach = DetachOnDrop(&fault);
         table.add_validator_binding(binding(id)).await.unwrap();
         fault.fail_next_flushes(usize::MAX);
         let observations_before = fault.live_observations().len();
@@ -404,7 +421,30 @@ async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
             .await
             .expect_err("bind must refuse while the table is in doubt");
         assert!(is_in_doubt(&again), "{again}");
-        fault.detach();
+    })
+    .await;
+}
+
+/// Oracle for [`DetachOnDrop`] on the PANIC path. Kills the mutant "delete the
+/// `DetachOnDrop` guard and keep the trailing `detach()`": that mutant survives
+/// the other four tests by construction, because they only reach `detach()` on
+/// success. Here the only exit from the scope is the unwind, so an unobserved
+/// guard leaves the store -> manager -> store cycle attached.
+#[tokio::test]
+async fn detach_on_drop_releases_the_fixture_cycle_when_the_test_panics() {
+    bounded(async {
+        let (table, fault, _id, _info) = fixture().await;
+        assert!(fault.is_attached(), "the fixture must start attached");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _detach = DetachOnDrop(&fault);
+            let _keep_table_alive = &table;
+            panic!("injected test failure");
+        }));
+        assert!(panicked.is_err(), "the injected panic must unwind");
+        assert!(
+            !fault.is_attached(),
+            "a failing test must still break the store -> manager -> store cycle: the guard's Drop is the only release point"
+        );
     })
     .await;
 }

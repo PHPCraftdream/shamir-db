@@ -814,3 +814,162 @@ async fn schema_activation_refuses_an_in_doubt_table_before_replacing_the_artifa
     assert_eq!(healthy.validator_bindings().len(), 1);
     assert!(!healthy.validator_bindings_in_doubt());
 }
+
+/// Round 9: kills the mutant that deletes ONLY the in-doubt check at the top of
+/// `compile_table_schema_admitted` (round 7, `schema_management.rs:636` —
+/// `refuse_schema_activation_in_doubt`). The wrapper test above stays green on
+/// that mutant because the wrapper checks first; this test drives the admitted
+/// entry the wire SET/ADD/REMOVE schema handlers call.
+///
+/// The kill is a deterministic ORACLE that fires BEFORE the ALTER branch: a
+/// second admitted call passes a `schema_validator_id` that is NOT the id
+/// registered under the table's schema name (the stale-name-collision shape
+/// F-24 models). With the line-636 check present it must return
+/// `DbError::Conflict` "in doubt". With that check DELETED the call instead
+/// reaches `replace_artifact(other_id, ...)`, which is a silent no-op, and the
+/// F-24 `if !replaced` guard returns `DbError::Validation` mentioning "stale
+/// name collision" — so the Conflict assertion (and the explicit
+/// "no stale name collision" assertion) both FAIL.
+///
+/// This test PASSES on the parent commit: the parent's production check still
+/// refuses before the swap, so every assertion here holds there too. It kills
+/// the MUTANT, not a parent defect.
+#[tokio::test]
+async fn admitted_schema_activation_refuses_an_in_doubt_table_before_replacing_the_artifact() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        Box::pin(async {
+            let db = db_without_tables().await;
+            let mut batch = Batch::new();
+            batch.id(1);
+            batch.create_repo("cr", ddl::create_repo("main").tables(["users", "orders"]));
+            db.execute(
+                "testdb",
+                &batch
+                    .to_request_via_msgpack()
+                    .expect("batch request encoding"),
+            )
+            .await
+            .expect("create_repo must succeed");
+
+            let repo = db
+                .get_db("testdb")
+                .and_then(|db| db.get_repo("main"))
+                .expect("seeded repository must exist");
+            let table = db
+                .get_table("testdb", "main", "users")
+                .await
+                .expect("seeded table must exist");
+            let id = RecordId::system("g4_schema");
+            let name = schema_validator_name("testdb", "main", "users");
+            // A previously-active schema artifact (the state an ALTER starts from).
+            let artifact: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(no_rules()));
+            db.validators()
+                .register(id, &name, Arc::clone(&artifact))
+                .expect("precondition register must succeed");
+            let live = db.validators().get_by_id(&id).expect("artifact must exist");
+            assert!(Arc::ptr_eq(&live, &artifact));
+
+            // This table's persisted binding record is in doubt.
+            table.mark_validator_bindings_in_doubt();
+
+            let permit = repo
+                .write_domain()
+                .admit()
+                .await
+                .expect("test must hold repository admission");
+
+            // Oracle: a STALE id for an ALTER-shaped admission. With the line-636
+            // check the in-doubt refusal wins; with it deleted the ALTER branch's
+            // `replace_artifact` no-ops and the F-24 guard reports "stale name
+            // collision" instead. Must refuse BEFORE the ALTER branch.
+            let other_id = RecordId::system("g4_schema_stale");
+            assert_ne!(other_id, id);
+            let stale_error = db
+                .compile_table_schema_admitted(
+                    "testdb",
+                    "main",
+                    "users",
+                    other_id,
+                    no_rules(),
+                    &permit,
+                )
+                .await
+                .expect_err(
+                    "the admitted entry must refuse an in-doubt table before any ALTER branch",
+                );
+            assert!(
+                matches!(stale_error, DbError::Conflict(_)),
+                "kills the mutant that deletes the in-doubt check at \
+                 schema_management.rs:636: without it the ALTER branch reports a stale name \
+                 collision instead of the in-doubt refusal: {stale_error}"
+            );
+            assert!(
+                stale_error.to_string().contains("in doubt"),
+                "{stale_error}"
+            );
+            assert!(
+                !stale_error.to_string().contains("users"),
+                "the refusal must not disclose the table: {stale_error}"
+            );
+            assert!(
+                !stale_error.to_string().contains("stale name collision"),
+                "kills the mutant that deletes the in-doubt check at \
+                 schema_management.rs:636: reaching replace_artifact(other_id, ..) surfaces its \
+                 stale-name-collision guard, so the refusal did NOT precede the ALTER branch: \
+                 {stale_error}"
+            );
+
+            let error = db
+                .compile_table_schema_admitted("testdb", "main", "users", id, no_rules(), &permit)
+                .await
+                .expect_err("admitted schema activation on an in-doubt table must be refused");
+            assert!(matches!(error, DbError::Conflict(_)), "{error}");
+            assert!(error.to_string().contains("in doubt"), "{error}");
+            assert!(
+                !error.to_string().contains("users"),
+                "the refusal must not disclose the table: {error}"
+            );
+            let live = db
+                .validators()
+                .get_by_id(&id)
+                .expect("the artifact must survive the refusal");
+            assert!(
+                Arc::ptr_eq(&live, &artifact),
+                "no artifact may be replaced before the in-doubt refusal"
+            );
+            assert!(
+                table.validator_bindings().is_empty(),
+                "no binding may be attempted on a doubtful table"
+            );
+            drop(permit);
+
+            // Control: a healthy table in the same repository still activates.
+            let healthy = db
+                .get_table("testdb", "main", "orders")
+                .await
+                .expect("seeded table must exist");
+            let healthy_id = RecordId::system("g4_schema_healthy");
+            let healthy_name = schema_validator_name("testdb", "main", "orders");
+            let healthy_permit = repo
+                .write_domain()
+                .admit()
+                .await
+                .expect("test must hold repository admission");
+            db.compile_table_schema_admitted(
+                "testdb",
+                "main",
+                "orders",
+                healthy_id,
+                no_rules(),
+                &healthy_permit,
+            )
+            .await
+            .expect("a healthy table must still activate");
+            assert_eq!(db.validators().id_for_name(&healthy_name), Some(healthy_id));
+            assert_eq!(healthy.validator_bindings().len(), 1);
+        }),
+    )
+    .await
+    .expect("admitted schema-activation scenario timed out");
+}
