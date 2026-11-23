@@ -12,6 +12,8 @@
 //! (`create_validator_from_wasm` / `rename_validator`) takes `ExclusionOnly`
 //! and runs no holder scan by design.
 
+use std::time::Duration;
+
 use shamir_types::types::record_id::RecordId;
 
 use super::super::validator_management::{ValidatorRegistrationError, ValidatorTargetAdmission};
@@ -52,6 +54,29 @@ const ECHO_WAT: &str = r#"
 
 fn echo_wasm() -> Vec<u8> {
     wat::parse_str(ECHO_WAT).expect("WAT parse failed")
+}
+
+const ECHO_V2_WAT: &str = r#"
+(module
+  (memory (export "memory") 2)
+  (global $bump (mut i32) (i32.const 2048))
+  (func (export "shamir_alloc") (param $len i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get $len)))
+    (local.get $ptr)
+  )
+  (func (export "shamir_call") (param $ptr i32) (param $len i32) (result i64)
+    (i64.or
+      (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
+      (i64.extend_i32_u (local.get $len))
+    )
+  )
+)
+"#;
+
+fn echo_v2_wasm() -> Vec<u8> {
+    wat::parse_str(ECHO_V2_WAT).expect("WAT parse failed")
 }
 
 /// The in-doubt refusal, out of an admitted-mutation error. Anything else means
@@ -105,29 +130,79 @@ async fn fixture() -> (ShamirDb, RecordId) {
 
 #[tokio::test]
 async fn admitted_replace_refuses_an_in_doubt_holder() {
-    let (db, id) = fixture().await;
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        Box::pin(async {
+            let (db, id) = fixture().await;
 
-    let error = db
-        .create_validator_admitted(
-            "v1",
-            FunctionSource::Wasm(&echo_wasm()),
-            true,
-            Actor::System,
-            ValidatorTargetAdmission::Fence,
-        )
-        .await
-        .expect_err("an admitted replace must be refused while a holder table is in doubt");
-    let message = in_doubt_message(error);
-    assert!(message.contains("in doubt"), "{message}");
-    assert!(
-        !message.contains("events"),
-        "the refusal must not disclose the table: {message}"
-    );
-    assert_eq!(
-        db.validator_id("v1"),
-        Some(id),
-        "the replacement must not be registered"
-    );
+            assert_ne!(
+                echo_wasm(),
+                echo_v2_wasm(),
+                "the replacement must be distinguishable"
+            );
+            let before_artifact = db
+                .validators()
+                .get_by_id(&id)
+                .expect("the registered artifact must exist");
+            let before_wasm = db
+                .system_store()
+                .load_validator("v1")
+                .await
+                .expect("catalogue read")
+                .expect("v1 row")
+                .get("wasm_b64")
+                .and_then(|value| value.as_str())
+                .expect("a wasm validator row carries wasm_b64")
+                .to_string();
+
+            let error = db
+                .create_validator_admitted(
+                    "v1",
+                    FunctionSource::Wasm(&echo_v2_wasm()),
+                    true,
+                    Actor::System,
+                    ValidatorTargetAdmission::Fence,
+                )
+                .await
+                .expect_err("an admitted replace must be refused while a holder table is in doubt");
+            let message = in_doubt_message(error);
+            assert!(message.contains("in doubt"), "{message}");
+            assert!(
+                !message.contains("events"),
+                "the refusal must not disclose the table: {message}"
+            );
+            assert_eq!(
+                db.validator_id("v1"),
+                Some(id),
+                "the replacement must not be registered"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    &db.validators()
+                        .get_by_id(&id)
+                        .expect("the artifact must survive the refusal"),
+                    &before_artifact
+                ),
+                "the refused replace must not swap the live artifact"
+            );
+            let after_wasm = db
+                .system_store()
+                .load_validator("v1")
+                .await
+                .expect("catalogue read")
+                .expect("v1 row")
+                .get("wasm_b64")
+                .and_then(|value| value.as_str())
+                .expect("wasm_b64")
+                .to_string();
+            assert_eq!(
+                after_wasm, before_wasm,
+                "the refused replace must not save the replacement catalogue row"
+            );
+        }),
+    )
+    .await
+    .expect("admitted replace refusal scenario timed out");
 }
 
 #[tokio::test]

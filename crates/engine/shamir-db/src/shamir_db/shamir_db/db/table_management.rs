@@ -301,14 +301,14 @@ impl ShamirDb {
         // Round 7 (G3): refuse the rename of a table whose persisted binding
         // record is IN DOUBT before anything is copied, recovered or committed.
         // The rename copies the info store and installs a FRESH manager, so the
-        // flag — the only record that the doubt exists — would be discarded
-        // while the copied envelope may be the unreconciled one: the renamed
-        // table would silently present a settled binding state (it would stop
-        // validating with the binding it still invokes, and a later DROP could
-        // proceed). Non-instantiating accessor, the same one the holder scan
-        // uses: a dormant or never-opened manager has no doubt state to lose,
-        // and an unknown table is reported by the existing checks below, in
-        // their own order.
+        // flag — the only record that the doubt exists — is discarded. The
+        // copied envelope may be the previous one (the binding is intact, so the
+        // renamed table keeps validating) or the unreconciled forward one; the
+        // copied bytes cannot tell the two apart, and a later DROP no longer
+        // sees the doubt. Non-instantiating accessor, the same one the holder
+        // scan uses: a dormant or never-opened manager has no doubt state to
+        // lose, and an unknown table is reported by the existing checks below,
+        // in their own order.
         if repo.table_validator_bindings_in_doubt(from) {
             return Err(crate::engine::table::TableManager::binding_in_doubt_error());
         }

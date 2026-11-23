@@ -508,7 +508,7 @@ impl Config {
             ));
         }
 
-        // `logging::init` parses this via `LevelFilter::from_str`, which silently falls back to
+        // `logging::init_for` parses this via `LevelFilter::from_str`, which silently falls back to
         // INFO on garbage — reject typos here instead of silently changing verbosity.
         let lvl = self.logging.level.to_ascii_lowercase();
         if !matches!(

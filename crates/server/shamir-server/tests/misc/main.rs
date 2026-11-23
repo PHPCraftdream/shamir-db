@@ -16,6 +16,8 @@ mod hmac_gate;
 mod logging_batch;
 #[path = "audit_log/observability_http.rs"]
 mod observability_http;
+#[path = "offline_sink.rs"]
+mod offline_sink;
 #[path = "reference_compat.rs"]
 mod reference_compat;
 #[path = "runtime/runtime_serve.rs"]

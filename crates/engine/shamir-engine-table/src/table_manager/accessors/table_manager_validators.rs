@@ -127,6 +127,9 @@ impl TableManager {
         // below cannot restore the previous record, the flag stays set and the
         // table fails closed until a restart re-reads the envelope. It is
         // cleared only after the live snapshot matches the flushed record.
+        // A record that did not exist before (a table with no persisted bindings)
+        // is restored as a PRESENT-EMPTY record, not as an absent one: the
+        // compensation always writes the previous LOGICAL envelope.
         self.bindings_in_doubt.store(true, Ordering::Release);
         if let Err(error) = self.persist_bindings(&bindings).await {
             // The live snapshot never changed, so no write ran against a
@@ -147,21 +150,26 @@ impl TableManager {
     /// Ordering after round 6 (F3): the live removal is published ONLY after
     /// the durable record is saved AND flushed. Publishing first let a
     /// concurrent write run without the validator for the whole flush window,
-    /// and a failed flush cannot un-validate a write that already ran. The
-    /// round-4 cancellation safety is preserved in the conservative direction:
-    /// cancellation before the flush leaves the live binding in place (only
-    /// the durable record may be ahead), and cancellation after the flush but
-    /// before the publication leaves a live binding whose durable record is
-    /// gone — the in-doubt flag raised for this window makes the holder scan
-    /// treat the table as holding EVERY identity, so no foreign replace/drop
-    /// can act on that split state, and a restart re-reads the envelope.
+    /// and a failed flush cannot un-validate a write that already ran. There is
+    /// no suspension point between a successful flush result and the
+    /// publication that follows it, so a completed flush cannot be cancelled
+    /// before the live snapshot catches up; the cancellable case is a backing
+    /// flush that has already TAKEN EFFECT in the store while the future is
+    /// still pending (a dropped await can also let that write finish later).
+    /// The in-doubt flag is raised for the whole write → flush → publish
+    /// window, so a future dropped anywhere inside it leaves the table in doubt
+    /// and the holder scan treats it as holding EVERY identity, instead of
+    /// letting a foreign replace/drop act on the split state.
     ///
     /// On a failed write or flush the previous LOGICAL envelope — the FULL
-    /// binding list, ops and priority included; a record that did not exist
-    /// before is restored as a PRESENT-EMPTY record — is written back and
-    /// flushed (bounded immediate attempts) and the unbind is reported as not
-    /// done; a compensation that cannot be written or flushed leaves the table
-    /// IN DOUBT with the fixed in-doubt error, as for a failed bind.
+    /// binding list, ops and priority included — is written back and flushed
+    /// (bounded immediate attempts) and the unbind is reported as not done; a
+    /// compensation that cannot be written or flushed leaves the table IN DOUBT
+    /// with the fixed in-doubt error, as for a failed bind. This unbind cannot
+    /// hit the missing-record case: a binding that is not in the live snapshot
+    /// returns `false` above, before any write, so the record it restores always
+    /// existed. (The absent→present-empty restore is BIND's case, documented on
+    /// `add_validator_binding_admitted`.)
     pub async fn remove_validator_binding(
         &self,
         validator_id: &RecordId,

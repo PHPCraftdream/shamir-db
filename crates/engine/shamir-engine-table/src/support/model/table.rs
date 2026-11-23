@@ -222,6 +222,35 @@ impl Table {
         }
     }
 
+    /// Strict twin of [`Table::list_stream`]: same iteration and the same
+    /// UNDECODED `RecordCow::Borrowed` values, but a physical key that is not a
+    /// 16-byte record id is a typed `DbError::Codec` for that batch instead of a
+    /// silent skip.
+    ///
+    /// Used by EVERY reader of the migration-journal partition — the startup
+    /// routing scan, the history read and the control lookup (all through
+    /// `shamir-db`'s `read_journal_partition_records`) — not only the journal
+    /// open scan: one unreadable row must refuse the whole open. Every ordinary
+    /// read keeps the relaxed [`Table::list_stream`] — a corrupted key in an
+    /// unrelated partition must not break those scans.
+    pub fn list_stream_strict(
+        &self,
+        batch_size: usize,
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> {
+        let table = self.clone();
+
+        stream! {
+            let mut storage_stream = table.data_store.iter_stream(batch_size);
+            while let Some(batch_result) = storage_stream.next().await {
+                let batch_bytes = batch_result?
+                    .into_iter()
+                    .map(|(k, v)| (bytes::Bytes::from(k), v))
+                    .collect();
+                yield Self::decode_raw_batch_strict(batch_bytes);
+            }
+        }
+    }
+
     /// Like `list_stream`, but applies a bytes-level pre-filter before
     /// decoding each record to `InnerValue`.  Rows that the pre-filter
     /// definitively rejects (`Some(false)`) are skipped without allocation.
@@ -288,6 +317,29 @@ impl Table {
             vec![Ok(batch)]
         };
         out.into_iter()
+    }
+
+    /// Strict twin of [`Self::decode_raw_batch`]: ONE batch result, and a
+    /// physical key that is not a 16-byte record id fails the WHOLE batch with
+    /// `DbError::Codec`. That error does NOT end the stream: the next poll
+    /// yields the next batch, so it is the CONSUMER that stops, by applying `?`
+    /// to the batch — the migration journal treats one unreadable row as a
+    /// whole-open refusal. The message names the key LENGTH only — never the
+    /// key bytes, which are the damaged artifact and must not reach a message.
+    pub(crate) fn decode_raw_batch_strict(
+        batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
+    ) -> DbResult<Vec<(RecordId, RecordCow)>> {
+        let mut batch = Vec::with_capacity(batch_bytes.len());
+        for (key_bytes, value_bytes) in batch_bytes {
+            let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
+                DbError::Codec(format!(
+                    "physical record key is not a 16-byte record id ({} bytes)",
+                    key_bytes.len()
+                ))
+            })?;
+            batch.push((RecordId(arr), RecordCow::Borrowed(value_bytes)));
+        }
+        Ok(batch)
     }
 
     /// Like `decode_raw_batch`, but applies a bytes-level pre-filter before

@@ -1,6 +1,6 @@
 //! `logging.level` must be validated at config-load time.
 //!
-//! `logging::init` consumes the level via `LevelFilter::from_str`, which
+//! `logging::init_for` consumes the level via `LevelFilter::from_str`, which
 //! silently falls back to INFO on an unparseable value — a typo like
 //! `warnn` would silently change the operator's verbosity. `Config::validate`
 //! now rejects such values with a typed `ConfigError::Validation` naming the
