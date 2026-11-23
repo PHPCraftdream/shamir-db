@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::options::deserialize_optional_field;
 
-use crate::admin::{ActivityPage, CancelOutcome};
+use crate::admin::{ActivityPage, CancelOutcome, ShapeStatsPage};
 
 use crate::batch::{
     BatchRequest, BatchResponse, IsolationLevel, TransactionInfo, VisibilityState, VisibilityWait,
@@ -488,6 +488,19 @@ pub enum DbResponse {
         /// remain.
         page: ActivityPage,
     },
+    /// Successful [`crate::batch::BatchOp::ListShapeStats`] — one bounded page
+    /// of per-shape execution statistics for one repository (R4b step 4).
+    /// Carries canonical shape hashes and counters only; never literals,
+    /// field names, table names or credentials.
+    ShapeStatsPage {
+        /// The deterministically ordered rows plus the `(other)` fold totals.
+        page: ShapeStatsPage,
+    },
+    /// Successful [`crate::batch::BatchOp::ResetShapeStats`] — the repository's
+    /// local shape registry (including the `(other)` fold row) is now empty
+    /// (R4b step 4). Carries no rows and no counters; never literals, field
+    /// names, table names or credentials.
+    ShapeStatsReset,
 
     /// DB-layer failure (permission, planner, query, lock-timeout, …).
     /// Not a protocol error; the wire frame is a normal `ResponseEnvelope`.

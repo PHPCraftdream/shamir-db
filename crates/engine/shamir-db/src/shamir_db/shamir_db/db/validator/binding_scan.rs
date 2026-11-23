@@ -20,15 +20,23 @@
 //! DOUBT — a failed binding write the manager could not write back and flush —
 //! holds EVERY validator identity, because it may still validate with a binding
 //! the backing record lost. The flag lives on the table's already-open manager:
-//! a never-opened (cold) manager has none, so such a table contributes nothing
-//! here, and a restart clears the flag by definition (it resets the flag; it
-//! does not repair the records). Such a table contributes its DATABASE to the
-//! reservation set and nothing to the table refs, so no refusal message
-//! discloses it. Its database is also added to `in_doubt_dbs`, which drives
-//! `BindingHolders::refuse_in_doubt` — the shared refusal that validator
-//! replace, rename and drop all call, because a reservation alone is NOT
-//! evidence: a doubtful table's database is usually free, and a vacant fence
-//! slot reserves successfully.
+//! a never-opened (cold) manager has none and contributes no FLAG evidence, but
+//! its PERSISTED envelope is still read below, so a cold table can still appear
+//! as a NAMED holder; a restart clears the flag by definition (it resets the
+//! flag; it does not repair the records). A doubtful table contributes its
+//! DATABASE to the reservation set and nothing to the table refs, so the shared
+//! in-doubt refusal (`BindingHolders::refuse_in_doubt`) carries neither the
+//! table nor the database name. That is the ONLY path-free refusal here: the
+//! ORDINARY admitted wire paths — validator replace, wire rename and validator
+//! drop — derive the holders, RESERVE every database and only then call the
+//! refusal, so a holder whose migration slot is already occupied returns the
+//! existing fence refusal first — that one keeps its stable code and may name
+//! the database. Two paths do NOT reserve before they refuse: the
+//! MIGRATION-rename preflight checks the doubt before it reserves any foreign
+//! target, and a direct (`ExclusionOnly`) validator drop skips the reservation
+//! entirely. A reservation is nevertheless NOT evidence on its own: a doubtful
+//! table's database is usually free, and a vacant fence slot reserves
+//! successfully.
 //!
 //! Exclusion domain / TOCTOU: the `ReplicationControlGuard` parameter
 //! proves the caller holds replication control for the whole derive →
@@ -60,7 +68,9 @@ pub(in crate::shamir_db) struct BindingHolders {
     tables: Vec<String>,
     /// Databases holding an IN-DOUBT table (round 6). Their fence is
     /// reserved like a real holder's, their table refs stay out of `tables()`
-    /// so no refusal message discloses them, and the field is the input of
+    /// so the in-doubt refusal itself names nothing (an occupied migration
+    /// slot can still surface the earlier fence refusal, which names the
+    /// database), and the field is the input of
     /// `refuse_in_doubt` — the shared in-doubt refusal every admitted caller
     /// (replace, rename, drop) consumes (round 7, G1).
     in_doubt_dbs: Vec<String>,
@@ -98,6 +108,14 @@ impl BindingHolders {
     /// `TableManager::binding_in_doubt_error`): neither the table nor the
     /// database name reaches it, and it is the same text this table's own
     /// bind/unbind refuses with.
+    ///
+    /// This is the doubt decision only: the ordinary admitted wire paths
+    /// (validator replace, wire rename, validator drop) reserve every holder
+    /// database BEFORE reaching it, so an occupied migration slot surfaces its
+    /// own fence refusal (stable code, database name) first. Two paths do not
+    /// reserve first: the migration-rename preflight runs this decision before
+    /// it reserves any foreign target, and a direct (`ExclusionOnly`) validator
+    /// drop skips the reservation entirely.
     pub(in crate::shamir_db) fn refuse_in_doubt(&self) -> DbResult<()> {
         if self.has_in_doubt() {
             return Err(crate::engine::table::TableManager::binding_in_doubt_error());

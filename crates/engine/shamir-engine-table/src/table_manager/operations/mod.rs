@@ -8,3 +8,4 @@ pub(crate) mod table_manager_crud;
 pub(crate) mod table_manager_index_mgmt;
 pub(crate) mod table_manager_replication;
 pub(crate) mod table_manager_sorted_index;
+pub(crate) mod table_manager_strict_scan;

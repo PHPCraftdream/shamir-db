@@ -72,5 +72,7 @@ sequenceDiagram
 - **Pre-state GC:** state без proof через `HANDSHAKE_TIMEOUT` (≥15s) → drop
 - **Server-side Argon2id:** login proof-verify runs NO server-side Argon2id and never refuses login on semaphore exhaustion; the Argon2 permit applies only to privileged user-creation derivation (AUTH §8.1)
 - **Rate limit per subnet:** `security.auth_init_rate_per_second` (по умолчанию `10/sec`, допустимо `1..=100_000`) → соединение закрывается без тела ответа, пишется `tracing::info!` и audit-событие `rate_limited`, инкрементируется `auth_attempts_total{result="rate_limited"}`; ошибка `rate_limited` клиенту не возвращается
+- **Throttle перед первым кадром:** тот же per-subnet лимит применяется к принятому соединению до чтения первого кадра (`shamir-sync/src/sync/connection/handshake.rs:729-758`), поэтому отсекается и клиент, не приславший ни одного кадра
+- **HTTP-коды здесь не описаны:** diagram покрывает только native initial auth; 429 `rate_limited` (по частоте или по отказу в слоте конкурентности) и 503 `server_busy` от HTTP login — в AUTH_PROTOCOL §2.5
 - **Lockout** (50 fails/час per (subnet, user)): silent (генерик `authentication_failed`)
 - **`rotation_in_progress` в auth_ok** (during overlap window) → клиент handles via §6.5

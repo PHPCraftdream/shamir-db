@@ -18,24 +18,30 @@
 
 use super::super::{
     args::{CreateArgs, ListArgs},
+    create,
     lock::{is_lock_contention, LockFailure},
     run_with_io,
-    secret_output::OutputPathError,
+    secret_output::{self, OutputPathError},
     CliIo, TokenAction,
 };
 use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
 use crate::config::Config;
 use crate::engine::server_meta::ServerMetaStore;
-use crate::security::tokens::TokenStore;
+use crate::security::tokens::{NewToken, TokenAuditContext, TokenStore};
 use crate::security::user_directory::FjallUserDirectory;
 use anyhow::Error as AnyError;
 use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory as _;
-use shamir_connect::server::audit_chain::AuditChain;
+use shamir_connect::server::audit_chain::{
+    AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
+};
+use shamir_connect::server::token::{TokenChannels, TokenMode};
 use shamir_connect::server::user_record::UserRecord;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -385,6 +391,29 @@ fn typed_output_error(err: &AnyError, what: &str) {
     );
 }
 
+/// Windows only: pins the EXACT typed refusal for a final component that
+/// contains ':'. `lexical_candidate` refuses it as an unresolvable
+/// destination whose IO source is `InvalidInput`, so the variant and the kind
+/// are both asserted — `typed_output_error` alone would also accept a
+/// `ReservedAuditName` or a `NotFound` resolution failure.
+#[cfg(windows)]
+fn windows_colon_component_error(err: &AnyError, what: &str) {
+    match err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<OutputPathError>())
+    {
+        Some(OutputPathError::Unresolvable(source)) => assert_eq!(
+            source.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{what} must refuse a ':' component as invalid input, got {source:?}"
+        ),
+        other => panic!(
+            "{what} must fail with OutputPathError::Unresolvable for a ':' component, \
+             got {other:?}: {err:#}"
+        ),
+    }
+}
+
 /// Round-3 finding 3: `--out-file` equal to the MISSING active audit log.
 /// The valid archive stays, the active log stays missing (recovery may
 /// recreate an empty active only AFTER the typed refusal), and no secret is
@@ -473,7 +502,7 @@ async fn create_refuses_a_windows_drive_like_final_component() {
     let out = std::path::PathBuf::from(format!("{}\\z:notes", outside.display()));
     let (result, o, _e) = run(&c, create_args_with_out("alice", "ads", &out), true).await;
     let err = result.expect_err("a ':' component must be refused");
-    typed_output_error(&err, "create");
+    windows_colon_component_error(&err, "create");
     assert!(!String::from_utf8(o).expect("stdout").contains("shk1."));
 }
 
@@ -577,10 +606,11 @@ async fn create_refuses_every_reserved_audit_namespace_alias() {
     std::fs::create_dir_all(c.data_dir.join("audit.log.dir").join("grand"))
         .expect("reserved-named directory tree");
     std::fs::create_dir_all(c.data_dir.join("sub")).expect("dotdot base directory");
-    // ASCII case variants are reserved on EVERY platform (Windows and macOS
-    // defaults are case-insensitive; Linux can mount case-insensitive
-    // filesystems), so the uppercase archive shape is refused everywhere.
-    // No entry with that spelling exists in the fixture.
+    // The reserved FILE NAME is unconditionally ASCII-case-insensitive by
+    // decision (over-refusal is harmless, under-refusal is not), while only
+    // directory-component matching follows the platform. So the uppercase
+    // archive shape is refused everywhere. No entry with that spelling
+    // exists in the fixture.
     let aliases: Vec<std::path::PathBuf> = vec![
         log_path(&c),
         c.data_dir.join("audit.log.00000000000000000042"),
@@ -610,6 +640,92 @@ async fn create_refuses_every_reserved_audit_namespace_alias() {
         !archive_alias.exists(),
         "the refusal must not create an archive-named file"
     );
+}
+
+/// The FILE-NAME half of the rule is unconditional (see the alias test
+/// above); only the DIRECTORY-prefix comparison follows the platform. On a
+/// case-insensitive filesystem (Windows, default macOS APFS) a sibling whose
+/// name differs from `data_dir` only in ASCII case IS `data_dir`, so a
+/// reserved name under it must be refused — the Windows half is a real
+/// oracle (a typed refusal) ONLY where the filesystem folds case (a
+/// case-sensitive APFS volume or NTFS directory refuses nothing, so it would
+/// fail for a platform reason). On a case-sensitive filesystem the flipped
+/// name is another directory with no audit namespace, so the create must not
+/// fail with the typed output-path refusal — a weaker negative guarding
+/// against an unconditional fold that would over-refuse (a success
+/// legitimately appends its record, so the real-log check covers refusals).
+#[tokio::test]
+async fn create_refuses_a_case_variant_of_the_data_directory_only_where_the_filesystem_folds_case()
+{
+    let (_tmp, c) = seeded_dir(&["one"]).await;
+    let before = std::fs::read(log_path(&c)).expect("read audit.log");
+    // A DIFFERENT directory whose name differs from data_dir only in ASCII
+    // case. On a case-insensitive filesystem (Windows, default macOS APFS)
+    // it IS data_dir, so a reserved name under it must be refused; on a
+    // case-sensitive filesystem it is a different directory with no audit
+    // namespace, so the same path is an ordinary destination.
+    let original_name = c
+        .data_dir
+        .file_name()
+        .expect("data_dir has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let flipped_name: String = original_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_lowercase() {
+                ch.to_ascii_uppercase()
+            } else if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            }
+        })
+        .collect();
+    if flipped_name == original_name {
+        // No ASCII letter to flip (e.g. a purely numeric temp name): there is
+        // no case variant to build, so the fixture cannot exercise the rule.
+        return;
+    }
+    let flipped = c
+        .data_dir
+        .parent()
+        .expect("data_dir has a parent")
+        .join(&flipped_name);
+    std::fs::create_dir_all(&flipped).expect("case-variant directory");
+    let out = flipped.join("audit.log");
+    let (result, _o, _e) = run(&c, create_args_with_out("alice", "case-dir", &out), true).await;
+    if cfg!(any(windows, target_os = "macos")) {
+        let err = result.expect_err(
+            "a case-variant of data_dir must be refused where the filesystem folds case",
+        );
+        typed_output_error(&err, "create");
+        assert_eq!(
+            std::fs::read(log_path(&c)).expect("reread audit.log"),
+            before,
+            "a refusal must not touch the real audit log"
+        );
+    } else {
+        // Different directory, no audit namespace: the create reaches the
+        // normal store path rather than the reserved-name refusal. Written
+        // as runtime code (not `#[cfg]`) so this branch still compiles on
+        // Windows; it only EXECUTES on a case-sensitive filesystem.
+        if let Err(err) = result {
+            assert!(
+                !err.chain()
+                    .any(|cause| cause.downcast_ref::<OutputPathError>().is_some()),
+                "on a case-sensitive filesystem a differently-spelled directory \
+                 is not the audit namespace: {err:#}"
+            );
+            assert_eq!(
+                std::fs::read(log_path(&c)).expect("reread audit.log"),
+                before,
+                "a failure before the store path must not touch the real audit log"
+            );
+        }
+        // A success appends its audit record to the real log, so nothing
+        // further is asserted here.
+    }
 }
 
 /// Round-3 follow-up: final symlink aliases are typed-refused without being
@@ -650,5 +766,234 @@ async fn create_typed_refuses_symlink_aliases_named_or_pointing_into_audit_names
     assert!(
         !c.data_dir.join("audit.log.00000000000000000042").exists(),
         "nothing may be created through the dangling link's target"
+    );
+}
+
+/// A trailing separator names a DIRECTORY, never a file. The lexical rebuild
+/// pushes components into a canonical ancestor, which silently DROPS the
+/// trailing separator, so `token.out/` would become a FILE named `token.out`.
+/// The refusal must inspect the ORIGINAL argument bytes, not the rebuilt
+/// destination.
+#[test]
+fn out_file_with_trailing_separator_is_refused() {
+    // `Path::new` keeps the trailing separator in `as_encoded_bytes()`;
+    // a `PathBuf::push` round trip would drop it.
+    let out = Path::new("token.out/");
+    assert_eq!(
+        out.as_os_str().as_encoded_bytes(),
+        b"token.out/".as_slice(),
+        "fixture sanity: the trailing separator must survive in the raw bytes"
+    );
+    // A data directory that does not exist has no reserved namespace, so only
+    // the trailing-separator check can refuse this call.
+    let missing = Path::new("shamir-data-dir-that-does-not-exist");
+    let err = secret_output::validate_out_file(out, missing)
+        .expect_err("a trailing separator names a directory, never a file");
+    assert!(
+        matches!(err, OutputPathError::TrailingSeparator),
+        "the trailing separator must be typed-refused, got {err:?}"
+    );
+}
+
+/// A no-op appender: the writer's shutdown latch must be observable without
+/// any durable store behind it.
+struct NoopAuditAppender;
+
+impl AuditAppender for NoopAuditAppender {
+    fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+/// An event refused for sequence exhaustion was NEVER written, so the writer
+/// must latch that fact: `checkpoint_now` then reports
+/// `SequenceExhaustedUnaudited` instead of `Ok` and cannot certify a log that
+/// lost an event.
+///
+/// Mutant killed: dropping the `AtomicBool` store in `AuditChainWriter::append`
+/// makes `checkpoint_now()` return `Ok(())` — the parent commit's behavior —
+/// and the `expect_err` below fails.
+#[test]
+fn checkpoint_failure_reports_unaudited_token() {
+    let chain = Arc::new(AuditChain::from_checkpoint([5; 32], u64::MAX - 1, [9; 32]));
+    let writer = AuditChainWriter::new_with_shared(chain, Arc::new(NoopAuditAppender));
+    assert!(
+        matches!(
+            writer.append("token_create", "cli", "alice", "", [0; 8], "ok", Vec::new(), 0),
+            Err(AuditError::SequenceExhausted { next }) if next == u64::MAX - 1
+        ),
+        "the exhausted sequence must be refused with the typed error"
+    );
+    assert_eq!(
+        writer
+            .checkpoint_now()
+            .expect_err("a refused event must latch the checkpoint"),
+        AuditError::SequenceExhaustedUnaudited
+    );
+    assert!(
+        AuditError::SequenceExhaustedUnaudited
+            .to_string()
+            .contains("was not written"),
+        "the typed error must name the missing event"
+    );
+}
+
+/// A failed `create` must not leave the output file `prepare` created behind:
+/// the file never held a secret, and its exclusive name would block the
+/// operator's retry. The unknown owner fails the setup step, which is the
+/// branch that cleans up through the identity-checked `remove_out_file`.
+#[tokio::test]
+async fn create_failure_removes_the_created_out_file() {
+    let (tmp, c) = seeded_dir(&["one"]).await;
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let out = outside.join("failed.out");
+    let (result, o, _e) = run(
+        &c,
+        create_args_with_out("ghost", "no-such-user", &out),
+        true,
+    )
+    .await;
+    let err = result.expect_err("an unknown owner must fail the create");
+    assert!(
+        format!("{err:#}").contains("unknown user"),
+        "unexpected failure: {err:#}"
+    );
+    assert!(
+        !out.exists(),
+        "the created-but-unusable output file must be removed"
+    );
+    assert!(
+        !String::from_utf8(o).expect("stdout").contains("shk1."),
+        "no secret may be delivered by a failed create"
+    );
+}
+
+/// The backstop appender: if the chain ever stops refusing the oversized field,
+/// persisting the entry fails and `checkpoint_now` reports `Persistence`, so the
+/// equality assertion below still fails.
+struct RefusingAuditAppender;
+
+impl AuditAppender for RefusingAuditAppender {
+    fn append_entry(&self, _entry: &AuditEntry) -> Result<(), std::io::Error> {
+        Err(std::io::Error::other("injected"))
+    }
+    fn checkpoint(&self, _next_seq: u64, _prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+/// An offline `token create` whose audit append is refused for a NON-exhaustion
+/// reason must report an unaudited token, not exhaustion, and deliver nothing.
+/// The record is already stored: `TokenService::create_with_context` stores it
+/// first (token_service.rs:267-303) and only warns when the audit append fails,
+/// so the refusal reaches `create` only through the writer's latch.
+///
+/// What remains in the store: one live, unrevoked `TokenRecord` — `id`,
+/// `owner_user_id = [3; 16]`, `label = "unaudited"`,
+/// `mac = compute_mac(key, 1, 1, &id, &secret)`, `key_id = 1`,
+/// `format_version = 1`, `created_at_ns`, `expires_at_ns`,
+/// `mode = read_only`, `channels = both`, `databases = None`,
+/// `roles = ["user"]`, `revoked_at_ns = None`.
+///
+/// Mutants killed: (i) restricting the latch to `SequenceExhausted` means this
+/// `FieldTooLong` refusal does not latch, `checkpoint_now` returns `Ok`, and the
+/// `expect_err` fails; (ii) making `checkpoint_now` ignore a latched checkpoint
+/// (return `Ok` after the latch) fails the same assertion. The appender is the
+/// backstop above.
+///
+/// Parent verdicts, both failing. Before the writer latched every refusal, the
+/// latch covered only sequence exhaustion, so a non-exhaustion refusal left
+/// `finish` with nothing to trip on: `cp` was `Ok`, `run_create` reached its
+/// `(Ok, Ok)` arm, and `deliver` ran — the secret was delivered while its
+/// audit event was missing. Against this round's parent the latch already
+/// covered any refusal, but the `fail_after_create_for_test` seam did not
+/// exist (so this test did not compile), and the exhausted-only wording the
+/// last assertion rejects was still in place.
+#[tokio::test]
+async fn offline_create_with_a_refused_audit_append_delivers_nothing_and_reports_an_unaudited_token(
+) {
+    let tmp = TempDir::new().expect("tmp");
+    let c = config(&tmp);
+    std::fs::create_dir_all(c.data_dir.join("users")).expect("users dir");
+    let m = ServerMetaStore::open_or_init(c.data_dir.join("server_meta")).expect("meta");
+    let d = Arc::new(FjallUserDirectory::open(c.data_dir.join("users")).expect("directory"));
+    d.insert("alice".into(), user_record()).expect("user");
+    let writer = Arc::new(AuditChainWriter::new_with_shared(
+        Arc::new(AuditChain::from_checkpoint([5; 32], 1, [0; 32])),
+        Arc::new(RefusingAuditAppender),
+    ));
+    let svc = create::service(&c, &m, d, Arc::clone(&writer))
+        .await
+        .expect("service opens");
+    // `transport` is a u8-length audit field: 256 bytes is a typed
+    // `FieldTooLong` refusal, raised inside the chain BEFORE the appender and
+    // latched by the writer as an event that was never written.
+    let created = svc
+        .create_with_context(
+            NewToken {
+                owner_user_id: [3; 16],
+                owner_roles: vec!["user".into()],
+                label: "unaudited".into(),
+                ttl_secs: Some(7200),
+                mode: TokenMode::ReadOnly,
+                channels: TokenChannels::Both,
+                databases: None,
+            },
+            TokenAuditContext {
+                actor_username: "alice".into(),
+                transport: "x".repeat(256),
+                session_id_prefix: [0; 8],
+            },
+        )
+        .await
+        .expect("the record is stored before the audit append, whose error is swallowed");
+    assert!(
+        !created.token.is_empty(),
+        "the bearer secret exists only in this value"
+    );
+    // Observed version of the doc comment's "what remains in the store": the
+    // record the failed audit event did not cover is still there and still
+    // live. `lookup` reads the store through the live service handle.
+    let stored = svc
+        .lookup(created.record_view.id)
+        .await
+        .expect("lookup of the leftover record")
+        .expect("the refused audit event must not remove the stored record");
+    assert_eq!(
+        stored.label, "unaudited",
+        "the leftover record is the one created"
+    );
+    assert_eq!(
+        stored.owner_user_id, [3; 16],
+        "the leftover record keeps its owner"
+    );
+    assert_eq!(
+        stored.revoked_at_ns, None,
+        "the leftover record is live, not revoked"
+    );
+    let latched = writer
+        .checkpoint_now()
+        .expect_err("a refused event must latch the checkpoint");
+    assert_eq!(latched, AuditError::SequenceExhaustedUnaudited);
+    let out = tmp.path().join("unaudited.out");
+    let output = secret_output::prepare(Some(&out), true).expect("prepare");
+    let msg = create::fail_after_create_for_test(
+        output,
+        Some(&out),
+        &anyhow::Error::new(latched),
+        "TOKENID",
+    )
+    .to_string();
+    assert!(msg.contains("was not written"), "{msg}");
+    assert!(msg.contains("TOKENID"), "{msg}");
+    assert!(msg.contains("token revoke"), "{msg}");
+    assert!(!msg.contains("sequence space is exhausted"), "{msg}");
+    assert!(
+        !out.exists(),
+        "the created-but-unusable output file must be removed"
     );
 }

@@ -782,7 +782,9 @@ async fn read_journal_partition_records(
 ) -> DbResult<Vec<(String, QueryValue)>> {
     let interner = table.info_store_read_view().interner_read_view().await?;
     let mut records = Vec::new();
-    let mut stream = Box::pin(table.list_stream(256));
+    // STRICT scan (fail-closed): `list_stream` silently SKIPS a malformed
+    // physical key; the codec mapping below turns it into the typed refusal.
+    let mut stream = Box::pin(table.list_stream_strict(256));
     while let Some(batch) = stream.next().await {
         // A raw codec failure is physical corruption — typed whole-open,
         // redacted; infra failures pass through unmasked.

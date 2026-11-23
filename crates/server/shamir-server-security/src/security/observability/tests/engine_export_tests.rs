@@ -60,7 +60,7 @@ fn zero_touch_exposes_every_query_series_with_bounded_labels() {
         .lines()
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .collect();
-    assert_eq!(samples.len(), 5 * 22 + ERROR_LABELS.len() + 2, "{rendered}");
+    assert_eq!(samples.len(), 5 * 22 + ERROR_LABELS.len() + 3, "{rendered}");
 
     for op in QUERY_OPS {
         let op_label = format!("op=\"{}\"", op.label());
@@ -131,6 +131,16 @@ fn zero_touch_exposes_every_query_series_with_bounded_labels() {
             &["db", "repo"],
         );
     }
+    let shapes = sample(
+        &rendered,
+        "shamir_shapes_tracked",
+        &["db=\"metrics_db\"", "repo=\"metrics_repo\""],
+    );
+    assert_label_keys(shapes, &["db", "repo"]);
+    assert!(
+        shapes.ends_with(" 0"),
+        "zero-touch registry tracks no shape rows: {shapes}"
+    );
     for line in samples {
         assert!(
             !line.contains("table=") && !line.contains("function="),
@@ -151,7 +161,8 @@ fn observed_snapshots_are_absolute_seconds_and_torn_histograms_are_omitted() {
     metrics.record_error(Some("version_conflict"));
     metrics.record_error(Some("not_in_allowlist"));
     metrics.record_rows(19, 7);
-    let snapshot = metrics.snapshot();
+    let mut snapshot = metrics.snapshot();
+    snapshot.shapes_tracked = 7;
     let mut torn: EngineMetricsSnapshot = EngineMetrics::default().snapshot();
     torn.durations[QueryOp::Read.index()].torn = true;
 
@@ -245,6 +256,16 @@ fn observed_snapshots_are_absolute_seconds_and_torn_histograms_are_omitted() {
         &["db=\"observed_db\"", "repo=\"observed_repo\""],
     )
     .ends_with(" 7"));
+    let shapes = sample(
+        &rendered,
+        "shamir_shapes_tracked",
+        &["db=\"observed_db\"", "repo=\"observed_repo\""],
+    );
+    assert_label_keys(shapes, &["db", "repo"]);
+    assert!(
+        shapes.ends_with(" 7"),
+        "tracked shape rows are exported as an absolute gauge: {shapes}"
+    );
     assert!(!rendered.lines().any(|line| {
         line.contains("shamir_query_duration_seconds_")
             && line.contains("db=\"torn_only_db\"")

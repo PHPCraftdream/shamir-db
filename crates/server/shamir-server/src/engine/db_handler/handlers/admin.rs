@@ -655,6 +655,11 @@ pub(crate) fn is_coarse_admin_gate_exempt(op: &BatchOp) -> bool {
             // Same for the operator cancels: the exemption grants nothing.
             | BatchOp::CancelTx(_)
             | BatchOp::CancelCursorAdmin(_)
+            // R4b step 4: the shape listing/wipe. Only the coarse superuser
+            // gate is stopped — both ops enforce `ActivityView` +
+            // `Action::Manage` inside their handler.
+            | BatchOp::ListShapeStats(_)
+            | BatchOp::ResetShapeStats(_)
     )
 }
 

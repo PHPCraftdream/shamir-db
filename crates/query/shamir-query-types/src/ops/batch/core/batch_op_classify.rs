@@ -125,7 +125,9 @@ impl BatchOp {
             | BatchOp::ListActivity(_)
             | BatchOp::CancelRequest(_)
             | BatchOp::CancelTx(_)
-            | BatchOp::CancelCursorAdmin(_) => return None,
+            | BatchOp::CancelCursorAdmin(_)
+            | BatchOp::ListShapeStats(_)
+            | BatchOp::ResetShapeStats(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -243,6 +245,8 @@ impl BatchOp {
                 | BatchOp::CancelRequest(_)
                 | BatchOp::CancelTx(_)
                 | BatchOp::CancelCursorAdmin(_)
+                | BatchOp::ListShapeStats(_)
+                | BatchOp::ResetShapeStats(_)
         )
     }
 
@@ -294,6 +298,12 @@ impl BatchOp {
             // Operator cancellation likewise only changes transient state.
             BatchOp::CancelRequest(_) => false,
             BatchOp::CancelTx(_) | BatchOp::CancelCursorAdmin(_) => false,
+            // The shape registry is local in-memory telemetry; the listing is
+            // pure introspection.
+            BatchOp::ListShapeStats(_) => false,
+            // The reset destroys local statistics only, never stored data
+            // (audited as an admin op, see the server handler).
+            BatchOp::ResetShapeStats(_) => false,
             BatchOp::StartBackup(_) => true,
             BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan
