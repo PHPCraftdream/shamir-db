@@ -1,116 +1,25 @@
 //! Pass-budget accounting and fresh-copy ownership tests: the pass charges the
-//! verifier's real reads (a manifest file once, a WAL segment twice) and
-//! nothing else, and the fresh copy is owned before a scan can refuse.
+//! verifier's real reads (a manifest file once, a WAL segment and a copied
+//! stamp twice) and nothing else, at the exact boundary and one byte below it,
+//! and the fresh copy is owned before a scan can refuse.
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use shamir_private_dir::create_private_dir;
-use tempfile::TempDir;
+use std::path::Path;
 
 use crate::config::BackupRetentionConfig;
-use crate::sync::durability::backup::online::manifest::{
-    build_v2, encode, write_backup_meta, write_manifest, ConsistencySection, RepoConsistency,
-    WalDirEntry, WalSection, WalSegmentEntry, BACKUP_META_FILE_NAME,
-};
+use crate::sync::durability::backup::online::manifest::BACKUP_META_FILE_NAME;
 use crate::sync::durability::backup::online::progress::CancelFlag;
-use crate::sync::durability::backup::{verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME};
+use crate::sync::durability::backup::MANIFEST_FILE_NAME;
+use crate::sync::format_stamp::STAMP_FILE_NAME;
 
 use super::super::budget::{Budget, Refusal};
 use super::super::prune::prune_inner;
-use super::super::{prune, RetentionOutcome};
-
-const OWNER: &str = "retention-test-owner";
-const WAL_DIR: &str = "store.shamirwal";
-const WAL_FILE: &str = "store.shamirwal/00000000.wal";
-
-fn private_root() -> (TempDir, PathBuf) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = temp.path().join("private");
-    create_private_dir(&root).expect("private root");
-    (temp, root.canonicalize().expect("canonical root"))
-}
-
-fn copy_with_payload(
-    root: &Path,
-    name: &str,
-    time: u128,
-    owner: Option<&str>,
-    payload: &[u8],
-) -> PathBuf {
-    let dir = root.join(name);
-    fs::create_dir_all(dir.join(WAL_DIR)).expect("WAL dir");
-    fs::write(dir.join(WAL_FILE), payload).expect("WAL segment");
-    let size = u64::try_from(payload.len()).expect("payload size fits u64");
-    let sha256 = hex::encode(Sha256::digest(payload));
-    let manifest = build_v2(
-        time,
-        vec![ManifestFileEntry {
-            path: WAL_FILE.to_owned(),
-            sha256: sha256.clone(),
-            size_bytes: size,
-        }],
-        None,
-        None,
-        ConsistencySection {
-            per_repo: [(
-                "repo".to_owned(),
-                RepoConsistency {
-                    wal_position: 0,
-                    store_dir: "store".to_owned(),
-                    schema_version: 0,
-                },
-            )]
-            .into(),
-            system_store_version: 0,
-        },
-        WalSection {
-            dirs: vec![WalDirEntry {
-                repo: "repo".to_owned(),
-                dir: WAL_DIR.to_owned(),
-                segments: vec![WalSegmentEntry {
-                    seq: 0,
-                    file: WAL_FILE.to_owned(),
-                    sidecar: None,
-                    sha256,
-                    size,
-                }],
-            }],
-        },
-    );
-    write_manifest(&dir, &encode(&manifest).expect("encode manifest")).expect("write manifest");
-    write_backup_meta(&dir).expect("sidecar");
-    verify_manifest(&dir).expect("valid fixture");
-    if let Some(owner) = owner {
-        let mut value = sidecar(&dir);
-        value["scheduled_retention"] = json!({"version": 1, "owner": owner});
-        fs::write(
-            dir.join(BACKUP_META_FILE_NAME),
-            serde_json::to_vec(&value).expect("encode sidecar"),
-        )
-        .expect("write sidecar");
-    }
-    dir
-}
-
-fn sidecar(dir: &Path) -> Value {
-    serde_json::from_slice(&fs::read(dir.join(BACKUP_META_FILE_NAME)).expect("read sidecar"))
-        .expect("decode sidecar")
-}
-
-fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
-    prune(
-        root,
-        fresh,
-        OWNER,
-        &BackupRetentionConfig { keep_last },
-        &CancelFlag::default(),
-        &BTreeSet::new(),
-    )
-}
+use super::super::RetentionOutcome;
+use super::fixture::{
+    copy_with_payload, copy_with_stamp, owner_tag, private_root, retain, sidecar, OWNER, WAL_DIR,
+    WAL_FILE,
+};
 
 /// Bytes one pass charges for a payload copy: the bounded manifest read, the
 /// bounded sidecar read and the payload, which is a WAL segment and therefore
@@ -129,9 +38,26 @@ fn true_read_bytes(dir: &Path) -> u64 {
     manifest + 1 + sidecar + 1 + 2 * payload
 }
 
+/// [`true_read_bytes`] plus the stamp's two real reads: `format_stamp::inspect`
+/// and the verifier's manifest-file loop both read the copied stamp.
+fn stamped_read_bytes(dir: &Path) -> u64 {
+    true_read_bytes(dir) + 2 * stamp_bytes(dir)
+}
+
+fn stamp_bytes(dir: &Path) -> u64 {
+    fs::metadata(dir.join(STAMP_FILE_NAME))
+        .expect("stamp metadata")
+        .len()
+}
+
 /// Total true reads of the three-copy tree below, in bytes.
 fn three_copy_reads(oldest: &Path, newest: &Path, fresh: &Path) -> u64 {
     true_read_bytes(oldest) + true_read_bytes(newest) + true_read_bytes(fresh)
+}
+
+/// Total true reads of the three stamped copies below, in bytes.
+fn three_stamped_reads(oldest: &Path, newest: &Path, fresh: &Path) -> u64 {
+    stamped_read_bytes(oldest) + stamped_read_bytes(newest) + stamped_read_bytes(fresh)
 }
 
 #[test]
@@ -141,9 +67,10 @@ fn one_pass_charges_the_verifiers_real_reads() {
     let oldest = copy_with_payload(&root, "20200101_000001", 1, Some(OWNER), &payload);
     let newest = copy_with_payload(&root, "20200101_000002", 2, Some(OWNER), &payload);
     let fresh = copy_with_payload(&root, "20200101_000003", 3, None, &payload);
-    // A slack far below one payload: charging a file the verifier never reads,
-    // or one extra payload per copy, exceeds it.
-    let budget_bytes = three_copy_reads(&oldest, &newest, &fresh) + (4 << 10);
+    // EXACTLY the true reads, no slack: one extra sentinel byte per bounded
+    // read, one extra file debit, or a duplicate manifest debit refuses the
+    // pass, because the total is the only budget that fits.
+    let budget_bytes = three_copy_reads(&oldest, &newest, &fresh);
     let cancel = CancelFlag::default();
     let mut budget = Budget::with_bytes(&cancel, budget_bytes);
     let mut outcome = RetentionOutcome::default();
@@ -169,7 +96,49 @@ fn one_pass_charges_the_verifiers_real_reads() {
     assert!(fresh.exists());
     assert_eq!(
         sidecar(&fresh).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": OWNER}))
+        Some(&owner_tag(OWNER))
+    );
+}
+
+/// Mutants killed: a missing sentinel byte on a bounded read, or any missing
+/// byte debit, leaves the pass one byte short of the true reads — this budget
+/// then fits, the pass succeeds, and the assertion below fails.
+#[test]
+fn one_byte_short_of_the_true_reads_refuses() {
+    let (_temp, root) = private_root();
+    let payload = vec![0u8; 64 << 10];
+    let oldest = copy_with_payload(&root, "20200101_000001", 1, Some(OWNER), &payload);
+    let newest = copy_with_payload(&root, "20200101_000002", 2, Some(OWNER), &payload);
+    let fresh = copy_with_payload(&root, "20200101_000003", 3, None, &payload);
+    let budget_bytes = three_copy_reads(&oldest, &newest, &fresh) - 1;
+    let cancel = CancelFlag::default();
+    let mut budget = Budget::with_bytes(&cancel, budget_bytes);
+    let mut outcome = RetentionOutcome::default();
+    let refusal = prune_inner(
+        &root,
+        &fresh,
+        OWNER,
+        &BackupRetentionConfig { keep_last: 2 },
+        &BTreeSet::new(),
+        &mut budget,
+        &mut outcome,
+    );
+    assert!(
+        matches!(refusal, Err(Refusal::Budget)),
+        "the true reads are the exact upper bound: one byte less must refuse"
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (0, 0, None),
+        "the scan ran out of budget and deletes nothing"
+    );
+    assert!(oldest.exists());
+    assert!(newest.exists());
+    assert!(fresh.exists());
+    assert_eq!(
+        sidecar(&fresh).get("scheduled_retention"),
+        Some(&owner_tag(OWNER)),
+        "the fresh copy is tagged before the scan can run out"
     );
 }
 
@@ -208,6 +177,76 @@ fn pass_budget_refuses_when_the_second_wal_read_does_not_fit() {
     assert!(newest.exists());
 }
 
+/// One pass over stamped copies fits a budget of exactly their true reads,
+/// stamp reads included.
+#[test]
+fn one_pass_charges_the_stamps_two_real_reads() {
+    let (_temp, root) = private_root();
+    let oldest = copy_with_stamp(&root, "20200101_000001", 1, Some(OWNER));
+    let newest = copy_with_stamp(&root, "20200101_000002", 2, Some(OWNER));
+    let fresh = copy_with_stamp(&root, "20200101_000003", 3, None);
+    let budget_bytes = three_stamped_reads(&oldest, &newest, &fresh);
+    let cancel = CancelFlag::default();
+    let mut budget = Budget::with_bytes(&cancel, budget_bytes);
+    let mut outcome = RetentionOutcome::default();
+    let refusal = prune_inner(
+        &root,
+        &fresh,
+        OWNER,
+        &BackupRetentionConfig { keep_last: 2 },
+        &BTreeSet::new(),
+        &mut budget,
+        &mut outcome,
+    );
+    assert!(
+        refusal.is_ok(),
+        "a pass over stamped copies fits exactly its true reads"
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (1, 0, Some(0))
+    );
+    assert!(!oldest.exists());
+    assert!(newest.exists());
+    assert!(fresh.exists());
+}
+
+/// Mutant killed: dropping the stamp debit that `format_stamp::inspect`'s read
+/// accounts for undercharges by one stamp per copy, so this budget (one stamp
+/// short of the true reads) would fit and the pass would succeed.
+#[test]
+fn a_pass_that_forgets_the_stamp_read_runs_out_of_budget() {
+    let (_temp, root) = private_root();
+    let oldest = copy_with_stamp(&root, "20200101_000001", 1, Some(OWNER));
+    let newest = copy_with_stamp(&root, "20200101_000002", 2, Some(OWNER));
+    let fresh = copy_with_stamp(&root, "20200101_000003", 3, None);
+    let budget_bytes = three_stamped_reads(&oldest, &newest, &fresh) - stamp_bytes(&fresh);
+    let cancel = CancelFlag::default();
+    let mut budget = Budget::with_bytes(&cancel, budget_bytes);
+    let mut outcome = RetentionOutcome::default();
+    let refusal = prune_inner(
+        &root,
+        &fresh,
+        OWNER,
+        &BackupRetentionConfig { keep_last: 2 },
+        &BTreeSet::new(),
+        &mut budget,
+        &mut outcome,
+    );
+    assert!(
+        matches!(refusal, Err(Refusal::Budget)),
+        "the stamp's first read is charged: one stamp short must refuse"
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (0, 0, None),
+        "the refusing scan deletes nothing and publishes no classification"
+    );
+    assert!(oldest.exists());
+    assert!(newest.exists());
+    assert!(fresh.exists());
+}
+
 #[test]
 fn scan_refusal_keeps_the_fresh_copy_owned() {
     let (_temp, root) = private_root();
@@ -239,7 +278,7 @@ fn scan_refusal_keeps_the_fresh_copy_owned() {
     assert!(other.exists());
     assert_eq!(
         sidecar(&fresh).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": OWNER})),
+        Some(&owner_tag(OWNER)),
         "the fresh copy is tagged before the scan can refuse"
     );
 
@@ -259,4 +298,83 @@ fn scan_refusal_keeps_the_fresh_copy_owned() {
     assert!(!other.exists());
     assert!(fresh.exists());
     assert!(later.exists());
+}
+
+/// Bytes a candidate that the cheap structural reject discards still charges:
+/// the bounded sidecar read (`backup.meta.json`, so the scan can classify the
+/// copy as owned) and the bounded manifest read (`manifest.json`), each
+/// `len() + 1` to detect a size change. Its listed WAL payload is never
+/// opened, because the tree check refuses the copy first.
+fn rejected_read_bytes(dir: &Path) -> u64 {
+    let manifest = fs::metadata(dir.join(MANIFEST_FILE_NAME))
+        .expect("manifest metadata")
+        .len();
+    let sidecar = fs::metadata(dir.join(BACKUP_META_FILE_NAME))
+        .expect("sidecar metadata")
+        .len();
+    manifest + 1 + sidecar + 1
+}
+
+/// Total true reads of the three-copy tree below, in bytes: the fresh copy
+/// and the verified candidate (`true_read_bytes` each: `manifest.len() + 1`,
+/// `sidecar.len() + 1`, `2 * payload.len()`) plus the rejected copy's two
+/// bounded reads (`manifest.len() + 1`, `sidecar.len() + 1`). No byte of the
+/// rejected copy's listed WAL payload and no byte of its unlisted
+/// `store.shamirwal/extra.pem` is in this total.
+fn verified_plus_rejected_reads(verified: &Path, fresh: &Path, rejected: &Path) -> u64 {
+    true_read_bytes(verified) + true_read_bytes(fresh) + rejected_read_bytes(rejected)
+}
+
+/// Mutant (the parent implementation): file bytes are charged before the
+/// cheap structural rejects, so the rejected candidate's listed WAL payload is
+/// charged twice for a verifier that never opens that copy. This budget has no
+/// slack for those bytes, so the parent runs out and returns `Err(Budget)`;
+/// the first assertion below then fails.
+///
+/// The rejected copy is owner-tagged on purpose: an untagged copy is refused
+/// at the sidecar check in `prune.rs` BEFORE `verified_time`, so only an owned
+/// copy reaches the manifest read and the tree check this test targets.
+#[test]
+fn a_structurally_rejected_candidate_charges_no_payload_bytes() {
+    let (_temp, root) = private_root();
+    let payload = vec![0u8; 64 << 10];
+    let rejected = copy_with_payload(&root, "20200101_000001", 1, Some(OWNER), &payload);
+    // A file the manifest does not list, so the tree check refuses this copy
+    // after the manifest read and before any byte charge.
+    fs::write(
+        rejected.join(WAL_DIR).join("extra.pem"),
+        vec![7u8; 128 << 10],
+    )
+    .expect("unlisted payload");
+    let verified = copy_with_payload(&root, "20200101_000002", 2, Some(OWNER), &payload);
+    let fresh = copy_with_payload(&root, "20200101_000003", 3, None, &payload);
+    let budget_bytes = verified_plus_rejected_reads(&verified, &fresh, &rejected);
+    let cancel = CancelFlag::default();
+    let mut budget = Budget::with_bytes(&cancel, budget_bytes);
+    let mut outcome = RetentionOutcome::default();
+    let refusal = prune_inner(
+        &root,
+        &fresh,
+        OWNER,
+        &BackupRetentionConfig { keep_last: 1 },
+        &BTreeSet::new(),
+        &mut budget,
+        &mut outcome,
+    );
+    assert!(
+        refusal.is_ok(),
+        "the rejected copy's payload is never opened, so it must not be charged"
+    );
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (1, 0, Some(1)),
+        "one verified candidate is pruned; the rejected copy stays untouched"
+    );
+    assert!(rejected.exists(), "the rejected copy is never deleted");
+    assert!(!verified.exists());
+    assert!(fresh.exists());
+    assert_eq!(
+        sidecar(&fresh).get("scheduled_retention"),
+        Some(&owner_tag(OWNER))
+    );
 }

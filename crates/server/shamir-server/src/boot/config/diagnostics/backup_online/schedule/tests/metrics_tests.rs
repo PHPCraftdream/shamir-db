@@ -7,6 +7,8 @@
 //! are all PROCESS-GLOBAL, so every test here is `#[serial]`, starts from a
 //! known cell (`set_export_last_success_for_test(0)`) and restores it before it
 //! returns — a test in the same binary can never inherit or leave evidence.
+//! The same process-global state also carries the boot arming decision
+//! (`arm_action`) and the `schedule_enabled` cell, pinned here as well.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +17,8 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 use super::super::super::metrics::{
-    backup_metrics_snapshot, install_backup_meta_store, note_success,
-    set_export_last_success_for_test, ClockOverride,
+    arm_action, backup_metrics_snapshot, enable_schedule, install_backup_meta_store, note_success,
+    set_export_last_success_for_test, ArmingAction, ClockOverride,
 };
 use crate::server_meta::ServerMetaStore;
 
@@ -99,6 +101,43 @@ fn last_success_stamp_takes_newest_source_and_never_the_future() {
     set_export_last_success_for_test(0);
 }
 
+/// The exported stamp only ever moves FORWARD: a success stamped with an OLDER
+/// second (a backwards clock step between two runs) must not replace the stamp
+/// a NEWER run already published, so the exported last-success stamp never
+/// regresses below the previous run's.
+///
+/// Mutant caught: `store` instead of `fetch_max` in `note_success` — the
+/// second, older stamp replaces the newer one and the last-success stamp
+/// regresses. The live scheduled route cannot force this (two consecutive real
+/// runs stamp a non-decreasing clock, so a `store` there is invisible), hence
+/// the invariant is pinned here at the evidence cell.
+#[serial]
+#[test]
+fn note_success_never_lowers_the_exported_stamp() {
+    set_export_last_success_for_test(0);
+    let clock = ClockOverride::set(NOW);
+
+    note_success(1, Duration::from_secs(1));
+    assert_eq!(
+        backup_metrics_snapshot().last_success_timestamp_seconds,
+        NOW,
+        "the first success must publish its own stamp"
+    );
+
+    // Run N+1 stamps an OLDER second than run N did.
+    clock.pin(NOW - 60);
+    note_success(2, Duration::from_secs(1));
+    assert_eq!(
+        backup_metrics_snapshot().last_success_timestamp_seconds,
+        NOW,
+        "an older success stamp must never REPLACE a newer one (mutant: `store` \
+         instead of `fetch_max` in `note_success`)"
+    );
+
+    drop(clock);
+    set_export_last_success_for_test(0);
+}
+
 /// Every launch installs its OWN store: a success after the second install is
 /// persisted through B, and A is never written again.
 ///
@@ -129,5 +168,72 @@ fn holder_replaces_across_installs() {
     assert_eq!(stamp_a_again, Some(NOW + 10), "store A is left untouched");
 
     drop(clock);
+    set_export_last_success_for_test(0);
+}
+
+/// ONE unreadable armed-at row is NOT an absent one: the durable FIRST
+/// arming stamp must never be overwritten, so the unreadable case borrows
+/// "now" for this boot only instead of writing it.
+///
+/// Mutant caught: routing `Err` to `WriteNow` (the parent behaviour, where an
+/// `if let Ok(Some(..))` let the error fall through to the store write) makes
+/// the third assertion fail — and resurrects the stale-alert defect the
+/// durable row exists to prevent.
+#[serial]
+#[test]
+fn unreadable_armed_at_row_borrows_now_and_never_rewrites_the_stamp() {
+    assert_eq!(
+        arm_action(Ok(Some(7)), NOW),
+        ArmingAction::Keep(7),
+        "a readable row keeps the durable first-arming stamp"
+    );
+    assert_eq!(
+        arm_action(Ok(None), NOW),
+        ArmingAction::WriteNow(NOW),
+        "an absent row arms now"
+    );
+    assert_eq!(
+        arm_action(Err(()), NOW),
+        ArmingAction::UseNowWithoutWriting(NOW),
+        "an unreadable row is used for this boot but MUST NOT be rewritten"
+    );
+}
+
+/// A relaunch WITHOUT a schedule must not inherit the process-global
+/// `schedule_enabled` flag: the disarm path clears the cell, so the
+/// stale-backup alert cannot fire for a schedule-less server.
+///
+/// Mutant caught: removing the reset leaves the cell at the previous
+/// launch's non-zero stamp, so `schedule_enabled` stays `true` and the second
+/// assertion fails. The test ends at the same zero state it asserts, so no
+/// later serial test inherits the flag.
+#[serial]
+#[test]
+fn schedule_less_install_clears_the_process_global_schedule_enabled_flag() {
+    set_export_last_success_for_test(0);
+
+    enable_schedule();
+    let enabled = backup_metrics_snapshot();
+    assert!(
+        enabled.schedule_enabled,
+        "a configured schedule must export schedule_enabled"
+    );
+    assert_ne!(
+        enabled.schedule_started_timestamp_seconds, 0,
+        "an enabled schedule exports its non-zero started stamp"
+    );
+
+    let (_dir, store) = temp_store();
+    install_backup_meta_store(Arc::clone(&store), false);
+    let disabled = backup_metrics_snapshot();
+    assert!(
+        !disabled.schedule_enabled,
+        "a schedule-less relaunch must clear schedule_enabled"
+    );
+    assert_eq!(
+        disabled.schedule_started_timestamp_seconds, 0,
+        "the started stamp is reset, not merely hidden"
+    );
+
     set_export_last_success_for_test(0);
 }

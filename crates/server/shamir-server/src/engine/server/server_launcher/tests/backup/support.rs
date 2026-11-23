@@ -26,9 +26,18 @@ pub(super) const TICK: Duration = Duration::from_millis(40);
 /// Fixed base second of the injected snapshot-name clock: every run gets
 /// `base + n`, so no two runs collide on the `<to>/<timestamp>` create.
 pub(super) const SNAPSHOT_NAME_BASE: u64 = 1_700_000_000;
-/// One generous bound for every wait (the Windows CI runner is up to 10x slower).
-pub(super) const BOUND: Duration = Duration::from_secs(120);
-/// Watchdog deadline: fires BEFORE nextest's 180 s per-test kill.
+/// One generous bound for every wait (the Windows CI runner is up to 10x
+/// slower). Deliberately BELOW [`WATCHDOG`]: a stuck await must reach its own
+/// `timeout(BOUND, ..)` and panic with that wait's diagnostic message instead
+/// of the flake watchdog's generic timeline dump. 110 s covers one live
+/// scheduled copy, which costs ~50-64 s on the Windows runner, and still
+/// leaves the retention-handshake loop in `backup_alert_retention_tests.rs` —
+/// ONE `BOUND` deadline shared across two runs — room to finish, so that
+/// loop's awaits keep reporting their own message without pinching it.
+pub(super) const BOUND: Duration = Duration::from_secs(110);
+/// Watchdog deadline: fires AFTER [`BOUND`] (so every await already reported
+/// its own message) and BEFORE nextest's 180 s per-test kill (so the dumped
+/// timeline still reaches the log).
 pub(super) const WATCHDOG: Duration = Duration::from_secs(120);
 /// Outer bound around a test body: leaves the watchdog room to dump its timeline
 /// first.
@@ -51,18 +60,20 @@ pub(super) type TerminalOutcome = bool;
 /// Arm the NEXT run's runner-thread observer: its post-run callback runs on
 /// that run's OWN runner thread, after the copy and before retention, so it
 /// installs the retention-END seam there (the pause seam's counterpart) and
-/// reports the published name. Re-armed before the next admission, which waits
-/// for this run's `finished` (sent after retention).
+/// reports the published name to `published`. `published` is `None` for a
+/// caller that only tracks the retention END; every other handshake is
+/// identical. Re-armed before the next admission, which waits for this run's
+/// `finished` (sent after retention).
 pub(super) fn arm_run_observer(
     registry: &OnlineBackupRegistry,
-    published: &mpsc::UnboundedSender<OsString>,
+    published: Option<&mpsc::UnboundedSender<OsString>>,
     retention_ends: &mpsc::UnboundedSender<()>,
 ) {
-    let published = published.clone();
+    let published = published.cloned();
     let ends = retention_ends.clone();
     registry.arm_post_run_callback_for_shutdown_test(move |snapshot| {
         let ends = ends.clone();
-        if let Some(name) = snapshot.file_name() {
+        if let (Some(published), Some(name)) = (published.as_ref(), snapshot.file_name()) {
             let _ = published.send(name.to_owned());
         }
         let end = arm_scheduled_retention_end(move || {

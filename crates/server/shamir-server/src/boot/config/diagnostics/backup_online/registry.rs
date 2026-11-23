@@ -83,9 +83,16 @@
 //! Retention + adoption then run under `catch_unwind` (a panic there is
 //! ONE retention failure, never a copy one); `record.running` stays `true`
 //! until the final record publication sets it `false` LAST, and the guard
-//! is disarmed only then. `last_error` is path-free (`stage: reason`) for
-//! a SCHEDULED run and the full `Display` chain for a MANUAL one; either
-//! way it directs the operator to `verify` before use.
+//! is disarmed only then. The same accounting holds for an unwind in the
+//! window between publication and the end of retention: the guard sees the
+//! already-taken `outcome` sender, so it records ONE retention failure for
+//! a SCHEDULED run and no counter at all for a MANUAL one (manual runs
+//! have no retention pass) — a copy outcome that was already published is
+//! never counted a second time and the copy counters are never touched
+//! twice. Only a panic BEFORE publication costs the guard's own copy
+//! failure. `last_error` is path-free (`stage: reason`) for a SCHEDULED
+//! run and the full `Display` chain for a MANUAL one; either way it
+//! directs the operator to `verify` before use.
 
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -125,6 +132,8 @@ pub use super::progress_attribution::BackupStatusSnapshot;
 pub(crate) use super::schedule::online_backup_step_hooks::{
     arm_backup_step, install_test_step_hook, set_thread_step_callback, BackupStepCallback,
 };
+#[cfg(test)]
+use super::schedule::retention_pass::fire_post_publication_panic;
 #[cfg(test)]
 pub(crate) use super::schedule::retention_pass::set_scheduled_retention_end as arm_scheduled_retention_end;
 #[cfg(test)]
@@ -689,6 +698,11 @@ impl RunJob {
         // is delivered even if retention panics below (the guard stays ARMED).
         backup_metrics::note_finished(failed, stage, bytes, started_at.elapsed());
         guard.publish_outcome(!failed);
+        // Test-only: a planted panic HERE proves what a panic in the
+        // published-but-not-yet-retained window accounts for — ONE retention
+        // failure, never a second copy failure.
+        #[cfg(test)]
+        fire_post_publication_panic();
         // Scheduled retention reports marker-provisioning failures with the
         // same outcome and metric as failed pruning, independent of the copy.
         // Provenance is snapshotted and updated under the existing record
@@ -812,7 +826,9 @@ impl RunJob {
 /// Publication ordering makes partial state impossible: the body publishes
 /// the copy outcome at protocol completion, stays armed across retention,
 /// then publishes the final record with `running = false` LAST and disarms —
-/// the guard re-publishes nothing and re-advances no counter.
+/// the guard re-publishes nothing. A panic in the published window (the
+/// `outcome` sender is already taken) accounts ONE retention failure for a
+/// scheduled run, never a second copy counter.
 struct RunGuard {
     record: Arc<Mutex<RunRecord>>,
     /// The run's live stage hint, read at unwind time (before the permit
@@ -834,6 +850,8 @@ struct RunGuard {
     armed: bool,
     // Field drop closes the channel on unwind only after Drop publishes
     // the failure; normal completion sends explicitly, before retention.
+    // `None` is therefore how `Drop` knows the COPY outcome was already
+    // published (protocol completion) and must not be counted again.
     outcome: Option<oneshot::Sender<bool>>,
     // The LATE signal: sent exactly once when the run is fully over (final
     // record published, defensive refusal, or the unwind path). Never early.
@@ -893,6 +911,11 @@ impl Drop for RunGuard {
             return;
         }
         let stage = self.run_state.stage();
+        // `publish_outcome` takes the sender, so `None` means the COPY
+        // outcome already reached the scheduler: this unwind happened in the
+        // post-publication window (retention and the final publication) and
+        // must not count the copy a second time.
+        let copy_published = self.outcome.is_none();
         let error = match (&self.completed_dir, self.scheduled) {
             (Some(_), true) => String::from(
                 "online-backup runner panicked after the protocol completed; \
@@ -940,7 +963,18 @@ impl Drop for RunGuard {
         record.progress.record_failure(stage, &error);
         record.dest_dir = self.completed_dir.clone();
         record.last_error = Some(error);
-        backup_metrics::note_finished(true, stage, 0, self.started_at.elapsed());
+        if copy_published {
+            // The copy outcome was already published at protocol completion:
+            // a panic here is ONE retention failure for a SCHEDULED run (what
+            // the module doc promises) and no counter at all for a MANUAL one,
+            // which has no retention pass. The copy counters, `active`
+            // included, are never touched twice.
+            if self.scheduled {
+                backup_metrics::note_retention(0, 1, None);
+            }
+        } else {
+            backup_metrics::note_finished(true, stage, 0, self.started_at.elapsed());
+        }
         record.running = false;
         drop(record);
         self.send_finished();
@@ -950,49 +984,12 @@ impl Drop for RunGuard {
 // The engine-step dispatcher and arming helpers live in their OWN
 // `schedule` module (`schedule::online_backup_step_hooks`, declared by
 // `#[path]` over `schedule/tests/online_backup_step_hooks.rs`) and are
-// re-exported above, keeping every call path. This seam impl stays here: it
-// touches private fields.
+// re-exported above, keeping every call path. The arming seam impl touches
+// private fields, so it lives in its OWN `#[cfg(test)]` module too (a NEW
+// path over a file in `schedule/tests/`, intentionally NOT declared by
+// `schedule/tests/mod.rs`): it is a child of THIS module, not of
+// `schedule::tests`, and every call path is unchanged.
 
 #[cfg(test)]
-impl OnlineBackupRegistry {
-    /// Arm a one-shot step callback for this registry's NEXT `start`: the
-    /// callback is moved onto that run's runner thread (and only that
-    /// thread) before the protocol runs, and fires at each engine
-    /// barrier-step boundary through the shared dispatcher
-    /// ([`install_test_step_hook`]). Per-registry opt-in: no other run,
-    /// registry instance or test observes it.
-    pub(crate) fn arm_runner_step_callback(&self, callback: BackupStepCallback) {
-        *self.pending_step_callback.lock() = Some(callback);
-    }
-
-    #[cfg(test)]
-    pub(super) fn pending_adoption_count_for_test(&self, root: &Path, owner: &str) -> usize {
-        self.record
-            .lock()
-            .pending_adoptions
-            .recorded_for(root, owner)
-            .len()
-    }
-
-    /// Arm a one-shot post-run callback for this registry's NEXT `start`:
-    /// after the protocol returns `Ok` on the runner thread and before the
-    /// guard stamp, completion capture and retention pass, it may rename the
-    /// published child (`None` keeps the report path). Per-registry opt-in.
-    pub(super) fn arm_post_run_callback(&self, callback: TestPostRunCallback) {
-        *self.pending_post_run_callback.lock() = Some(callback);
-    }
-
-    /// Ordered-shutdown test seam: arm the one-shot post-run callback the NEXT
-    /// `start` moves onto its runner thread.
-    ///
-    /// Generic on purpose: the crate-private callback type never becomes an API
-    /// surface, and no existing item's visibility changes. A shutdown test parks
-    /// the REAL runner here — after the protocol returned, before the completion
-    /// signal — to prove the shutdown deadline does not abandon the worker.
-    pub(crate) fn arm_post_run_callback_for_shutdown_test(
-        &self,
-        callback: impl Fn(&Path) -> Option<PathBuf> + Send + 'static,
-    ) {
-        self.arm_post_run_callback(Box::new(callback));
-    }
-}
+#[path = "schedule/tests/registry_seams.rs"]
+mod registry_seams;

@@ -10,16 +10,14 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::boot::config::diagnostics::backup_online::metrics::backup_metrics_snapshot;
-use crate::boot::config::diagnostics::backup_online::registry::arm_scheduled_retention_end;
 use crate::boot::config::diagnostics::backup_online::schedule::runner::spawn_for_test;
-use crate::boot::config::diagnostics::backup_online::OnlineBackupRegistry;
 use crate::server::{BootstrapMode, ServerLauncher};
 use crate::sync::durability::backup::online::set_snapshot_name_base_seconds;
 use crate::sync::durability::backup::SNAPSHOT_LEASE_FILE_NAME;
 
 use super::support::{
-    metric_type, obstruct_lease_marker, on_big_stack, sample, scheduled_config, scrape_metrics,
-    TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
+    arm_run_observer, metric_type, obstruct_lease_marker, on_big_stack, sample, scheduled_config,
+    scrape_metrics, TerminalOutcome, BOUND, OUTER, SNAPSHOT_NAME_BASE, TICK, WATCHDOG,
 };
 
 const ALERT_RETENTION_TEST: &str = "live_alert_retention_failure_reaches_the_real_metrics_route";
@@ -30,23 +28,6 @@ fn live_alert_retention_failure_reaches_the_real_metrics_route() {
         timeout(OUTER, run_alert_retention())
             .await
             .expect("live alert-retention acceptance timed out");
-    });
-}
-
-/// Arm the NEXT run's runner-thread observer: its post-run callback installs
-/// the retention-END seam on that run's OWN runner thread, so the END fires
-/// after the pass published its counters. Re-armed before the next admission.
-fn arm_retention_end_observer(registry: &OnlineBackupRegistry, ends: &mpsc::UnboundedSender<()>) {
-    let ends = ends.clone();
-    registry.arm_post_run_callback_for_shutdown_test(move |_snapshot| {
-        let ends = ends.clone();
-        let end = arm_scheduled_retention_end(move || {
-            let _ = ends.send(());
-        });
-        // The hook fires in THIS run's retention pass; the zero-sized guard
-        // would only clear an unfired install.
-        std::mem::forget(end);
-        None
     });
 }
 
@@ -74,8 +55,9 @@ async fn run_alert_retention() {
         .launch_with_backup_test(move |resolved, registry, owner, shutdown| {
             let scheduler_shutdown = shutdown.child_token();
             // Retention-END handshake for run 1; the outcome observer re-arms
-            // it for every following run.
-            arm_retention_end_observer(&registry, &retention_end_tx);
+            // it for every following run. This test only needs the END, not
+            // the published snapshot names.
+            arm_run_observer(&registry, None, &retention_end_tx);
             let observer_registry = Arc::clone(&registry);
             let observer_ends = retention_end_tx.clone();
             spawn_for_test(
@@ -85,7 +67,7 @@ async fn run_alert_retention() {
                 scheduler_shutdown,
                 TICK,
                 move |ok| {
-                    arm_retention_end_observer(&observer_registry, &observer_ends);
+                    arm_run_observer(&observer_registry, None, &observer_ends);
                     let _ = send.send(ok);
                 },
             )
@@ -114,18 +96,42 @@ async fn run_alert_retention() {
     // retention END, never a sleep, so a pass that started before the
     // obstruction cannot be mistaken for the obstructed one.
     let deadline = tokio::time::Instant::now() + BOUND;
-    loop {
+    // The obstructed run's OWN copy outcome: one terminal signal is taken off
+    // the outcome channel for every retention END observed, so this keeps the
+    // stale-outcome drain above and still lands on the obstructed run (a run's
+    // copy outcome is published BEFORE its retention pass, so the pass that
+    // just ended never has to wait for a LATER run's copy — the bounded await
+    // only absorbs the runner task's scheduling lag).
+    let obstructed_outcome = loop {
         match tokio::time::timeout_at(deadline, retention_end_rx.recv()).await {
             Ok(Some(())) => {
+                let outcome = tokio::time::timeout_at(deadline, receive.recv())
+                    .await
+                    .expect("every obstructed run's copy outcome must arrive within the bound")
+                    .expect("the scheduled worker must keep its terminal channel open");
                 if backup_metrics_snapshot().retention_failed_total > retention_before {
-                    break;
+                    break outcome;
                 }
             }
             Ok(None) => panic!("the scheduled worker stopped before the obstructed retention pass"),
             Err(_) => panic!("an obstructed retention pass must end within the bound"),
         }
-    }
+    };
     guard.mark("obstructed retention pass ended");
+    // The obstruction fails RETENTION only: the copy of that same run is intact,
+    // so its terminal outcome must be `Completed`.
+    //
+    // Mutants caught: (a) "the retention obstruction is accounted as a failed
+    // copy run" — an outcome that ORs the retention failure into the copy result
+    // (`false` here, then a nonzero failure streak and a `result="failed"` run on
+    // the route), and (b) an outcome that is only reported after retention, which
+    // would leave this `recv` empty at the obstructed END and trip the bound.
+    assert!(
+        obstructed_outcome,
+        "the obstructed run's COPY must still be reported as a success: a retention \
+         obstruction is a RETENTION failure, never a failed copy run (mutant: the \
+         retention obstruction is accounted as a failed copy run); outcome={obstructed_outcome}"
+    );
     let settled_retention = backup_metrics_snapshot().retention_failed_total;
     assert!(
         settled_retention > retention_before,
@@ -149,6 +155,25 @@ async fn run_alert_retention() {
     assert_eq!(
         metric_type(&route, "shamir_backup_retention_failed_total"),
         "counter"
+    );
+    // Route-level counterpart of the outcome assertion above, immune to the
+    // runner-task lag of the terminal channel: no scheduled run may be counted
+    // `failed`. Index 3 of the snapshot array is the `failed` result, and the
+    // counter never resets, so this is the whole process's history.
+    assert_eq!(
+        sample(
+            &route,
+            "shamir_backup_scheduled_runs_total{result=\"failed\"}"
+        ),
+        baseline.scheduled_runs_total[3],
+        "an obstructed retention pass must never be noted as a FAILED scheduled run \
+         (mutant: the retention obstruction is accounted as a failed copy run): {route}"
+    );
+    assert_eq!(
+        sample(&route, "shamir_backup_scheduled_failure_streak"),
+        0,
+        "a retention failure must not raise the scheduled failure streak (mutant: the \
+         retention obstruction is accounted as a failed copy run): {route}"
     );
 
     let report = timeout(BOUND, handle.shutdown())

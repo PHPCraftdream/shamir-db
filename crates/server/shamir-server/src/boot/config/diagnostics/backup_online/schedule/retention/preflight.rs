@@ -51,36 +51,49 @@ pub(super) fn verified_time(
         return Err(Refusal::Budget);
     }
 
+    // Discovery/validation phase: only the bounded manifest read above and
+    // the walk's entry charges have been charged, so every cheap reject here
+    // costs no byte budget for files the verifier would never open.
     let mut tree = BTreeMap::new();
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
-    match metadata(&dir.join(STAMP_FILE_NAME)) {
+    let stamp_size = match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
             // The verifier reads the stamp twice: `format_stamp::inspect`
-            // reads it, then the manifest-file loop hashes it (charged in the
-            // claimed-file loop below). This is the first of the two reads.
+            // reads it, then the manifest-file loop hashes it (charged with
+            // the claimed files below). This is the first of the two reads,
+            // charged with the other byte charges below.
             let size = file_size(&tree, STAMP_FILE_NAME)?;
             if size > MAX_STAMP {
                 return Err(Refusal::Budget);
             }
-            budget.bytes(size)?;
+            Some(size)
         }
-        Err(Refusal::Unverifiable) => {} // Absent stamp is permitted by v2.
+        Err(Refusal::Unverifiable) => None, // Absent stamp is permitted by v2.
         Err(error) => return Err(error),
-    }
-    // Byte charges mirror the verifier's real reads: every manifest-listed
-    // file is hashed once by its file loop (charged here); a WAL segment is
-    // hashed a second time by its WAL loop and the stamp is read a second time
-    // by `inspect` (both charged where they are bound). The walk charges no
-    // bytes and the manifest is handed to the verifier, never re-read.
+    };
     let mut claimed = BTreeSet::new();
     for entry in &decoded.files {
         budget.checkpoint()?;
         if !claimed.insert(entry.path.as_str()) {
             return Err(Refusal::Unverifiable);
         }
-        budget.bytes(file_size(&tree, &entry.path)?)?;
+        // Root control files are never listed in `files`: the online writer's
+        // copy pass skips `manifest.json` and `backup.meta.json` at the top
+        // level, so a manifest that lists either is not a copy this server
+        // produced. Excluding such an entry from the hash set instead would
+        // change `verify_retention_candidate`'s contract — that verifier lives
+        // in `shamir-sync`'s shared backup module, hashes every listed path
+        // for other callers too, and is out of this change's area — while
+        // hashing bytes retention itself rewrites (`tag_fresh` replaces
+        // `backup.meta.json`, and `manifest.json` is the file being verified)
+        // cannot be a useful check. The copied `format.stamp` is NOT such a
+        // control file: the writer does list it, so it stays hashable.
+        if entry.path == BACKUP_META_FILE_NAME || entry.path == MANIFEST_FILE_NAME {
+            return Err(Refusal::Unverifiable);
+        }
+        file_size(&tree, &entry.path)?;
     }
     let mut wal_dirs = BTreeSet::new();
     let mut wal_files = BTreeSet::new();
@@ -95,8 +108,7 @@ pub(super) fn verified_time(
             {
                 return Err(Refusal::Unverifiable);
             }
-            // The verifier's WAL loop hashes each segment a second time.
-            budget.bytes(file_size(&tree, &segment.file)?)?;
+            file_size(&tree, &segment.file)?;
             if let Some(sidecar) = &segment.sidecar {
                 if !claimed.contains(sidecar.as_str()) {
                     return Err(Refusal::Unverifiable);
@@ -128,6 +140,27 @@ pub(super) fn verified_time(
         };
         if !known {
             return Err(Refusal::Unverifiable);
+        }
+    }
+
+    // Byte charges come only now, after every cheap reject above passed, and
+    // they mirror the verifier's real reads: the stamp is read once by
+    // `format_stamp::inspect` (charged here) and hashed again by its
+    // manifest-file loop (charged with the claimed files); every
+    // manifest-listed file is hashed once by that loop; a WAL segment is
+    // hashed a second time by the verifier's WAL loop. The walk charges no
+    // bytes and the manifest bytes are handed to the verifier, never re-read.
+    if let Some(size) = stamp_size {
+        budget.bytes(size)?;
+    }
+    for entry in &decoded.files {
+        budget.checkpoint()?;
+        budget.bytes(file_size(&tree, &entry.path)?)?;
+    }
+    for listing in &wal.dirs {
+        for segment in &listing.segments {
+            budget.checkpoint()?;
+            budget.bytes(file_size(&tree, &segment.file)?)?;
         }
     }
 
