@@ -49,7 +49,7 @@ use axum::{
     routing::get,
     Router,
 };
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -261,28 +261,6 @@ pub async fn spawn(
     .await
 }
 
-/// Histogram bucket layout for the HTTP login duration metrics.
-///
-/// Fixed upper bounds (seconds) around the 50-75 ms policy padding, up to the
-/// request deadline.
-const BUCKETS: &[f64] = &[
-    0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.1, 0.25, 0.5, 1.0, 5.0, 120.0,
-];
-
-/// A builder with the login BEGIN and FINISH duration histograms configured.
-fn builder_with_login_buckets() -> Result<PrometheusBuilder, ObservabilityError> {
-    let mut builder = PrometheusBuilder::new();
-    for metric in [
-        "shamir_login_http_begin_duration_seconds",
-        "shamir_login_http_finish_duration_seconds",
-    ] {
-        builder = builder
-            .set_buckets_for_metric(Matcher::Full(metric.into()), BUCKETS)
-            .map_err(|error| ObservabilityError::RecorderInstall(error.to_string()))?;
-    }
-    Ok(builder)
-}
-
 /// Same as [`spawn`], plus an optional [`ByteBudget`] sampled on each
 /// `/metrics` scrape. The existing `shamir_inflight_response_bytes_used` and
 /// `shamir_inflight_response_bytes_cap` names are preserved, alongside
@@ -317,7 +295,7 @@ pub async fn spawn_with_byte_budget(
     //    spawn multiple servers in the same process pass
     //    `install_recorder = false` for the second+ instance.
     let prom_handle = if install_recorder {
-        let builder = builder_with_login_buckets()?;
+        let builder = login_histogram::builder_with_login_buckets()?;
         match builder.install_recorder() {
             Ok(h) => Some(h),
             Err(e) => return Err(ObservabilityError::RecorderInstall(e.to_string())),

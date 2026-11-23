@@ -7,7 +7,7 @@
 //! which is exactly the window this test parks in.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -497,4 +497,70 @@ fn open_share_decision(gate: &(Mutex<ShareDecisionState>, Condvar)) {
         released: true,
     };
     condvar.notify_all();
+}
+
+/// Two absent principal entries race for the last global slot. The loser must
+/// not retain a transient reservation after its first-touch attempt fails.
+///
+/// Mutant killed: reserve-global-before-`insert_sync` on first touch, which lets
+/// the losing insert temporarily keep a slot and deny the third principal.
+#[test]
+fn losing_first_touch_reservation_never_denies_a_third_principal() {
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let capacity = CancelRefusalAudit::global_capacity_for_test();
+    let mut seeded =
+        queue.seed_reservations_for_test("principal-seed-0", CANCEL_AUDIT_PRINCIPAL_SHARE);
+    let mut remaining = capacity - 1 - CANCEL_AUDIT_PRINCIPAL_SHARE;
+    let mut index = 1;
+    while remaining != 0 {
+        let take = remaining.min(CANCEL_AUDIT_PRINCIPAL_SHARE);
+        seeded.append(queue.seed_reservations_for_test(&format!("principal-seed-{index}"), take));
+        remaining -= take;
+        index += 1;
+    }
+    assert_eq!(queue.global_held_for_test(), capacity - 1);
+
+    let rendezvous = Arc::new(Barrier::new(3));
+    let first = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || {
+            rendezvous.wait();
+            queue.try_reserve_for_test("first-touch-a")
+        }
+    });
+    let second = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || {
+            rendezvous.wait();
+            queue.try_reserve_for_test("first-touch-b")
+        }
+    });
+    rendezvous.wait();
+    let first = first.join().expect("first-touch A thread");
+    let second = second.join().expect("first-touch B thread");
+    assert_ne!(
+        first.is_some(),
+        second.is_some(),
+        "exactly one principal gets the last slot"
+    );
+    assert_eq!(queue.global_held_for_test(), capacity);
+    assert_eq!(
+        queue.dropped_count(),
+        1,
+        "the losing admission is counted once"
+    );
+
+    // Free the winner's slot, then prove no reservation leaked from the loser.
+    drop(first);
+    drop(second);
+    assert_eq!(queue.global_held_for_test(), capacity - 1);
+    let third = queue
+        .try_reserve_for_test("third-principal")
+        .expect("losing first-touch reservation must not deny a third principal");
+    assert_eq!(queue.global_held_for_test(), capacity);
+
+    drop(third);
+    drop(seeded);
 }

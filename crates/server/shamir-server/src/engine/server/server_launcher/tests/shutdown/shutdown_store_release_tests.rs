@@ -310,6 +310,88 @@ fn a_saturated_blocking_pool_reports_an_unverified_release() {
     );
 }
 
+/// A positive release budget still submits the lock probe; the saturated pool
+/// keeps that probe queued until the stage's own budget expires.
+#[test]
+fn a_saturated_blocking_pool_submits_an_unverified_release_probe() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime");
+    let temp = tempfile::tempdir().expect("test root");
+    let data_dir = temp.path().join("data");
+    create_private_dir(&data_dir).expect("private data directory");
+    let handle = runtime
+        .block_on(async {
+            ServerLauncher {
+                config: boot_config(data_dir.clone()),
+                bootstrap: BootstrapMode::Skip,
+                node_mode: NodeMode::ReadWrite,
+            }
+            .launch()
+            .await
+        })
+        .expect("launch real server");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let job_finished = std::sync::Arc::clone(&finished);
+    let occupied = runtime.spawn_blocking(move || {
+        let _ = started_tx.send(());
+        let _ = release_rx.recv_timeout(BOUND);
+        job_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let _release_on_drop = ReleaseBlockingWorker(release_tx);
+    started_rx
+        .recv_timeout(BOUND)
+        .expect("the pool worker started the occupying job");
+
+    // Shutdown stages precede store release. Under the 3s outer deadline the
+    // release stage must submit a probe with positive remaining budget; the
+    // saturated pool keeps it queued until that stage budget expires.
+    // Construct the timeout within runtime context.
+    let report = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                BOUND,
+                crate::runtime::drain_server(handle, Duration::from_secs(3)),
+            )
+            .await
+        })
+        .expect("shutdown report bounded");
+    let returned_while_parked = !finished.load(std::sync::atomic::Ordering::SeqCst);
+
+    drop(_release_on_drop);
+    drop(occupied);
+
+    assert!(
+        returned_while_parked,
+        "shutdown returned before pool release"
+    );
+    assert!(
+        report.errors().iter().any(|error| {
+            error.contains("store release could not be verified")
+                && error.contains(
+                    "the store-release blocking job did not complete before its deadline",
+                )
+        }),
+        "positive remaining budget must submit a probe and report its Unverified verdict, not generic outer expiry: {report:?}"
+    );
+    assert!(
+        !report
+            .errors()
+            .iter()
+            .any(|error| error.contains("graceful shutdown exceeded deadline")),
+        "the store-release verdict must precede outer expiry: {report:?}"
+    );
+    assert!(
+        !report.is_clean(),
+        "unverified release is unclean: {report:?}"
+    );
+}
+
 /// Releases a parked blocking-pool worker even if an assertion unwinds.
 struct ReleaseBlockingWorker(std::sync::mpsc::Sender<()>);
 

@@ -58,9 +58,6 @@ enum LockState {
 /// How far the discovery walk got.
 #[derive(Debug)]
 enum Discovery {
-    /// The walk never ran to a value (its blocking job was starved past the
-    /// budget), so no store set is known.
-    Unknown,
     /// Every directory under the root was classified: this IS the store set.
     Complete(Vec<StoreRoot>),
     /// The walk could not finish — an unreadable directory, a non-UTF8 entry, a
@@ -69,14 +66,40 @@ enum Discovery {
     Gap,
 }
 
-/// `true` for a fjall store root: `version` is a regular marker file, and the
-/// `lock` entry only has to EXIST.
-///
-/// Requiring `lock` to be a regular file would silently skip a root whose
-/// `lock` is unusable (a directory, say) — the probe of exactly such a root is
-/// the case that must report [`LockState::ProbeError`] instead.
-fn is_store_root(dir: &Path) -> bool {
-    dir.join(VERSION_MARKER).is_file() && std::fs::symlink_metadata(dir.join(LOCK_FILE)).is_ok()
+/// What marker inspection established about a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreClassification {
+    NotStore,
+    Complete,
+    Gap,
+}
+
+/// Classify fjall's marker files without treating metadata failures as absence.
+/// `version` must be a regular file, while `lock` only has to exist: a bad lock
+/// entry must still be discovered so its probe can report UNKNOWN.
+fn classify_store_root(dir: &Path) -> StoreClassification {
+    let version_path = dir.join(VERSION_MARKER);
+    match std::fs::metadata(&version_path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return StoreClassification::NotStore,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling marker symlink exists but its target cannot be read.
+            match std::fs::symlink_metadata(&version_path) {
+                Ok(_) => return StoreClassification::Gap,
+                Err(marker_error) if marker_error.kind() == std::io::ErrorKind::NotFound => {
+                    return StoreClassification::NotStore;
+                }
+                Err(_) => return StoreClassification::Gap,
+            }
+        }
+        Err(_) => return StoreClassification::Gap,
+    }
+
+    match std::fs::symlink_metadata(dir.join(LOCK_FILE)) {
+        Ok(_) => StoreClassification::Complete,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreClassification::NotStore,
+        Err(_) => StoreClassification::Gap,
+    }
 }
 
 /// Walk `root` for fjall store roots, FOLLOWING directory symlinks.
@@ -99,9 +122,13 @@ fn discover(root: &Path) -> Discovery {
         if !visited.insert(probe.clone()) {
             continue;
         }
-        if is_store_root(&probe) {
-            found.push(StoreRoot { logical, probe });
-            continue;
+        match classify_store_root(&probe) {
+            StoreClassification::Complete => {
+                found.push(StoreRoot { logical, probe });
+                continue;
+            }
+            StoreClassification::Gap => return Discovery::Gap,
+            StoreClassification::NotStore => {}
         }
         let Ok(entries) = std::fs::read_dir(&probe) else {
             return Discovery::Gap;
@@ -229,6 +256,18 @@ fn logical(roots: Vec<StoreRoot>) -> Vec<PathBuf> {
 ///   (an unreadable directory, a symlink that does not resolve, a walk cut by
 ///   the depth cap, a starved blocking pool), or a lock probe errored. This is
 ///   never a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnverifiedReason {
+    /// The blocking job did not complete before the absolute deadline.
+    PoolStarved,
+    /// Discovery could not classify the complete store set.
+    DiscoveryGap,
+    /// A lock probe ran but could not determine the lock state.
+    ProbeError,
+    /// The caller's shutdown budget was already exhausted before probing.
+    BudgetExpired,
+}
+
 #[derive(Debug)]
 pub(crate) enum ReleaseOutcome {
     /// No store under the root holds its directory lock.
@@ -236,39 +275,38 @@ pub(crate) enum ReleaseOutcome {
     /// These logical store roots were still holding their lock when the budget
     /// expired.
     StillLocked(Vec<PathBuf>),
-    /// The store state is UNKNOWN: discovery never produced a complete store
-    /// set, or a lock probe could not answer at all (a saturated blocking pool
-    /// parks queued jobs, so an unbounded await here would keep the public
-    /// shutdown inside this barrier forever). A store that WAS discovered and
-    /// then observed locked is [`Self::StillLocked`], never this.
-    Unverified,
+    /// The store state is UNKNOWN, with the reason discovery or probing failed.
+    Unverified(UnverifiedReason),
 }
 
 /// Wait until no fjall store under `root` is locked, bounded end to end.
 ///
 /// Every probe await is bounded by the REMAINING budget, so neither discovery
-/// nor a lock probe can outlive the timeout on a busy pool; the verdict says
-/// which of the three cases happened. The budget is checked BEFORE a probe is
-/// submitted, so an already-spent budget never turns a known held set into an
-/// `Unverified` verdict: a lock that was observed held is reported as
-/// [`ReleaseOutcome::StillLocked`], and only a run that never completed a
-/// discovery (or a probe) reports [`ReleaseOutcome::Unverified`].
+/// nor a lock probe can outlive the deadline; the verdict says which of the
+/// three cases happened. An already-spent deadline never turns a known held
+/// set into `Unverified`: an observed held lock remains `StillLocked`.
 pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOutcome {
-    let deadline = Instant::now() + timeout;
+    release_stores_until(root, Instant::now() + timeout).await
+}
+
+pub(crate) async fn release_stores_until(root: &Path, deadline: Instant) -> ReleaseOutcome {
+    if Instant::now() >= deadline {
+        return ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired);
+    }
     let root = root.to_path_buf();
     // Discovery and the first observation are one job; the two states stay
     // apart afterwards: `discovery` is fixed by that one walk, while `observed`
     // is only ever replaced by a COMPLETED lock probe.
     let (discovery, observed) = match bounded_probe(deadline, move || first_look(&root)).await {
-        Some(FirstLook {
+        Ok(FirstLook {
             discovery,
             observed,
         }) => (discovery, observed),
-        None => (Discovery::Unknown, None),
+        Err(reason) => return ReleaseOutcome::Unverified(reason),
     };
     let Discovery::Complete(_roots) = discovery else {
         // Unknown or Gap: the store set is not knowable, so no release claim.
-        return ReleaseOutcome::Unverified;
+        return ReleaseOutcome::Unverified(UnverifiedReason::DiscoveryGap);
     };
     let mut observed = observed;
     let mut delay = POLL_START;
@@ -276,7 +314,7 @@ pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOut
         // The verdict always comes from the last COMPLETED observation.
         let Some(held) = observed.take() else {
             // A probe errored (or discovery never produced a set): UNKNOWN.
-            return ReleaseOutcome::Unverified;
+            return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError);
         };
         if held.is_empty() {
             return ReleaseOutcome::Released;
@@ -289,13 +327,16 @@ pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOut
         // discard locks already observed held.
         let fallback = held.clone();
         observed = match bounded_probe(deadline, move || observe(&held)).await {
-            Some(observed) => observed,
-            None => return ReleaseOutcome::StillLocked(logical(fallback)),
+            Ok(observed) => observed,
+            Err(UnverifiedReason::PoolStarved) => {
+                return ReleaseOutcome::StillLocked(logical(fallback));
+            }
+            Err(reason) => return ReleaseOutcome::Unverified(reason),
         };
         // A fresh observation is answered at once: an errored one is UNKNOWN,
         // and an empty one is a release — no sleep after either.
         match &observed {
-            None => return ReleaseOutcome::Unverified,
+            None => return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError),
             Some(held) if held.is_empty() => return ReleaseOutcome::Released,
             Some(_) => {}
         }
@@ -311,26 +352,24 @@ pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOut
     }
 }
 
-/// Run ONE blocking probe, bounded by `deadline`. `None` when the budget ran out
-/// before a pool worker took the job (a saturated pool) or when the job ended
-/// without a value; an expired job is ABORTED so queued probe work never
-/// outlives the barrier.
+/// The blocking job did not complete before its deadline (it may have been
+/// queued or still running), or its result channel closed unexpectedly.
 async fn bounded_probe<T: Send + 'static>(
     deadline: Instant,
     probe: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, UnverifiedReason> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let job = tokio::task::spawn_blocking(move || {
         let _ = tx.send(probe());
     });
     match tokio::time::timeout_at(deadline, rx).await {
-        Ok(Ok(value)) => Some(value),
-        Ok(Err(_)) => None,
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(UnverifiedReason::ProbeError),
         Err(_) => {
             // The budget expired with the job still queued (or stuck): abort it
             // rather than leave an orphan probe running after the verdict.
             job.abort();
-            None
+            Err(UnverifiedReason::PoolStarved)
         }
     }
 }
@@ -344,6 +383,6 @@ pub(crate) async fn wait_stores_released(
     match release_stores(root, timeout).await {
         ReleaseOutcome::Released => Ok(()),
         ReleaseOutcome::StillLocked(locked) => Err(locked),
-        ReleaseOutcome::Unverified => Err(vec![root.to_path_buf()]),
+        ReleaseOutcome::Unverified(_) => Err(vec![root.to_path_buf()]),
     }
 }

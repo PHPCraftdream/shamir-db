@@ -621,10 +621,45 @@ fn one_byte_short_of_the_rereads_refuses_before_the_late_rejection() {
     );
 }
 
-/// Mutant killed: the old blanket `kind() == Interrupted` rule classified a
-/// plain OS `EINTR` as `Cancelled`, silently stopping the pass. Only the
-/// cancel hook's own `HashCancelled` marker may be cancelled; every other
-/// I/O error stays incomplete and every non-I/O error is unverifiable.
+#[test]
+fn pre_cancelled_pass_returns_cancelled_without_retention_mutations() {
+    let (_temp, root) = private_root();
+    let older = copy_with_payload(&root, "20200101_000001", 1, Some(OWNER), b"");
+    let fresh = copy_with_payload(&root, "20200101_000002", 2, None, b"");
+    let cancel = CancelFlag::default();
+    cancel.cancel();
+    let mut budget = Budget::with_bytes(&cancel, u64::MAX);
+    let mut outcome = RetentionOutcome::default();
+
+    let refusal = prune_inner(
+        &root,
+        &fresh,
+        OWNER,
+        &BackupRetentionConfig { keep_last: 1 },
+        &BTreeSet::new(),
+        &mut budget,
+        &mut outcome,
+    );
+
+    assert!(matches!(refusal, Err(Refusal::Cancelled)));
+    assert!(outcome.adopted.is_empty());
+    assert_eq!(
+        (outcome.deleted, outcome.failed, outcome.untouched),
+        (0, 0, None)
+    );
+    assert!(older.exists());
+    assert!(fresh.exists());
+    assert!(
+        sidecar(&fresh).get("scheduled_retention").is_none(),
+        "the initial cancellation checkpoint precedes fresh-copy tagging"
+    );
+}
+
+/// Verifier-error classification semantics: the typed cancel-hook marker maps
+/// to `Cancelled`, plain EINTR and other I/O errors remain `Incomplete`, and
+/// non-I/O errors are `Unverifiable`. This classifier-only test does not model
+/// the v2 verifier's hash path: that path wraps the marker in an I/O error
+/// string, so the inner `HashCancelled` type is not preserved for this match.
 #[test]
 fn only_the_cancel_marker_classifies_as_cancelled() {
     let cancelled = BackupError::Io(std::io::Error::new(ErrorKind::Interrupted, HashCancelled));

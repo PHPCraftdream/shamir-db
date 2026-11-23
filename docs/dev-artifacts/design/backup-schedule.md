@@ -141,18 +141,19 @@ skip pruning, even if a temp sidecar remains. No manifest, protocol or restore c
 2. Use sequential checked budgets: 4,096 root entries, 32 tree levels, 64 KiB
    sidecar, 16 MiB manifest, 100,000 tree entries per candidate, and 1,000,000
    tree entries and 1 TiB of input per pass. Byte budget: the pass charges the
-   verifier's real reads, by size, when the manifest's file set is known. Each
-   manifest-listed file is charged once (the claimed-file loop); a WAL segment
-   is charged a second time (the verifier's WAL loop hashes it again) and the
-   stamp a second time (`inspect` reads it before the manifest-file hash). The
-   manifest is handed to the verifier and never re-read within one verification,
-   the tree walk charges directory entries only, so unknown files in a rejected
-   candidate cost one entry each, and file-byte charges are applied only after
-   the cheap structural refusals. Bounded control-file reads are charged as
-   well, each with one extra sentinel byte (`meta.len() + 1`): `manifest.json`
-   once and `backup.meta.json` once per candidate; the adoption loop re-reads
-   the sidecar and the bounded manifest (same caps and charges). Exhausted
-   budget or incomplete root scan means no deletion;
+   verifier's real reads, by size, as execution reaches them. The first stamp
+   inspection is charged before its verdict; the second inspection is charged
+   only after a valid stamp verdict, and a valid listed stamp also pays its
+   manifest-file hash. Structural refusals pay only bytes read before refusal.
+   Each manifest-listed file is charged once (the claimed-file loop); a WAL
+   segment is charged a second time (the verifier's WAL loop hashes it again).
+   The tree walk charges directory entries only, so unknown files in a rejected
+   candidate cost one entry each. Bounded control-file reads are charged too,
+   each with one extra sentinel byte (`meta.len() + 1`): `manifest.json` once
+   during classification and once during adoption, and `backup.meta.json` once
+   per candidate. Adoption's late sidecar and manifest rereads are charged
+   before digest comparison, including when that candidate is subsequently
+   rejected. Exhausted budget or incomplete root scan means no deletion;
    count failure.
    Foreign files, partial or corrupt copies, unsafe trees, other owners and
    unmarked R2a/admin copies stay untouched and are counted. If the just-created

@@ -17,7 +17,9 @@ use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
 use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
-use crate::server::store_release_barrier::{release_stores, ReleaseOutcome};
+use crate::server::store_release_barrier::{
+    release_stores_until, ReleaseOutcome, UnverifiedReason,
+};
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
 /// end once they were told to.
@@ -322,6 +324,43 @@ fn fire_scheduled_join_probe() {
     }
 }
 
+/// One-shot marker for the post-deadline fallback join in `ShutdownOwner::drain`.
+#[cfg(test)]
+static FALLBACK_DRAIN_JOIN_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct FallbackDrainJoinProbeGuard;
+
+#[cfg(test)]
+impl Drop for FallbackDrainJoinProbeGuard {
+    fn drop(&mut self) {
+        *FALLBACK_DRAIN_JOIN_PROBE
+            .lock()
+            .expect("fallback drain join probe") = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn arm_fallback_drain_join_probe(
+    probe: impl FnOnce() + Send + 'static,
+) -> FallbackDrainJoinProbeGuard {
+    *FALLBACK_DRAIN_JOIN_PROBE
+        .lock()
+        .expect("fallback drain join probe") = Some(Box::new(probe));
+    FallbackDrainJoinProbeGuard
+}
+
+#[cfg(test)]
+fn fire_fallback_drain_join_probe() {
+    let probe = FALLBACK_DRAIN_JOIN_PROBE
+        .lock()
+        .expect("fallback drain join probe")
+        .take();
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
 /// One-shot probe fired immediately BEFORE the ordered shutdown's REAL
 /// repository flush call (`ShamirDb::flush_all_report`) — never at the point
 /// the flush would have started, so a SKIPPED flush leaves the probe unfired
@@ -397,6 +436,8 @@ impl ShutdownOwner {
     /// was dropped mid-teardown and the worker is still awaited here — the lock
     /// is released afterwards, never before.
     pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
+        #[cfg(test)]
+        fire_fallback_drain_join_probe();
         self.join_schedule(report).await;
         // Released here, after the scheduled worker finished — never
         // explicitly unlocked (drop is the release).
@@ -407,21 +448,21 @@ impl ShutdownOwner {
 /// The ABSOLUTE bound and the duration a late teardown stage may spend.
 ///
 /// `cap` is the stage's own constant. Inside an outer shutdown budget the stage
-/// may only spend what is left of it, so an outer expiry can never replace the
-/// stage's own verdict with the generic deadline message. The returned instant
-/// is the outer deadline ITSELF when that comes first (not `now + remaining`,
-/// which lands a few nanoseconds later), so a stage that expires exactly at the
-/// outer deadline still records its verdict in the same poll instead of being
-/// dropped with the abandoned future.
+/// may only spend what is left after reserving `reserve_after` for later stages
+/// and their report entries. The returned instant is kept strictly before the
+/// outer deadline when there is a reservation, so the caller can append its
+/// verdict before the outer timeout abandons the teardown future.
 fn stage_bound(
     deadline_at: Option<tokio::time::Instant>,
     cap: Duration,
+    reserve_after: Duration,
 ) -> (tokio::time::Instant, Duration) {
     let now = tokio::time::Instant::now();
     let own = now + cap;
     match deadline_at {
         Some(at) => {
-            let until = at.min(own);
+            let usable_until = at.checked_sub(reserve_after).unwrap_or(now);
+            let until = own.min(usable_until);
             (until, until.saturating_duration_since(now))
         }
         None => (own, cap),
@@ -495,14 +536,11 @@ impl ServerHandle {
     /// The teardown, with the instant its caller's outer deadline expires.
     ///
     /// `deadline_at` is the same instant the caller's own `timeout` is bounded
-    /// by, computed BEFORE that timeout starts. The late teardown stages
-    /// (the meta-snapshot join and the store-release barrier) then spend only
-    /// the budget that is really left, so their verdict — "this snapshot did
-    /// not settle", "this store still holds its lock", "the release could not
-    /// be verified" — reaches the report instead of being dropped with the
-    /// future the outer deadline abandons. `None` means "no outer deadline":
-    /// each stage falls back to its own constant, exactly as
-    /// [`Self::shutdown_with_report`] always did.
+    /// by, computed BEFORE that timeout starts. The late teardown stages share
+    /// this absolute budget and reserve time for later stages and report
+    /// entries. For a very short budget, specific late-stage unknown verdicts
+    /// are appended before earlier stages can consume the deadline; each wait
+    /// otherwise uses `min(cap, remaining - reserve)`.
     ///
     /// cancel-safe: NO — same as [`Self::shutdown_with_report`].
     pub(crate) async fn shutdown_with_budget(
@@ -511,10 +549,9 @@ impl ServerHandle {
         owner: &mut ShutdownOwner,
         deadline_at: Option<tokio::time::Instant>,
     ) {
-        // 1. Tell all accept loops to stop. CancellationToken::cancel() is
-        //    persistent: every existing `.cancelled().await` resolves on the
-        //    next poll, and any new caller sees the cancelled state
-        //    immediately. No subscribe-window race.
+        // 1. Tell all accept loops and refusal-audit producers to stop.
+        // CancellationToken::cancel() is persistent: every existing waiter
+        // resolves on its next poll, and new callers observe cancellation.
         self.cancel_refusal_audit.close();
         self.shutdown_token.cancel();
         // 2. Wait for accept loops to finish, then wait for tracked accepted
@@ -668,7 +705,13 @@ impl ServerHandle {
         //    META_SNAPSHOT_JOIN_TIMEOUT. Join errors stay ignored exactly as
         //    before: only an EXPIRY means the store may still be locked.
         if let Some(snap) = self.meta_snapshot_task {
-            let (bound_at, bound) = stage_bound(deadline_at, META_SNAPSHOT_JOIN_TIMEOUT);
+            // Keep a fixed 500 ms for the release stage and report append; it
+            // still fits inside the 3 s shutdown deadline used by CI tests.
+            let (bound_at, bound) = stage_bound(
+                deadline_at,
+                META_SNAPSHOT_JOIN_TIMEOUT,
+                Duration::from_millis(500),
+            );
             if tokio::time::timeout_at(bound_at, snap.handle)
                 .await
                 .is_err()
@@ -718,26 +761,23 @@ impl ServerHandle {
         drop(self.token_service);
         // The barrier's outcome belongs in the report, not only in a log line,
         // and the two failures stay distinct: a lock that is still HELD names
-        // the store, while a probe that could not run (a saturated blocking
-        // pool) says that the release could not be verified at all. The bound
-        // is what is LEFT of the shutdown budget, capped by
-        // STORE_RELEASE_TIMEOUT, and every line below names the bound it used
-        // rather than the constant: an outer expiry must not swallow this
-        // stage's verdict.
-        let (_, release_budget) = stage_bound(deadline_at, STORE_RELEASE_TIMEOUT);
+        // the store, while an unknown release state identifies whether the
+        // blocking job missed its deadline, discovery was incomplete, or a
+        // probe failed. This stage uses the one absolute budget, capped by
+        // STORE_RELEASE_TIMEOUT and with report slack reserved before expiry.
+        // Keep 250 ms before the absolute deadline for recording this verdict
+        // and returning the report; do not let the release wait consume it all.
+        let (release_deadline, release_budget) = stage_bound(
+            deadline_at,
+            STORE_RELEASE_TIMEOUT,
+            Duration::from_millis(250),
+        );
         if release_budget.is_zero() {
-            // Nothing is left to wait with. A probe submitted now would park
-            // until the outer deadline erased it, so the honest verdict is the
-            // UNKNOWN one — without spending the store-release wait.
-            tracing::warn!("shutdown: no shutdown budget left to verify the store release");
-            report.add_error(format!(
-                "store release could not be verified within {release_budget:?} (no shutdown \
-                 budget left for the store-release probe): the lock probe was not started, so \
-                 whether every store released its directory lock is UNKNOWN; an immediate \
-                 relaunch of the same data directory can fail with `Locked`"
-            ));
+            // No probe was submitted, so do not claim an unverified outcome.
+            // The outer deadline reports that teardown was abandoned.
+            tracing::warn!("shutdown: no budget remained to start the store-release probe");
         } else {
-            match release_stores(&data_dir, release_budget).await {
+            match release_stores_until(&data_dir, release_deadline).await {
                 ReleaseOutcome::Released => {}
                 ReleaseOutcome::StillLocked(still_locked) => {
                     let stores = store_names(&still_locked);
@@ -753,16 +793,37 @@ impl ServerHandle {
                          same data directory can fail with `Locked`"
                     ));
                 }
-                ReleaseOutcome::Unverified => {
+                ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired) => {
+                    // The barrier rejected an already-expired absolute
+                    // deadline before submitting a probe. Do not label this a
+                    // completed unverified probe outcome.
+                    tracing::warn!("shutdown: release probe deadline expired before submission");
+                }
+                ReleaseOutcome::Unverified(reason) => {
+                    let (summary, detail) = match reason {
+                        UnverifiedReason::PoolStarved => (
+                            "the store-release blocking job did not complete before its deadline",
+                            "the blocking job may still have been queued or running",
+                        ),
+                        UnverifiedReason::DiscoveryGap => (
+                            "store discovery was incomplete",
+                            "the store set could not be fully discovered",
+                        ),
+                        UnverifiedReason::ProbeError => (
+                            "the store-release blocking job ended without a result",
+                            "discovery or a lock probe did not complete successfully",
+                        ),
+                        UnverifiedReason::BudgetExpired => unreachable!("handled above"),
+                    };
                     tracing::warn!(
+                        ?reason,
                         timeout = ?release_budget,
                         "shutdown: store release could not be verified in time",
                     );
                     report.add_error(format!(
-                        "store release could not be verified within {release_budget:?}: the \
-                         blocking pool did not run the lock probe, so whether every store \
-                         released its directory lock is UNKNOWN; an immediate relaunch of the \
-                         same data directory can fail with `Locked`"
+                        "store release could not be verified within {release_budget:?}: {summary}; \
+                         {detail}, so whether every store released its directory lock is UNKNOWN; \
+                         an immediate relaunch of the same data directory can fail with `Locked`"
                     ));
                 }
             }

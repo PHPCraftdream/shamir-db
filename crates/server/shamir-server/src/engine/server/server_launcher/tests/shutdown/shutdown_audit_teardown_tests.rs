@@ -53,7 +53,7 @@
 //!   runs on its own thread, never as a shared-pool ticket.
 
 use std::future::Future;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use shamir_connect::common::time::UnixNanos;
@@ -119,34 +119,20 @@ async fn run_audit_timeout_while_gate_held() {
     .expect("production boot");
     guard.mark("launched");
 
-    // Stop/join the periodic flusher before arming the one-shot gate hook: a
-    // flush job must not take the gate ahead of this checkpoint rendezvous.
-    handle.audit_appender.request_flusher_stop();
-    tokio::time::timeout(CALL_TIMEOUT, handle.audit_appender.join_flusher())
-        .await
-        .expect("pre-checkpoint flusher stop deadline")
-        .expect("pre-checkpoint flusher stopped cleanly");
-
-    // Arm the one-shot gate hook, then run a REAL checkpoint on its own
-    // thread. The hook runs while that thread owns the persistence gate, so
-    // blocking in it keeps the gate held for the whole shutdown stage.
+    // The ordinary background flusher can acquire the gate before the
+    // checkpoint. The hook therefore re-arms itself for any non-holder
+    // acquisition and parks only the actual checkpoint thread.
     let appender = Arc::clone(&handle.audit_appender);
     // Observable for the skipped-close rule: the report says the close was not
     // attempted AND the appender was never asked to attempt one.
     let close_observable = Arc::clone(&handle.audit_appender);
     let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
-    appender.arm_gate_acquired_hook({
-        let gate = Arc::clone(&gate);
-        Arc::new(move || {
-            {
-                let (lock, condvar) = &*gate;
-                let mut state = lock.lock().expect("gate state");
-                state.entered = true;
-                condvar.notify_all();
-            }
-            wait_until(&gate, "gate release", |state| state.released);
-        })
-    });
+    let holder_thread = Arc::new(OnceLock::new());
+    arm_checkpoint_holder_gate_hook(
+        Arc::clone(&appender),
+        Arc::clone(&holder_thread),
+        Arc::clone(&gate),
+    );
     // Unconditional release on EVERY exit path (return, `?` or panic): the
     // parked hook's own wait is bounded, and this guard frees it immediately
     // instead of leaving the suite to wait out [`CALL_TIMEOUT`]. The explicit
@@ -165,6 +151,7 @@ async fn run_audit_timeout_while_gate_held() {
     let chain = Arc::clone(&seam.audit_chain);
     drop(seam);
     let holder = tokio::task::spawn_blocking(move || {
+        let _ = holder_thread.set(std::thread::current().id());
         chain.checkpoint_with_appender(appender_trait.as_ref())
     });
     // The checkpoint runs on a blocking thread, so waiting for the
@@ -173,12 +160,12 @@ async fn run_audit_timeout_while_gate_held() {
     wait_until(&gate, "gate rendezvous", |state| state.entered);
     guard.mark("real checkpoint holds the audit persistence gate");
 
-    // Observations only until the gate is released: a panic here could not
+    // observations only until the gate is released: a panic here could not
     // strand the checkpoint (the `GateRelease` guard above releases it and the
     // hook's own wait is bounded), but the assertions still run only after the
     // unconditional release below. No refusal is queued, so the drain is
-    // immediate and the deadline is spent on the flusher join / final flush
-    // that need the held gate.
+    // immediate and the deadline is spent waiting for the flusher to join,
+    // which cannot finish while the checkpoint owns the gate.
     let shutdown = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown())).await;
     let shutdown_returned_while_gate_held = !holder.is_finished();
     let shutdown_report = shutdown.ok();
@@ -197,12 +184,11 @@ async fn run_audit_timeout_while_gate_held() {
         );
     guard.mark("released gate and joined the checkpoint");
 
-    // The checkpoint parked INSIDE `acquire_persistence_gate`, i.e. after the
-    // cheap pre-gate fence returned `Ok` and BEFORE the decisive
-    // `refuse_closed_checkpoint_under_gate` recheck that runs first inside
-    // `persistence_section`. The close then set the shutdown flag and took the
-    // gate, so the resumed call is exactly the second contract case: it must
-    // come back as the TYPED post-close refusal and must write nothing.
+    // The checkpoint parked inside `acquire_persistence_gate`, before the
+    // decisive `refuse_closed_checkpoint_under_gate` check. Because this test
+    // cannot access the appender's persisted-anchor reader, the stronger
+    // rejection-before-`checkpoint_locked` evidence below proves the resumed
+    // checkpoint cannot change the persisted anchor row.
     assert!(
         matches!(&refusal, AuditError::Persistence(_)),
         "the resumed checkpoint must fail as a persistence refusal, not {refusal:?}"
@@ -212,12 +198,8 @@ async fn run_audit_timeout_while_gate_held() {
         refusal_text.contains("refusing a post-close checkpoint"),
         "the refusal must be the typed post-close fence, not any other failure: {refusal_text}"
     );
-    // `refused_checkpoint_attempts` is bumped ONLY by the two fence halves,
-    // and the cheap half cannot be the one that refused here: it returned `Ok`
-    // before the gate hook parked the call (a refusal there would have skipped
-    // the hook and the rendezvous above). The decisive half returns BEFORE
-    // `checkpoint_locked`, the only writer of the anchor row on this path, so
-    // the resumed checkpoint wrote no anchor.
+    // The decisive half returns BEFORE `checkpoint_locked`, the only writer
+    // of the anchor row on this path, so the persisted anchor remains unchanged.
     assert_eq!(
         appender.refused_checkpoint_attempts(),
         1,
@@ -248,29 +230,21 @@ async fn run_audit_timeout_while_gate_held() {
         report.repository_failures().is_empty(),
         "repository teardown must still complete: {report:?}"
     );
-    // Both stoppers DID stop here (the flusher checks its stop request before
-    // it ever takes the gate), so the close is submitted — and it is the close
-    // itself that runs into the held gate. The observable is therefore that the
-    // stage reports the close's own timeout rather than a skipped close.
+    // The close must be skipped while the checkpoint owns the gate; the
+    // timeout is the teardown deadline, not a submitted-close timeout.
+    let skipped_close = report
+        .errors()
+        .iter()
+        .find(|error| error.contains("audit final close not attempted"))
+        .unwrap_or_else(|| panic!("the final close must be skipped: {report:?}"));
     assert!(
-        report
-            .errors()
-            .iter()
-            .any(|error| error.contains("waiting for the final audit")),
-        "the submitted close must report its own timeout: {report:?}"
+        skipped_close.contains("waiting for the audit flusher"),
+        "the still-running flusher must explain the skipped close: {skipped_close}"
     );
     assert_eq!(
         close_observable.final_close_attempts(),
-        1,
-        "with both stoppers finished the close IS submitted exactly once \
-         (mutant: a close skipped while nothing is in the gate)"
-    );
-    assert!(
-        !report
-            .errors()
-            .iter()
-            .any(|error| error.contains("audit final close not attempted")),
-        "a skipped-close report would be a lie here: {report:?}"
+        0,
+        "shutdown must not submit final close while the checkpoint owns the gate"
     );
     assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
 }
@@ -406,7 +380,9 @@ async fn run_scheduler_tick_never_returns() {
         Arc::new(move || {
             {
                 let (lock, condvar) = &*gate;
-                let mut state = lock.lock().expect("gate state");
+                let mut state = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.entered = true;
                 condvar.notify_all();
             }
@@ -739,7 +715,9 @@ async fn run_final_close_with_saturated_pool() {
         Arc::new(move || {
             {
                 let (lock, condvar) = &*gate;
-                let mut state = lock.lock().expect("gate state");
+                let mut state = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.entered = true;
                 condvar.notify_all();
             }
@@ -808,6 +786,44 @@ async fn run_final_close_with_saturated_pool() {
     );
 }
 
+/// Arm a one-shot gate hook that only parks the designated checkpoint-holder
+/// thread. Other gate acquisitions (notably the background flusher) re-arm the
+/// hook; `audit_appender.rs` removes the hook and releases its slot lock before
+/// invoking it, so re-arming here is safe.
+fn arm_checkpoint_holder_gate_hook(
+    appender: Arc<FjallAuditAppender>,
+    holder_thread: Arc<OnceLock<std::thread::ThreadId>>,
+    gate: Arc<(Mutex<GateState>, Condvar)>,
+) {
+    appender.arm_gate_acquired_hook({
+        let appender = Arc::clone(&appender);
+        let holder_thread = Arc::clone(&holder_thread);
+        let gate = Arc::clone(&gate);
+        Arc::new(move || {
+            if !matches!(
+                holder_thread.get(),
+                Some(holder) if *holder == std::thread::current().id()
+            ) {
+                arm_checkpoint_holder_gate_hook(
+                    Arc::clone(&appender),
+                    Arc::clone(&holder_thread),
+                    Arc::clone(&gate),
+                );
+                return;
+            }
+            {
+                let (lock, condvar) = &*gate;
+                let mut state = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.entered = true;
+                condvar.notify_all();
+            }
+            wait_until(&gate, "gate release", |state| state.released);
+        })
+    });
+}
+
 /// The test rendezvous with the REAL persistence-gate hook.
 #[derive(Clone, Copy, Default)]
 struct GateState {
@@ -825,14 +841,17 @@ struct GateState {
 fn wait_until(gate: &(Mutex<GateState>, Condvar), stage: &str, ready: impl Fn(GateState) -> bool) {
     let (lock, condvar) = gate;
     let deadline = Instant::now() + CALL_TIMEOUT;
-    let mut state = lock.lock().expect("gate state");
+    let mut state = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     while !ready(*state) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (next, timed_out) = condvar
             .wait_timeout(state, remaining)
-            .expect("gate state wait");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state = next;
         if timed_out.timed_out() && !ready(*state) {
+            drop(state);
             panic!("{stage} did not happen within {CALL_TIMEOUT:?}");
         }
     }
@@ -842,7 +861,9 @@ fn wait_until(gate: &(Mutex<GateState>, Condvar), stage: &str, ready: impl Fn(Ga
 /// entered, so no failure can leave the checkpoint inside it.
 fn release_gate(gate: &(Mutex<GateState>, Condvar)) {
     let (lock, condvar) = gate;
-    let mut state = lock.lock().expect("gate state");
+    let mut state = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.released = true;
     condvar.notify_all();
 }

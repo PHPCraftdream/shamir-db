@@ -92,11 +92,11 @@ pub async fn serve(
 /// by `ShutdownOwner::drain`.
 ///
 /// The deadline instant is also HANDED to the teardown, so its late stages
-/// (the meta-snapshot join and the store-release barrier) spend only the budget
-/// that is really left instead of their own constants: a stage that misses its
-/// bound then reaches the report with its own verdict — which snapshot did not
-/// settle, which store still holds its lock — instead of being erased by the
-/// generic expiry message.
+/// share one absolute budget and reserve report slack: each uses
+/// `min(cap, remaining - reserved time for later stages/report)`. For very
+/// short budgets the teardown records the late-stage unknown verdicts before
+/// earlier stages can consume the deadline. This keeps specific reports ahead
+/// of outer expiry without raising the caller's deadline.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,

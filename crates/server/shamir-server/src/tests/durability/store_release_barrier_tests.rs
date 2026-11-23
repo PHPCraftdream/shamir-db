@@ -140,6 +140,29 @@ async fn a_store_reached_through_a_directory_symlink_is_probed() {
     );
 }
 
+/// A dangling `version` marker is undecidable, not evidence that this is not a
+/// store. Discovery must fail closed rather than report an empty store set.
+///
+/// Mutant: marker metadata errors collapsed into `false` allow the complete
+/// walk to finish empty and incorrectly return `Released`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_version_marker_is_a_discovery_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = temp.path().join("users");
+    std::fs::create_dir_all(&store).expect("store directory");
+    std::os::unix::fs::symlink(store.join("missing-version-target"), store.join("version"))
+        .expect("dangling version marker symlink");
+    std::fs::write(store.join("lock"), b"").expect("lock marker");
+
+    let outcome = release_stores(temp.path(), Duration::from_millis(100)).await;
+
+    assert!(
+        matches!(outcome, ReleaseOutcome::Unverified(_)),
+        "an undecidable version marker is a discovery gap, never Released: {outcome:?}"
+    );
+}
+
 /// A store whose `lock` entry cannot be opened is UNKNOWN state.
 ///
 /// Mutant: the former `is_released` returned `true` for EVERY lock-file open
@@ -156,7 +179,7 @@ async fn an_unopenable_lock_file_is_unverified_never_released() {
     let outcome = release_stores(temp.path(), Duration::from_millis(100)).await;
 
     assert!(
-        matches!(outcome, ReleaseOutcome::Unverified),
+        matches!(outcome, ReleaseOutcome::Unverified(_)),
         "an unopenable lock file leaves the store state UNKNOWN, got {outcome:?}"
     );
 }
@@ -189,7 +212,7 @@ async fn an_unreadable_directory_is_a_gap_not_a_release() {
     let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700));
 
     assert!(
-        matches!(outcome, ReleaseOutcome::Unverified),
+        matches!(outcome, ReleaseOutcome::Unverified(_)),
         "an unreadable directory hides part of the store set: UNKNOWN, never Released — got \
          {outcome:?}"
     );
@@ -227,7 +250,7 @@ async fn an_empty_discovery_is_released_and_a_truncated_one_is_unverified() {
     assert!(
         matches!(
             release_stores(temp.path(), Duration::from_millis(500)).await,
-            ReleaseOutcome::Unverified
+            ReleaseOutcome::Unverified(_)
         ),
         "a walk that stopped at the depth cap cannot claim the stores released"
     );
@@ -266,7 +289,7 @@ fn a_starved_first_probe_is_unverified() {
     runtime.block_on(occupied).expect("the occupier joined");
 
     assert!(
-        matches!(outcome, ReleaseOutcome::Unverified),
+        matches!(outcome, ReleaseOutcome::Unverified(_)),
         "a first probe that never ran leaves the store state UNKNOWN, got {outcome:?}"
     );
 }

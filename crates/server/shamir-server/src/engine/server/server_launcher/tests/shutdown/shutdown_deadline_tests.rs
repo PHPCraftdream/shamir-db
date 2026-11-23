@@ -43,7 +43,9 @@ use crate::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig, TlsConfig,
 };
 use crate::db_handler::NodeMode;
-use crate::server::server_handle::{arm_repo_flush_probe, arm_scheduled_join_probe};
+use crate::server::server_handle::{
+    arm_fallback_drain_join_probe, arm_repo_flush_probe, arm_scheduled_join_probe,
+};
 use crate::server::server_launcher::audit_teardown::arm_teardown_probe;
 use crate::server::{release_stores, BootstrapMode, ReleaseOutcome, ServerLauncher};
 
@@ -97,21 +99,24 @@ async fn run_scheduled_worker() {
     // it releases the run again.
     let parked = Arc::new(Semaphore::new(0));
     let gate = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
-    let completed = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
 
     let handle = ServerLauncher::new(backup_config(data_dir.clone(), backups))
         .with_bootstrap(BootstrapMode::Skip)
         .launch_with_backup_test({
             let parked = Arc::clone(&parked);
             let gate = Arc::clone(&gate);
-            let completed = Arc::clone(&completed);
+            let finished = Arc::clone(&finished);
             move |resolved, registry, owner, shutdown| {
                 registry.arm_post_run_callback_for_shutdown_test({
                     let parked = Arc::clone(&parked);
                     let gate = Arc::clone(&gate);
+                    let finished = Arc::clone(&finished);
                     move |_published: &Path| {
                         parked.add_permits(1);
                         wait_until(&gate, "worker release", |state| state.released);
+                        // Marks the post-run callback's released stage; it does not prove task exit.
+                        finished.store(true, Ordering::SeqCst);
                         None
                     }
                 });
@@ -121,11 +126,7 @@ async fn run_scheduled_worker() {
                     owner,
                     shutdown.child_token(),
                     Duration::from_secs(3600),
-                    move |ok| {
-                        if ok {
-                            completed.store(true, Ordering::SeqCst);
-                        }
-                    },
+                    move |_| {},
                 )
             }
         })
@@ -143,17 +144,12 @@ async fn run_scheduled_worker() {
     drop(parked_permit);
     guard.mark("native runner parked before its completion signal");
 
-    // STAGE MARKERS, not a guessed window. The audit-teardown probe proves the
-    // teardown entry ran, the join probe proves it REACHED
-    // `ShutdownOwner::join_schedule`, and the repository-flush probe records
-    // whether the join was already done when the flush stage started. Without
-    // them a shutdown that timed out at an earlier stage would satisfy the
-    // "still pending" assertion vacuously (mutant: a teardown that never
-    // reaches the join), and "the worker awaited after the flush" would be
-    // invisible (mutant: wait after flush).
+    // Distinct markers show the bounded join is reached in both modes, while
+    // the fallback join is reached only after deadline expiry.
     let (join_tx, join_rx) = tokio::sync::oneshot::channel::<()>();
     let (teardown_tx, teardown_rx) = tokio::sync::oneshot::channel::<()>();
     let joined = Arc::new(AtomicBool::new(false));
+    let fallback_joined = Arc::new(AtomicBool::new(false));
     let flush_entered = Arc::new(AtomicBool::new(false));
     let _teardown_probe = arm_teardown_probe(move || {
         let _ = teardown_tx.send(());
@@ -214,8 +210,8 @@ async fn run_scheduled_worker() {
     );
     assert_eq!(shutdown.exit_code(), 70, "unclean report: {shutdown:?}");
     assert!(
-        completed.load(Ordering::SeqCst),
-        "the scheduled run must still complete after the release (the worker was drained, not abandoned)"
+        finished.load(Ordering::SeqCst),
+        "the post-run callback passed its release wait (not proof that the callback or spawned task fully exited)"
     );
     assert!(
         lock_after.is_ok(),
@@ -226,6 +222,14 @@ async fn run_scheduled_worker() {
     // repository flush belonged to the dropped future, so it must NOT run.
     // (Mutant: a flush on the expiry path would write after the report already
     // declared the teardown abandoned.)
+    assert!(
+        joined.load(Ordering::SeqCst),
+        "bounded join_schedule marker must fire on the TEST_DEADLINE-expired path"
+    );
+    assert!(
+        fallback_joined.load(Ordering::SeqCst),
+        "fallback ShutdownOwner::drain join marker must fire on the TEST_DEADLINE-expired path"
+    );
     assert!(
         !flush_entered.load(Ordering::SeqCst),
         "the expiry path must not enter the repository flush: {shutdown:?}"
@@ -242,10 +246,10 @@ async fn run_scheduled_worker() {
     );
 }
 
-/// A NORMAL shutdown (no expiry) joins the scheduled worker and its run BEFORE
-/// the repository flush. The flush probe records whether the run had already
-/// completed when the flush stage started, so the mutant "wait after flush"
-/// (flush first, join after) records `false`.
+/// A NORMAL shutdown (no expiry) joins the scheduled worker before the
+/// repository flush. The callback-stage marker records whether the post-run
+/// callback passed its release wait by the time the flush stage started; this
+/// does not establish that the spawned task fully exited.
 #[test]
 fn normal_shutdown_joins_the_scheduled_worker_before_the_repository_flush() {
     on_big_stack(|| async {
@@ -269,21 +273,24 @@ async fn run_normal_order() {
 
     let parked = Arc::new(Semaphore::new(0));
     let gate = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
-    let completed = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
 
     let handle = ServerLauncher::new(backup_config(data_dir.clone(), backups))
         .with_bootstrap(BootstrapMode::Skip)
         .launch_with_backup_test({
             let parked = Arc::clone(&parked);
             let gate = Arc::clone(&gate);
-            let completed = Arc::clone(&completed);
+            let finished = Arc::clone(&finished);
             move |resolved, registry, owner, shutdown| {
                 registry.arm_post_run_callback_for_shutdown_test({
                     let parked = Arc::clone(&parked);
                     let gate = Arc::clone(&gate);
+                    let finished = Arc::clone(&finished);
                     move |_published: &Path| {
                         parked.add_permits(1);
                         wait_until(&gate, "worker release", |state| state.released);
+                        // Marks the post-run callback's released stage; it does not prove task exit.
+                        finished.store(true, Ordering::SeqCst);
                         None
                     }
                 });
@@ -293,11 +300,7 @@ async fn run_normal_order() {
                     owner,
                     shutdown.child_token(),
                     Duration::from_secs(3600),
-                    move |ok| {
-                        if ok {
-                            completed.store(true, Ordering::SeqCst);
-                        }
-                    },
+                    move |_| {},
                 )
             }
         })
@@ -313,18 +316,28 @@ async fn run_normal_order() {
     guard.mark("native runner parked before its completion signal");
 
     let (join_tx, join_rx) = tokio::sync::oneshot::channel::<()>();
+    let bounded_joined = Arc::new(AtomicBool::new(false));
+    let fallback_joined = Arc::new(AtomicBool::new(false));
     let flush_entered = Arc::new(AtomicBool::new(false));
     let flush_saw_completion = Arc::new(AtomicBool::new(false));
-    let _join_probe = arm_scheduled_join_probe(move || {
-        let _ = join_tx.send(());
-    });
+    let _join_probe = {
+        let bounded_joined = Arc::clone(&bounded_joined);
+        arm_scheduled_join_probe(move || {
+            bounded_joined.store(true, Ordering::SeqCst);
+            let _ = join_tx.send(());
+        })
+    };
+    let _fallback_join_probe = {
+        let fallback_joined = Arc::clone(&fallback_joined);
+        arm_fallback_drain_join_probe(move || fallback_joined.store(true, Ordering::SeqCst))
+    };
     let _flush_probe = {
         let flush_entered = Arc::clone(&flush_entered);
         let flush_saw_completion = Arc::clone(&flush_saw_completion);
-        let completed = Arc::clone(&completed);
+        let finished = Arc::clone(&finished);
         arm_repo_flush_probe(move || {
             flush_entered.store(true, Ordering::SeqCst);
-            flush_saw_completion.store(completed.load(Ordering::SeqCst), Ordering::SeqCst);
+            flush_saw_completion.store(finished.load(Ordering::SeqCst), Ordering::SeqCst);
         })
     };
 
@@ -350,8 +363,16 @@ async fn run_normal_order() {
         "the normal case must not expire: {shutdown:?}"
     );
     assert!(
-        completed.load(Ordering::SeqCst),
-        "the scheduled run must complete before the shutdown returns: {shutdown:?}"
+        finished.load(Ordering::SeqCst),
+        "the post-run callback passed its release wait before the normal flush (not proof the callback or spawned task fully exited): {shutdown:?}"
+    );
+    assert!(
+        bounded_joined.load(Ordering::SeqCst),
+        "bounded join_schedule marker must fire on the normal path"
+    );
+    assert!(
+        !fallback_joined.load(Ordering::SeqCst),
+        "fallback ShutdownOwner::drain join marker must not fire on the normal path"
     );
     assert!(
         flush_entered.load(Ordering::SeqCst),
@@ -379,12 +400,10 @@ async fn run_normal_order() {
 /// report what they could not settle.
 ///
 /// The runtime has ONE blocking thread and this test parks it before the
-/// shutdown starts. Both late stages submit their real work to that pool — the
-/// meta-snapshot task its final lockout/rate-limit write, the store-release
-/// barrier its discovery walk and lock probe — so neither can finish on its own
-/// while the pool is parked. With an outer deadline of
-/// [`REMAINING_BUDGET_DEADLINE`] (below both stage constants) the report must
-/// still carry:
+/// 3 s outer budget is too short to rely on earlier teardown reaching those
+/// stages. Once reached, the meta-snapshot wait reserves time for release and
+/// reporting, while the release wait reserves final report slack, so each
+/// actual stage verdict is appended before outer expiry.
 ///
 /// * the meta-snapshot verdict (step 6): the snapshot did not settle, so the
 ///   `server_meta` store may still be locked;

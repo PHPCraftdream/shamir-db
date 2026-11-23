@@ -125,24 +125,21 @@ async fn shutdown_joins_both_tasks_and_drop_cancels_the_token() {
     );
 }
 
-// Pins the parked-handler case from the review: a client that sends a
-// `/metrics` request and never reads the response leaves a live TCP connection
-// in the listener's drain set. `shutdown()` must still complete inside the
-// bound, report BOTH sides as joined, and leave the socket closed — the
-// listener drains/aborts its connection rather than holding the database past
-// the caller's deadline.
+// A connected client sends a `/metrics` request and deliberately leaves the
+// response unread. The test cancels the handle before calling `shutdown()`, so
+// it does not establish that the handler entered sampling or was parked in the
+// drain set. It asserts listener/poller joins and that shutdown closes both
+// the connection and listening socket with a pending request.
 //
 // Rendezvous is `connect` + `write_all` only (no sleep, no read before the
-// shutdown): `shutdown()`'s own `OBS_TASK_JOIN_TIMEOUT` per side is the
-// deadline under test.
+// shutdown); the cancellation is explicit and precedes shutdown.
 //
 // Mutants killed: "shutdown() detaches the listener join" (the socket stays
 // open and the read below times out); "shutdown() returns () and collapses
-// both sides" (no outcome to assert at all); "listener_joined hard-coded true"
-// is NOT killed here — nothing parks the drain past the bound — that case is
-// covered by `shutdown_names_a_wedged_listener_without_hiding_the_poller`.
+// both sides" (no outcome to assert at all). This does not pin a parked handler
+// or an in-flight database sample.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parked_scrape_connection_does_not_outlive_shutdown() {
+async fn shutdown_closes_listener_with_a_pending_unread_request() {
     let (dir, handle) = spawn_on_tempdir().await;
     let bound_addr = handle.bound_addr;
 
@@ -195,15 +192,15 @@ async fn parked_scrape_connection_does_not_outlive_shutdown() {
     drop(dir);
 }
 
-// Pins the per-side report over the real fixture: on a NORMAL shutdown the
-// poller (which holds its own `Arc<ShamirDb>`) really did join, and `cancel()`
-// reaches the token the poller selects on before `shutdown()` is awaited.
+// Pins the per-side report over the real fixture: the poller has a real
+// database and is cancelled before its first tick, then joins normally. This
+// does not establish that sampling was in flight.
 //
 // Mutants killed: "poller_joined hard-coded false" / "the outcome swaps the two
 // sides" (caught together with the wedged-listener test, which has one `true`
 // and one `false`); "shutdown() returns ()" (nothing to assert).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_reports_the_poller_joined_over_a_real_database() {
+async fn shutdown_joins_a_real_database_poller_cancelled_before_first_tick() {
     let (_dir, handle) = spawn_on_tempdir().await;
     let bound_addr = handle.bound_addr;
     let token = handle.shutdown_on_drop.0.clone();
@@ -271,15 +268,14 @@ async fn shutdown_names_a_wedged_listener_without_hiding_the_poller() {
     );
 }
 
-// Pins the handler half of item 9: a `/metrics` scrape in flight when the
-// server is cancelled answers `503 not ready` promptly instead of sampling the
-// database under the caller's `Arc<ShamirDb>`.
+// Pins the already-cancelled handler path: with a recorder and database
+// present, a pre-cancelled request answers `503 not ready` without sampling.
+// This does not prove cancellation interrupts a sample already in flight.
 //
-// Mutants killed: "no cancellation in the handler" — without the `select!` the
-// same `AppState` (recorder handle present, database present) renders and
-// answers `200 OK`, so the status assertion fails.
+// Mutants killed: "no cancellation check before sampling" — without the
+// `select!`, this pre-cancelled state would render and answer `200 OK`.
 #[tokio::test]
-async fn cancelled_metrics_handler_answers_503_without_sampling_the_database() {
+async fn pre_cancelled_metrics_handler_answers_503_without_sampling_the_database() {
     let dir = TempDir::new().expect("tempdir");
     let db = ShamirDb::init(SystemStoreConfig::Fjall(dir.path().join("system")))
         .await
@@ -299,7 +295,7 @@ async fn cancelled_metrics_handler_answers_503_without_sampling_the_database() {
 
     let response = tokio::time::timeout(SHUTDOWN_BOUND, metrics_handler(State(state)))
         .await
-        .expect("a cancelled handler must answer at once, not sample the database");
+        .expect("a pre-cancelled handler must answer at once, before sampling the database");
     assert_eq!(
         response.status(),
         StatusCode::SERVICE_UNAVAILABLE,

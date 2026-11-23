@@ -123,6 +123,7 @@ const CLOSED: usize = 1 << (usize::BITS - 1);
 const SATURATED: usize = CLOSED >> 1;
 const COUNT_MASK: usize = !(CLOSED | SATURATED);
 const DRAIN_BUDGET: Duration = Duration::from_secs(3);
+const ADMISSION_RETRY_LIMIT: usize = 4;
 
 #[derive(Default)]
 pub(crate) struct CancelRefusalAudit {
@@ -160,14 +161,19 @@ pub(crate) struct CancelRefusalAudit {
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
-/// Outcome of the single bucket-locked admission decision. A `bool` cannot carry
-/// it: a share refusal has to log and record its own drop, while a global
-/// refusal already recorded and logged both inside
-/// [`CancelRefusalAudit::reserve_global_slot`].
+/// Outcome of the single bucket-locked admission decision. Refusal accounting
+/// and logging are performed only after the bucket callback returns.
 enum ShareAdmission {
     Reserved,
     ShareFull,
-    GlobalRefused,
+    GlobalRefused(GlobalRefusal),
+}
+
+#[derive(Clone, Copy)]
+enum GlobalRefusal {
+    Closed,
+    Saturated,
+    Full,
 }
 
 impl CancelRefusalAudit {
@@ -222,40 +228,68 @@ impl CancelRefusalAudit {
     /// NAME: two principals never share a counter and the count cannot drift
     /// from the live slots.
     fn reserve_share_and_global(&self, principal: &str) -> bool {
-        loop {
+        for _ in 0..ADMISSION_RETRY_LIMIT {
             match self.principals.update_sync(principal, |_, held| {
                 if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
                     return ShareAdmission::ShareFull;
                 }
-                // Lock-free CAS: no second lock is taken under this bucket.
-                if !self.reserve_global_slot() {
-                    return ShareAdmission::GlobalRefused;
+                match self.reserve_global_slot() {
+                    Ok(()) => {
+                        *held += 1;
+                        ShareAdmission::Reserved
+                    }
+                    Err(reason) => ShareAdmission::GlobalRefused(reason),
                 }
-                *held += 1;
-                ShareAdmission::Reserved
             }) {
                 Some(ShareAdmission::Reserved) => return true,
                 Some(ShareAdmission::ShareFull) => {
                     self.refuse_share_full();
                     return false;
                 }
-                // The global refusal already recorded its drop and logged it.
-                Some(ShareAdmission::GlobalRefused) => return false,
-                None => {
-                    // First refusal for this name: a brand-new entry can never
-                    // be share-capped, so take the global slot first and insert
-                    // it already holding our slot. A concurrent insert wins the
-                    // entry; hand the slot back and increment against that
-                    // winner on the next pass (bounded, as before: the winner's
-                    // entry is present, so the next `update_sync` sees it).
-                    if !self.reserve_global_slot() {
-                        return false;
-                    }
-                    if self.principals.insert_sync(principal.to_owned(), 1).is_ok() {
-                        return true;
-                    }
-                    self.release_global_slot();
+                Some(ShareAdmission::GlobalRefused(reason)) => {
+                    // First-touch failures leave a zero-count placeholder. Retire
+                    // it only if no concurrent admission has made it live.
+                    self.principals.remove_if_sync(principal, |held| *held == 0);
+                    self.refuse_global(reason);
+                    return false;
                 }
+                None => {
+                    // Publish an empty entry first. The subsequent bucket-locked
+                    // update is the sole admission decision for both paths.
+                    let _ = self.principals.insert_sync(principal.to_owned(), 0);
+                }
+            }
+        }
+        self.principals.remove_if_sync(principal, |held| *held == 0);
+        self.refuse_retry_limit();
+        false
+    }
+
+    fn refuse_retry_limit(&self) {
+        let dropped = self.record_drop();
+        tracing::warn!(
+            retries = ADMISSION_RETRY_LIMIT,
+            dropped,
+            "cancel refusal audit admission retry limit reached; dropping event"
+        );
+    }
+
+    fn refuse_global(&self, reason: GlobalRefusal) {
+        match reason {
+            GlobalRefusal::Closed => {
+                let dropped = self.record_drop();
+                tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
+            }
+            GlobalRefusal::Full => {
+                let dropped = self.record_drop();
+                tracing::warn!(
+                    capacity = CANCEL_AUDIT_CAPACITY,
+                    dropped,
+                    "cancel refusal audit queue full; dropping events"
+                );
+            }
+            GlobalRefusal::Saturated => {
+                self.record_drop();
             }
         }
     }
@@ -274,34 +308,23 @@ impl CancelRefusalAudit {
     /// Take one GLOBAL slot, or refuse: admission closed, capacity reached, or
     /// an earlier rejection in the same saturation episode already latched it.
     /// The count grows only here.
-    fn reserve_global_slot(&self) -> bool {
+    fn reserve_global_slot(&self) -> Result<(), GlobalRefusal> {
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CLOSED != 0 {
-                let dropped = self.record_drop();
-                tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
-                return false;
+                return Err(GlobalRefusal::Closed);
             }
             let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
             if full && state & SATURATED != 0 {
-                self.record_drop();
-                return false;
+                return Err(GlobalRefusal::Saturated);
             }
             let next = if full { state | SATURATED } else { state + 1 };
             match self
                 .state
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) if full => {
-                    let dropped = self.record_drop();
-                    tracing::warn!(
-                        capacity = CANCEL_AUDIT_CAPACITY,
-                        dropped,
-                        "cancel refusal audit queue full; dropping events"
-                    );
-                    return false;
-                }
-                Ok(_) => return true,
+                Ok(_) if full => return Err(GlobalRefusal::Full),
+                Ok(_) => return Ok(()),
                 Err(current) => state = current,
             }
         }
