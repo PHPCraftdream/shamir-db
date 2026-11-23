@@ -26,15 +26,12 @@ pub struct BackupScheduleConfig {
 pub struct BackupRetentionConfig {
     #[serde(default = "default_keep_last")]
     pub keep_last: usize,
-    #[serde(default)]
-    pub max_age_days: Option<u32>,
 }
 
 impl Default for BackupRetentionConfig {
     fn default() -> Self {
         Self {
             keep_last: default_keep_last(),
-            max_age_days: None,
         }
     }
 }
@@ -42,6 +39,11 @@ impl Default for BackupRetentionConfig {
 fn default_keep_last() -> usize {
     7
 }
+
+/// Upper bound of `keep_last`: one retention pass scans at most 4,096 root
+/// entries, and foreign entries share that cap, so a larger floor could never
+/// be satisfied by a single successful pass.
+const MAX_KEEP_LAST: usize = 1000;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSchedule {
@@ -98,12 +100,27 @@ fn invalid_window() -> ConfigError {
 }
 
 impl BackupScheduleConfig {
-    pub(super) fn validate(&self, data_dir: &Path) -> Result<(), ConfigError> {
-        self.validated(data_dir).map(|_| ())
+    /// Syntax-only validation: no filesystem access, so every subcommand that
+    /// loads the production config — `restore --from` included — passes even
+    /// when the original backup mount is absent. Privacy of the destination
+    /// and its disjointness from `data_dir` are launch-time checks and run in
+    /// [`Self::resolve`] only.
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        self.syntax().map(|_| ())
+    }
+
+    /// Launch-time preflight, run before the data directory is created: the
+    /// syntax plus the destination's lexical disjointness from the configured
+    /// `data_dir` and its privacy. It never touches `data_dir`, so an invalid
+    /// schedule refuses the launch before any directory is created.
+    pub fn check_launch(&self, data_dir: &Path) -> Result<(), ConfigError> {
+        self.syntax()?;
+        self.check_destination(data_dir)
     }
 
     pub fn resolve(&self, data_dir: &Path) -> Result<ResolvedSchedule, ConfigError> {
-        let mut schedule = self.validated(data_dir)?;
+        let mut schedule = self.syntax()?;
+        self.check_destination(data_dir)?;
         let destination = self.destination.canonicalize().map_err(|error| {
             ConfigError::Validation(format!(
                 "backup.destination cannot be canonicalized: {error}"
@@ -120,27 +137,10 @@ impl BackupScheduleConfig {
         Ok(schedule)
     }
 
-    fn validated(&self, data_dir: &Path) -> Result<ResolvedSchedule, ConfigError> {
-        let interval = parse_interval(&self.interval)?;
-        let window = self.window.as_deref().map(DailyWindow::parse).transpose()?;
-        if self.retention.keep_last == 0 {
-            return Err(ConfigError::Validation(
-                "backup.retention.keep_last must be at least 1".into(),
-            ));
-        }
-        // All u32 day counts fit in u64 seconds, including u32::MAX.
-        if self.retention.max_age_days == Some(0) {
-            return Err(ConfigError::Validation(
-                "backup.retention.max_age_days must be at least 1".into(),
-            ));
-        }
+    fn check_destination(&self, data_dir: &Path) -> Result<(), ConfigError> {
         let destination = &self.destination;
-        if !destination.is_absolute()
-            || destination.file_name().is_none()
-            || has_parent_component(destination)
-        {
-            return Err(invalid_destination());
-        }
+        // A path inside `data_dir` stays out of the schedule even when the
+        // source cannot be canonicalized yet.
         if data_dir.is_absolute() && !has_parent_component(data_dir) {
             check_disjoint(destination, data_dir)?;
         }
@@ -156,7 +156,30 @@ impl BackupScheduleConfig {
             })
             .map_err(|error| {
                 ConfigError::Validation(format!("backup.destination must be private: {error}"))
-            })?;
+            })
+    }
+
+    fn syntax(&self) -> Result<ResolvedSchedule, ConfigError> {
+        let interval = parse_interval(&self.interval)?;
+        let window = self.window.as_deref().map(DailyWindow::parse).transpose()?;
+        let keep_last = self.retention.keep_last;
+        if keep_last == 0 {
+            return Err(ConfigError::Validation(
+                "backup.retention.keep_last must be at least 1".into(),
+            ));
+        }
+        if keep_last > MAX_KEEP_LAST {
+            return Err(ConfigError::Validation(format!(
+                "backup.retention.keep_last must be at most {MAX_KEEP_LAST}: one retention pass scans at most 4096 root entries, shared with foreign entries"
+            )));
+        }
+        let destination = &self.destination;
+        if !destination.is_absolute()
+            || destination.file_name().is_none()
+            || has_parent_component(destination)
+        {
+            return Err(invalid_destination());
+        }
         Ok(ResolvedSchedule {
             destination: destination.clone(),
             interval,

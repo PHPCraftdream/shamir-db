@@ -229,10 +229,7 @@ async fn failed_scheduled_copy_completes_false_without_starting_retention() {
         .start_scheduled(
             to.clone(),
             OWNER.to_owned(),
-            BackupRetentionConfig {
-                keep_last: 1,
-                max_age_days: None,
-            },
+            BackupRetentionConfig { keep_last: 1 },
         )
         .expect("admit scheduled run");
     guard.mark("scheduled run admitted");
@@ -346,10 +343,7 @@ async fn refused_manifest_capture_records_no_provenance_or_fallback_attribution(
         .start_scheduled(
             to.clone(),
             OWNER.to_owned(),
-            BackupRetentionConfig {
-                keep_last: 1,
-                max_age_days: None,
-            },
+            BackupRetentionConfig { keep_last: 1 },
         )
         .expect("admit scheduled run");
     guard.mark("scheduled run admitted");
@@ -470,10 +464,7 @@ async fn marker_obstruction_counts_retention_failure_and_records_provenance() {
     assert_eq!(before.retention_untouched, 0);
 
     // --- Pass 1: copy succeeds, retention reports the marker failure.
-    let policy = || BackupRetentionConfig {
-        keep_last: 1,
-        max_age_days: None,
-    };
+    let policy = || BackupRetentionConfig { keep_last: 1 };
     // Test-only fixture surgery: pin run 1's output to a fixed name and a
     // fixed manifest creation time (see `pin_fixture`), so run 2's scan
     // ordering and the recorded provenance are deterministic.
