@@ -486,3 +486,47 @@ fn applied_tail_seeds_fence_without_entering_operation_recovery() {
         .expect("applied-tail scenario timed out");
     });
 }
+
+/// STARTUP-3c: a journal row whose PHYSICAL key is not a 16-byte record id must
+/// fail the WHOLE open with the typed refusal. The lenient partition scan skips
+/// such a key, so the journal received neither a key nor an error and the open
+/// succeeded — a silently lost journal row that no later validation could see.
+///
+/// The payload is a VALID journal record copied from a live row: the only
+/// damage is the key, so the strict scan's codec failure is what refuses, not a
+/// value-decode error.
+#[test]
+fn malformed_journal_physical_key_fails_the_open() {
+    on_big_stack(|| async {
+        tokio::time::timeout(
+            Duration::from_secs(300),
+            Box::pin(async {
+                let (dir, db, _) = started().await;
+                let table = journal_table(&db).await;
+                let raw = {
+                    let mut stream = Box::pin(table.list_stream(16));
+                    let mut batch = stream.next().await.unwrap().unwrap();
+                    let (_, RecordCow::Borrowed(raw)) = batch.pop().unwrap() else {
+                        panic!("journal MVCC scan must yield raw record bytes");
+                    };
+                    raw
+                };
+                table
+                    .mvcc_store_for_test()
+                    .unwrap()
+                    .set_versioned(RecordKey::from_slice(b"not-a-record-id"), raw)
+                    .await
+                    .unwrap();
+                db.system_store()
+                    .flush_system_repo_durable(&table)
+                    .await
+                    .unwrap();
+                drop(table);
+                close(db).await;
+                assert_open_damage(dir.path(), &["undecodable raw bytes"]).await;
+            }),
+        )
+        .await
+        .expect("malformed journal key scenario timed out");
+    });
+}
