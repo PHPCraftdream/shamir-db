@@ -9,7 +9,8 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
@@ -569,4 +570,112 @@ fn stage_and_reason_is_stage_and_kind_without_paths() {
         stage_and_io_reason(BackupStage::Preparing, ErrorKind::PermissionDenied),
         "preparing: io-permission-denied"
     );
+}
+
+/// The publication's directory fsync obeys the SAME tolerance rule as the
+/// copy passes: an injected `Unsupported` on the snapshot root, armed only
+/// after the Verifying boundary (i.e. exactly at the two publications), is
+/// tolerated; an injected `PermissionDenied` at the same point is a typed
+/// destination failure.
+///
+/// The seam substitutes the fsync RESULT and `manifest::fsync_dest_dir` then
+/// runs it through `tolerate_dir_sync_capability`, the very rule a real
+/// result takes, so an injected result can never take a path the production
+/// code does not have.
+///
+/// Mutant caught: the parent's private, non-tolerant and UNSEAMED
+/// `fsync_dir` in `write_manifest` / `write_backup_meta`. On the parent
+/// commit the publication never consults the seam, so the tolerated phase
+/// observes zero firings and the strict phase returns `Ok` instead of the
+/// typed refusal.
+#[test]
+fn publication_directory_fsync_obeys_the_one_tolerance_rule() {
+    // Phase 1: a filesystem that cannot fsync a directory at all.
+    let source = TempDir::new().expect("source temp dir");
+    InjectPort::source_with_data(source.path());
+    let to = TempDir::new().expect("destination temp dir");
+    let armed = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicUsize::new(0));
+    let armed_for_boundary = armed.clone();
+    let boundary: SeamGuard =
+        test_seams::set_before_boundary(Box::new(move |stage: BackupStage| {
+            if stage == BackupStage::Verifying {
+                armed_for_boundary.store(true, Ordering::SeqCst);
+            }
+        }));
+    let armed_for_hook = armed.clone();
+    let fired_for_hook = fired.clone();
+    let snapshot_root = to.path().to_path_buf();
+    let fsync: SeamGuard = test_seams::set_fsync_dir(Box::new(move |path: &Path| {
+        if !armed_for_hook.load(Ordering::SeqCst) || path.parent() != Some(snapshot_root.as_path())
+        {
+            return None;
+        }
+        fired_for_hook.fetch_add(1, Ordering::SeqCst);
+        Some(Err(std::io::Error::from(ErrorKind::Unsupported)))
+    }));
+    let port = InjectPort::single_repo(source.path());
+    let (result, _progress) = run_online(&port, source.path(), to.path(), &CancelFlag::default());
+    drop(fsync);
+    drop(boundary);
+    let report = result.expect("an unsupported publication fsync must stay tolerated");
+    assert!(
+        report.dest_dir.join("manifest.json").is_file(),
+        "the tolerated fsync must not prevent publishing the manifest"
+    );
+    assert!(
+        fired.load(Ordering::SeqCst) >= 2,
+        "both publications must consult the one rule, observed {} firing(s)",
+        fired.load(Ordering::SeqCst)
+    );
+
+    // Phase 2: any other kind propagates as a destination failure.
+    let source = TempDir::new().expect("source temp dir");
+    InjectPort::source_with_data(source.path());
+    let to = TempDir::new().expect("destination temp dir");
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_boundary = armed.clone();
+    let boundary: SeamGuard =
+        test_seams::set_before_boundary(Box::new(move |stage: BackupStage| {
+            if stage == BackupStage::Verifying {
+                armed_for_boundary.store(true, Ordering::SeqCst);
+            }
+        }));
+    let armed_for_hook = armed.clone();
+    let snapshot_root = to.path().to_path_buf();
+    let fsync: SeamGuard = test_seams::set_fsync_dir(Box::new(move |path: &Path| {
+        if !armed_for_hook.load(Ordering::SeqCst) || path.parent() != Some(snapshot_root.as_path())
+        {
+            return None;
+        }
+        Some(Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "injected publication fsync failure",
+        )))
+    }));
+    let port = InjectPort::single_repo(source.path());
+    let (result, _progress) = run_online(&port, source.path(), to.path(), &CancelFlag::default());
+    drop(fsync);
+    drop(boundary);
+    let error = result.expect_err("a non-tolerated publication fsync must fail the run");
+    let OnlineBackupError::Failed { stage, source, .. } = &error else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Verifying);
+    let OnlineBackupFailure::Dest { source: io } = source else {
+        panic!("the publication fsync failure must be a DESTINATION failure, got {source:?}");
+    };
+    assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.stage_and_reason(),
+        "verifying: destination-io-permission-denied",
+        "the scheduled reason must be the destination vocabulary token"
+    );
+    assert_eq!(
+        fs::read_dir(to.path()).expect("destination root").count(),
+        0,
+        "the failed run must remove its owned snapshot directory"
+    );
+    assert_eq!(port.pins_currently_held(), 0);
+    assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
 }

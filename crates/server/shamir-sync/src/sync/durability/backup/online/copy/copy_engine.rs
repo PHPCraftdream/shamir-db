@@ -24,75 +24,10 @@ use crate::sync::durability::audit_chain_files::{
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
+pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
+
 /// Fixed reused buffer for streaming copies and hashes.
 const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
-
-/// Bounded retry knobs for Windows sharing violations (os errors 32/33).
-#[derive(Debug, Clone)]
-pub struct CopyOptions {
-    pub share_retry_attempts: u32,
-    pub share_retry_delay_ms: u64,
-}
-
-impl Default for CopyOptions {
-    fn default() -> Self {
-        Self {
-            share_retry_attempts: 5,
-            share_retry_delay_ms: 100,
-        }
-    }
-}
-
-/// One file of the snapshot: forward-slash path relative to the snapshot
-/// root, lowercase-hex SHA-256, size in bytes.
-#[derive(Debug, Clone)]
-pub struct CopiedFile {
-    pub rel_path: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-/// What one copy pass defined. `files` IS the snapshot: only what the
-/// final hash pass hashed (design 4.2 step D — the manifest never
-/// describes a file set that no longer exists).
-#[derive(Debug, Default)]
-pub struct CopyPassResult {
-    pub files: Vec<CopiedFile>,
-    pub changed_files: u64,
-    pub missing_files: u64,
-}
-
-/// Copy failures. Sharing violations exhausted after the bounded retry
-/// surface as `Io` (source) or `Dest` (destination) carrying the
-/// original error; a tripped seal gate surfaces as typed `RecopyCap`
-/// (the protocol maps it to `OnlineBackupFailure::RecopyCap` at
-/// `Sealing`). The bounded audit chain rounds of the data-directory pass
-/// fail typed when an archive keeps appearing behind the copy.
-#[derive(Debug, thiserror::Error)]
-pub enum CopyError {
-    #[error("backup copy cancelled")]
-    Cancelled,
-    #[error("copy failed for {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// The DESTINATION side failed (create, write, fsync, parent
-    /// directory): kept distinct from [`CopyError::Io`] so a destination
-    /// error can never be mistaken for the tolerated vanished-SOURCE
-    /// race that `Io { NotFound }` encodes.
-    #[error("destination write failed for {path}: {source}")]
-    Dest {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("seal re-copy cap exceeded: {0}")]
-    RecopyCap(String),
-    #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
-    AuditFilesUnstable { rounds: usize },
-}
 
 /// Cooperative seal-re-copy gate (design Q12): bounds ONE repo's seal
 /// re-copy (WAL dir + store dir) by wall-clock deadline and cumulative
@@ -211,7 +146,10 @@ impl SealGate {
 fn is_sharing_violation(error: &CopyError) -> bool {
     let source = match error {
         CopyError::Io { source, .. } | CopyError::Dest { source, .. } => source,
-        CopyError::Cancelled | CopyError::RecopyCap(_) | CopyError::AuditFilesUnstable { .. } => {
+        CopyError::Cancelled
+        | CopyError::RecopyCap(_)
+        | CopyError::AuditFilesUnstable { .. }
+        | CopyError::AuditListing { .. } => {
             return false;
         }
     };
@@ -269,7 +207,7 @@ fn hex_encode(digest: &[u8]) -> String {
 /// protocol runs on the caller's thread, so the hooks observe exactly
 /// the copy/hash calls of the run under test.
 #[cfg(test)]
-#[path = "tests/copy_seams.rs"]
+#[path = "../tests/copy_seams.rs"]
 pub(crate) mod test_seams;
 
 /// Stream-hash a file, returning lowercase-hex SHA-256 and size.
@@ -407,17 +345,13 @@ fn copy_once(
 
 /// Fsync one destination directory; a failure is [`CopyError::Dest`] naming
 /// the DIRECTORY (a destination failure, never a source one) and always
-/// propagates — never swallowed. `manifest::fsync_dest_dir` documents the
-/// tolerated filesystem-capability kinds and is the seam's fallback result.
+/// propagates — never swallowed. [`manifest::fsync_dest_dir`] owns the ONE
+/// tolerated-filesystem-capability rule of the online copy AND the test seam
+/// that substitutes its result, so the copy passes and the two publications
+/// (`manifest::write_manifest`, `manifest::write_backup_meta`) can never
+/// disagree about which directory-fsync failures are tolerated.
 fn fsync_dir_fallible(dir: &Path) -> Result<(), CopyError> {
-    #[cfg(test)]
-    let result = match test_seams::fire_fsync_dir(dir) {
-        Some(injected) => manifest::tolerate_dir_sync_capability(injected),
-        None => manifest::fsync_dest_dir(dir),
-    };
-    #[cfg(not(test))]
-    let result = manifest::fsync_dest_dir(dir);
-    result.map_err(|error| dest_at(dir, error))
+    manifest::fsync_dest_dir(dir).map_err(|error| dest_at(dir, error))
 }
 
 fn is_regular_file(meta: &fs::Metadata) -> bool {
@@ -606,7 +540,12 @@ pub fn run_copy_pass(
 /// the last round, and an active log an earlier pass left in the destination
 /// that the last round did not capture is removed (the source has none while a
 /// rotation reopens it). A source file that vanishes during a corrective
-/// re-copy still fails the pass with its I/O error, as in every other pass.
+/// re-copy, or its follow-up re-hash, is counted MISSING for that round: a
+/// rotation renamed the active log into a new archive, which the stability
+/// check re-lists and the next round captures, so the snapshot still carries
+/// every byte the rotation moved. Every other pass (`run_copy_pass`,
+/// `run_copy_pass_gated`) still fails with its typed I/O error there,
+/// because in those a vanished source means a lost file.
 ///
 /// Not covered, by design: retention may DELETE an archive between the
 /// listing and its copy — a vanished file is excluded exactly as any other
@@ -642,11 +581,15 @@ pub(super) fn run_data_dir_copy_pass(
                 ..rules
             },
         )?;
+        // Every round's counters describe work this pass really did: a
+        // source that vanished inside one round's corrective re-copy is
+        // counted missing there, even when a LATER round is the stable one
+        // that defines the snapshot.
+        result.changed_files += audit.changed_files;
+        result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
             remove_uncaptured_active_log(dest_root, &audit)?;
             result.files.extend(audit.files);
-            result.changed_files += audit.changed_files;
-            result.missing_files += audit.missing_files;
             return Ok(result);
         }
     }
@@ -949,36 +892,28 @@ fn run_copy_pass_inner(
             if pass_hash == copy_hash && pass_size == copy_size {
                 (pass_hash, pass_size)
             } else {
-                // Changed between copy and hash: re-copy, bounded (design
-                // 4.2 D).
+                // Corrective re-copy, bounded (design 4.2 D).
                 changed_files += 1;
-                let mut hash = pass_hash;
-                let mut size = pass_size;
-                for _ in 0..2 {
-                    let recopy = copy_with_retry(&source_path, &dest_path, cancel, options, gate)?;
-                    let rehash = match hash_file_inner(&source_path, cancel, gate) {
-                        Ok(result) => result,
-                        Err(CopyError::Io { source, .. })
-                            if source.kind() == std::io::ErrorKind::NotFound =>
-                        {
-                            return Err(CopyError::Io {
-                                path: source_path,
-                                source: std::io::Error::new(
-                                    std::io::ErrorKind::NotFound,
-                                    "source vanished during re-copy",
-                                ),
-                            });
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    let matches_copy = rehash.0 == recopy.0 && rehash.1 == recopy.1;
-                    hash = rehash.0;
-                    size = rehash.1;
-                    if matches_copy {
-                        break;
-                    }
-                }
-                (hash, size)
+                let recopied = recopy_until_stable(
+                    &source_path,
+                    &dest_path,
+                    cancel,
+                    options,
+                    gate,
+                    rules.audit_files == AuditFiles::Only,
+                    (pass_hash, pass_size),
+                )?;
+                let Some(settled) = recopied else {
+                    // The source vanished between its copy and this
+                    // corrective copy: in the audit chain phase that
+                    // rotation renamed the active log into a NEW archive,
+                    // which the pass's stability check re-lists and the
+                    // next round captures, so the file is MISSING from
+                    // this round, not a failure.
+                    missing_files += 1;
+                    continue;
+                };
+                settled
             }
         };
         #[cfg(test)]
@@ -994,4 +929,63 @@ fn run_copy_pass_inner(
         changed_files,
         missing_files,
     })
+}
+
+/// Bounded corrective re-copy of one file whose snapshot hash differed from
+/// the hash of its copy: copy it again and hash the source again, at most
+/// twice, accepting the copy once the two agree. Returns the LAST pair —
+/// exactly what the inline loop returned before, so a persistent mismatch
+/// still surfaces at the run's self-verification, never here.
+///
+/// `tolerate_vanished` is set ONLY for the audit chain phase
+/// (`AuditFiles::Only`): there a source that vanished before the corrective
+/// copy or its re-hash is the rotation that renamed the active log into a new
+/// archive, and `Ok(None)` reports it MISSING so the pass's stability check
+/// re-lists. Every other pass keeps the old behaviour: a vanished source
+/// fails the pass with its typed `NotFound`.
+fn recopy_until_stable(
+    source_path: &Path,
+    dest_path: &Path,
+    cancel: &CancelFlag,
+    options: &CopyOptions,
+    gate: Option<&SealGate>,
+    tolerate_vanished: bool,
+    mismatched: (String, u64),
+) -> Result<Option<(String, u64)>, CopyError> {
+    let mut hash = mismatched.0;
+    let mut size = mismatched.1;
+    for _ in 0..2 {
+        let recopy = match copy_with_retry(source_path, dest_path, cancel, options, gate) {
+            Ok(copy) => copy,
+            Err(CopyError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound && tolerate_vanished =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let rehash = match hash_file_inner(source_path, cancel, gate) {
+            Ok(result) => result,
+            Err(CopyError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                if tolerate_vanished {
+                    return Ok(None);
+                }
+                return Err(CopyError::Io {
+                    path: source_path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "source vanished during re-copy",
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let matches_copy = rehash.0 == recopy.0 && rehash.1 == recopy.1;
+        hash = rehash.0;
+        size = rehash.1;
+        if matches_copy {
+            break;
+        }
+    }
+    Ok(Some((hash, size)))
 }

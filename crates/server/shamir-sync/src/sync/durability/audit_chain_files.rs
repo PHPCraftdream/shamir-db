@@ -6,7 +6,10 @@
 //! `audit.log` plus `audit.log.` + 20 ASCII decimal digits archives — and
 //! shamir-sync carries no config for them. Only exact names count: boot
 //! recovery ignores every other name in the reserved namespace, so a copy
-//! must neither capture such a name as an archive nor skip it as one.
+//! must neither capture such a name as an archive nor skip it as one. A
+//! per-entry listing failure is typed ([`CopyError::AuditListing`]) rather
+//! than a silent omission, so an unreadable entry can never hide a possibly
+//! new rotation archive.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -17,7 +20,9 @@ use super::backup::online::copy_engine::{CopyError, CopyPassResult, SealGate};
 use super::backup::online::progress::CancelFlag;
 
 /// File name of the ACTIVE audit chain log at the top of `data_dir`.
-pub(crate) const AUDIT_LOG_FILE_NAME: &str = "audit.log";
+/// Private: every caller lives in this module (the copy engine uses
+/// `is_audit_log_file_name`, never the raw name).
+const AUDIT_LOG_FILE_NAME: &str = "audit.log";
 
 /// Rotation archives are exactly `audit.log.` + 20 ASCII decimal digits.
 const AUDIT_ARCHIVE_PREFIX: &str = "audit.log.";
@@ -49,6 +54,13 @@ pub(crate) fn is_audit_log_file_name(name: &OsStr) -> bool {
 /// both the copy loop and the hash pass follow, so the manifest's file order
 /// stays deterministic). Only exact archive names, only regular files;
 /// cancellation and the gate are checked per entry.
+///
+/// Every enumeration and metadata failure is a typed
+/// [`CopyError::AuditListing`] — which carries no path, the copy's error
+/// vocabulary being path-free — except an entry that VANISHED between the
+/// listing and the metadata read (`NotFound`), which is the
+/// retention/rotation race and is skipped. Never a silent omission: an
+/// unreadable entry could be a possibly-new rotation archive.
 pub(crate) fn list_audit_files(
     source_root: &Path,
     cancel: &CancelFlag,
@@ -60,11 +72,16 @@ pub(crate) fn list_audit_files(
         path: source_root.to_path_buf(),
         source,
     })?;
-    let mut entries: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect();
-    entries.sort();
+    // EVERY enumeration error is typed: a dropped entry would silently omit
+    // an audit chain file from this listing — and this is the ONE listing
+    // both the capture round and the stability check use.
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
+        let entry = entry.map_err(|source| CopyError::AuditListing { source })?;
+        paths.push(entry.path());
+    }
+    paths.sort();
+    for entry in paths {
         if let Some(gate) = gate {
             gate.check(cancel)?;
         } else if cancel.is_cancelled() {
@@ -76,9 +93,26 @@ pub(crate) fn list_audit_files(
         if !is_audit_log_file_name(name) {
             continue;
         }
-        let meta = match fs::symlink_metadata(&entry) {
+        // Test-only seam: an injected metadata RESULT for this entry
+        // REPLACES the result the listing consumes, so the injected failure
+        // travels the same match arm as a genuine one (the seam
+        // `copy_engine::list_files` uses).
+        #[cfg(test)]
+        let meta_result =
+            match super::backup::online::copy_engine::test_seams::fire_symlink_metadata(&entry) {
+                Some(result) => result,
+                None => fs::symlink_metadata(&entry),
+            };
+        #[cfg(not(test))]
+        let meta_result = fs::symlink_metadata(&entry);
+        // Only an entry that VANISHED between the listing and this read is
+        // skipped (the retention/rotation race, exactly as in
+        // `copy_engine::list_files`); every other failure is typed, never a
+        // silent omission of a possibly-new archive.
+        let meta = match meta_result {
             Ok(meta) => meta,
-            Err(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(CopyError::AuditListing { source }),
         };
         if !meta.is_file() {
             continue;

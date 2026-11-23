@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
@@ -256,31 +257,70 @@ pub fn fire_manifest_rename(target: &Path) -> Option<std::io::Result<()>> {
     MANIFEST_RENAME.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(target)))
 }
 
-/// Recreate the empty Fjall `lock` artifact in every Fjall store under `root`
-/// (a directory holding a `version` file and a `keyspaces` subdirectory). The
-/// online producer omits every file named `lock` and pinned Fjall recovery
+/// Fjall `file::MAGIC_BYTES` (`b"FJL"`) + `FormatVersion::V3`: the header
+/// `restore::fjall_locks::is_fjall_store_dir` requires.
+const FJALL_V3_MAGIC: [u8; 4] = [b'F', b'J', b'L', 3];
+const FJALL_VERSION_FILE: &str = "version";
+const FJALL_KEYSPACES_DIR: &str = "keyspaces";
+const FJALL_LOCK_FILE: &str = "lock";
+
+/// The production store fingerprint (`restore::fjall_locks::
+/// is_fjall_store_dir`): a `keyspaces` directory AND a `version` header that
+/// starts with `FJL\x03`, read bounded to those four magic bytes.
+fn is_fjall_store(dir: &Path) -> bool {
+    if !dir.join(FJALL_KEYSPACES_DIR).is_dir() {
+        return false;
+    }
+    let mut header = [0u8; 4];
+    match fs::File::open(dir.join(FJALL_VERSION_FILE))
+        .and_then(|mut file| file.read_exact(&mut header))
+    {
+        Ok(()) => header == FJALL_V3_MAGIC,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            false
+        }
+        Err(error) => panic!("read the Fjall store version header: {error}"),
+    }
+}
+
+/// Recreate the empty Fjall `lock` artifact in every Fjall store under `root`.
+/// The online producer omits every file named `lock` and pinned Fjall recovery
 /// opens it WITHOUT create, so a tree a test copied out of a snapshot gets it
 /// back the way the production restore does (`restore/fjall_locks.rs`) before
 /// any store in it is opened.
+///
+/// Reproduced from production: the fingerprint above, the empty `lock` created
+/// with `create_new`, the `AlreadyExists` tolerance and the skip of a
+/// fingerprinted store's subtree (a Fjall store never nests another one).
+/// NOT reproducible here, by design: the typed `RestoreError` of every entry —
+/// this is test code and panics instead; the symlink refusal — the online
+/// snapshot carries regular files only (`copy_engine::list_files`), so a
+/// restored snapshot cannot contain one; and the `stage` bound — the fixture
+/// walks the tree it is handed.
 pub fn recreate_fjall_locks(root: &Path) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if dir.join("version").is_file() && dir.join("keyspaces").is_dir() {
+        if is_fjall_store(&dir) {
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(dir.join("lock"))
+                .open(dir.join(FJALL_LOCK_FILE))
             {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("recreate the Fjall lock artifact: {error}"),
             }
-            continue;
-        }
-        for entry in fs::read_dir(&dir).expect("read a restored directory") {
-            let entry = entry.expect("restored entry");
-            if entry.file_type().expect("restored entry type").is_dir() {
-                stack.push(entry.path());
+        } else {
+            for entry in fs::read_dir(&dir).expect("read a restored directory") {
+                let entry = entry.expect("restored entry");
+                if entry.file_type().expect("restored entry type").is_dir() {
+                    stack.push(entry.path());
+                }
             }
         }
     }
