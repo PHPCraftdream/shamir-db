@@ -89,6 +89,7 @@ async fn readonly_tx_fixture() -> (Arc<ShamirDb>, ShamirDbHandler, Session, u64)
                 "app".into(),
                 "main".into(),
                 std::time::Duration::from_secs(60),
+                handler.tx_abort_release(),
             ),
         )
         .expect("park transaction");

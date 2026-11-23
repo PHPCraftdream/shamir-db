@@ -3,7 +3,7 @@ use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::batch::{BatchTreeVisitor, IsolationLevel, VisibilityWait};
 use std::sync::Arc;
 
-use crate::tx_registry::{InteractiveTx, TxRegistryError};
+use crate::tx_registry::{InteractiveTx, TxAbortRelease, TxRegistryError};
 
 use super::activity::server_busy_response;
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
@@ -40,6 +40,16 @@ fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<
 }
 
 impl ShamirDbHandler {
+    /// The releaser a newly parked [`InteractiveTx`] must carry: it frees the
+    /// Level-3 record locks the parked context still holds whenever the LAST
+    /// reference to the transaction goes away outside the commit pipeline —
+    /// the owner's rollback, the reaper, session teardown, an execution-limit
+    /// abort, or a request that loses its race with them. Hand-built
+    /// transactions in fixtures use it to get the real releaser.
+    pub fn tx_abort_release(&self) -> TxAbortRelease {
+        super::activity::tx_abort_release(Arc::clone(&self.db))
+    }
+
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
     ///
@@ -118,6 +128,7 @@ impl ShamirDbHandler {
             db_name.to_string(),
             repo_name.to_string(),
             INTERACTIVE_TX_MAX_LIFETIME,
+            self.tx_abort_release(),
         );
         match self.tx_registry.register_activity(
             handle,

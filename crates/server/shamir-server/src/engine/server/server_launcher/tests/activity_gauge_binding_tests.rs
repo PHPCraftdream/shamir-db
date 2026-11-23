@@ -375,6 +375,7 @@ async fn run() {
                 "app".into(),
                 "main".into(),
                 Duration::from_secs(3600),
+                handler.tx_abort_release(),
             ),
         )
         .expect("park transaction");

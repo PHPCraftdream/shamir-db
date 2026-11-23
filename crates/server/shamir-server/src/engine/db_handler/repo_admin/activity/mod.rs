@@ -11,7 +11,10 @@
 //! - `cancel` — the `CancelRequest` / `CancelTx` / `CancelCursorAdmin`
 //!   workers, their ownership/permission rule, their detached audit path
 //!   and the per-server outcome counters.
+//! - `abort_release` — the Level-3 record-lock releaser the registry calls
+//!   from `InteractiveTx::drop`.
 
+mod abort_release;
 mod cancel;
 mod continuation;
 mod requests;
@@ -21,6 +24,7 @@ mod requests;
 pub(in crate::engine::db_handler) mod list;
 
 // The guard and entry are named directly only by registry tests.
+pub(in crate::engine::db_handler) use abort_release::tx_abort_release;
 pub(in crate::engine::db_handler) use cancel::CancelCounters;
 pub(in crate::engine::db_handler) use requests::server_busy_response;
 pub(in crate::engine::db_handler) use requests::ActivityRequests;

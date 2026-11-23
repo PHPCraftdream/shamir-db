@@ -490,6 +490,7 @@ async fn park_tx(
                 "app".into(),
                 "main".into(),
                 Duration::from_secs(3_600),
+                handler.tx_abort_release(),
             ),
         )
         .expect("park transaction");
