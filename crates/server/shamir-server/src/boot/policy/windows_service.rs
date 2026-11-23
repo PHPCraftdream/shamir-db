@@ -176,6 +176,10 @@ fn service_main_inner() -> anyhow::Result<()> {
     };
 
     // Run the server. On return (normal or error), ALWAYS report Stopped.
+    // `SERVICE_PROCESS_EXIT` mirrors the report's `exit_code()` and nothing
+    // forces the process exit: `set_service_status(Stopped)` is only reported
+    // after `serve` returned, which is why `serve` waits for the scheduled
+    // worker and keeps the data-directory lock until then.
     let result = rt.block_on(runtime::serve(config, bootstrap, shutdown, on_ready));
 
     SERVICE_PROCESS_EXIT.store(

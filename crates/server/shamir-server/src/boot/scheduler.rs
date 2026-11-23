@@ -244,7 +244,7 @@ impl Scheduler {
             let rx = shutdown_tx.subscribe();
             let period = config.audit_checkpoint_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("audit_checkpoint", period, rx, move || {
+                run_periodic_off_thread("audit_checkpoint", period, rx, move || {
                     let chain = chain.clone();
                     let appender = appender.clone();
                     safe_run("audit_checkpoint", move || {
@@ -296,7 +296,23 @@ impl Scheduler {
     /// `recv()` calls also return `Err(Closed)` which the loop treats as
     /// shutdown.
     pub async fn shutdown(self) {
+        self.signal_shutdown();
+        self.join().await;
+    }
+
+    /// Tell every task to stop without waiting for any of them.
+    ///
+    /// Teardown must signal BEFORE it joins: a task parked on a tick (an
+    /// hour for `identity_finalize`) or blocked on the audit persistence
+    /// gate only observes the stop request once it is sent, so sending it
+    /// first turns a join deadline into "the task is slow", while sending it
+    /// from inside the join turns it into "the task was never told".
+    pub fn signal_shutdown(&self) {
         let _ = self.shutdown_tx.send(());
+    }
+
+    /// Await every task after [`Self::signal_shutdown`].
+    pub async fn join(self) {
         for h in self.handles {
             let _ = h.await;
         }
@@ -337,6 +353,51 @@ async fn run_periodic<F>(
             }
             _ = interval.tick() => {
                 tick_fn();
+            }
+        }
+    }
+}
+
+/// Drive an interval + shutdown select loop, running each tick off-thread.
+///
+/// A tick here can block on the audit appender's synchronous persistence
+/// gate and then fsync. Running it inside this poll would park a runtime
+/// worker; on a current-thread runtime that is the only thread, so the
+/// shutdown deadline timer could never fire while the gate was held. Each
+/// tick therefore runs on a blocking thread instead.
+async fn run_periodic_off_thread<F>(
+    name: &'static str,
+    period: Duration,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    tick_fn: F,
+) where
+    F: Fn() + Send + Sync + 'static,
+{
+    let tick_fn = Arc::new(tick_fn);
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Burn the immediate first tick — `interval.tick()` always fires once
+    // synchronously on first poll.
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            biased;
+            res = shutdown_rx.recv() => {
+                tracing::debug!(task = name, ?res, "scheduler task shutting down");
+                break;
+            }
+            _ = interval.tick() => {
+                let tick = Arc::clone(&tick_fn);
+                // Awaiting the blocking job keeps `join()` waiting for an
+                // in-flight tick exactly as the synchronous call did, while the
+                // persistence-gate wait stays off this runtime worker.
+                if let Err(error) = tokio::task::spawn_blocking(move || tick()).await {
+                    tracing::warn!(
+                        task = name,
+                        %error,
+                        "scheduler blocking tick did not complete"
+                    );
+                }
             }
         }
     }

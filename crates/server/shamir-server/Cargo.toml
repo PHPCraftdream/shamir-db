@@ -196,6 +196,9 @@ bytes = "1.11.0"
 # Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
 # — dev-only crate; the `tracing` feature enables the tracing ring layer.
 shamir-test-diag = { path = "../../devtools/shamir-test-diag", features = ["tracing"] }
+# Ordered-shutdown tests hold the REAL audit-appender persistence gate and
+# arm the flush fault through the security crate's test-only hooks.
+shamir-server-security = { path = "../shamir-server-security", features = ["test-hooks"] }
 
 [[bench]]
 name = "db_handler_rps"
