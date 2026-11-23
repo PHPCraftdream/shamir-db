@@ -37,6 +37,7 @@ use crate::server::boot_error::BootError;
 use crate::server::bootstrap_mode::BootstrapMode;
 use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
 use crate::server::server_handle::ServerHandle;
+use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::tables_registry::TablesRegistry;
 use crate::user_directory::ScramDerivationGate;
 
@@ -47,6 +48,10 @@ use super::load_metrics::bind_load_source;
 
 #[path = "support/durable_stores.rs"]
 mod durable_stores;
+#[path = "support/rollback_cleanup.rs"]
+mod rollback_cleanup;
+
+use rollback_cleanup::log_rollback_cleanup;
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
@@ -578,11 +583,23 @@ impl ServerLauncher {
         {
             Ok(listeners) => listeners,
             Err(error) => {
+                let mut cleanup = shamir_db::ShutdownReport::default();
                 cancel_refusal_audit.close();
                 shutdown_token.cancel();
-                cancel_refusal_audit.drain().await;
-                audit_appender.shutdown().await;
-                scheduler.shutdown().await;
+                teardown_audit(
+                    AuditTeardown {
+                        cancel_refusal_audit: &cancel_refusal_audit,
+                        appender: &audit_appender,
+                        scheduler,
+                        #[cfg(test)]
+                        drain_probe: None,
+                    },
+                    &mut cleanup,
+                )
+                .await;
+                // The boot error wins: cleanup failures are logged, never
+                // returned in its place.
+                log_rollback_cleanup("listener bind", &cleanup);
                 if let Some(snap) = meta_snapshot_task {
                     let _ = snap.handle.await;
                 }
@@ -717,9 +734,19 @@ impl ServerLauncher {
                     gate.shutdown().await;
                 }
                 token_service.shutdown_gc().await;
-                cancel_refusal_audit.drain().await;
-                audit_appender.shutdown().await;
-                scheduler.shutdown().await;
+                let mut cleanup = shamir_db::ShutdownReport::default();
+                teardown_audit(
+                    AuditTeardown {
+                        cancel_refusal_audit: &cancel_refusal_audit,
+                        appender: &audit_appender,
+                        scheduler,
+                        #[cfg(test)]
+                        drain_probe: None,
+                    },
+                    &mut cleanup,
+                )
+                .await;
+                log_rollback_cleanup("observability bind", &cleanup);
                 if let Some(snap) = meta_snapshot_task {
                     let _ = snap.handle.await;
                 }
@@ -796,7 +823,7 @@ impl ServerLauncher {
             data_dir: config.data_dir.clone(),
             conn_tasks: conn_tasks.clone(),
             format_stamp,
-            _data_dir_lock: data_dir_lock,
+            data_dir_lock: Some(data_dir_lock),
             tunables: Arc::new(RuntimeTunables::new()),
             // Tests drive the real handler and scrape the actual bound metrics address.
             #[cfg(test)]

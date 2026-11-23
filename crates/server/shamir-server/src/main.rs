@@ -613,6 +613,10 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
         })
     };
 
+    // The process exit code is this report's `exit_code()`; nothing forces the
+    // exit. The runtime is dropped normally after `serve` returned — which is
+    // why `serve` waits for the scheduled-backup worker and keeps the
+    // single-instance data-directory lock until that worker finished.
     shamir_server::runtime::serve(
         config,
         bootstrap,

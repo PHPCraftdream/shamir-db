@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_collections::THasher;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::TransportKind;
 use shamir_connect::server::audit_chain::AuditChainWriter;
@@ -111,6 +112,13 @@ struct CancelRefusalDetails<'a> {
 // The low bits count queued and running jobs; the high bits close admission
 // and latch the first rejected submission of each saturation episode.
 const CANCEL_AUDIT_CAPACITY: usize = 256;
+/// Share of the queue one principal may hold (queued + running jobs). An
+/// eighth of the global cap, so at least eight principals keep their whole
+/// share while the global cap binds and no single principal can starve the
+/// rest. Charged per principal NAME — one counter per name, never shared
+/// between two names — so one principal reaching its share can never deny
+/// another while global slots are free.
+pub(crate) const CANCEL_AUDIT_PRINCIPAL_SHARE: usize = 32;
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const SATURATED: usize = CLOSED >> 1;
 const COUNT_MASK: usize = !(CLOSED | SATURATED);
@@ -121,19 +129,81 @@ pub(crate) struct CancelRefusalAudit {
     state: AtomicUsize,
     dropped: AtomicUsize,
     idle: Notify,
+    /// Queued + running jobs per principal NAME. A name's entry is inserted
+    /// with its first refusal and removed when its count returns to zero, so
+    /// the map is bounded by the live slots: at most `CANCEL_AUDIT_CAPACITY`
+    /// entries with a non-zero count, plus zero entries whose removal raced a
+    /// reservation (retired by that name's next release).
+    ///
+    /// Contention: one `update_sync`/`insert_sync` per refusal and one per
+    /// release on the scc bucket of that name — the map's own bucket lock for
+    /// the increment/decrement only, never across an `.await`, never inside the
+    /// audit append. No `std` mutex is added to the reply path.
+    principals: scc::HashMap<String, usize, THasher>,
+    /// Abort handles of accepted-but-unfinished audit jobs. Bounded by
+    /// `CANCEL_AUDIT_CAPACITY` live slots (finished entries are pruned on
+    /// the next refusal), taken once per accepted refusal for one bounded
+    /// push plus a prune of finished handles, and once at teardown; it is
+    /// never held across an `.await`. It IS on the reply path: the client
+    /// reply is built after the synchronous enqueue, whose cost is one
+    /// principal-counter update, one `spawn_blocking` and this short
+    /// push+prune. None of that waits for the audit writer, its persistence
+    /// gate or a flush.
+    unfinished: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
+    /// Test seam (ordered-shutdown close/discard race): called after the share
+    /// slot is reserved and before the job is spawned, so a test can close
+    /// admission and sweep the queue inside that exact window.
+    #[cfg(test)]
+    pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl CancelRefusalAudit {
-    fn try_reserve(self: &Arc<Self>) -> Option<CancelAuditSlot> {
+    /// Reserve one share slot for `principal`, or refuse without waiting.
+    ///
+    /// Exact per NAME: the share test and the increment run in one
+    /// `update_sync` inside the map's own bucket lock, so two principals never
+    /// share a counter and the count cannot drift from the live slots.
+    fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
+        loop {
+            let reserved = self.principals.update_sync(principal, |_, held| {
+                if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
+                    return false;
+                }
+                *held += 1;
+                true
+            });
+            match reserved {
+                Some(true) => break,
+                Some(false) => {
+                    let dropped = self.record_drop();
+                    tracing::warn!(
+                        share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+                        dropped,
+                        "cancel refusal audit principal share full; dropping event"
+                    );
+                    return None;
+                }
+                None => {
+                    // First refusal for this name: insert it already holding
+                    // our slot. A concurrent insert wins the entry, and the next
+                    // pass increments against that winner instead.
+                    if self.principals.insert_sync(principal.to_owned(), 1).is_ok() {
+                        break;
+                    }
+                }
+            }
+        }
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CLOSED != 0 {
+                self.release_share(principal);
                 let dropped = self.record_drop();
                 tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
                 return None;
             }
             let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
             if full && state & SATURATED != 0 {
+                self.release_share(principal);
                 self.record_drop();
                 return None;
             }
@@ -143,6 +213,7 @@ impl CancelRefusalAudit {
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) if full => {
+                    self.release_share(principal);
                     let dropped = self.record_drop();
                     tracing::warn!(
                         capacity = CANCEL_AUDIT_CAPACITY,
@@ -154,6 +225,7 @@ impl CancelRefusalAudit {
                 Ok(_) => {
                     return Some(CancelAuditSlot {
                         queue: Arc::clone(self),
+                        principal: principal.to_owned(),
                         appended: false,
                     });
                 }
@@ -162,15 +234,85 @@ impl CancelRefusalAudit {
         }
     }
 
+    /// Release one principal slot and retire the entry when it reaches zero.
+    ///
+    /// The decrement and the removal both run inside the name's bucket lock, so
+    /// a reservation arriving in between is never lost: it either increments
+    /// before the removal (the removal then sees a non-zero count and keeps the
+    /// entry) or inserts a fresh entry afterwards.
+    fn release_share(&self, principal: &str) {
+        self.principals.update_sync(principal, |_, held| {
+            *held = held.saturating_sub(1);
+        });
+        self.principals.remove_if_sync(principal, |held| *held == 0);
+    }
+
     fn record_drop(&self) -> usize {
         self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    }
+
+    /// Drops recorded so far — the test observable for the refusal accounting
+    /// (a refused reservation, a closed queue and a discarded job all count).
+    #[cfg(test)]
+    pub(crate) fn dropped_count(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     pub(crate) fn close(&self) {
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
 
-    pub(crate) async fn drain(&self) {
+    /// Abort audit jobs that have not started yet.
+    ///
+    /// A job that never ran drops its [`CancelAuditSlot`], so it is counted
+    /// exactly like a refused submission and its `Arc<AuditChainWriter>`
+    /// reference — which would otherwise keep the writer, the appender and
+    /// its fjall store alive past the release timeout — is released now.
+    /// A job already blocked inside the writer's persistence gate keeps
+    /// running: a timeout stops waiting, it does not cancel I/O.
+    pub(crate) fn discard_queued(&self) {
+        let aborted = self
+            .unfinished
+            .lock()
+            .map(|mut handles| {
+                let count = handles.len();
+                for handle in handles.drain(..) {
+                    handle.abort();
+                }
+                count
+            })
+            .unwrap_or(0);
+        if aborted != 0 {
+            tracing::warn!(aborted, "cancel refusal audit discarded queued jobs");
+        }
+    }
+
+    /// Spawn one accepted job and register its abort handle as ONE decision
+    /// with [`Self::close`].
+    ///
+    /// The closed-bit test, the `spawn_blocking` and the push all happen under
+    /// the mutex [`Self::discard_queued`] drains, so after `close()` returned no
+    /// job can still be spawned: the sweep either sees the handle (and aborts
+    /// it before the blocking pool starts it) or the job is never spawned at
+    /// all. That ordering is the whole point — `abort` cannot stop a blocking
+    /// job that already started, so the decision has to be taken BEFORE the
+    /// spawn, never after it. A refused spawn drops `job`, whose slot counts
+    /// the refusal as a dropped event exactly like a refused reservation.
+    fn spawn_tracked(&self, job: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>> {
+        let mut handles = match self.unfinished.lock() {
+            Ok(handles) => handles,
+            Err(_) => return None,
+        };
+        if self.state.load(Ordering::Acquire) & CLOSED != 0 {
+            return None;
+        }
+        let handle = tokio::task::spawn_blocking(job);
+        handles.retain(|queued| !queued.is_finished());
+        handles.push(handle.abort_handle());
+        Some(handle)
+    }
+
+    pub(crate) async fn drain(&self) -> bool {
         let drained = tokio::time::timeout(DRAIN_BUDGET, async {
             // Cancel-safe: no jobs are consumed by waiting.
             loop {
@@ -184,7 +326,8 @@ impl CancelRefusalAudit {
             }
         })
         .await;
-        if drained.is_err() {
+        let complete = drained.is_ok();
+        if !complete {
             let pending = self.state.load(Ordering::Acquire) & COUNT_MASK;
             tracing::warn!(pending, "cancel refusal audit drain timed out");
         }
@@ -192,11 +335,15 @@ impl CancelRefusalAudit {
         if dropped != 0 {
             tracing::debug!(dropped, "cancel refusal audit drops so far");
         }
+        complete
     }
 }
 
 struct CancelAuditSlot {
     queue: Arc<CancelRefusalAudit>,
+    /// The NAME this slot is charged to — never a hash bucket, so two
+    /// principals can never share one counter.
+    principal: String,
     appended: bool,
 }
 
@@ -205,6 +352,7 @@ impl Drop for CancelAuditSlot {
         if !self.appended {
             self.queue.record_drop();
         }
+        self.queue.release_share(&self.principal);
         // Releasing any slot necessarily makes the queue non-full. Clear
         // the saturation latch in the same transition as the decrement.
         let mut state = self.queue.state.load(Ordering::Acquire);
@@ -272,7 +420,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
         CancelOutcome::NotCancellable => "not_cancellable",
         CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished => return None,
     };
-    let slot = queue.try_reserve()?;
+    let slot = queue.try_reserve(&session.username)?;
     let details = match rmp_serde::to_vec_named(&CancelRefusalDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
@@ -299,7 +447,11 @@ pub(super) fn enqueue_cancel_refusal_audit(
         audit: Arc::clone(audit),
         slot,
     };
-    Some(tokio::task::spawn_blocking(move || {
+    #[cfg(test)]
+    if let Some(pause) = queue.pause_before_spawn.as_ref() {
+        pause();
+    }
+    queue.spawn_tracked(move || {
         let guard = pending;
         let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
             if let Err(error) = guard.audit.append(
@@ -319,7 +471,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
             true
         });
         guard.complete(appended);
-    }))
+    })
 }
 
 pub(super) fn repo_audit_observer(
