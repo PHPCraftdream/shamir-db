@@ -476,12 +476,13 @@ fn shell_transport_typed_refusals() {
     assert!(!stderr.contains("--accept-new-host\""));
 
     // Batch routing floor: the routing database named by the profile does
-    // not exist — batch catalogue commands fail server-side (exit 5) while
-    // the non-batch `ping` (no floor) still succeeds.
+    // not exist — batch catalogue commands fail server-side with the typed
+    // `unknown_db` (exit 5) while the non-batch `ping` (no floor) still
+    // succeeds.
     let text = pinned("tls-tcp", "nosuchroute");
     overwrite_profile(&fixture, &text);
     seed_catalogue(&fixture);
-    expect_refusal(&fixture, &["db", "list"], "db list", "server_error", 5);
+    expect_refusal(&fixture, &["db", "list"], "db list", "unknown_db", 5);
     ping_ok(&fixture);
 }
 
