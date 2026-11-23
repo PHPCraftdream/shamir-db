@@ -7,15 +7,18 @@ use std::io::Write;
 use serde_json::{json, Value as Json};
 
 use super::grammar::{
-    command_id, ActivityCli, AuthKind, Command, DbCommand, FunctionCommand, GroupCommand,
-    IndexCommand, Mode, Outcome, ProfileCommand, RepoCommand, RightsCommand, ShellArgs,
-    TableCommand, UserCommand,
+    command_id, ActivityCli, AuthKind, BackupCli, Command, DbCommand, DiagCli, ExportCli,
+    FunctionCommand, GroupCommand, ImportCli, IndexCommand, Mode, Outcome, ProfileCommand,
+    RepoCommand, RightsCommand, ScheduleCli, SchemaMigrationCli, ShellArgs, TableCommand,
+    UserCommand,
 };
 use super::session::{
     check_secret_conflict, establish_profile, guarded, with_session, Ctx, Session,
 };
 use super::state_args::{DataCommand, ReplicationCommand, VersionCommand};
-use crate::shell::commands::{AccessCommand, ActivityCommand, Catalogue, StateCommand};
+use crate::shell::commands::{
+    AccessCommand, ActivityCommand, Catalogue, MaintenanceCommand, StateCommand,
+};
 use crate::shell::connect;
 use crate::shell::connect::{Profile, SessionClient};
 use crate::shell::output::{self, ShellError};
@@ -70,7 +73,13 @@ fn allowed_with_token(command: &Command) -> bool {
         | Command::Chown { .. }
         | Command::Chgrp { .. }
         // §3.3: the activity commands are SCRAM only.
-        | Command::Activity { .. } => false,
+        | Command::Activity { .. }
+        // §3.3: the maintenance commands are SCRAM only.
+        | Command::Backup { .. }
+        | Command::SchemaMigration { .. }
+        | Command::Export { .. }
+        | Command::Import { .. }
+        | Command::Diag { .. } => false,
     }
 }
 
@@ -150,19 +159,41 @@ pub(super) fn dispatch(
         Command::Status => {
             return state_outcome(shell, mode, session, runtime, ctx, id, StateCommand::Status)
         }
-        Command::Version {
-            action: VersionCommand::Show,
-        } => {
-            return state_outcome(
-                shell,
-                mode,
-                session,
-                runtime,
-                ctx,
-                id,
-                StateCommand::VersionShow,
-            )
-        }
+        Command::Version { action } => match action {
+            VersionCommand::Show => {
+                return state_outcome(
+                    shell,
+                    mode,
+                    session,
+                    runtime,
+                    ctx,
+                    id,
+                    StateCommand::VersionShow,
+                )
+            }
+            VersionCommand::Stamp => {
+                return maintenance_outcome(
+                    shell,
+                    mode,
+                    session,
+                    runtime,
+                    ctx,
+                    id,
+                    MaintenanceCommand::VersionStamp,
+                )
+            }
+            VersionCommand::Migrate => {
+                return maintenance_outcome(
+                    shell,
+                    mode,
+                    session,
+                    runtime,
+                    ctx,
+                    id,
+                    MaintenanceCommand::VersionMigrate,
+                )
+            }
+        },
         Command::Replication {
             action: ReplicationCommand::Subscriptions,
         } => {
@@ -319,6 +350,83 @@ pub(super) fn dispatch(
                 },
             )
         }
+        Command::Backup { action } => {
+            return maintenance_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                id,
+                match action {
+                    BackupCli::Start { to, yes } => MaintenanceCommand::BackupStart { to, yes },
+                    BackupCli::Status => MaintenanceCommand::BackupStatus,
+                    BackupCli::Cancel { yes } => MaintenanceCommand::BackupCancel { yes },
+                    BackupCli::Verify { snapshot } => MaintenanceCommand::BackupVerify { snapshot },
+                    BackupCli::Restore => MaintenanceCommand::BackupRestore,
+                    BackupCli::Snapshot => MaintenanceCommand::BackupSnapshot,
+                    BackupCli::Schedule {
+                        action: ScheduleCli::Show,
+                    } => MaintenanceCommand::BackupScheduleShow,
+                },
+            )
+        }
+        Command::SchemaMigration { action } => {
+            return maintenance_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                id,
+                match action {
+                    SchemaMigrationCli::Status { database_id } => {
+                        MaintenanceCommand::SchemaMigrationStatus { database_id }
+                    }
+                },
+            )
+        }
+        Command::Export {
+            action: ExportCli::Logical,
+        } => {
+            return maintenance_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                id,
+                MaintenanceCommand::ExportLogical,
+            )
+        }
+        Command::Import {
+            action: ImportCli::Logical,
+        } => {
+            return maintenance_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                id,
+                MaintenanceCommand::ImportLogical,
+            )
+        }
+        Command::Diag { action } => {
+            return maintenance_outcome(
+                shell,
+                mode,
+                session,
+                runtime,
+                ctx,
+                id,
+                match action {
+                    DiagCli::Integrity => MaintenanceCommand::DiagIntegrity,
+                    DiagCli::Wal => MaintenanceCommand::DiagWal,
+                    DiagCli::Durability { repo } => MaintenanceCommand::DiagDurability { repo },
+                },
+            )
+        }
     };
     catalogue(shell, mode, session, runtime, ctx, which)
 }
@@ -419,6 +527,41 @@ fn activity_outcome(
         },
     );
     (id, Some(action.op()), outcome)
+}
+
+/// The maintenance commands (design §§4.7–4.10), validated and confirmed
+/// before any dial, with the explained or unsupported ones answered locally.
+fn maintenance_outcome(
+    shell: &ShellArgs,
+    mode: Mode,
+    session: &mut Option<Session>,
+    runtime: &tokio::runtime::Runtime,
+    ctx: &mut Ctx<'_>,
+    id: &'static str,
+    action: MaintenanceCommand,
+) -> Outcome {
+    if let Err(err) = action.validate() {
+        return (id, None, Err(err));
+    }
+    if let Some(local) = action.local() {
+        return (id, None, local);
+    }
+    if action.wants_confirm() {
+        if let Err(err) = ctx.confirm(mode, action.yes(), CONFIRM_PROMPT) {
+            return (id, None, Err(err));
+        }
+    }
+    let routing_db_required = action.requires_routing_db();
+    let outcome = with_session(shell, mode, session, runtime, routing_db_required, ctx).and_then(
+        |(profile, client)| {
+            let routing_db = profile.database.as_deref();
+            if routing_db_required && routing_db.is_none() {
+                return Err(ShellError::Usage);
+            }
+            runtime.block_on(guarded(action.execute(client, routing_db)))
+        },
+    );
+    (id, action.op(), outcome)
 }
 
 /// Local confirmation for one destructive command. An explicit `--yes` is

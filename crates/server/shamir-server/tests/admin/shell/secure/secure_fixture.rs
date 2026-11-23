@@ -65,40 +65,41 @@ pub(in crate::shell_tests) fn boot_secure_root_list(name: &str) -> SecureFixture
 }
 
 fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
-    let (shell, bound_addrs, cert_path) = boot_with(name, root_list, |config| {
-        config.listeners.extend([
-            ListenerConfig {
-                kind: ListenerKind::Ws,
-                addr: "127.0.0.1:0".into(),
-                profile: Some(ProfileKind::TlsExporter),
-                path: Some("/shamir/v1".into()),
-                kdf_override: None,
-                browser_origin_allowlist: vec![],
-                http: Default::default(),
-            },
-            ListenerConfig {
-                kind: ListenerKind::Http,
-                addr: "127.0.0.1:0".into(),
-                profile: None,
-                path: None,
-                kdf_override: None,
-                browser_origin_allowlist: vec![],
-                http: HttpListenerSettings {
-                    tls: Some(true),
-                    ..Default::default()
+    let (shell, bound_addrs, cert_path) =
+        boot_with(name, root_list, Default::default(), |config| {
+            config.listeners.extend([
+                ListenerConfig {
+                    kind: ListenerKind::Ws,
+                    addr: "127.0.0.1:0".into(),
+                    profile: Some(ProfileKind::TlsExporter),
+                    path: Some("/shamir/v1".into()),
+                    kdf_override: None,
+                    browser_origin_allowlist: vec![],
+                    http: Default::default(),
                 },
-            },
-            ListenerConfig {
-                kind: ListenerKind::Ws,
-                addr: "127.0.0.1:0".into(),
-                profile: Some(ProfileKind::TlsExporter),
-                path: Some("/decoy/v1".into()),
-                kdf_override: None,
-                browser_origin_allowlist: vec![],
-                http: Default::default(),
-            },
-        ]);
-    });
+                ListenerConfig {
+                    kind: ListenerKind::Http,
+                    addr: "127.0.0.1:0".into(),
+                    profile: None,
+                    path: None,
+                    kdf_override: None,
+                    browser_origin_allowlist: vec![],
+                    http: HttpListenerSettings {
+                        tls: Some(true),
+                        ..Default::default()
+                    },
+                },
+                ListenerConfig {
+                    kind: ListenerKind::Ws,
+                    addr: "127.0.0.1:0".into(),
+                    profile: Some(ProfileKind::TlsExporter),
+                    path: Some("/decoy/v1".into()),
+                    kdf_override: None,
+                    browser_origin_allowlist: vec![],
+                    http: Default::default(),
+                },
+            ]);
+        });
     let [.., Some(wss_addr), Some(http_addr), Some(decoy_wss_addr)] = bound_addrs.as_slice() else {
         panic!("secure fixture listeners did not bind");
     };
