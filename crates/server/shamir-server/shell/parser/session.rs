@@ -45,6 +45,33 @@ impl Ctx<'_> {
             None => connect::load(name),
         }
     }
+
+    /// Local confirmation for one state-changing command. An explicit `yes`
+    /// accepts; batch mode without it is the fixed typed
+    /// [`ShellError::ConfirmationRequired`] refusal; interactive mode writes
+    /// `prompt` and accepts only one bounded line whose trimmed text is
+    /// exactly `yes` (anything else, including EOF, is the same refusal).
+    pub(super) fn confirm(
+        &mut self,
+        mode: Mode,
+        yes: bool,
+        prompt: &str,
+    ) -> Result<(), ShellError> {
+        if yes {
+            return Ok(());
+        }
+        match mode {
+            Mode::Batch => Err(ShellError::ConfirmationRequired),
+            Mode::Interactive => {
+                let _ = self.stderr.write_all(prompt.as_bytes());
+                let _ = self.stderr.flush();
+                match super::input::read_line_bounded(&mut *self.input) {
+                    super::input::ReadLine::Line(line) if line.trim() == "yes" => Ok(()),
+                    _ => Err(ShellError::ConfirmationRequired),
+                }
+            }
+        }
+    }
 }
 
 /// Ensures a live session (implicit dial when none); the routing database
