@@ -67,7 +67,10 @@ fn shapes_tracked_gauge_counts_distinct_shapes_until_admin_reset() {
 /// filter by the field's INTERNED id and folds unknown names into one
 /// shared key, so the two field names are interned first through DDL-only
 /// single-field indexes. Index DDL is an admin op and records no data
-/// shape, which keeps the "0 before traffic" baseline honest.
+/// shape, which keeps the "0 before traffic" baseline honest. Reads 2 and 3
+/// differ only in the filtered FIELD (same literal value and type); a fold
+/// that dropped the interned field id would merge them and the gauge would
+/// read 1 instead of 2.
 async fn run_shapes_tracked_gauge() {
     let guard = FlakeGuard::with_watchdog(
         "shapes_tracked_gauge_counts_distinct_shapes_until_admin_reset",
@@ -138,9 +141,11 @@ async fn run_shapes_tracked_gauge() {
     );
     guard.note("scrape", "pre-traffic /metrics fetched");
 
-    // (2) Real reads over the real client connection: two differ ONLY in a
-    // literal (folds to one shape), the third filters a different field
-    // (a second shape).
+    // (2) Real reads over the real client connection: reads 2 and 3 differ
+    // only in the filtered FIELD (same literal value and type); a fold that
+    // dropped the interned field id would merge them and the gauge would
+    // read 1 instead of 2. Read 1 differs only in its literal (folds to the
+    // same shape as read 2).
     let reads = [
         (
             "literal_a",
@@ -152,7 +157,7 @@ async fn run_shapes_tracked_gauge() {
         ),
         (
             "other_field",
-            Query::with_repo("main", "items").where_eq("id", "k0"),
+            Query::with_repo("main", "items").where_eq("id", 2i64),
         ),
     ];
     for (alias, query) in reads {

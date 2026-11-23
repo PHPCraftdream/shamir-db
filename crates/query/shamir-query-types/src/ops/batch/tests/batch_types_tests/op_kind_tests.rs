@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{op_kind, OpKind, ALL};
+use crate::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
 use crate::batch::BatchOp;
 
 // Wire-format round-trip test: a query builder would bypass the wire shapes under test.
@@ -431,17 +432,15 @@ fn decode_malformed<T: Serialize>(wire: &T) -> Result<BatchOp, rmp_serde::decode
     rmp_serde::from_slice(&bytes)
 }
 
-/// The same discriminator key written twice: a `Value` map cannot hold
-/// duplicate keys, so the pair is emitted at the serializer level.
-struct DuplicateDiscriminator {
-    key: &'static str,
-    first: Value,
-    second: Value,
-}
+/// An ordered raw map: a `Value` map cannot hold duplicate keys, so a
+/// repeated discriminator is emitted at the serializer level. As with the
+/// other malformed-wire cases, the hand-built raw map IS the subject under
+/// test.
+struct RawMap(Vec<(&'static str, Value)>);
 
-impl Serialize for DuplicateDiscriminator {
+impl Serialize for RawMap {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_map([(self.key, &self.first), (self.key, &self.second)])
+        serializer.collect_map(self.0.iter().map(|(k, v)| (k, v)))
     }
 }
 
@@ -449,11 +448,7 @@ impl Serialize for DuplicateDiscriminator {
 fn cancel_tx_duplicate_discriminator_is_rejected() {
     // mutant: drop the `cancel_tx` arm of the duplicate guard in `batch_op.rs`
     // => the second key overwrites the first and the op decodes.
-    let wire = DuplicateDiscriminator {
-        key: "cancel_tx",
-        first: json!(5),
-        second: json!(6),
-    };
+    let wire = RawMap(vec![("cancel_tx", json!(5)), ("cancel_tx", json!(6))]);
     let error = decode_malformed(&wire).expect_err("duplicated cancel_tx must not decode");
     assert!(
         error.to_string().contains("duplicate field"),
@@ -463,33 +458,70 @@ fn cancel_tx_duplicate_discriminator_is_rejected() {
 
 #[test]
 fn list_shape_stats_duplicate_discriminator_is_rejected() {
-    // mutant: drop the `list_shape_stats` arm of the duplicate guard in
-    // `batch_op.rs` => the second key overwrites the first and the op decodes.
-    let wire = DuplicateDiscriminator {
-        key: "list_shape_stats",
-        first: json!({ "list_shape_stats": true, "repo": "main" }),
-        second: json!({ "list_shape_stats": true, "repo": "other" }),
-    };
+    // mutant: drop the `list_shape_stats` arm of the duplicate guard at
+    // `batch_op.rs:402-407` => the second key overwrites the first and the op
+    // decodes.
+    let wire = RawMap(vec![
+        ("repo", json!("main")),
+        ("list_shape_stats", json!(true)),
+        ("list_shape_stats", json!(true)),
+    ]);
     let error = decode_malformed(&wire).expect_err("duplicated list_shape_stats must not decode");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("duplicate field"),
-        "unexpected error: {error}"
+        message.contains("duplicate field"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("list_shape_stats"),
+        "the refusal must name the discriminator: {message}"
+    );
+    // Control: the same flat payload with the repeat REMOVED is a valid
+    // request, so the repeated discriminator is the only defect above.
+    assert_eq!(
+        decode_malformed(&RawMap(vec![
+            ("repo", json!("main")),
+            ("list_shape_stats", json!(true)),
+        ]))
+        .expect("control decodes"),
+        BatchOp::ListShapeStats(ListShapeStatsReq {
+            repo: "main".into(),
+            limit: None,
+        })
     );
 }
 
 #[test]
 fn reset_shape_stats_duplicate_discriminator_is_rejected() {
-    // mutant: drop the `reset_shape_stats` arm of the duplicate guard in
-    // `batch_op.rs` => the second key overwrites the first and the op decodes.
-    let wire = DuplicateDiscriminator {
-        key: "reset_shape_stats",
-        first: json!({ "reset_shape_stats": true, "repo": "main" }),
-        second: json!({ "reset_shape_stats": true, "repo": "other" }),
-    };
+    // mutant: drop the `reset_shape_stats` arm of the duplicate guard at
+    // `batch_op.rs:402-407` => the second key overwrites the first and the op
+    // decodes.
+    let wire = RawMap(vec![
+        ("repo", json!("main")),
+        ("reset_shape_stats", json!(true)),
+        ("reset_shape_stats", json!(true)),
+    ]);
     let error = decode_malformed(&wire).expect_err("duplicated reset_shape_stats must not decode");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("duplicate field"),
-        "unexpected error: {error}"
+        message.contains("duplicate field"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("reset_shape_stats"),
+        "the refusal must name the discriminator: {message}"
+    );
+    // Control: the same flat payload with the repeat REMOVED is a valid
+    // request, so the repeated discriminator is the only defect above.
+    assert_eq!(
+        decode_malformed(&RawMap(vec![
+            ("repo", json!("main")),
+            ("reset_shape_stats", json!(true)),
+        ]))
+        .expect("control decodes"),
+        BatchOp::ResetShapeStats(ResetShapeStatsReq {
+            repo: "main".into(),
+        })
     );
 }
 
@@ -521,11 +553,10 @@ fn cancel_tx_extra_field_is_rejected() {
 fn cancel_cursor_admin_duplicate_discriminator_is_rejected() {
     // mutant: drop the `cancel_cursor_admin` arm of the duplicate guard in
     // `batch_op.rs` => the second key overwrites the first and the op decodes.
-    let wire = DuplicateDiscriminator {
-        key: "cancel_cursor_admin",
-        first: json!(7),
-        second: json!(8),
-    };
+    let wire = RawMap(vec![
+        ("cancel_cursor_admin", json!(7)),
+        ("cancel_cursor_admin", json!(8)),
+    ]);
     let error =
         decode_malformed(&wire).expect_err("duplicated cancel_cursor_admin must not decode");
     assert!(

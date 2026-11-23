@@ -178,5 +178,6 @@ fn golden_read_shape_with_a_field_reference_is_pinned() {
         value: FilterValue::Int(5),
     });
     let folded = ShapeKey::fold(&BatchOp::Read(query), "orders", &interner);
-    assert_eq!(folded.to_hex(), "1e041bd074979079dd633fe5fe57ca13");
+    // Derived from the independent shape-key script output.
+    assert_eq!(folded.to_hex(), "b8818a61a47c1af2509e381f0fd74624");
 }

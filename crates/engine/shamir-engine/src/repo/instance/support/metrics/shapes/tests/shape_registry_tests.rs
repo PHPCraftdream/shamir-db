@@ -1,7 +1,11 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier};
 
-use super::super::{ShapeCounters, ShapeRegistry, ShapeStatsSnapshot, SHAPE_ROWS_CAP};
+use shamir_test_diag::FlakeGuard;
+
+use super::super::{
+    ShapeCounters, ShapeRegistry, ShapeStatsSnapshot, SHAPE_ROWS_CAP, SHAPE_ROWS_LOW_WATER,
+};
 
 fn key_of(tag: u64, index: u64) -> [u8; 16] {
     let mut key = [0u8; 16];
@@ -17,17 +21,6 @@ fn counted(snapshot: &ShapeStatsSnapshot) -> u64 {
         .map(|(_, counters)| counters.executions)
         .sum::<u64>()
         + snapshot.other.executions
-}
-
-/// Signed total of the same sum, so the "never negative" invariant is a real
-/// assertion rather than a vacuous unsigned comparison.
-fn total_counted_signed(snapshot: &ShapeStatsSnapshot) -> i128 {
-    snapshot
-        .rows
-        .iter()
-        .map(|(_, counters)| i128::from(counters.executions))
-        .sum::<i128>()
-        + i128::from(snapshot.other.executions)
 }
 
 /// Fails unless `snapshot` is *entirely* the settled pre-reset generation
@@ -46,8 +39,10 @@ fn assert_single_generation(
         snapshot.rows.len()
     );
     assert!(
-        total_counted_signed(snapshot) >= 0,
-        "negative execution total in {snapshot:?}"
+        snapshot.rows.len() as u64 <= snapshot.tracked,
+        "rows {} exceed the tracked mirror {}",
+        snapshot.rows.len(),
+        snapshot.tracked
     );
     let is_old = snapshot.rows.len() == old_rows
         && counted(snapshot) == old_total
@@ -64,10 +59,12 @@ fn assert_single_generation(
 
 #[test]
 fn shape_eviction_bound_and_other_fold() {
+    let guard = FlakeGuard::new("shape_eviction_bound_and_other_fold");
     let registry = Arc::new(ShapeRegistry::new());
     // Handshake: every recorder starts only once all eight are ready, so the
     // cap and the fold are exercised concurrently.
     let barrier = Arc::new(Barrier::new(8));
+    guard.mark("8 recorders about to be released at the barrier");
     std::thread::scope(|scope| {
         for thread in 0..8u64 {
             let registry = Arc::clone(&registry);
@@ -80,11 +77,15 @@ fn shape_eviction_bound_and_other_fold() {
             });
         }
     });
+    guard.mark("8 recorders joined (1000 executions recorded)");
 
     let snapshot = registry.snapshot();
     assert!(snapshot.rows.len() <= SHAPE_ROWS_CAP);
     assert_eq!(counted(&snapshot), 1000);
     assert!(snapshot.other.executions > 0);
+    guard.mark("eviction-bound and fold assertions held");
+    guard.note("rows", snapshot.rows.len().to_string());
+    guard.note("other executions", snapshot.other.executions.to_string());
 }
 
 #[test]
@@ -125,6 +126,7 @@ fn shape_stats_reset_clears_rows_and_other() {
 
 #[test]
 fn concurrent_records_at_cap_keep_accounting_invariant() {
+    let guard = FlakeGuard::new("concurrent_records_at_cap_keep_accounting_invariant");
     let registry = Arc::new(ShapeRegistry::new());
     for index in 0..SHAPE_ROWS_CAP as u64 {
         registry.record(key_of(u64::MAX, index), 3, false);
@@ -134,6 +136,7 @@ fn concurrent_records_at_cap_keep_accounting_invariant() {
     // Handshake: all eight threads are released together, so the 800 new
     // keys contend with a registry that is already at its cap.
     let barrier = Arc::new(Barrier::new(8));
+    guard.mark("registry at cap; 8 recorders about to be released");
     std::thread::scope(|scope| {
         for thread in 0..8u64 {
             let registry = Arc::clone(&registry);
@@ -146,11 +149,15 @@ fn concurrent_records_at_cap_keep_accounting_invariant() {
             });
         }
     });
+    guard.mark("8 recorders joined (800 executions at cap)");
 
     let snapshot = registry.snapshot();
     assert!(snapshot.rows.len() <= SHAPE_ROWS_CAP);
     assert_eq!(counted(&snapshot), SHAPE_ROWS_CAP as u64 + 800);
     assert!(snapshot.other.executions > 0);
+    guard.mark("accounting invariant held");
+    guard.note("rows", snapshot.rows.len().to_string());
+    guard.note("other executions", snapshot.other.executions.to_string());
 }
 
 #[test]
@@ -189,6 +196,12 @@ fn reset_during_reserved_insert_keeps_the_cap() {
     assert_eq!(live.other, ShapeCounters::default());
 }
 
+/// mutant: a snapshot that re-loads the state after the pause, or one that
+/// reads `other` from the live generation, would mix generations. The
+/// snapshot is parked — via [`ShapeRegistry::snapshot_paused`] — after its row
+/// copy and before its `(other)`/mirror reads, the reset publishes a fresh
+/// state in that window, and the returned snapshot must still be *exactly*
+/// the pinned old generation.
 #[test]
 fn snapshot_during_reset_is_internally_consistent() {
     let registry = ShapeRegistry::new();
@@ -200,40 +213,124 @@ fn snapshot_during_reset_is_internally_consistent() {
     assert_eq!(counted(&settled), 2);
     assert_eq!(settled.other, ShapeCounters::default());
     assert_eq!(settled.tracked, 2);
-    // The pinned state will also carry the parked recorder's reservation.
-    let old_tracked = settled.tracked + 1;
 
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
     let (go_tx, go_rx) = mpsc::channel::<()>();
     let parked_registry = &registry;
-    std::thread::scope(|scope| {
+    let parked = std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
-            parked_registry.record_paused(key_of(u64::MAX, 1), 1, false, || {
-                ready_tx.send(()).expect("handshake: recorder parked");
-                go_rx.recv().expect("handshake: recorder released");
-            });
+            parked_registry.snapshot_paused(|| {
+                ready_tx.send(()).expect("handshake: snapshot parked");
+                go_rx.recv().expect("handshake: snapshot released");
+            })
         });
         ready_rx
             .recv()
-            .expect("recorder reached the reserve-insert window");
+            .expect("snapshot reached the post-copy window");
 
+        // The snapshot has already copied its rows and nothing has moved
+        // yet: the live generation still holds exactly the two settled rows.
         let before = registry.snapshot();
-        assert_single_generation(&before, 2, 2, old_tracked);
+        assert_eq!(before.rows.len(), 2);
+        assert_eq!(counted(&before), 2);
+        assert_eq!(before.tracked, 2);
 
         registry.reset();
-        // Allowed to observe either generation, but never a mix of both.
-        let middle = registry.snapshot();
-        assert_single_generation(&middle, 2, 2, old_tracked);
-
-        go_tx.send(()).expect("release the parked recorder");
-        worker.join().expect("parked recorder");
+        go_tx.send(()).expect("release the parked snapshot");
+        worker.join().expect("parked snapshot")
     });
 
+    // Not a mix: the parked snapshot pinned the old generation before the
+    // reset, so every part of it is the old generation.
+    assert_single_generation(&parked, 2, 2, 2);
+    assert_eq!(parked.rows.len(), 2);
+    assert_eq!(counted(&parked), 2);
+    assert_eq!(parked.other, ShapeCounters::default());
+    assert_eq!(parked.tracked, 2);
+
     let after = registry.snapshot();
-    assert_single_generation(&after, 2, 2, old_tracked);
     assert!(after.rows.is_empty());
     assert_eq!(after.other, ShapeCounters::default());
     assert_eq!(after.tracked, 0);
+}
+
+/// mutant: `ShapeState::snapshot_with` copying the rows and then reading
+/// `(other)` without taking the cold-path guard (delete `acquire_exclusive`,
+/// or force it to return `true`): the trim then runs inside the parked window,
+/// evicts rows behind the copy's back and folds them into `(other)`, so
+/// `counted` exceeds the records and the parked copy no longer holds a full
+/// cap of rows. The seam and the guard land together, so the parent of this
+/// change cannot compile this test; the guard-free variant of it fails here.
+#[test]
+fn snapshot_during_trim_counts_each_execution_once() {
+    let guard = FlakeGuard::new("snapshot_during_trim_counts_each_execution_once");
+    let registry = ShapeRegistry::new();
+    for index in 0..SHAPE_ROWS_CAP as u64 {
+        registry.record(key_of(u64::MAX, index), 7, false);
+    }
+    let at_cap = registry.snapshot();
+    assert_eq!(at_cap.rows.len(), SHAPE_ROWS_CAP);
+    assert_eq!(counted(&at_cap), SHAPE_ROWS_CAP as u64);
+    guard.mark("registry filled to the cap, no trim yet");
+    guard.note("rows at cap", at_cap.rows.len().to_string());
+
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let parked_registry = &registry;
+    let parked = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            // Parked *after* the row copy, *before* the `(other)` read.
+            parked_registry.snapshot_paused(|| {
+                ready_tx.send(()).expect("handshake: snapshot parked");
+                go_rx.recv().expect("handshake: snapshot released");
+            })
+        });
+        ready_rx
+            .recv()
+            .expect("snapshot reached the post-copy window");
+
+        // At the cap this folds into `(other)` and asks for a trim. The
+        // snapshot holds the guard, so the trim is suppressed and nothing
+        // is evicted behind the parked copy's back.
+        registry.record(key_of(1, 0), 11, false);
+
+        go_tx.send(()).expect("release the parked snapshot");
+        worker.join().expect("parked snapshot")
+    });
+
+    guard.mark("parked snapshot joined");
+    // Each execution counted exactly once, and the suppressed trim left every
+    // row in place.
+    assert_eq!(counted(&parked), SHAPE_ROWS_CAP as u64 + 1);
+    assert_eq!(parked.rows.len(), SHAPE_ROWS_CAP);
+    assert!(
+        parked.rows.len() as u64 <= parked.tracked,
+        "rows {} exceed the tracked mirror {}",
+        parked.rows.len(),
+        parked.tracked
+    );
+    guard.note("parked rows", parked.rows.len().to_string());
+    guard.note(
+        "parked other executions",
+        parked.other.executions.to_string(),
+    );
+
+    // Guard released: the deferred trim runs and shrinks the map.
+    registry.record(key_of(1, 1), 13, false);
+    let snapshot = registry.snapshot();
+    guard.mark("deferred trim observed");
+    assert_eq!(counted(&snapshot), SHAPE_ROWS_CAP as u64 + 2);
+    assert!(snapshot.rows.len() <= SHAPE_ROWS_CAP);
+    assert!(snapshot.rows.len() <= SHAPE_ROWS_LOW_WATER);
+    assert!(
+        snapshot.rows.len() as u64 <= snapshot.tracked,
+        "rows {} exceed the tracked mirror {}",
+        snapshot.rows.len(),
+        snapshot.tracked
+    );
+    guard.mark("count-once and deferred-trim assertions held");
+    guard.note("rows after trim", snapshot.rows.len().to_string());
+    guard.note("other executions", snapshot.other.executions.to_string());
 }
 
 #[test]
