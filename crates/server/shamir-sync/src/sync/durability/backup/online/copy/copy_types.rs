@@ -48,10 +48,12 @@ pub struct CopyPassResult {
 /// `Sealing`). The bounded audit chain rounds of the data-directory pass
 /// fail typed when an archive keeps appearing behind the copy.
 ///
-/// `AuditFilesUnstable` and `AuditListing` are new public surface of a
-/// `publish = false` crate — there is no external consumer, no semver
-/// obligation, and neither is a stable error code (the stable,
-/// user-visible vocabulary is `OnlineBackupError::stage_and_reason`).
+/// `AuditFilesUnstable` and `AuditListing` are new public Rust surface:
+/// `publish = false` only stops registry publishing, it does not make the API
+/// private — sibling crates (`shamir-server`) can name and match these
+/// variants. There is no semver obligation for them, and neither is a stable
+/// error code: the stable, user-visible vocabulary is
+/// `OnlineBackupError::stage_and_reason`.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyError {
     #[error("backup copy cancelled")]

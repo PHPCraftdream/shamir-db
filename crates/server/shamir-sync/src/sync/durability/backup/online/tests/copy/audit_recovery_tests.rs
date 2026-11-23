@@ -328,19 +328,12 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
         .is_err(),
         "a foreign audit chain key must fail recovery"
     );
-    let anchor_bytes = fs::read(
-        source
-            .join(audit_fixtures::SERVER_META_DIR)
-            .join(audit_fixtures::SERVER_META_ANCHOR_FILE),
-    )
-    .expect("the fixture's server_meta anchor");
-    assert_eq!(
-        manifest_entry(&report.dest_dir, "server_meta/audit_anchor"),
-        (
-            hex::encode(Sha256::digest(&anchor_bytes)),
-            anchor_bytes.len() as u64
-        ),
-        "phase 1 must capture and hash the server_meta anchor store"
+    let captured_meta = audit_fixtures::manifest_paths(&report.dest_dir)
+        .into_iter()
+        .find(|path| path.starts_with("server_meta/keyspaces/"));
+    assert!(
+        captured_meta.is_some(),
+        "phase 1 must capture the real server_meta keyspace files, not just its name"
     );
 
     let anchor = FjallAuditAppender::load_checkpoint(&restored)
@@ -494,19 +487,12 @@ fn quiet_audit_log_copy_restores_and_boots() {
         "recovery resumes at the captured anchor"
     );
     drop(recovered);
-    let anchor_bytes = fs::read(
-        source
-            .join(audit_fixtures::SERVER_META_DIR)
-            .join(audit_fixtures::SERVER_META_ANCHOR_FILE),
-    )
-    .expect("the fixture's server_meta anchor");
-    assert_eq!(
-        manifest_entry(&report.dest_dir, "server_meta/audit_anchor"),
-        (
-            hex::encode(Sha256::digest(&anchor_bytes)),
-            anchor_bytes.len() as u64
-        ),
-        "phase 1 must capture and hash the server_meta anchor store"
+    let captured_meta = audit_fixtures::manifest_paths(&report.dest_dir)
+        .into_iter()
+        .find(|path| path.starts_with("server_meta/keyspaces/"));
+    assert!(
+        captured_meta.is_some(),
+        "phase 1 must capture the real server_meta keyspace files, not just its name"
     );
     drop(appender);
 }
@@ -547,5 +533,30 @@ fn audit_phase_removes_the_destination_active_log_the_source_no_longer_has() {
     assert_eq!(
         fs::read(to.join(archive)).expect("archive copy"),
         b"archived\n"
+    );
+}
+
+/// The tightened fixture fingerprint rejects an IMPOSTOR store that the old
+/// `version`-exists check accepted, and still accepts a genuine one.
+///
+/// Mutant caught: the previous fingerprint (`version` file + `keyspaces`
+/// directory, no header check) stamps a `lock` into the impostor, so the
+/// negative assertion fails.
+#[test]
+fn the_fjall_fixture_fingerprint_rejects_an_impostor_store() {
+    let root_dir = TempDir::new().expect("fixture temp dir");
+    let root = root_dir.path();
+    fs::create_dir_all(root.join("fake/keyspaces")).expect("impostor keyspaces");
+    fs::write(root.join("fake/version"), b"FJL\x02not-a-store").expect("impostor version");
+    fs::create_dir_all(root.join("real/keyspaces")).expect("genuine keyspaces");
+    fs::write(root.join("real/version"), b"FJL\x03payload").expect("genuine version");
+    test_seams::recreate_fjall_locks(root);
+    assert!(
+        root.join("real/lock").is_file(),
+        "a genuine Fjall store must get its lock artifact"
+    );
+    assert!(
+        !root.join("fake/lock").exists(),
+        "an impostor must be rejected by the tightened fingerprint"
     );
 }

@@ -34,11 +34,11 @@ const AUDIT_ARCHIVE_DIGITS: usize = 20;
 /// not copy repeats. The bound counts rounds: a stable round, the last one
 /// included, succeeds; no stable round within the bound fails the pass typed
 /// (never a silently inconsistent copy).
-pub(crate) const AUDIT_CAPTURE_ROUNDS: usize = 4;
+pub(super) const AUDIT_CAPTURE_ROUNDS: usize = 4;
 
 /// True for the top-level audit chain file names: the active log and its
 /// rotation archives.
-pub(crate) fn is_audit_log_file_name(name: &OsStr) -> bool {
+pub(super) fn is_audit_log_file_name(name: &OsStr) -> bool {
     name == OsStr::new(AUDIT_LOG_FILE_NAME)
         || name.to_str().is_some_and(|name| {
             name.strip_prefix(AUDIT_ARCHIVE_PREFIX)
@@ -61,7 +61,7 @@ pub(crate) fn is_audit_log_file_name(name: &OsStr) -> bool {
 /// listing and the metadata read (`NotFound`), which is the
 /// retention/rotation race and is skipped. Never a silent omission: an
 /// unreadable entry could be a possibly-new rotation archive.
-pub(crate) fn list_audit_files(
+pub(super) fn list_audit_files(
     source_root: &Path,
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
@@ -133,7 +133,7 @@ pub(crate) fn list_audit_files(
 /// that listed it captured it, and the anchors were captured before any audit
 /// listing, so bytes appended later are only a longer tail; a rotation landing
 /// after a round forces another round, in which its archive is copied.
-pub(crate) fn audit_capture_is_stable(
+pub(super) fn audit_capture_is_stable(
     source_root: &Path,
     captured: &CopyPassResult,
     cancel: &CancelFlag,
@@ -149,34 +149,52 @@ pub(crate) fn audit_capture_is_stable(
     }))
 }
 
-/// Removes the destination's active log when this round's capture has none.
+/// Removes the destination's audit chain files the ACCEPTED round did not
+/// capture.
 ///
 /// The data-directory pass runs twice into one destination (pass D, then the
-/// snapshot-defining pass E). When the source has no active log at E's audit
-/// listing — a rotation renamed it and has not reopened it yet — E's manifest
-/// has no entry for it, while the copy pass D made would stay behind and fail
-/// the self-verification as an unlisted file. The destination must hold
-/// exactly what the round captured, so the earlier copy goes: the archive the
-/// rotation produced carries its bytes, and recovery accepts a directory
-/// without an active log.
-pub(crate) fn remove_uncaptured_active_log(
+/// snapshot-defining pass E) and phase 2 itself may run several rounds. A
+/// reserved audit file copied by an earlier pass or an earlier (unstable)
+/// round can be gone from the source by the accepted round — a rotation
+/// renamed the active log, or retention deleted an archive the writer pruned
+/// — while its copy stays behind and fails self-verification as an unlisted
+/// file. The destination must hold exactly what the accepted round captured,
+/// so every reserved audit name that round did not list goes: the bytes of a
+/// rotation live in its archive, and recovery accepts a directory without an
+/// active log.
+///
+/// Only exact reserved names at the top of `dest_root` are considered; every
+/// other destination entry is left alone.
+pub(super) fn reconcile_destination_audit_files(
     dest_root: &Path,
     captured: &CopyPassResult,
 ) -> Result<(), CopyError> {
-    if captured
-        .files
-        .iter()
-        .any(|file| file.rel_path == AUDIT_LOG_FILE_NAME)
-    {
-        return Ok(());
+    let entries = fs::read_dir(dest_root).map_err(|source| CopyError::Io {
+        path: dest_root.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| CopyError::AuditListing { source })?;
+        let path = entry.path();
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if !is_audit_log_file_name(name) {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if captured.files.iter().any(|file| file.rel_path == name) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(CopyError::Io { path, source });
+            }
+        }
     }
-    let stale = dest_root.join(AUDIT_LOG_FILE_NAME);
-    match fs::remove_file(&stale) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(CopyError::Io {
-            path: stale,
-            source,
-        }),
-    }
+    Ok(())
 }

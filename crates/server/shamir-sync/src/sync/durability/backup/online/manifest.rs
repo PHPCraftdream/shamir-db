@@ -228,13 +228,15 @@ fn fsync_dir_raw(dir: &Path) -> std::io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
-/// Windows cannot open a directory handle for fsync: nudge the metadata file
-/// inside `dir` instead when it exists.
+/// Windows cannot open a directory handle for fsync, so this is a documented
+/// NO-OP — not a discarded error: there is no directory fsync to attempt, and
+/// the files published into `dir` were synced individually before their
+/// rename. Returning `Ok` here therefore states the platform's ceiling
+/// instead of swallowing a failure that "every other failure propagates"
+/// would promise to report.
 #[cfg(not(unix))]
 fn fsync_dir_raw(dir: &Path) -> std::io::Result<()> {
-    if let Ok(file) = fs::File::open(dir.join(BACKUP_META_FILE_NAME)) {
-        let _ = file.sync_all();
-    }
+    let _ = dir;
     Ok(())
 }
 

@@ -56,10 +56,14 @@ pub type MetadataHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<fs::Metad
 /// `None` falls through. Lets a test inject a failed partial-tree
 /// cleanup without depending on the OS refusing a removal.
 pub type RemoveDirAllHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<()>> + 'static>;
-/// Substitutes the directory fsync `fsync_dir_fallible` performs for a
-/// matching destination directory: `Some(result)` replaces the real
-/// (platform) fsync, `None` falls through. Lets a test inject a
-/// destination-side fsync failure the platform cannot be made to produce.
+/// Substitutes the directory fsync of `manifest::fsync_dest_dir` — the ONE
+/// rule the copy passes and BOTH publications (`write_manifest`,
+/// `write_backup_meta`) go through — for a matching destination directory:
+/// `Some(result)` replaces the real (platform) fsync and is then processed by
+/// `tolerate_dir_sync_capability`, exactly like a genuine result; `None` falls
+/// through. Lets a test inject a destination-side fsync failure the platform
+/// cannot be made to produce, and lets it separate the copy-pass context from
+/// the publication context.
 pub type FsyncDirHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<()>> + 'static>;
 /// Substitutes the publication rename `manifest::write_manifest`
 /// performs for a matching destination target: `Some(result)` replaces
@@ -244,8 +248,9 @@ pub fn fire_remove_dir_all(path: &Path) -> Option<std::io::Result<()>> {
 }
 
 /// The registered directory-fsync substitution for one destination
-/// directory, else `None` (the real platform fsync). Called only from
-/// `fsync_dir_fallible`.
+/// directory, else `None` (the real platform fsync, or the documented no-op
+/// on Windows). Called only from `manifest::fsync_dest_dir`, so the copy
+/// passes and the publications share it.
 pub fn fire_fsync_dir(path: &Path) -> Option<std::io::Result<()>> {
     FSYNC_DIR.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
 }
@@ -272,7 +277,7 @@ fn is_fjall_store(dir: &Path) -> bool {
         return false;
     }
     let mut header = [0u8; 4];
-    match fs::File::open(dir.join(FJALL_VERSION_FILE))
+    let genuine = match fs::File::open(dir.join(FJALL_VERSION_FILE))
         .and_then(|mut file| file.read_exact(&mut header))
     {
         Ok(()) => header == FJALL_V3_MAGIC,
@@ -285,7 +290,22 @@ fn is_fjall_store(dir: &Path) -> bool {
             false
         }
         Err(error) => panic!("read the Fjall store version header: {error}"),
+    };
+    if !genuine {
+        return false;
     }
+    // An EXISTING artifact must be an ordinary file, exactly as
+    // `restore::fjall_locks` requires before it opens a staged store.
+    match fs::symlink_metadata(dir.join(FJALL_LOCK_FILE)) {
+        Ok(meta) if !meta.is_file() => panic!(
+            "the Fjall lock artifact must be a regular file: {}",
+            dir.display()
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read the Fjall lock artifact: {error}"),
+    }
+    true
 }
 
 /// Recreate the empty Fjall `lock` artifact in every Fjall store under `root`.

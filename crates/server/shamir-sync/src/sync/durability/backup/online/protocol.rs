@@ -79,6 +79,17 @@ pub enum OnlineBackupFailure {
         #[source]
         source: std::io::Error,
     },
+    /// The snapshot's PUBLICATION into an existing destination directory
+    /// (the manifest and the backup-metadata file) failed: unlike
+    /// [`OnlineBackupFailure::Dest`], which covers the snapshot child's
+    /// creation, the directory is part of the typed error. The scheduled
+    /// vocabulary is unchanged (`destination-io-<kind>`).
+    #[error("destination publication failed for {dir}: {source}")]
+    Publication {
+        dir: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("snapshot self-verification failed: {0}")]
     Verify(String),
     #[error("seal re-copy cap exceeded: {0}")]
@@ -250,7 +261,7 @@ fn failure_token(failure: &OnlineBackupFailure) -> String {
         OnlineBackupFailure::Verify(_) => "verify-failed".to_string(),
         OnlineBackupFailure::RecopyCap(_) => "recopy-cap-exceeded".to_string(),
         OnlineBackupFailure::Io(error) => format!("io-{}", kind_token(error.kind())),
-        OnlineBackupFailure::Dest { source } => {
+        OnlineBackupFailure::Dest { source } | OnlineBackupFailure::Publication { source, .. } => {
             format!("destination-io-{}", kind_token(source.kind()))
         }
         OnlineBackupFailure::Copy(error) => copy_token(error),
@@ -334,6 +345,21 @@ fn copy_failed(stage: BackupStage, error: CopyError) -> OnlineBackupError {
 /// `stage_and_reason` names the destination (`destination-io-<kind>`).
 fn dest_failed(stage: BackupStage, error: std::io::Error) -> OnlineBackupError {
     failed(stage, OnlineBackupFailure::Dest { source: error })
+}
+
+/// A PUBLICATION failure inside `dir` (the manifest, the backup-metadata
+/// file) as a stage-tagged protocol error: it names the destination
+/// DIRECTORY, so the operator sees which directory could not take the
+/// published bytes. The scheduled token is the same destination vocabulary
+/// (`destination-io-<kind>`).
+fn publication_failed(stage: BackupStage, dir: &Path, error: std::io::Error) -> OnlineBackupError {
+    failed(
+        stage,
+        OnlineBackupFailure::Publication {
+            dir: dir.to_path_buf(),
+            source: error,
+        },
+    )
 }
 
 /// One copy pass's shared context (keeps argument lists short): the
@@ -869,9 +895,9 @@ fn run_steps(
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
     manifest::write_manifest(dest_dir, &encoded)
-        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
+        .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     manifest::write_backup_meta(dest_dir)
-        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
+        .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
     self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;

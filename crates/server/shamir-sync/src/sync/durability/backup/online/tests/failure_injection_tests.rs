@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -347,58 +347,82 @@ pub(crate) fn run(
     (result, progress)
 }
 
-/// Bounded budget for joining a helper thread: generous for a slow Windows
-/// runner, far below the per-test kill, so a wedged helper fails its own
-/// test instead of hanging the binary.
-const JOIN_BUDGET: Duration = Duration::from_secs(120);
+/// Absolute budget for ONE helper thread, measured from its creation: the
+/// rendezvous wait (120 s) and the teardown join share it, so a wedged helper
+/// cannot spend two budgets (240 s) and overrun the 180 s per-test kill.
+const JOIN_BUDGET: Duration = Duration::from_secs(150);
 
-/// Joins `handle` within `budget`: `std::thread::JoinHandle` has no timed
+/// Outcome of a bounded join. `Joined` is the only success; `TimedOut` means
+/// the helper is still running and was NOT joined (it is left behind on
+/// purpose — a thread wedged in uninterruptible I/O is isolated by the test
+/// process, never "joined"); `Panicked` carries the helper's payload so only
+/// `JoinOnDrop::finish` decides to re-raise it.
+enum JoinOutcome {
+    Joined,
+    TimedOut,
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+/// Joins `handle` within the ABSOLUTE `deadline`: `std::thread` has no timed
 /// join, so the join runs on a throwaway thread and the caller waits on a
-/// channel with its own deadline. Returns `false` on timeout (the throwaway
-/// thread and the wedged helper are left behind; the caller must fail).
-fn join_within(handle: std::thread::JoinHandle<()>, budget: Duration) -> bool {
+/// channel with the remaining budget.
+fn join_within(handle: std::thread::JoinHandle<()>, deadline: Instant) -> JoinOutcome {
     let (done_tx, done_rx) = mpsc::channel();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("join-within".to_string())
         .spawn(move || {
             let _ = done_tx.send(handle.join());
-        })
-        .expect("spawn the bounded joiner");
-    match done_rx.recv_timeout(budget) {
-        Ok(Ok(())) => true,
-        Ok(Err(payload)) => std::panic::resume_unwind(payload),
-        Err(_) => false,
+        });
+    if spawned.is_err() {
+        return JoinOutcome::TimedOut;
+    }
+    match done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(())) => JoinOutcome::Joined,
+        Ok(Err(payload)) => JoinOutcome::Panicked(payload),
+        Err(_) => JoinOutcome::TimedOut,
     }
 }
 
-/// Joins a helper thread on EVERY path, WITHIN the join budget: an assertion
-/// panic or a bounded channel timeout must not leave the thread, the audit
-/// appender or a temp dir alive behind the test. A wedged helper now fails
-/// inside the budget instead of hanging the whole test binary.
-pub(super) struct JoinOnDrop(Option<std::thread::JoinHandle<()>>);
+/// Joins a helper thread on EVERY path, within one absolute budget measured
+/// from its creation. A helper that overruns fails the test in `finish`; a
+/// helper panic is re-raised ONLY from `finish`, never from `Drop`, where a
+/// second panic during unwinding would abort the whole test binary.
+pub(super) struct JoinOnDrop {
+    handle: Option<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+}
 
 impl JoinOnDrop {
     pub(super) fn new(handle: std::thread::JoinHandle<()>) -> Self {
-        Self(Some(handle))
+        Self {
+            handle: Some(handle),
+            deadline: Instant::now() + JOIN_BUDGET,
+        }
     }
 
-    /// Join eagerly within the budget and propagate the helper's panic (if
-    /// any); a helper still running when the budget ends fails the test.
+    /// Join eagerly within the remaining budget, re-raise the helper's panic
+    /// and fail the test when the helper is still running at the deadline.
     pub(super) fn finish(mut self) {
-        if let Some(handle) = self.0.take() {
-            assert!(
-                join_within(handle, JOIN_BUDGET),
-                "the helper thread must finish within {JOIN_BUDGET:?}"
-            );
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        match join_within(handle, self.deadline) {
+            JoinOutcome::Joined => {}
+            JoinOutcome::Panicked(payload) => std::panic::resume_unwind(payload),
+            JoinOutcome::TimedOut => {
+                panic!("the helper thread must finish within {JOIN_BUDGET:?} of its creation")
+            }
         }
     }
 }
 
 impl Drop for JoinOnDrop {
     fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
-            // A drop during unwinding cannot fail the test and must not block it.
-            let _ = join_within(handle, JOIN_BUDGET);
+        if let Some(handle) = self.handle.take() {
+            // Never panics here: this drop can run while unwinding, and a
+            // resumed helper panic would abort the binary. An overrunning
+            // helper is left behind; `finish` is what reports it.
+            let _ = join_within(handle, self.deadline);
         }
     }
 }
@@ -753,10 +777,10 @@ fn f_manifest_write_failure_fails_at_verifying_with_no_success_report() {
         &progress,
         BackupStage::Verifying,
         &error,
-        "destination io error:",
+        "destination publication failed for",
     );
-    let OnlineBackupFailure::Dest { source: io } = failure else {
-        panic!("the manifest failure must surface as a DESTINATION io failure, got {failure:?}");
+    let OnlineBackupFailure::Publication { source: io, .. } = failure else {
+        panic!("the manifest failure must surface as a publication failure, got {failure:?}");
     };
     assert!(
         !io.to_string().is_empty(),

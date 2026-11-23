@@ -403,10 +403,15 @@ fn manifest_publication_failure_is_a_destination_error() {
     };
     assert_eq!(*stage, BackupStage::Verifying);
     assert_eq!(*cleanup, None, "the owned directory was removed normally");
-    let OnlineBackupFailure::Dest { source: io } = primary else {
-        panic!("the manifest publication failure must be a DESTINATION failure, got {primary:?}");
+    let OnlineBackupFailure::Publication { dir, source: io } = primary else {
+        panic!("the manifest publication failure must be a publication failure, got {primary:?}");
     };
     assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        dir.parent(),
+        Some(to.path()),
+        "the typed failure must name the snapshot directory it could not publish into"
+    );
     let rendered = error.stage_and_reason();
     assert_eq!(
         rendered, "verifying: destination-io-permission-denied",
@@ -662,10 +667,15 @@ fn publication_directory_fsync_obeys_the_one_tolerance_rule() {
         panic!("expected Failed, got {error:?}");
     };
     assert_eq!(*stage, BackupStage::Verifying);
-    let OnlineBackupFailure::Dest { source: io } = source else {
-        panic!("the publication fsync failure must be a DESTINATION failure, got {source:?}");
+    let OnlineBackupFailure::Publication { dir, source: io } = source else {
+        panic!("the publication fsync failure must be a publication failure, got {source:?}");
     };
     assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        dir.parent(),
+        Some(to.path()),
+        "the typed failure must name the snapshot directory it could not publish into"
+    );
     assert_eq!(
         error.stage_and_reason(),
         "verifying: destination-io-permission-denied",

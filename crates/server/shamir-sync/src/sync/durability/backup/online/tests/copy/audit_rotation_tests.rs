@@ -16,6 +16,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use shamir_connect::server::audit_chain::{AuditChain, AuditChainWriter};
 use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
@@ -204,6 +206,27 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
         archives, 3,
         "the copy must carry every rotation archive, including the one created while the copy was paused"
     );
+    // The PUBLICATION must describe every archive the copy carried: the exact
+    // path, digest and size in the decoded manifest.
+    for entry in fs::read_dir(&restored).expect("restored directory") {
+        let name = entry
+            .expect("restored entry")
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        let is_archive = name
+            .strip_prefix(ROTATION_AUDIT_LOG)
+            .is_some_and(|suffix| suffix.starts_with('.'));
+        if !is_archive {
+            continue;
+        }
+        let bytes = fs::read(restored.join(&name)).expect("restored archive bytes");
+        assert_eq!(
+            audit_fixtures::manifest_entry(&report.dest_dir, &name),
+            (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64),
+            "the manifest must describe the archive {name} the copy carried"
+        );
+    }
     drop(appender);
 }
 
@@ -289,5 +312,75 @@ fn rotation_during_the_corrective_re_copy_is_missing_for_that_round_and_lands_ne
         unique.len(),
         captured.len(),
         "no rel_path may be captured twice: {captured:?}"
+    );
+}
+
+/// A rotation that lands between the corrective COPY and its follow-up
+/// RE-HASH is tolerated in the audit phase and the next round publishes the
+/// new archive.
+///
+/// The `hash_file` seam stands for the append that changed the log between
+/// its copy and its snapshot hash (an unmatchable digest), and on the SECOND
+/// read — the re-hash inside the corrective loop — it renames the active log
+/// into its archive and reports it gone.
+///
+/// Mutant caught: restoring `NotFound` propagation in the follow-up-hash arm
+/// of the corrective re-copy (`copy_engine::recopy_until_stable`). That arm
+/// is never reached by the source-open test, so this case is its own
+/// oracle: the run returns a typed `Io { NotFound }` instead of a report, and
+/// the decoded-manifest assertion never runs.
+#[test]
+fn rotation_between_the_corrective_copy_and_its_re_hash_lands_in_the_manifest() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    let log_path = source.join(ROTATION_AUDIT_LOG);
+    write_file(&log_path, b"active-before-rotation\n");
+    let archive = audit_fixtures::archive_name(1);
+    let archive_path = source.join(&archive);
+    // 0: the snapshot hash of the copy (mismatch forced); 1: the re-hash.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_for_hook = reads.clone();
+    let log_for_hook = log_path.clone();
+    let archive_for_hook = archive_path.clone();
+    let seam = test_seams::set_hash_file(Box::new(move |path| {
+        if path != log_for_hook.as_path() {
+            return None;
+        }
+        match reads_for_hook.fetch_add(1, Ordering::SeqCst) {
+            0 => Some(Ok(("0".repeat(64), 0))),
+            1 => {
+                fs::rename(&log_for_hook, &archive_for_hook).expect("rotate the audit log");
+                Some(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            }
+            _ => None,
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    let report = result.expect(
+        "a source that vanishes inside the corrective re-hash is counted missing, not a failure",
+    );
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the fixture must reach the copy hash and the re-hash"
+    );
+    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    assert!(
+        paths.contains(&archive),
+        "the published manifest must list the re-listed archive: {paths:?}"
+    );
+    assert!(
+        !paths.contains(&ROTATION_AUDIT_LOG.to_string()),
+        "the rotated active log must not be published: {paths:?}"
+    );
+    let bytes = fs::read(&archive_path).expect("source archive bytes");
+    assert_eq!(
+        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
+        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64),
+        "the manifest must describe the archive bytes exactly"
     );
 }

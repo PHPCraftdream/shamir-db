@@ -20,7 +20,7 @@ use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
     audit_capture_is_stable, is_audit_log_file_name, list_audit_files,
-    remove_uncaptured_active_log, AUDIT_CAPTURE_ROUNDS,
+    reconcile_destination_audit_files, AUDIT_CAPTURE_ROUNDS,
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
@@ -427,11 +427,18 @@ fn list_files(
             };
             #[cfg(not(test))]
             let meta_result = fs::symlink_metadata(&entry);
-            // Only an entry that VANISHED between the listing and this
-            // metadata read is tolerated; every other failure is typed.
+            // Only an entry that VANISHED is tolerated. A reserved top-level
+            // audit name is the audit listing's own path-free refusal: the
+            // phase-1 name exclusion runs AFTER this read.
             let meta = match meta_result {
                 Ok(meta) => meta,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error)
+                    if dir.as_path() == source_root
+                        && entry.file_name().is_some_and(is_audit_log_file_name) =>
+                {
+                    return Err(CopyError::AuditListing { source: error });
+                }
                 Err(error) => return Err(io_at(&entry, error)),
             };
             if meta.is_dir() {
@@ -588,7 +595,7 @@ pub(super) fn run_data_dir_copy_pass(
         result.changed_files += audit.changed_files;
         result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
-            remove_uncaptured_active_log(dest_root, &audit)?;
+            reconcile_destination_audit_files(dest_root, &audit)?;
             result.files.extend(audit.files);
             return Ok(result);
         }
