@@ -28,6 +28,8 @@ use super::super::ownership::{tag_fresh_with_seam, STAGED_PREFIX};
 use super::super::prune::prune_inner;
 use super::super::{prune, RetentionOutcome};
 use super::fixture::{copy_with_payload, owner_tag, private_root, retain, sidecar, OWNER};
+#[cfg(unix)]
+use super::fixture::private_root_in;
 
 /// A v2 online copy with an empty WAL segment, untagged or owned by `owner`.
 fn copy(root: &Path, name: &str, time: u128, owner: Option<&str>) -> PathBuf {
