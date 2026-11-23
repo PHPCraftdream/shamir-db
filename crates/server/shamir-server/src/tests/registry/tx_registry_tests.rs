@@ -11,6 +11,14 @@ use crate::tx_registry::{spawn_reaper_task, InteractiveTx, TxRegistry, TxRegistr
 const SID_A: [u8; 32] = [0xAA; 32];
 const SID_B: [u8; 32] = [0xBB; 32];
 
+/// A releaser that releases nothing: these tests drive the registry's own
+/// bookkeeping with a snapshot transaction, so no Level-3 lock can exist.
+fn no_abort_release() -> crate::tx_registry::TxAbortRelease {
+    std::sync::Arc::new(|_| -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::ready(()))
+    })
+}
+
 /// Build a real `(handle, InteractiveTx)` from a standalone gate — the
 /// registry stores genuine `TxContext` + `SnapshotGuard` values.
 async fn make_tx(sid: [u8; 32], max_lifetime: Duration, seed: u64) -> (u64, InteractiveTx) {
@@ -33,6 +41,7 @@ async fn make_tx(sid: [u8; 32], max_lifetime: Duration, seed: u64) -> (u64, Inte
         "db".to_string(),
         "repo".to_string(),
         max_lifetime,
+        no_abort_release(),
     );
     (tx_id.0, it)
 }
@@ -382,6 +391,7 @@ async fn long_lease_survives_repeated_reap_then_commits_real_write() {
             "db".into(),
             "repo".into(),
             Duration::from_secs(300),
+            no_abort_release(),
         ),
     )
     .unwrap();

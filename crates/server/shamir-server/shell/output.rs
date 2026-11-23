@@ -105,6 +105,27 @@ pub(crate) enum ShellError {
     /// The request was cancelled by another operator before it finished
     /// (`cancelled`): its effects may be partial.
     Cancelled,
+    /// `backup start` was refused because another online copy already runs on
+    /// this node (`backup_already_running`).
+    BackupAlreadyRunning,
+    /// The server refused the `--to` destination (`backup_invalid_destination`):
+    /// the path is passed unmodified and the server's own validation decides.
+    BackupInvalidDestination,
+    /// The node has no online-copy facility configured (`backup_unavailable`).
+    BackupUnavailable,
+    /// The node is a follower: node-local copy start/cancel are refused there
+    /// (`online_backup_follower_read_only`).
+    OnlineBackupFollowerReadOnly,
+    /// The node is a follower: application-schema status is refused there
+    /// (`schema_migration_follower_read_only`).
+    SchemaMigrationFollowerReadOnly,
+    /// The command depends on a capability this release does not carry
+    /// (R2d backup schedule state, R3 online export); never a placeholder
+    /// success (`unsupported_prerequisite`).
+    PendingCapability,
+    /// A node-local online-copy operation failed on I/O (destination setup or
+    /// the runner thread): `backup_io_error`.
+    BackupIo,
 }
 
 impl ShellError {
@@ -156,6 +177,13 @@ impl ShellError {
             ShellError::TreeTooLarge => "tree_too_large",
             ShellError::ReadOnlyReplica => "read_only_replica",
             ShellError::Cancelled => "cancelled",
+            ShellError::BackupAlreadyRunning => "backup_already_running",
+            ShellError::BackupInvalidDestination => "backup_invalid_destination",
+            ShellError::BackupUnavailable => "backup_unavailable",
+            ShellError::OnlineBackupFollowerReadOnly => "online_backup_follower_read_only",
+            ShellError::SchemaMigrationFollowerReadOnly => "schema_migration_follower_read_only",
+            ShellError::PendingCapability => "unsupported_prerequisite",
+            ShellError::BackupIo => "backup_io_error",
         }
     }
 
@@ -262,6 +290,25 @@ impl ShellError {
             ShellError::Cancelled => {
                 "the request was cancelled before it finished; its earlier effects may already be applied"
             }
+            ShellError::BackupAlreadyRunning => {
+                "another online copy is already running on this node; wait for it to finish or cancel the current run"
+            }
+            ShellError::BackupInvalidDestination => {
+                "the server refused the backup destination; give an absolute path on the server outside its data directory"
+            }
+            ShellError::BackupUnavailable => "this node has no online-copy facility configured",
+            ShellError::OnlineBackupFollowerReadOnly => {
+                "this node is a read-only replica: starting or cancelling an online copy is refused here; run it on the leader"
+            }
+            ShellError::SchemaMigrationFollowerReadOnly => {
+                "this node is a read-only replica and has no consistent migration-journal view; ask the leader"
+            }
+            ShellError::PendingCapability => {
+                "this command depends on a capability that is not part of this release and is never reported as a success"
+            }
+            ShellError::BackupIo => {
+                "the online copy failed on an I/O error on the server node; its own message text is never reproduced"
+            }
         }
     }
 
@@ -289,7 +336,13 @@ impl ShellError {
             | ShellError::UnknownDb
             | ShellError::TreeTooLarge
             | ShellError::ReadOnlyReplica
-            | ShellError::Cancelled => 5,
+            | ShellError::Cancelled
+            | ShellError::BackupAlreadyRunning
+            | ShellError::BackupInvalidDestination
+            | ShellError::BackupUnavailable
+            | ShellError::OnlineBackupFollowerReadOnly
+            | ShellError::SchemaMigrationFollowerReadOnly
+            | ShellError::BackupIo => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token
@@ -306,7 +359,8 @@ impl ShellError {
             | ShellError::SecretTooLong
             | ShellError::SecretSourceConflict
             | ShellError::RootMutation
-            | ShellError::ConfirmationRequired => 6,
+            | ShellError::ConfirmationRequired
+            | ShellError::PendingCapability => 6,
             #[cfg(windows)]
             ShellError::SecretFdWindows => 6,
             ShellError::Timeout | ShellError::HeadWallTime => 7,
