@@ -19,7 +19,8 @@ use super::manifest::BACKUP_META_FILE_NAME;
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
-    audit_capture_is_stable, is_audit_log_file_name, list_audit_files, AUDIT_CAPTURE_ROUNDS,
+    audit_capture_is_stable, is_audit_log_file_name, list_audit_files,
+    remove_uncaptured_active_log, AUDIT_CAPTURE_ROUNDS,
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
@@ -538,12 +539,17 @@ pub fn run_copy_pass(
 /// so a rotation in between hides the archive holding exactly the bytes
 /// the captured anchor names.
 ///
-/// Phase 2 re-lists the audit directory after each capture round and
-/// re-captures what appeared, up to [`AUDIT_CAPTURE_ROUNDS`] rounds; the
-/// active log is re-captured in every round because a rotation can move
-/// its bytes into a new archive. Reaching the bound fails the pass with a
-/// typed [`CopyError::AuditFilesUnstable`] — never a silently inconsistent
-/// copy. The manifest describes exactly the bytes of the last round.
+/// Phase 2 re-lists the audit directory after each capture round and runs
+/// another round when the fresh listing names an archive the round did not
+/// copy; every round copies every listed file again (a rotation can move the
+/// active log's bytes into a new archive). A stable round, up to the
+/// [`AUDIT_CAPTURE_ROUNDS`]-th, ends the pass; no stable round within the
+/// bound fails it with a typed [`CopyError::AuditFilesUnstable`] — never a
+/// silently inconsistent copy. The manifest describes exactly the bytes of
+/// the last round, and an active log an earlier pass left in the destination
+/// that the last round did not capture is removed (the source has none while a
+/// rotation reopens it). A source file that vanishes during a corrective
+/// re-copy still fails the pass with its I/O error, as in every other pass.
 ///
 /// Not covered, by design: retention may DELETE an archive between the
 /// listing and its copy — a vanished file is excluded exactly as any other
@@ -580,6 +586,7 @@ pub(super) fn run_data_dir_copy_pass(
             },
         )?;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
+            remove_uncaptured_active_log(dest_root, &audit)?;
             result.files.extend(audit.files);
             result.changed_files += audit.changed_files;
             result.missing_files += audit.missing_files;

@@ -10,6 +10,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::backup::online::copy_engine::{CopyError, CopyPassResult, SealGate};
@@ -23,10 +24,11 @@ const AUDIT_ARCHIVE_PREFIX: &str = "audit.log.";
 const AUDIT_ARCHIVE_DIGITS: usize = 20;
 
 /// Upper bound on the audit chain rounds of one data-directory pass. Each
-/// round lists the audit files, copies the ones not yet captured and lists
-/// them again; a round that finds a rotation archive it did not copy
-/// repeats. Reaching the bound fails the pass typed (never a silently
-/// inconsistent copy).
+/// round lists the audit files, copies every file it listed and lists them
+/// again; a round whose fresh listing names a rotation archive that round did
+/// not copy repeats. The bound counts rounds: a stable round, the last one
+/// included, succeeds; no stable round within the bound fails the pass typed
+/// (never a silently inconsistent copy).
 pub(crate) const AUDIT_CAPTURE_ROUNDS: usize = 4;
 
 /// True for the top-level audit chain file names: the active log and its
@@ -93,9 +95,10 @@ pub(crate) fn list_audit_files(
 
 /// True when a FRESH listing of the audit chain files names no rotation
 /// archive this capture round did not copy — the stable condition of a
-/// data-directory pass's phase 2. The active log is always tolerated (phase
-/// 2 re-captures it every round), so a rotation landing after a round only
-/// forces another round, in which its archive is copied.
+/// data-directory pass's phase 2. The active log is always tolerated: a round
+/// that listed it captured it, and the anchors were captured before any audit
+/// listing, so bytes appended later are only a longer tail; a rotation landing
+/// after a round forces another round, in which its archive is copied.
 pub(crate) fn audit_capture_is_stable(
     source_root: &Path,
     captured: &CopyPassResult,
@@ -110,4 +113,36 @@ pub(crate) fn audit_capture_is_stable(
                     || captured.files.iter().any(|file| file.rel_path == name)
             })
     }))
+}
+
+/// Removes the destination's active log when this round's capture has none.
+///
+/// The data-directory pass runs twice into one destination (pass D, then the
+/// snapshot-defining pass E). When the source has no active log at E's audit
+/// listing — a rotation renamed it and has not reopened it yet — E's manifest
+/// has no entry for it, while the copy pass D made would stay behind and fail
+/// the self-verification as an unlisted file. The destination must hold
+/// exactly what the round captured, so the earlier copy goes: the archive the
+/// rotation produced carries its bytes, and recovery accepts a directory
+/// without an active log.
+pub(crate) fn remove_uncaptured_active_log(
+    dest_root: &Path,
+    captured: &CopyPassResult,
+) -> Result<(), CopyError> {
+    if captured
+        .files
+        .iter()
+        .any(|file| file.rel_path == AUDIT_LOG_FILE_NAME)
+    {
+        return Ok(());
+    }
+    let stale = dest_root.join(AUDIT_LOG_FILE_NAME);
+    match fs::remove_file(&stale) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CopyError::Io {
+            path: stale,
+            source,
+        }),
+    }
 }

@@ -37,7 +37,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,7 +51,9 @@ use super::failure_injection_tests::{
     assert_source_untouched, run, snapshot_dir, write_file, Fixture, InjectPort, JoinOnDrop,
 };
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
-use crate::sync::durability::backup::online::copy_engine::{run_copy_pass, CopyError, CopyOptions};
+use crate::sync::durability::backup::online::copy_engine::{
+    run_copy_pass, run_data_dir_copy_pass, CopyError, CopyOptions,
+};
 use crate::sync::durability::backup::online::manifest;
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{OnlineBackupError, OnlineBackupFailure};
@@ -709,27 +711,22 @@ fn audit_log_is_captured_after_its_anchor_store() {
     );
 }
 
-/// A copy taken while audit events keep arriving restores and boots, and its
-/// manifest describes the log bytes the copy actually carries.
+/// Shared body of the paused-copy cases: a copy taken while audit events keep
+/// arriving restores and boots, and its manifest describes the log bytes the
+/// copy actually carries.
 ///
-/// The copy is paused DETERMINISTICALLY (channel rendezvous, no sleeps) right
-/// after the destination write of the final `audit.log` copy and BEFORE that
-/// file's snapshot hash. While it is paused three real append + checkpoint
-/// cycles run through the real appender, so the log grows between the copy and
-/// its hash and the pass must re-copy and hash the FINAL bytes. The copy is
-/// then released, its bytes moved into a fresh directory and opened through
-/// the real boot recovery FIRST.
-///
-/// Mutant caught: a manifest (or hash pass) that records the digest read at
-/// copy time, before those appends — either the run's own step-F
-/// self-verification fails or the manifest assertion below does. Mutant
-/// caught: a capture order that leaves the copied anchor past the copied tail
-/// (the pre-round-1 sorted order: log first, anchor stores last) — recovery
-/// refuses with `AnchorPastTail`, observed at the recovery assertion. The
-/// capture order itself is additionally pinned by
-/// `audit_log_is_captured_after_its_anchor_store`.
-#[test]
-fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
+/// The copy is paused DETERMINISTICALLY (channel rendezvous, no sleeps) in the
+/// snapshot-defining data-directory pass, at the `after_capture` seam when
+/// `pause_after_capture` is set and at the `after_copy` seam otherwise. While
+/// it is paused three real append + checkpoint cycles run through the real
+/// appender; the copy is then released, its bytes moved into a fresh directory
+/// and opened through the real boot recovery FIRST. The restored log must
+/// carry the appended records when the pause was before the log's snapshot
+/// hash (the pass re-copies it) and may not carry them when the pause was
+/// after the log's capture. The test models the restore as a plain tree copy
+/// plus the Fjall lock files and opens recovery with no `server_meta` anchor,
+/// so only the audit checkpoint store is exercised, not the metadata anchor.
+fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let restored_dir = TempDir::new().expect("restored temp dir");
@@ -749,7 +746,9 @@ fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
     let copies = Arc::new(AtomicUsize::new(0));
     let copies_for_hook = copies.clone();
     let audit_log_path = source.join(AUDIT_LOG_FILE);
-    let seam = test_seams::set_after_copy(Box::new(move |path| {
+    let released = Arc::new(AtomicBool::new(false));
+    let released_for_hook = released.clone();
+    let pause: Box<dyn FnMut(&Path)> = Box::new(move |path| {
         if path != audit_log_path {
             return;
         }
@@ -760,8 +759,16 @@ fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
             return;
         }
         paused_tx.send(()).expect("signal the copy pause");
-        let _ = release_rx.recv_timeout(AUDIT_HANG_GUARD);
-    }));
+        released_for_hook.store(
+            release_rx.recv_timeout(AUDIT_HANG_GUARD).is_ok(),
+            Ordering::SeqCst,
+        );
+    });
+    let seam = if pause_after_capture {
+        test_seams::set_after_capture(pause)
+    } else {
+        test_seams::set_after_copy(pause)
+    };
     // The copy runs on THIS thread (the seams are thread-local); the audit
     // activity runs on a helper thread while the copy is paused.
     let activity = JoinOnDrop::new(
@@ -786,6 +793,10 @@ fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
         2,
         "the pause must land in the snapshot-defining copy (pass D, then pass E)"
     );
+    assert!(
+        released.load(Ordering::SeqCst),
+        "the audit activity must finish while the copy is paused"
+    );
     let report = result.expect("the copy must succeed");
 
     copy_tree(&report.dest_dir, &restored);
@@ -805,6 +816,21 @@ fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
     let entries =
         FjallAuditAppender::read_log_for_verify(&restored).expect("read the restored audit log");
     AuditChain::verify_chain(&AUDIT_KEY, &entries).expect("the restored log must verify");
+    let live = FjallAuditAppender::read_log_for_verify(&source)
+        .expect("read the live audit log")
+        .len();
+    if pause_after_capture {
+        assert!(
+            entries.len() < live,
+            "records appended after the log's capture are not in the snapshot"
+        );
+    } else {
+        assert_eq!(
+            entries.len(),
+            live,
+            "the pass must re-copy the log that grew before its hash"
+        );
+    }
     let tail = entries.last().expect("the restored log must not be empty");
     assert!(
         anchor.0 <= tail.seq + 1,
@@ -834,6 +860,33 @@ fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
         "the manifest must describe the log bytes the copy carries, not an earlier read"
     );
     drop(appender);
+}
+
+/// Pause right after the destination write of the final `audit.log` copy and
+/// BEFORE that file's snapshot hash: the log grows between its copy and its
+/// hash and the pass must re-copy and hash the FINAL bytes.
+///
+/// Mutant caught: a manifest (or hash pass) that records the digest read at
+/// copy time, before those appends — the run's own step-F self-verification
+/// or the manifest assertion fails; a pass that skips the re-copy — the
+/// restored log lacks the appended records.
+#[test]
+fn copy_paused_between_the_audit_log_copy_and_its_hash_restores_and_boots() {
+    paused_audit_copy_restores_and_boots(false);
+}
+
+/// Pause right after the log's snapshot entry is FINAL: the appends and their
+/// checkpoints land after the log was captured, so only an anchor captured
+/// BEFORE the log is consistent with it.
+///
+/// Mutant caught: a capture order that takes `audit.log` before the anchor
+/// stores (the sorted-path order of the previous engine): the stores' later
+/// capture takes the anchor of the appended cycles while the log keeps its
+/// earlier tail, and recovery refuses with `AnchorPastTail`. The order itself
+/// is also pinned by `audit_log_is_captured_after_its_anchor_store`.
+#[test]
+fn copy_paused_after_the_audit_log_capture_restores_and_boots() {
+    paused_audit_copy_restores_and_boots(true);
 }
 
 /// A copy taken while NO audit activity happens still restores and boots, and
@@ -898,4 +951,43 @@ fn quiet_audit_log_copy_restores_and_boots() {
     );
     drop(recovered);
     drop(appender);
+}
+
+/// A rotation that renamed `audit.log` and has not reopened it leaves the
+/// source with archives and no active file, while the destination still holds
+/// the active log an earlier pass of the same copy made. That stale file has
+/// no manifest entry and would fail the self-verification of an otherwise
+/// healthy copy, so the audit phase removes it.
+///
+/// Mutant caught: a pass that keeps the earlier destination copy.
+#[test]
+fn audit_phase_removes_the_destination_active_log_the_source_no_longer_has() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    let archive = "audit.log.00000000000000000001";
+    write_file(&source.join("repos/alpha/store.bin"), b"store-bytes");
+    write_file(&source.join(archive), b"archived\n");
+    write_file(&to.join(AUDIT_LOG_FILE), b"stale-active\n");
+    let cancel = CancelFlag::default();
+    let result = run_data_dir_copy_pass(source, to, &[], &cancel, &CopyOptions::default())
+        .expect("the data directory pass must succeed");
+    let captured: Vec<&str> = result
+        .files
+        .iter()
+        .map(|file| file.rel_path.as_str())
+        .collect();
+    assert!(captured.contains(&archive), "archive missing: {captured:?}");
+    assert!(
+        !captured.contains(&AUDIT_LOG_FILE),
+        "no active log was captured: {captured:?}"
+    );
+    assert!(
+        !to.join(AUDIT_LOG_FILE).exists(),
+        "the stale destination active log must be removed"
+    );
+    assert_eq!(
+        fs::read(to.join(archive)).expect("archive copy"),
+        b"archived\n"
+    );
 }
