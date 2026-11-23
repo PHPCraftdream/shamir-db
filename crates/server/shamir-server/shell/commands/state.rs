@@ -641,12 +641,24 @@ fn head_tail(
     projected: Result<Value, ShellError>,
     scan: impl FnOnce(&Value) -> Result<(), ShellError>,
 ) -> Result<Value, ShellError> {
+    head_tail_with_now(deadline, projected, scan, &tokio::time::Instant::now)
+}
+
+/// [`head_tail`] with its clock injected: every deadline consultation reads
+/// `now()` instead of the ambient clock, so a test can drive the ordering
+/// (before vs. after the scan) without sleeping.
+pub(super) fn head_tail_with_now<R>(
+    deadline: tokio::time::Instant,
+    payload: Result<R, ShellError>,
+    scan: impl FnOnce(&R) -> Result<(), ShellError>,
+    now: &dyn Fn() -> tokio::time::Instant,
+) -> Result<R, ShellError> {
     // A projection refusal keeps the deadline's typed outcome when the budget
     // has elapsed by the time the tail runs (a runner descheduled between the
     // row error and here must still report exit 7, not exit 5).
-    let payload = projected.map_err(|error| head_error(deadline, error))?;
+    let payload = payload.map_err(|error| head_error(deadline, error))?;
     let scanned = scan(&payload);
-    if tokio::time::Instant::now() >= deadline {
+    if now() >= deadline {
         return Err(ShellError::HeadWallTime);
     }
     scanned?;

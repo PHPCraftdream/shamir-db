@@ -19,9 +19,10 @@
 //!   (`crates/engine/shamir-db/src/shamir_db/execute/core/helpers.rs`), which
 //!   the engine applies to database/repository names;
 //! - a stored FUNCTION name is NOT validated by the engine at all (it is
-//!   persisted verbatim, `shamir_db/db/function/management.rs`): the shell
-//!   refuses only what it cannot address (empty, control bytes, past a
-//!   generous length bound);
+//!   persisted verbatim,
+//!   `crates/engine/shamir-db/src/shamir_db/shamir_db/db/function/management.rs`):
+//!   the shell refuses only what it cannot address (empty, control bytes,
+//!   past a generous length bound);
 //! - the table component mirrors the loosest PHYSICAL store-name length rule
 //!   (`crates/engine/shamir-engine-table/src/support/model/names.rs`,
 //!   `validate_table_store_name`): it refuses only names no table can have.
@@ -37,9 +38,9 @@ pub(in crate::shell) const RESOURCE_KINDS: [&str; 3] = ["database", "store", "ta
 ///
 /// The engine imposes NO length cap and no charset rule on a function name: it
 /// persists the registered name as given (`create_function_with_opts_as`,
-/// `shamir_db/db/function/management.rs`), with no folder or segment check on
-/// the name itself. 1024 bytes is therefore a shell-side sanity bound for a
-/// path-like name, not a mirrored engine rule.
+/// `crates/engine/shamir-db/src/shamir_db/shamir_db/db/function/management.rs`),
+/// with no folder or segment check on the name itself. 1024 bytes is therefore
+/// a shell-side sanity bound for a path-like name, not a mirrored engine rule.
 pub(in crate::shell) const MAX_FUNCTION_NAME_BYTES: usize = 1024;
 
 /// Longest accepted TABLE component, in bytes: the LOOSEST bound that still

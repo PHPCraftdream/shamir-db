@@ -140,7 +140,9 @@ async fn build_handler(
     let handler = ShamirDbHandler::new(Arc::new(shamir))
         .with_query_limits(query_limits)
         .with_byte_budget(byte_budget);
-    let seeded = seed_row(&handler).await;
+    let seeded = tokio::time::timeout(CALL_TIMEOUT, seed_row(&handler))
+        .await
+        .expect("the seed insert must complete within the 120s bound");
     (handler, seeded)
 }
 
@@ -278,25 +280,23 @@ fn items_registration(handler: &ShamirDbHandler) -> (Option<RecordId>, bool) {
 
 /// Drop `app.main.items` and create a fresh `items` in the same repo, as
 /// alice, through the REAL handler dispatch; then seed one row in the
-/// REPLACEMENT table with a unique payload. A second handler over the SAME
+/// REPLACEMENT table with a unique payload, re-keyed at the caller-supplied
+/// `replacement_id` because the parked read was built before the park (a
+/// random insert id cannot be known then). A second handler over the SAME
 /// `ShamirDb` is used with an unbounded budget: dispatching the DDL on the
 /// bounded handler would park it on the very reservation the test holds (its
 /// upfront reserve is `batch.limits.max_result_size`, 10 MB by default), which
 /// would deadlock the rendezvous.
 ///
 /// Returns the live `store_id` read BEFORE the drop, the one read back AFTER
-/// the create, the unbounded handler (so the caller can drive the control
-/// read) and the replacement row's storage `RecordId`. The id assertions are
-/// made HERE: a silently no-op DDL would otherwise leave the parked read
-/// comparing the table with itself and the test would pass vacuously.
+/// the create and the unbounded handler (so the caller can drive the control
+/// read). The id assertions are made HERE: a silently no-op DDL would
+/// otherwise leave the parked read comparing the table with itself and the
+/// test would pass vacuously.
 async fn replace_items_table(
     handler: &ShamirDbHandler,
-) -> (
-    Option<RecordId>,
-    Option<RecordId>,
-    ShamirDbHandler,
-    RecordId,
-) {
+    replacement_id: RecordId,
+) -> (Option<RecordId>, Option<RecordId>, ShamirDbHandler) {
     let (pre_drop_store_id, _) = items_registration(handler);
     assert!(
         pre_drop_store_id.is_some(),
@@ -335,34 +335,58 @@ async fn replace_items_table(
 
     // Two separate dispatches: one batch would leave the drop/create order
     // to the batch executor, and a create-before-drop would merely fail.
-    let drop_resp = send(
-        &ddl_handler,
-        &session,
-        DbRequest::Execute {
-            query_version: CURRENT_QUERY_LANG_VERSION,
-            db: "app".into(),
-            batch: drop_batch.build(),
-        },
+    let drop_resp = tokio::time::timeout(
+        CALL_TIMEOUT,
+        send(
+            &ddl_handler,
+            &session,
+            DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: "app".into(),
+                batch: drop_batch.build(),
+            },
+        ),
     )
-    .await;
-    assert!(
-        matches!(drop_resp, DbResponse::Batch { .. }),
-        "drop through the handler must succeed, got {drop_resp:?}"
+    .await
+    .expect("the drop dispatch must complete within the 120s bound");
+    let drop_response = match drop_resp {
+        DbResponse::Batch { response } => response,
+        other => panic!("drop through the handler must succeed, got {other:?}"),
+    };
+    // `handle_drop_table` renders success as
+    // `{"dropped_table": <name>, "existed": <removed>}` (see
+    // `shamir-db` `admin_table_index.rs`), so the real leaf is `existed`.
+    assert_eq!(
+        drop_response.results["destroy"].records[0].get_value_bool("existed"),
+        Some(true),
+        "the destroy alias must report that the table existed"
     );
 
-    let create_resp = send(
-        &ddl_handler,
-        &session,
-        DbRequest::Execute {
-            query_version: CURRENT_QUERY_LANG_VERSION,
-            db: "app".into(),
-            batch: create_batch.build(),
-        },
+    let create_resp = tokio::time::timeout(
+        CALL_TIMEOUT,
+        send(
+            &ddl_handler,
+            &session,
+            DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: "app".into(),
+                batch: create_batch.build(),
+            },
+        ),
     )
-    .await;
-    assert!(
-        matches!(create_resp, DbResponse::Batch { .. }),
-        "create through the handler must succeed, got {create_resp:?}"
+    .await
+    .expect("the create dispatch must complete within the 120s bound");
+    let create_response = match create_resp {
+        DbResponse::Batch { response } => response,
+        other => panic!("create through the handler must succeed, got {other:?}"),
+    };
+    // `handle_create_table` renders success as
+    // `{"created_table": <name>, "repo": <repo>, "created": true,
+    // "existed": false}`, so the real leaf is `created`.
+    assert_eq!(
+        create_response.results["recreate"].records[0].get_value_bool("created"),
+        Some(true),
+        "the recreate alias must report that the table was created"
     );
 
     let (post_create_store_id, has_table) = items_registration(handler);
@@ -393,7 +417,7 @@ async fn replace_items_table(
     .await
     .expect("the replacement insert must complete within the 120s bound")
     .expect("the replacement insert must succeed");
-    let replacement_id = match seeded
+    let inserted_id = match seeded
         .results
         .get("replacement")
         .expect("insert alias returned")
@@ -406,12 +430,35 @@ async fn replace_items_table(
         other => panic!("expected an Inserted write-result row, got {other:?}"),
     };
 
-    (
-        pre_drop_store_id,
-        post_create_store_id,
-        ddl_handler,
-        replacement_id,
-    )
+    // The parked read is built BEFORE this replacement, so its key must be
+    // known in advance; the engine insert mints a RANDOM `RecordId`. Re-key
+    // the very same row bytes at the caller's `replacement_id` (the raw-key
+    // `set` path: no query construction can carry an exact 16-byte id) and
+    // drop the random-key duplicate, so the parked read requests exactly the
+    // row the replacement table holds.
+    let table = tokio::time::timeout(CALL_TIMEOUT, handler.db().get_table("app", "main", "items"))
+        .await
+        .expect("replacement table acquisition must complete within the 120s bound")
+        .expect("the replacement table must be acquirable");
+    let inner = tokio::time::timeout(CALL_TIMEOUT, table.get(inserted_id))
+        .await
+        .expect("the seeded row read must complete within the 120s bound")
+        .expect("the seeded replacement row must be readable");
+    let rekeyed = tokio::time::timeout(CALL_TIMEOUT, table.set(replacement_id, &inner))
+        .await
+        .expect("the keyed re-seed must complete within the 120s bound")
+        .expect("re-keying the replacement row must succeed");
+    assert!(rekeyed, "the keyed re-seed must CREATE the replacement row");
+    let removed = tokio::time::timeout(CALL_TIMEOUT, table.delete(inserted_id))
+        .await
+        .expect("the duplicate delete must complete within the 120s bound")
+        .expect("removing the random-key duplicate must succeed");
+    assert!(
+        removed,
+        "the random-key duplicate of the replacement row must be removed"
+    );
+
+    (pre_drop_store_id, post_create_store_id, ddl_handler)
 }
 
 /// Replace the whole `app.main` REGISTRATION with a LEGACY one
@@ -454,7 +501,10 @@ async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
 #[tokio::test]
 async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
-    let (handler, seeded) = build_handler(budget.clone(), parked_limits()).await;
+    let (handler, seeded) =
+        tokio::time::timeout(CALL_TIMEOUT, build_handler(budget.clone(), parked_limits()))
+            .await
+            .expect("the handler fixture must build within the 120s bound");
     let store = SessionStore::new();
     let session = store.insert(ALICE_SID, alice_session());
     assert_ne!(session.activity_handle(), 0, "store-stamped session");
@@ -468,7 +518,9 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
         .expect("the read must reach the budget park within the 120s bound");
 
     // Mutate while the read is parked: revoke alice's Table Read.
-    chmod_items_table(&handler, 0o000).await;
+    tokio::time::timeout(CALL_TIMEOUT, chmod_items_table(&handler, 0o000))
+        .await
+        .expect("the ACL mutation must complete within the 120s bound");
     drop(held);
 
     let resp = tokio::time::timeout(CALL_TIMEOUT, read)
@@ -488,30 +540,35 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
 /// non-admin alice — so only the captured registration comparison can refuse
 /// it, with the fixed typed `access_denied`.
 ///
-/// WITHOUT the identity fix the read resolves the NEW table and returns
-/// `not_found` (or the replacement's row once it holds that key), never the
-/// fixed refusal.
+/// WITHOUT the identity fix the read resolves the NEW table, finds the
+/// replacement row under this same `replacement_id`, and returns THAT PAYLOAD
+/// (never the fixed refusal).
 #[tokio::test]
 async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
-    let (handler, _seeded) = build_handler(budget.clone(), parked_limits()).await;
+    let (handler, _seeded) =
+        tokio::time::timeout(CALL_TIMEOUT, build_handler(budget.clone(), parked_limits()))
+            .await
+            .expect("the handler fixture must build within the 120s bound");
     let store = SessionStore::new();
     let session = store.insert(ALICE_SID, alice_session());
+
+    // The read parks BEFORE the replacement, so it cannot learn the engine's
+    // random insert id: the fixture re-keys the replacement row at this key.
+    let replacement_id = RecordId([7u8; 16]);
 
     let held = tokio::time::timeout(CALL_TIMEOUT, budget.acquire(SMALL_BUDGET))
         .await
         .expect("the test must reserve the byte budget within the 120s bound");
-    let mut read = Box::pin(send(
-        &handler,
-        &session,
-        get_record_req(RecordId([7u8; 16])),
-    ));
+    let mut read = Box::pin(send(&handler, &session, get_record_req(replacement_id)));
     tokio::time::timeout(CALL_TIMEOUT, drive_to_capture(&mut read, &session))
         .await
         .expect("the read must reach the budget park within the 120s bound");
 
-    let (pre_store_id, post_store_id, ddl_handler, replacement_id) =
-        replace_items_table(&handler).await;
+    let (pre_store_id, post_store_id, ddl_handler) =
+        tokio::time::timeout(CALL_TIMEOUT, replace_items_table(&handler, replacement_id))
+            .await
+            .expect("the table replacement must complete within the 120s bound");
     assert_ne!(
         pre_store_id, post_store_id,
         "the parked read must be comparing two DIFFERENT registrations"
@@ -519,12 +576,16 @@ async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked()
 
     // CONTROL: the same NON-admin alice principal must read the replacement
     // row, so the parked refusal cannot be attributed to the ACL.
-    let control = send(
-        &ddl_handler,
-        &alice_session(),
-        get_record_req(replacement_id),
+    let control = tokio::time::timeout(
+        CALL_TIMEOUT,
+        send(
+            &ddl_handler,
+            &alice_session(),
+            get_record_req(replacement_id),
+        ),
     )
-    .await;
+    .await
+    .expect("the control read must complete within the 120s bound");
     match control {
         DbResponse::Record { record } => assert_eq!(
             record.get_value_i64("v"),
@@ -572,12 +633,17 @@ async fn get_record_refuses_when_the_authorized_table_is_replaced_while_parked()
 #[tokio::test]
 async fn get_record_refuses_when_a_legacy_table_is_replaced_by_a_legacy_registration() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
-    let (handler, _seeded) = build_handler(budget.clone(), parked_limits()).await;
+    let (handler, _seeded) =
+        tokio::time::timeout(CALL_TIMEOUT, build_handler(budget.clone(), parked_limits()))
+            .await
+            .expect("the handler fixture must build within the 120s bound");
     let store = SessionStore::new();
     let session = store.insert(ALICE_SID, alice_session());
 
     // Legacy on the AUTHORIZED side too: the parked read must capture `None`.
-    replace_repo_with_legacy_items(&handler).await;
+    tokio::time::timeout(CALL_TIMEOUT, replace_repo_with_legacy_items(&handler))
+        .await
+        .expect("the legacy registration swap must complete within the 120s bound");
     let (authorized_store_id, has_table) = items_registration(&handler);
     assert_eq!(
         authorized_store_id, None,
@@ -597,7 +663,9 @@ async fn get_record_refuses_when_a_legacy_table_is_replaced_by_a_legacy_registra
         .await
         .expect("the read must reach the budget park within the 120s bound");
 
-    replace_repo_with_legacy_items(&handler).await;
+    tokio::time::timeout(CALL_TIMEOUT, replace_repo_with_legacy_items(&handler))
+        .await
+        .expect("the legacy registration swap must complete within the 120s bound");
     let (replacement_store_id, has_table) = items_registration(&handler);
     assert_eq!(
         replacement_store_id, None,
@@ -635,7 +703,10 @@ async fn get_record_refuses_when_a_legacy_table_is_replaced_by_a_legacy_registra
 #[tokio::test]
 async fn get_record_granted_control_returns_the_seeded_row_after_parking() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
-    let (handler, seeded) = build_handler(budget.clone(), parked_limits()).await;
+    let (handler, seeded) =
+        tokio::time::timeout(CALL_TIMEOUT, build_handler(budget.clone(), parked_limits()))
+            .await
+            .expect("the handler fixture must build within the 120s bound");
     let store = SessionStore::new();
     let session = store.insert(ALICE_SID, alice_session());
 

@@ -1,13 +1,14 @@
 //! Projection seams of the rights commands: `rights show` must inspect ONE
-//! node (a healthy large catalogue must not trip the whole-tree cap), the
-//! whole-tree commands must keep it, and the typed mutation target must match
-//! the addressed selector form.
+//! node (a healthy large catalogue must not trip the whole-tree cap), and the
+//! whole-tree commands must keep it.
+//!
+//! The typed mutation target is covered by `access_mutation_tests.rs`, which
+//! is declared from the `mutate` module that owns it.
 
-use shamir_query_types::admin::ResourceRef;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use super::{mutation_resource, project_rights, project_tree, Selector};
+use super::{project_rights, project_tree, Selector};
 use crate::shell::output::ShellError;
 
 /// One raw access-tree node in the engine's own shape.
@@ -196,44 +197,5 @@ fn a_non_boolean_builtin_is_a_shape_mismatch() {
     assert!(matches!(
         project_tree(&value, None),
         Err(ShellError::Server)
-    ));
-}
-
-/// The typed mutation target follows the selector FORM: `db:root` is the
-/// DATABASE `root`, while the bare `root` stays the synthetic root and is
-/// refused. Mutant: treating `db:root` as Root.
-#[test]
-fn mutation_targets_follow_the_selector_form() {
-    assert!(matches!(
-        mutation_resource(&Selector::Root),
-        Err(ShellError::RootMutation)
-    ));
-    assert!(matches!(
-        mutation_resource(&Selector::Database(String::from("root"))),
-        Ok(ResourceRef::Database { database }) if database == "root"
-    ));
-    assert!(matches!(
-        mutation_resource(&Selector::Function(String::from("math/abs"))),
-        Ok(ResourceRef::Function { function }) if function == "math/abs"
-    ));
-    assert!(matches!(
-        mutation_resource(&Selector::Resource(vec![String::from("billing")])),
-        Ok(ResourceRef::Database { database }) if database == "billing"
-    ));
-    assert!(matches!(
-        mutation_resource(&Selector::Resource(vec![
-            String::from("billing"),
-            String::from("main"),
-        ])),
-        Ok(ResourceRef::Store { store }) if store[0] == "billing" && store[1] == "main"
-    ));
-    assert!(matches!(
-        mutation_resource(&Selector::Resource(vec![
-            String::from("billing"),
-            String::from("main"),
-            String::from("invoices"),
-        ])),
-        Ok(ResourceRef::Table { table })
-            if table[0] == "billing" && table[1] == "main" && table[2] == "invoices"
     ));
 }

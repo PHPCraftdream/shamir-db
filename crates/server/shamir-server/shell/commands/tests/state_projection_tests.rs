@@ -16,7 +16,8 @@ use shamir_query_types::read::{PaginationInfo, QueryRecord, QueryResult, QuerySt
 use shamir_types::types::value::QueryValue;
 
 use super::super::state::{
-    head_error, head_tail, is_optional_version, project_count, project_head, project_subscriptions,
+    head_error, head_tail, head_tail_with_now, is_optional_version, project_count, project_head,
+    project_subscriptions,
 };
 use crate::shell::output::ShellError;
 
@@ -161,26 +162,38 @@ fn head_tail_checks_the_deadline_after_the_credential_scan() {
     );
 }
 
-/// The oracle for the ORDERING: a deadline that expires DURING the
-/// synchronous credential scan must be the typed `head_wall_time` refusal.
-/// The old ordering (deadline consulted before the scan) returned the
-/// payload for this case, so this test fails against it — unlike the
+/// The oracle for the ORDERING, driven by an INJECTED clock instead of a
+/// sleep: the deadline is consulted BEFORE the scan (call 1 returns `t0`,
+/// not yet elapsed) and must be consulted AGAIN after it, where call 2
+/// returns `t0 + 40ms` — past the 10 ms budget — so a clean scan must still
+/// refuse with the typed `head_wall_time`. The old ordering (deadline
+/// consulted only before the scan) reads the clock once, sees a live budget
+/// and returns the payload, failing both assertions here — unlike the
 /// already-elapsed cases above, which both orderings refuse.
 #[test]
-fn head_tail_deadline_crossed_by_the_credential_scan_is_head_wall_time() {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+fn head_tail_rechecks_the_deadline_after_the_scan() {
+    let t0 = tokio::time::Instant::now();
+    let deadline = t0 + Duration::from_millis(10);
     let payload = serde_json::json!({ "rows": [] });
-    // A real sleep, NOT synchronisation: it only has to guarantee that the
-    // deadline has PASSED when the scan returns, and it overshoots it by
-    // design (no upper-bound timing assumption is made).
-    let out = head_tail(deadline, Ok(payload), |_| {
-        std::thread::sleep(Duration::from_millis(40));
-        Ok(())
-    });
+    let consultations = std::cell::Cell::new(0usize);
+    let now = || {
+        let call = consultations.get();
+        consultations.set(call + 1);
+        if call == 0 {
+            t0
+        } else {
+            t0 + Duration::from_millis(40)
+        }
+    };
+    let out = head_tail_with_now(deadline, Ok(payload), |_| Ok(()), &now);
     assert_eq!(
         out,
         Err(ShellError::HeadWallTime),
         "an expiry crossed by the scan must beat a clean scan result"
+    );
+    assert!(
+        consultations.get() >= 2,
+        "the deadline must be consulted again after the scan"
     );
 }
 
@@ -387,13 +400,25 @@ fn subscriptions_render_a_present_but_empty_identity() {
 /// must keep it projectable and exact (no float, no wraparound).
 #[test]
 fn subscriptions_project_a_large_unsigned_identity_through_the_wire_codec() {
-    let mut recorded_identity = identity(lineage(16));
-    let QueryValue::Map(identity_fields) = &mut recorded_identity else {
+    // The SAME two calls the engine's `to_qv` runs
+    // (`execute/core/helpers.rs`): a REAL `RepoIdentity` named-msgpack
+    // encode, then a `QueryValue` decode. The epoch leaf is never
+    // hand-built: `u64::MAX` sits above `i64::MAX`, so the decode must
+    // promote it to `Big` instead of wrapping it to `Int(-1)`.
+    let real_identity = shamir_db::engine::meta::repo_identity::RepoIdentity {
+        lineage_id: [0x5A; 16],
+        history_epoch: u64::MAX,
+    };
+    let identity_bytes = rmp_serde::to_vec_named(&real_identity).expect("encode identity");
+    let recorded_identity: QueryValue =
+        rmp_serde::from_slice(&identity_bytes).expect("decode identity");
+    let QueryValue::Map(identity_fields) = &recorded_identity else {
         panic!("identity is a map");
     };
-    identity_fields.insert(
-        String::from("history_epoch"),
-        QueryValue::Big(BigInt::from(u64::MAX)),
+    assert_eq!(
+        identity_fields.get("history_epoch"),
+        Some(&QueryValue::Big(BigInt::from(u64::MAX))),
+        "the decoded epoch leaf must be Big, not a wrapped Int"
     );
     let result = subscriptions_result(recorded_identity);
 
