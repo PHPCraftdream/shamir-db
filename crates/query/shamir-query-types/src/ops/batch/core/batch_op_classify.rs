@@ -123,7 +123,9 @@ impl BatchOp {
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
             | BatchOp::ListActivity(_)
-            | BatchOp::CancelRequest(_) => return None,
+            | BatchOp::CancelRequest(_)
+            | BatchOp::CancelTx(_)
+            | BatchOp::CancelCursorAdmin(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -239,6 +241,8 @@ impl BatchOp {
                 | BatchOp::CancelBackup(_)
                 | BatchOp::ListActivity(_)
                 | BatchOp::CancelRequest(_)
+                | BatchOp::CancelTx(_)
+                | BatchOp::CancelCursorAdmin(_)
         )
     }
 
@@ -287,7 +291,9 @@ impl BatchOp {
             // and cancel change persistent node-side backup state (R2a 3a).
             BatchOp::BackupStatus(_) | BatchOp::ListActivity(_) => false,
             // Cooperative cancellation only changes transient execution state.
+            // Operator cancellation likewise only changes transient state.
             BatchOp::CancelRequest(_) => false,
+            BatchOp::CancelTx(_) | BatchOp::CancelCursorAdmin(_) => false,
             BatchOp::StartBackup(_) => true,
             BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan

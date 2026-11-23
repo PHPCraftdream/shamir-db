@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::super::activity_export::CANCEL_RESULT_LABELS;
 use super::super::{render_activity_series, ActivityMetricsSnapshot, ActivitySource};
 
 const GAUGE_NAMES: [&str; 4] = [
@@ -17,12 +18,15 @@ const GAUGE_NAMES: [&str; 4] = [
     "shamir_active_cursors",
 ];
 
+const CANCEL_COUNTER: &str = "shamir_cancellations_total";
+
 /// Parse a rendered series block back into `(name -> value)`, failing on
-/// anything that is not an unlabeled sample line.
+/// anything that is not an unlabeled gauge sample line. The labelled
+/// cancellations counter series are skipped here and asserted directly by
+/// [`cancellations_family_renders_four_labelled_series`].
 fn parse_samples(rendered: &str) -> BTreeMap<&str, u64> {
     let mut samples = BTreeMap::new();
     for line in rendered.lines() {
-        assert!(!line.contains('{'), "unlabeled gauges only: {line}");
         if let Some(rest) = line.strip_prefix("# ") {
             assert!(
                 rest.starts_with("HELP ") || rest.starts_with("TYPE "),
@@ -30,6 +34,14 @@ fn parse_samples(rendered: &str) -> BTreeMap<&str, u64> {
             );
             continue;
         }
+        if let Some(rest) = line.strip_prefix(CANCEL_COUNTER) {
+            assert!(
+                rest.starts_with("{result=\""),
+                "unexpected cancellations series line: {line}"
+            );
+            continue;
+        }
+        assert!(!line.contains('{'), "unlabeled gauges only: {line}");
         let (name, value) = line
             .split_once(' ')
             .unwrap_or_else(|| panic!("sample line must be `name value`: {line}"));
@@ -54,6 +66,7 @@ fn rendered_series_matches_snapshot_values() {
         sessions: 7,
         transactions: 1,
         cursors: 12,
+        cancellations: [3, 2, 1, 0],
     };
     let rendered = render_activity_series(&snapshot);
     let samples = parse_samples(&rendered);
@@ -85,6 +98,30 @@ fn rendered_series_matches_snapshot_values() {
         };
         assert_eq!(*value, expected, "gauge {name} disagrees with the mirror");
     }
+
+    assert!(
+        rendered.contains("# TYPE shamir_cancellations_total counter\n"),
+        "the cancellations family must render as a counter:\n{rendered}"
+    );
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.starts_with("# TYPE shamir_cancellations_total "))
+            .count(),
+        1,
+        "exactly one TYPE descriptor for the cancellations family"
+    );
+    for (label, value) in CANCEL_RESULT_LABELS.into_iter().zip(snapshot.cancellations) {
+        let expected = format!("{CANCEL_COUNTER}{{result=\"{label}\"}} {value}");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| *line == expected.as_str())
+                .count(),
+            1,
+            "counter {expected} disagrees with the mirror:\n{rendered}"
+        );
+    }
 }
 
 /// A server without an installed source renders explicit zeros, so a
@@ -96,6 +133,17 @@ fn default_snapshot_renders_zero_gauges() {
     assert_eq!(samples.len(), 4);
     for name in GAUGE_NAMES {
         assert_eq!(samples[name], 0, "zero-touch series {name} must be 0");
+    }
+    for label in CANCEL_RESULT_LABELS {
+        let expected = format!("{CANCEL_COUNTER}{{result=\"{label}\"}} 0");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| *line == expected.as_str())
+                .count(),
+            1,
+            "zero-touch series {expected} must be 0"
+        );
     }
 }
 
@@ -112,6 +160,7 @@ fn distinct_sources_sample_their_own_closure() {
             sessions,
             transactions: 0,
             cursors: 0,
+            cancellations: [0; 4],
         }))
     };
     let first = make_source(9, 4);
@@ -129,4 +178,66 @@ fn distinct_sources_sample_their_own_closure() {
         render_activity_series(&second.sample()),
         "independent sources must render distinct series"
     );
+}
+
+/// The cancellations family renders exactly the four fixed `result` label
+/// values, each with its own mirrored value and its own counter
+/// descriptor, and never carries a per-user or per-session label.
+#[test]
+fn cancellations_family_renders_four_labelled_series() {
+    let snapshot = ActivityMetricsSnapshot {
+        cancellations: [3, 2, 1, 0],
+        ..Default::default()
+    };
+    let rendered = render_activity_series(&snapshot);
+
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| *line == "# TYPE shamir_cancellations_total counter")
+            .count(),
+        1,
+        "exactly one counter TYPE descriptor:\n{rendered}"
+    );
+    for (label, value) in CANCEL_RESULT_LABELS.into_iter().zip(snapshot.cancellations) {
+        let expected = format!("{CANCEL_COUNTER}{{result=\"{label}\"}} {value}");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| *line == expected.as_str())
+                .count(),
+            1,
+            "exactly one series {expected}:\n{rendered}"
+        );
+    }
+    let samples = rendered
+        .lines()
+        .filter(|line| line.starts_with(&format!("{CANCEL_COUNTER}{{")))
+        .count();
+    assert_eq!(samples, 4, "exactly four labelled series:\n{rendered}");
+    for line in rendered
+        .lines()
+        .filter(|line| line.starts_with(&format!("{CANCEL_COUNTER}{{")))
+    {
+        assert!(!line.contains("user="), "no per-user label: {line}");
+        assert!(!line.contains("session="), "no per-session label: {line}");
+    }
+}
+
+/// A server without an installed source renders all four `result` label
+/// values as explicit zeros, matching the gauges' zero-touch behavior.
+#[test]
+fn cancellations_family_renders_zeros_without_a_source() {
+    let rendered = render_activity_series(&ActivityMetricsSnapshot::default());
+    for label in CANCEL_RESULT_LABELS {
+        let expected = format!("{CANCEL_COUNTER}{{result=\"{label}\"}} 0");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| *line == expected.as_str())
+                .count(),
+            1,
+            "zero-touch series {expected} must render exactly once as 0:\n{rendered}"
+        );
+    }
 }

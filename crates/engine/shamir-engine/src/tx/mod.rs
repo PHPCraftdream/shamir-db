@@ -37,6 +37,7 @@ pub use commit::pipeline::driver::tx_outcome;
 #[allow(unused_imports)] // Compatibility paths for the moved driver modules.
 pub(crate) use commit::pipeline::driver::{commit_driver, commit_tail_barrier};
 pub use commit::pipeline::phase::commit_phases;
+pub use commit::release_interactive_tx_locks;
 pub(crate) use commit::release_pessimistic_locks;
 pub use commit::{commit_tx, wal_ops_from_tx, TxError as CommitError};
 pub use recovery::{recover_inflight_v2, replay_v2_entry, replay_v2_op};

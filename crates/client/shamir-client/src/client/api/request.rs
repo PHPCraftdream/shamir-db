@@ -16,7 +16,7 @@ use shamir_transport_tcp::framing::write_frame_prereserved;
 use shamir_query_types::admin::activity::{CancelOutcome, RequestExecId};
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
-use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+use shamir_query_types::wire::{CursorId, DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
 use crate::client::transport::{await_pending_response, Lifecycle, WsPeerClose};
@@ -748,6 +748,65 @@ impl Client {
         self.require_scram()?;
         let mut batch = shamir_query_builder::batch::Batch::new();
         batch.op("cancel_request", shamir_query_builder::cancel_request(id));
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::CancelOutcome { outcome } => Ok(outcome),
+            other => Err(ClientError::Protocol(format!(
+                "expected CancelOutcome, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Cancel an open interactive transaction by its handle.
+    ///
+    /// Use a separate SCRAM connection from the session that owns the
+    /// transaction (dispatch is lock-step per connection). The outcome
+    /// describes the cancellation attempt, not the transaction's later reply.
+    pub async fn cancel_tx(&self, db: &str, tx_handle: u64) -> Result<CancelOutcome, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op("cancel_tx", shamir_query_builder::cancel_tx(tx_handle));
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::CancelOutcome { outcome } => Ok(outcome),
+            other => Err(ClientError::Protocol(format!(
+                "expected CancelOutcome, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Cancel another session's result cursor (operator surface).
+    ///
+    /// The session-scoped `DbRequest::CancelCursor` is unchanged.
+    pub async fn cancel_cursor_admin(
+        &self,
+        db: &str,
+        cursor_id: CursorId,
+    ) -> Result<CancelOutcome, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "cancel_cursor_admin",
+            shamir_query_builder::cancel_cursor_admin(cursor_id),
+        );
         let batch = batch
             .try_build()
             .map_err(crate::error::client_batch_error)?;

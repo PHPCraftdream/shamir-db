@@ -8,6 +8,9 @@
 //!   mirror and the state word.
 //! - [`list`] — the `ListActivity` paging implementation, as inherent
 //!   methods on `ShamirDbHandler`.
+//! - `cancel` — the `CancelRequest` / `CancelTx` / `CancelCursorAdmin`
+//!   workers, their ownership/permission rule, their detached audit path
+//!   and the per-server outcome counters.
 
 mod cancel;
 mod continuation;
@@ -18,6 +21,7 @@ mod requests;
 pub(in crate::engine::db_handler) mod list;
 
 // The guard and entry are named directly only by registry tests.
+pub(in crate::engine::db_handler) use cancel::CancelCounters;
 pub(in crate::engine::db_handler) use requests::server_busy_response;
 pub(in crate::engine::db_handler) use requests::ActivityRequests;
 

@@ -90,6 +90,7 @@ use crate::cursor_registry::CursorRegistry;
 use crate::tx_registry::TxRegistry;
 
 use super::activity::ActivityRequests;
+use super::activity::CancelCounters;
 use super::admin::{
     change_password_challenge, change_password_verify, create_scram_user, set_replicator,
     set_superuser, AdminGlue,
@@ -226,6 +227,10 @@ pub struct ShamirDbHandler {
     /// `super::activity::requests` for the bounding argument and the
     /// privacy rule.
     pub(super) activity_requests: Arc<ActivityRequests>,
+    /// R4b-3 — per-server cancellation outcome counters (one fixed slot
+    /// per `CancelOutcome`), backing the `shamir_cancellations_total`
+    /// family. Shared across all clones of the handler (`Arc`).
+    pub(super) cancel_counters: Arc<CancelCounters>,
     /// R4b-1 — monotonic source of fresh [`RequestExecId`] values, minted
     /// when a BATCH is admitted (same shape as `next_cursor_id`). The
     /// client's optional `rid` is carried alongside, never replaced.
@@ -286,6 +291,7 @@ impl ShamirDbHandler {
             allow_self_service: true,
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
+            cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
         }
@@ -313,6 +319,7 @@ impl ShamirDbHandler {
             allow_self_service: true,
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
+            cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
         }

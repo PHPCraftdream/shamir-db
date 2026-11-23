@@ -1,5 +1,6 @@
 //! Complete wire-discriminator coverage for batch dispatch.
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{op_kind, OpKind, ALL};
@@ -195,7 +196,11 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         OpKind::StartBackup => json!({
             "to": "/backups/snap-1"
         }),
-        OpKind::BackupStatus | OpKind::CancelBackup | OpKind::CancelRequest => json!({}),
+        OpKind::BackupStatus
+        | OpKind::CancelBackup
+        | OpKind::CancelRequest
+        | OpKind::CancelTx
+        | OpKind::CancelCursorAdmin => json!({}),
         OpKind::ListActivity => json!({
             "scope": "all",
             "kind": "all"
@@ -222,7 +227,11 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::BackupStatus
         | OpKind::CancelBackup
         | OpKind::ListActivity => json!(true),
-        OpKind::ChangesSince | OpKind::Unsubscribe | OpKind::CancelRequest => json!(1),
+        OpKind::ChangesSince
+        | OpKind::Unsubscribe
+        | OpKind::CancelRequest
+        | OpKind::CancelTx
+        | OpKind::CancelCursorAdmin => json!(1),
         OpKind::Subscribe => json!([]),
         OpKind::List => json!("databases"),
         OpKind::Batch | OpKind::ForEach => json!({
@@ -380,6 +389,8 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::CancelBackup(_) => OpKind::CancelBackup,
         BatchOp::ListActivity(_) => OpKind::ListActivity,
         BatchOp::CancelRequest(_) => OpKind::CancelRequest,
+        BatchOp::CancelTx(_) => OpKind::CancelTx,
+        BatchOp::CancelCursorAdmin(_) => OpKind::CancelCursorAdmin,
         BatchOp::Call(_) => OpKind::Call,
         BatchOp::ForEach(_) => OpKind::ForEach,
         BatchOp::Batch(_) => OpKind::Batch,
@@ -404,4 +415,106 @@ fn every_discriminator_decodes_and_round_trips_its_variant() {
         assert_eq!(variant_kind(&decoded), kind, "round-trip variant {key}");
         assert_eq!(decoded, op, "round-trip payload {key}");
     }
+}
+
+/// Malformed-wire cases: the raw map IS the subject under test, so these
+/// inputs are hand-built `Value`/serializer maps rather than builder output.
+fn decode_malformed<T: Serialize>(wire: &T) -> Result<BatchOp, rmp_serde::decode::Error> {
+    let bytes = rmp_serde::to_vec_named(wire).unwrap();
+    rmp_serde::from_slice(&bytes)
+}
+
+/// The same discriminator key written twice: a `Value` map cannot hold
+/// duplicate keys, so the pair is emitted at the serializer level.
+struct DuplicateDiscriminator {
+    key: &'static str,
+    first: Value,
+    second: Value,
+}
+
+impl Serialize for DuplicateDiscriminator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map([(self.key, &self.first), (self.key, &self.second)])
+    }
+}
+
+#[test]
+fn cancel_tx_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `cancel_tx` arm of the duplicate guard in `batch_op.rs`
+    // => the second key overwrites the first and the op decodes.
+    let wire = DuplicateDiscriminator {
+        key: "cancel_tx",
+        first: json!(5),
+        second: json!(6),
+    };
+    let error = decode_malformed(&wire).expect_err("duplicated cancel_tx must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn cancel_tx_missing_payload_is_rejected() {
+    // mutant: accept a map-shaped `cancel_tx` payload (tolerating an absent
+    // handle) => `BatchOp::CancelTx` decodes out of an empty payload map.
+    decode_malformed(&json!({ "cancel_tx": {} }))
+        .expect_err("cancel_tx with an empty payload map must not decode");
+}
+
+#[test]
+fn cancel_tx_wrong_payload_type_is_rejected() {
+    // mutant: coerce the `cancel_tx` payload from a string => a string handle
+    // decodes instead of failing the `u64` newtype.
+    decode_malformed(&json!({ "cancel_tx": "not-a-number" }))
+        .expect_err("cancel_tx with a string handle must not decode");
+}
+
+#[test]
+fn cancel_tx_extra_field_is_rejected() {
+    // mutant: drop `deny_unknown_fields` from `CancelTxWire` => a payload with
+    // an extra field decodes.
+    decode_malformed(&json!({ "cancel_tx": 5, "extra": 1 }))
+        .expect_err("cancel_tx with an extra field must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `cancel_cursor_admin` arm of the duplicate guard in
+    // `batch_op.rs` => the second key overwrites the first and the op decodes.
+    let wire = DuplicateDiscriminator {
+        key: "cancel_cursor_admin",
+        first: json!(7),
+        second: json!(8),
+    };
+    let error =
+        decode_malformed(&wire).expect_err("duplicated cancel_cursor_admin must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn cancel_cursor_admin_missing_payload_is_rejected() {
+    // mutant: accept a map-shaped `cancel_cursor_admin` payload (tolerating an
+    // absent id) => `BatchOp::CancelCursorAdmin` decodes from an empty map.
+    decode_malformed(&json!({ "cancel_cursor_admin": {} }))
+        .expect_err("cancel_cursor_admin with an empty payload map must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_wrong_payload_type_is_rejected() {
+    // mutant: coerce the `cancel_cursor_admin` payload from a string => a
+    // string id decodes instead of failing the `CursorId` newtype.
+    decode_malformed(&json!({ "cancel_cursor_admin": "not-a-number" }))
+        .expect_err("cancel_cursor_admin with a string id must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_extra_field_is_rejected() {
+    // mutant: drop `deny_unknown_fields` from `CancelCursorAdminWire` => a
+    // payload with an extra field decodes.
+    decode_malformed(&json!({ "cancel_cursor_admin": 5, "extra": 1 }))
+        .expect_err("cancel_cursor_admin with an extra field must not decode");
 }

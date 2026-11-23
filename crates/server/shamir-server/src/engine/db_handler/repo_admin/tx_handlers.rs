@@ -178,7 +178,8 @@ impl ShamirDbHandler {
     /// the static discriminant summary of the batch (homogeneous batches
     /// keep their `activity_name`; heterogeneous ones are conservatively
     /// `write`), derived in the same pre-flight visitor pass that rejects
-    /// `ListActivity` and `CancelRequest` — never from arguments (privacy, D3).
+    /// `ListActivity`, `CancelRequest`, `CancelTx` and `CancelCursorAdmin` —
+    /// never from arguments (privacy, D3).
     pub(super) async fn tx_execute_with_rid(
         &self,
         session: &Session,
@@ -217,6 +218,8 @@ impl ShamirDbHandler {
             let control_op = match &visit.entry.op {
                 BatchOp::ListActivity(_) => Some("ListActivity"),
                 BatchOp::CancelRequest(_) => Some("CancelRequest"),
+                BatchOp::CancelTx(_) => Some("CancelTx"),
+                BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
                 _ => None,
             };
             if let Some(op) = control_op {

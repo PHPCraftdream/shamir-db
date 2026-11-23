@@ -2,4 +2,6 @@
 
 pub use crate::boot::restore;
 pub use crate::boot::restore::*;
-pub use shamir_sync::durability::{backup, maintenance_lock, tx_registry, DurabilityConfig};
+pub use shamir_sync::durability::{
+    backup, maintenance_lock, tx_cancel, tx_registry, DurabilityConfig,
+};

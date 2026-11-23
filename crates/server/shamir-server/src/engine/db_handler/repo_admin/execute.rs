@@ -6,6 +6,7 @@ use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::admin::activity::{ListActivityReq, RequestExecId};
 use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::wire::CursorId;
 use shamir_query_types::wire::DbResponse;
 
 use super::activity::server_busy_response;
@@ -26,6 +27,11 @@ impl ShamirDbHandler {
     /// byte-budget wait, so an operator can see a request stuck waiting
     /// for budget; `client_rid` is the OPTIONAL transport request id
     /// carried alongside the minted [`RequestExecId`].
+    ///
+    /// The three cancel operations (`CancelRequest`, `CancelTx`,
+    /// `CancelCursorAdmin`) bypass admission entirely, so a cancel reaches
+    /// saturated work (or a registry row) even when its session has no
+    /// in-flight slot left.
     ///
     /// cancel-safe: NO — drive this future to completion once DB execution starts.
     pub(super) async fn execute_with_rid(
@@ -53,6 +59,8 @@ impl ShamirDbHandler {
         }
         let mut single_activity: Option<ListActivityReq> = None;
         let mut single_cancel: Option<RequestExecId> = None;
+        let mut single_cancel_tx: Option<u64> = None;
+        let mut single_cancel_cursor: Option<CursorId> = None;
         // R4b-1 — classification rides the same walk: static
         // discriminant names only. Vocabulary: a homogeneous batch keeps
         // its exact `activity_name` (`read` / `write` / `admin:<op>`);
@@ -79,6 +87,8 @@ impl ShamirDbHandler {
                 let control_op = match op {
                     BatchOp::ListActivity(_) => Some("ListActivity"),
                     BatchOp::CancelRequest(_) => Some("CancelRequest"),
+                    BatchOp::CancelTx(_) => Some("CancelTx"),
+                    BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
                     _ => None,
                 };
                 if let Some(name) = control_op {
@@ -88,8 +98,12 @@ impl ShamirDbHandler {
                         Some("is not allowed inside a transactional batch")
                     } else if batch.queries.len() != 1 {
                         Some("must be the ONLY operation of its batch")
-                    } else if matches!(op, BatchOp::CancelRequest(_))
-                        && (visit.entry.when.is_some() || !visit.entry.after.is_empty())
+                    } else if matches!(
+                        op,
+                        BatchOp::CancelRequest(_)
+                            | BatchOp::CancelTx(_)
+                            | BatchOp::CancelCursorAdmin(_)
+                    ) && (visit.entry.when.is_some() || !visit.entry.after.is_empty())
                     {
                         Some("does not support execution conditions or dependencies")
                     } else {
@@ -107,6 +121,14 @@ impl ShamirDbHandler {
                     }
                     BatchOp::CancelRequest(id) => {
                         single_cancel = Some(*id);
+                        None
+                    }
+                    BatchOp::CancelTx(handle) => {
+                        single_cancel_tx = Some(*handle);
+                        None
+                    }
+                    BatchOp::CancelCursorAdmin(id) => {
+                        single_cancel_cursor = Some(*id);
                         None
                     }
                     BatchOp::Batch(sub) => sub.batch.visibility_wait,
@@ -220,11 +242,18 @@ impl ShamirDbHandler {
             .max_result_size
             .min(self.query_limits.max_result_size_bytes);
         let mut budget_guard = None;
+        let control_op =
+            single_cancel.is_some() || single_cancel_tx.is_some() || single_cancel_cursor.is_some();
         // Keep the request slot through response encoding on tracked paths.
         let in_flight;
         let final_response = if let Some(id) = single_cancel {
-            // Cancel must reach saturated work even if its session has no slots.
+            // Cancel must reach saturated work even if its session has no slots
+            // — true for all three cancel operations, which skip admission.
             Box::pin(self.cancel_request(session, id)).await
+        } else if let Some(handle) = single_cancel_tx {
+            Box::pin(self.cancel_tx(session, handle)).await
+        } else if let Some(cursor_id) = single_cancel_cursor {
+            Box::pin(self.cancel_cursor_admin(session, cursor_id)).await
         } else {
             let op_kind = match (seen_op, uniform_ops) {
                 (Some(name), true) => name,
@@ -333,7 +362,7 @@ impl ShamirDbHandler {
         }
 
         // RI-15 (CR-B2) — single convergence point for capped success and
-        // error replies (including both activity control operations): serialize
+        // error replies (including all three cancel operations): serialize
         // the final `DbResponse` envelope exactly ONCE, shrink the upfront
         // reservation down to that actual size (an error response's tiny
         // actual size still needs its pessimistic over-reservation narrowed
@@ -352,7 +381,7 @@ impl ShamirDbHandler {
         // writer task, after the socket write completes — never in this
         // dispatch task.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            if single_cancel.is_none() && bytes.len() > reserve_bytes {
+            if !control_op && bytes.len() > reserve_bytes {
                 // Includes arbitrary error strings, not just successful payloads.
                 // Release before returning; never stash the rejected payload.
                 drop(budget_guard);

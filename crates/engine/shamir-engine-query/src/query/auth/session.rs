@@ -600,6 +600,10 @@ impl SessionPermissions {
             BatchOp::ListActivity(_) => (Action::Read, Resource::Global),
             // Cancellation mutates request state; live authorization is server-side.
             BatchOp::CancelRequest(_) => (Action::Alter, Resource::Global),
+            // Cancellation mutates transient state; live authorization is server-side.
+            BatchOp::CancelTx(_) | BatchOp::CancelCursorAdmin(_) => {
+                (Action::Alter, Resource::Global)
+            }
         }
     }
 
