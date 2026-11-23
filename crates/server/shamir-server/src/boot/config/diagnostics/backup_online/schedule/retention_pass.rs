@@ -27,6 +27,9 @@ use std::io::Read;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use sha2::{Digest, Sha256};
 
 use crate::config::BackupRetentionConfig;
@@ -41,6 +44,90 @@ use super::retention::{prune, RetentionOutcome};
 /// Upper bound for one raw manifest read, shared by the retention
 /// preflight and the completion-time capture (single cap, module doc).
 pub(in crate::boot::config::diagnostics::backup_online) const MAX_MANIFEST: u64 = 16 << 20;
+
+// Test-only one-shot retention pause armed on the CURRENT thread (the
+// runner thread). It fires at the START of [`scheduled_retention_pass`] —
+// inside the retention step, AFTER the copy outcome was published — so a
+// shutdown test can hold the real worker inside retention.
+#[cfg(test)]
+thread_local! {
+    static RETENTION_PAUSE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Clears an unfired [`set_scheduled_retention_pause`] when dropped; a pause
+/// that fires removes itself from the slot. Zero-sized.
+#[cfg(test)]
+pub(crate) struct ScheduledRetentionPauseGuard;
+
+#[cfg(test)]
+impl Drop for ScheduledRetentionPauseGuard {
+    fn drop(&mut self) {
+        RETENTION_PAUSE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Arm ONE retention pause on the CURRENT thread. The runner thread arms it
+/// from the per-run post-run callback, so the thread-local is visible to the
+/// retention pass that runs next on the same thread. Never process-global.
+#[cfg(test)]
+pub(crate) fn set_scheduled_retention_pause(
+    pause: impl FnOnce() + 'static,
+) -> ScheduledRetentionPauseGuard {
+    RETENTION_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(pause)));
+    ScheduledRetentionPauseGuard
+}
+
+/// Fire and consume the current thread's one-shot retention pause, if any.
+#[cfg(test)]
+fn fire_scheduled_retention_pause() {
+    let pause = RETENTION_PAUSE.with(|slot| slot.borrow_mut().take());
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
+// Test-only one-shot retention END notification armed on the CURRENT thread
+// (the runner thread): fires at the END of [`scheduled_retention_pass`],
+// AFTER [`backup_metrics::note_retention`] published the pass's counters —
+// the pause seam's counterpart, so a fixture can wait for the retention
+// handshake instead of a sleep or a shutdown.
+#[cfg(test)]
+thread_local! {
+    static RETENTION_END: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Clears an unfired [`set_scheduled_retention_end`] when dropped; a hook
+/// that fires removes itself from the slot. Zero-sized.
+#[cfg(test)]
+pub(crate) struct ScheduledRetentionEndGuard;
+
+#[cfg(test)]
+impl Drop for ScheduledRetentionEndGuard {
+    fn drop(&mut self) {
+        RETENTION_END.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Arm ONE retention END notification on the CURRENT thread. The runner
+/// thread arms it from the per-run post-run callback (where the pause seam is
+/// armed too), so the thread-local is visible to the retention pass that runs
+/// next on the same thread. Never process-global.
+#[cfg(test)]
+pub(crate) fn set_scheduled_retention_end(
+    end: impl FnOnce() + 'static,
+) -> ScheduledRetentionEndGuard {
+    RETENTION_END.with(|slot| *slot.borrow_mut() = Some(Box::new(end)));
+    ScheduledRetentionEndGuard
+}
+
+/// Fire and consume the current thread's one-shot retention end hook, if any.
+#[cfg(test)]
+fn fire_scheduled_retention_end() {
+    let end = RETENTION_END.with(|slot| slot.borrow_mut().take());
+    if let Some(end) = end {
+        end();
+    }
+}
 
 /// Upper bound of the in-memory adoption provenance list (module doc).
 /// Dropping the OLDEST record on overflow keeps the bound without
@@ -241,6 +328,10 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_retention_p
     marker: &MarkerProvisioning,
     recorded: &BTreeSet<(String, u128, String)>,
 ) -> RetentionOutcome {
+    // Test-only: a shutdown test parks the real worker HERE, after the copy
+    // outcome was published and inside the retention step.
+    #[cfg(test)]
+    fire_scheduled_retention_pause();
     let result = match (outcome, marker) {
         (_, MarkerProvisioning::Failed) => RetentionOutcome {
             failed: 1,
@@ -280,5 +371,10 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_retention_p
             "scheduled retention skipped snapshots in use by readers"
         );
     }
+    // Test-only: the retention-END handshake fires AFTER the counters were
+    // published above, so a waiter observes this pass's result. A panic in the
+    // pass never reaches here (the registry accounts it as one failure).
+    #[cfg(test)]
+    fire_scheduled_retention_end();
     result
 }

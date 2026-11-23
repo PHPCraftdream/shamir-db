@@ -12,6 +12,7 @@ use tokio::time::{advance, timeout, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::super::super::metrics::ScheduledResult;
+use super::super::super::registry::ScheduledRunSignals;
 use super::super::super::StartBackupError;
 use super::super::runner::{next_deadline, run};
 use crate::config::BackupScheduleConfig;
@@ -115,8 +116,12 @@ async fn late_tick_does_not_overlap_or_replay_missed_slots() {
     let boot = Instant::now();
     let shutdown = CancellationToken::new();
     let (tx, mut events) = mpsc::channel(8);
-    let (complete, receiver) = oneshot::channel();
-    let mut first = Some(receiver);
+    let (complete, outcome) = oneshot::channel();
+    let (finished, finished_rx) = oneshot::channel();
+    let mut first = Some(ScheduledRunSignals {
+        outcome,
+        finished: finished_rx,
+    });
     let task = tokio::spawn(run(
         (boot, INTERVAL, true),
         None,
@@ -134,6 +139,12 @@ async fn late_tick_does_not_overlap_or_replay_missed_slots() {
     assert!((boot + INTERVAL * 11..boot + INTERVAL * 12).contains(&next));
     complete.send(true).unwrap();
     expect_event(&mut events, ScheduledResult::Completed).await;
+    // The outcome is noted but the run is not over (retention): a tick here
+    // must still be busy, never a second admission.
+    advance(INTERVAL).await;
+    expect_event(&mut events, ScheduledResult::SkippedBusy).await;
+    // The late FINISHED signal is what clears the in-flight slot.
+    finished.send(()).unwrap();
     shutdown.cancel();
     timeout(LIMIT, task).await.unwrap().unwrap();
 }
@@ -144,12 +155,22 @@ async fn admission_error_false_and_closed_have_distinct_accounting() {
     let (tx, mut events) = mpsc::channel(8);
     let (failed, failed_rx) = oneshot::channel();
     failed.send(false).unwrap();
+    let (failed_finished, failed_finished_rx) = oneshot::channel();
+    failed_finished.send(()).unwrap();
     let (closed, closed_rx) = oneshot::channel();
     drop(closed);
+    let (closed_finished, closed_finished_rx) = oneshot::channel();
+    drop(closed_finished);
     let mut attempts = [
         Err(StartBackupError::InvalidDestination(String::new())),
-        Ok(failed_rx),
-        Ok(closed_rx),
+        Ok(ScheduledRunSignals {
+            outcome: failed_rx,
+            finished: failed_finished_rx,
+        }),
+        Ok(ScheduledRunSignals {
+            outcome: closed_rx,
+            finished: closed_finished_rx,
+        }),
     ]
     .into_iter();
     let task = tokio::spawn(run(
@@ -177,8 +198,12 @@ async fn admission_error_false_and_closed_have_distinct_accounting() {
 async fn shutdown_cancels_runner_token_and_drains_before_exit() {
     let shutdown = CancellationToken::new();
     let copy_token = shutdown.child_token();
-    let (complete, receiver) = oneshot::channel();
-    let mut first = Some(receiver);
+    let (complete, outcome) = oneshot::channel();
+    let (finished, finished_rx) = oneshot::channel();
+    let mut first = Some(ScheduledRunSignals {
+        outcome,
+        finished: finished_rx,
+    });
     let events = RefCell::new(Vec::new());
     let started = Cell::new(false);
     let boot = Instant::now();
@@ -221,6 +246,7 @@ async fn shutdown_cancels_runner_token_and_drains_before_exit() {
     .await;
     assert_eq!(*events.borrow(), [discriminant(&ScheduledResult::Started)]);
     complete.send(false).unwrap();
+    finished.send(()).unwrap();
     timeout(LIMIT, task).await.unwrap();
     assert_eq!(
         *events.borrow(),
