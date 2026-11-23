@@ -380,11 +380,15 @@ impl ShamirDbHandler {
                     // Measure staged size INSIDE the same lock as the engine call.
                     r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                 }
-                None => Err(BatchError::QueryError {
-                    alias: String::new(),
-                    message: "transaction is already committed or rolled back".into(),
-                    code: None,
-                }),
+                // The context is gone: an operator cancel (or a commit that
+                // already took it) won the race. Same typed answer as a fresh
+                // lookup of the removed handle.
+                None => {
+                    return DbResponse::Error {
+                        code: "tx_not_found".into(),
+                        message: format!("no open transaction for handle {}", tx_handle),
+                    }
+                }
             }
         };
         match exec {

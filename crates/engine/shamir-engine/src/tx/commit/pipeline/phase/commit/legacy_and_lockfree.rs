@@ -499,7 +499,7 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoCore) {
 /// transaction leaves the server registry without running the commit
 /// pipeline, and [`shamir_tx::TxContext`] has no `Drop` that frees those
 /// locks — they live in the per-table `MvccStore` and are released only by
-/// the explicit call sites of [`release_pessimistic_locks`]. Same
+/// the explicit call sites of `release_pessimistic_locks`. Same
 /// behaviour as that function; a no-op for a transaction holding none.
 pub async fn release_interactive_tx_locks(tx: &TxContext, repo: &RepoCore) {
     release_pessimistic_locks(tx, repo).await;

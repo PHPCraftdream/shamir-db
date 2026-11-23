@@ -161,11 +161,14 @@ impl ShamirDbHandler {
         outcome: &CancelOutcome,
     ) {
         let Some(audit) = &self.audit else { return };
-        let refusal = matches!(
-            outcome,
-            CancelOutcome::AlreadyCommitting | CancelOutcome::NotCancellable
-        );
-        if !refusal && target_user_id == session.user_id {
+        // Audited: both refusals, and a SUCCESSFUL cancel of another user's
+        // work. `already_finished` is neither (nothing was refused or ended).
+        let audited = match outcome {
+            CancelOutcome::AlreadyCommitting | CancelOutcome::NotCancellable => true,
+            CancelOutcome::Cancelled => target_user_id != session.user_id,
+            CancelOutcome::AlreadyFinished => false,
+        };
+        if !audited {
             return;
         }
         // Detach by design: the reply must not wait for the writer.
@@ -234,10 +237,15 @@ impl ShamirDbHandler {
             // for the whole plan), or momentarily by the commit path reading
             // the context. Only the first case is a request the operator must
             // leave alone; a reserved handle is already committing. This is a
-            // refusal-only re-read: no removal decision depends on it.
+            // refusal-only re-read: no removal decision depends on it. A
+            // transaction that is gone, or replaced by another one, is not a
+            // request to leave alone: it answers `already_finished`.
             return match self.tx_registry.peek(tx_handle) {
                 TxParkedState::Committing => CancelOutcome::AlreadyCommitting,
-                _ => CancelOutcome::NotCancellable,
+                TxParkedState::Open(current) if Arc::ptr_eq(&current, &tx) => {
+                    CancelOutcome::NotCancellable
+                }
+                TxParkedState::Open(_) | TxParkedState::Gone => CancelOutcome::AlreadyFinished,
             };
         };
         match self.tx_registry.remove_identity(tx_handle, &tx) {
