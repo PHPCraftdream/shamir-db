@@ -614,12 +614,20 @@ pub struct AuditChainWriter {
     /// Latched by [`Self::append`] when the inner chain refuses an event for
     /// ANY reason — [`AuditError::SequenceExhausted`] or a typed-input refusal
     /// such as [`AuditError::RecordTooLarge`] / [`AuditError::FieldTooLong`]:
-    /// that event was never written, so no later checkpoint may report
-    /// success. Latching only the exhaustion case left every other refusal
-    /// certifiable, which let a caller that ignores the append error (the
-    /// token service warns and continues) deliver a secret whose audit event
-    /// does not exist. Monotonic — never cleared — and atomic only, so it adds
-    /// no lock and no ordering constraint.
+    /// that event was never written. Latching only the exhaustion case left
+    /// every other refusal certifiable, which let a caller that ignores the
+    /// append error (the token service warns and continues) deliver a secret
+    /// whose audit event does not exist.
+    ///
+    /// LIMIT — this is NOT a gate on every checkpoint write. The flag is read
+    /// only by [`Self::checkpoint_now`]; the writer's own periodic checkpoint
+    /// after an append (`Self::append`, every 1000 entries) and the appender's
+    /// rotation/close hooks still persist checkpoints after a refusal. Those
+    /// checkpoints stay sequence-consistent because a refusal consumes no
+    /// sequence, predecessor HMAC or retained-window entry — what remains
+    /// uncertifiable is the audit trail as a whole, not the counter.
+    /// Monotonic — never cleared — and atomic only, so it adds no lock and no
+    /// ordering constraint.
     append_failed: std::sync::atomic::AtomicBool,
 }
 
@@ -734,9 +742,11 @@ impl AuditChainWriter {
     /// [`Self::append`] has latched ANY append failure (sequence exhaustion
     /// and every typed-input refusal alike): the log is missing an event, so
     /// reporting a successful checkpoint would let the caller treat the audit
-    /// trail as complete. The variant keeps its name and message because its
-    /// `Display` text is asserted elsewhere; it now means "an audit event was
-    /// requested and not written", not only "the sequence space ran out".
+    /// trail as complete. The variant keeps its name for its existing callers;
+    /// its `Display` text was reworded to "an audit event was requested and
+    /// was not written" and is not asserted anywhere — only that reworded
+    /// wording's absence of the old "sequence space is exhausted" phrase is
+    /// pinned, by `audit_recovery_gate_tests`.
     pub fn checkpoint_now(&self) -> Result<(), AuditError> {
         if self.append_failed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(AuditError::SequenceExhaustedUnaudited);

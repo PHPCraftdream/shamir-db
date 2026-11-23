@@ -186,8 +186,10 @@ fn fail_after_create(
     // the secret is not recoverable.
     drop(output);
     remove_out_file(out, identity);
-    // The error type does not carry exhausted-vs-other, so one class-neutral
-    // message covers every latched append refusal.
+    // Two branches, one set of operator facts. The latch variant means the
+    // event was never written; every other checkpoint failure means the event
+    // may exist but the log cannot be certified. Both leave the token
+    // unaudited, both suppressed delivery, and both name the id to revoke.
     let unaudited = error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<AuditError>(),
@@ -203,7 +205,10 @@ fn fail_after_create(
         );
     }
     anyhow::anyhow!(
-        "token {id} was created but the audit checkpoint failed; revoke it with `token revoke {id}`"
+        "token {id} was created but its audit event was not written or the audit checkpoint \
+         cannot certify the log, so the audit trail for this token is not certified. The \
+         secret was NOT delivered and no output file was left behind. Revoke it with \
+         `token revoke {id}`."
     )
 }
 /// Test seam for [`fail_after_create`]: capture the identity from `out` exactly

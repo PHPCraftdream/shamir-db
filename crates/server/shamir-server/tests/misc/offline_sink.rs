@@ -12,8 +12,9 @@
 //! did nothing. With `SinkMode::StdoutOnly` the configured path is never
 //! opened, created or stat-ed.
 //!
-//! Parent commit: `6ef25baaf` (the commit before the fix) called
-//! `shamir_server::logging::init(&config.logging)` unconditionally in
+//! Parent commit: `6ef25baaf` (the commit before the fix) called the then-public
+//! `logging::init(&config.logging)` (deleted later, so the bypass is now a
+//! compile-time property) unconditionally in
 //! `run_async`, so the sink was always created and the `!exists()` assertion
 //! below fails there too. The parent's fix (`ef4ef5b5d`) already passes.
 

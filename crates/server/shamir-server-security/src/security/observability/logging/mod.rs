@@ -394,24 +394,11 @@ pub fn reload(cfg: &LoggingConfig) {
     set_mask(LogMask::new(parse_level_filter(&cfg.level)));
 }
 
-/// Initialise the global tracing subscriber.
-///
-/// * `cfg.file == None` → non-blocking stdout (slice 1).
-/// * `cfg.file == Some(path)` → batched file appender with periodic flush.
-///
-/// The boot default for the runtime mask comes from `cfg.level`. The mask
-/// can be changed at runtime via [`set_mask`] / [`set_namespace_level`].
-///
-/// Returns a [`LogGuard`] the caller must keep alive for the whole process.
-pub fn init(cfg: &LoggingConfig) -> LogGuard {
-    init_for(cfg, SinkMode::Config)
-}
-
 /// Initialise the global tracing subscriber with an explicit sink mode.
 ///
 /// [`SinkMode::StdoutOnly`] takes exactly the `cfg.file == None` branch: the
 /// configured path is never opened, created or stat-ed.
-pub fn init_for(cfg: &LoggingConfig, sink: SinkMode) -> LogGuard {
+pub(crate) fn init_for(cfg: &LoggingConfig, sink: SinkMode) -> LogGuard {
     // Set the boot mask from config level.
     let boot_mask = LogMask::new(parse_level_filter(&cfg.level));
     set_mask(boot_mask);

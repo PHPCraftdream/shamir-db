@@ -1,9 +1,12 @@
 //! Internal tests for [`ScramDerivationGate`] and bounded SCRAM admission.
 //!
 //! Every await and channel receive is bounded by the watchdog; synchronization
-//! uses handshakes, never sleeps. Tokio 1.51.6's blocking pool pops queued jobs
-//! with `VecDeque::pop_front`, which makes the post-cancel sentinel a completion
-//! witness for the earlier queued gated job.
+//! uses handshakes, never sleeps. One test relies on Tokio's blocking pool
+//! popping queued jobs in FIFO order (as of 1.51.6 it uses
+//! `VecDeque::pop_front`): that is NOT a documented contract. If the order
+//! ever changes, the post-cancel sentinel can complete before the earlier
+//! queued gated job, so the closing assertions stop witnessing that job —
+//! a possible FALSE PASS, never a false red.
 
 use std::future::Future;
 use std::pin::Pin;

@@ -647,13 +647,13 @@ async fn create_refuses_every_reserved_audit_namespace_alias() {
 /// case-insensitive filesystem (Windows, default macOS APFS) a sibling whose
 /// name differs from `data_dir` only in ASCII case IS `data_dir`, so a
 /// reserved name under it must be refused — the Windows half is a real
-/// oracle (a typed refusal). On a case-sensitive filesystem it is a
-/// different directory with no audit namespace, so the create must not fail
-/// with the typed output-path refusal — a weaker negative: if the create
-/// succeeds this branch asserts nothing further (a success legitimately
-/// appends its audit record to the real log), and it exists to catch an
-/// unconditional directory fold that would over-refuse. The real-log-unchanged
-/// assertion therefore applies to the refusal path only.
+/// oracle (a typed refusal) ONLY where the filesystem folds case (a
+/// case-sensitive APFS volume or NTFS directory refuses nothing, so it would
+/// fail for a platform reason). On a case-sensitive filesystem the flipped
+/// name is another directory with no audit namespace, so the create must not
+/// fail with the typed output-path refusal — a weaker negative guarding
+/// against an unconditional fold that would over-refuse (a success
+/// legitimately appends its record, so the real-log check covers refusals).
 #[tokio::test]
 async fn create_refuses_a_case_variant_of_the_data_directory_only_where_the_filesystem_folds_case()
 {

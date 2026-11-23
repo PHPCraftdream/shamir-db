@@ -75,11 +75,11 @@ pub fn validate_sink_path(log_file: &Path, data_dir: &Path) -> Result<(), LogSin
     }
 }
 
-/// Which sink [`super::init_for`] installs.
+/// Which sink the subscriber installer takes (the guarded `boot_logging` path).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkMode {
-    /// Honour `LoggingConfig::file` (the server path, and the behaviour of
-    /// [`super::init`]).
+    /// Honour `LoggingConfig::file` (the server path). Reachable only through
+    /// [`boot_logging`], which refuses an audit-namespace sink before opening.
     Config,
     /// Stdout only, exactly as if `file == None`. An offline command gets no
     /// file sink ([`SinkMode::StdoutOnly`]) because it must not create any

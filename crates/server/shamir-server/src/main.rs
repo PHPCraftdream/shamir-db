@@ -490,13 +490,15 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     }
     // Offline subcommands take the data-directory lock (or refuse it) and must
     // not create any file before their preconditions and their lock hold, so
-    // they get no file sink. `FormatMigrate` and `Shell` returned above;
-    // `Run` / `None` are the server path.
+    // they get no file sink. `Run` / `None` are the server path.
     //
     // Exhaustive on purpose — no `_` arm and no `matches!`: a new `Subcmd`
     // variant must state which sink it gets instead of silently inheriting
-    // one. The R5-5 branch adds `Subcmd::BackupVerify` and will need an
-    // explicit arm at merge; that compile error is the point.
+    // one (a compile error is the point).
+    //
+    // The `FormatMigrate`, `Shell` and `BackupVerify` arms below are
+    // UNREACHABLE for this selection — all three return earlier in this
+    // function — and are listed only to keep the match exhaustive.
     let offline = match cli.command {
         Some(
             Subcmd::Token { .. }
@@ -511,6 +513,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             | Subcmd::Service { .. }
             | Subcmd::Doctor { .. }
             | Subcmd::FormatMigrate(_)
+            | Subcmd::BackupVerify { .. }
             | Subcmd::Shell,
         ) => true,
         Some(Subcmd::Run { .. }) | None => false,
