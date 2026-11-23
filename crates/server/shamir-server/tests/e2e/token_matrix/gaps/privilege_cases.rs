@@ -458,5 +458,24 @@ pub(super) fn admin_batch_cases() -> Vec<(BatchOp, &'static str)> {
             "CancelCursorAdmin",
         ),
         (ddl::replication_status(), "ReplicationStatus"),
+        // R4b-4: shape statistics are a SCRAM-session surface; a token must
+        // never reach the listing or the registry wipe.
+        (
+            shamir_query_builder::wire::admin::list_shape_stats(
+                shamir_query_types::admin::shape_stats::ListShapeStatsReq {
+                    repo: "main".into(),
+                    limit: None,
+                },
+            ),
+            "ListShapeStats",
+        ),
+        (
+            shamir_query_builder::wire::admin::reset_shape_stats(
+                shamir_query_types::admin::shape_stats::ResetShapeStatsReq {
+                    repo: "main".into(),
+                },
+            ),
+            "ResetShapeStats",
+        ),
     ]
 }

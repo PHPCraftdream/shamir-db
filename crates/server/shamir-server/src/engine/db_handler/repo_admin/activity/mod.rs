@@ -11,6 +11,8 @@
 //! - `cancel` — the `CancelRequest` / `CancelTx` / `CancelCursorAdmin`
 //!   workers, their ownership/permission rule, their detached audit path
 //!   and the per-server outcome counters.
+//! - `shapes` — the R4b step 4 shape-statistics surface (`ListShapeStats` /
+//!   `ResetShapeStats`), the second operational-views admin surface.
 //! - `abort_release` — the Level-3 record-lock releaser the registry calls
 //!   from `InteractiveTx::drop`.
 
@@ -18,9 +20,14 @@ mod abort_release;
 mod cancel;
 mod continuation;
 mod requests;
+// The two serving surfaces live in `serving/` (the folder entry limit); the
+// `#[path]` attributes keep their module paths and every `super::` unchanged.
+#[path = "serving/shapes.rs"]
+mod shapes;
 
 // The paging implementation (`list.rs`) implements `list_activity` as an
 // method on `ShamirDbHandler`; no `pub` module re-export is needed.
+#[path = "serving/list.rs"]
 pub(in crate::engine::db_handler) mod list;
 
 // The guard and entry are named directly only by registry tests.

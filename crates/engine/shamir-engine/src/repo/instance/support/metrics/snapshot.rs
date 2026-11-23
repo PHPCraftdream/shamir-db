@@ -6,4 +6,6 @@ pub struct EngineMetricsSnapshot {
     pub errors: Vec<(&'static str, u64)>,
     pub rows_viewed: u64,
     pub rows_returned: u64,
+    /// Number of shape rows currently tracked, bounded by the shape cap.
+    pub shapes_tracked: u64,
 }

@@ -129,6 +129,7 @@ pub(in crate::query::batch) async fn execute_plan_tx_impl(
                 params,
                 result_encoding,
                 scope,
+                pending_shape: None,
             };
             let op_started = Instant::now();
             let _guard = register_op_watchdog(alias);

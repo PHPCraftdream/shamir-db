@@ -33,6 +33,11 @@ pub(crate) fn register_engine_metrics() {
         metrics::Unit::Count,
         "Rows returned by queries"
     );
+    metrics::describe_gauge!(
+        "shamir_shapes_tracked",
+        metrics::Unit::Count,
+        "Number of distinct query-shape rows currently tracked for the repository, excluding the (other) fold row, capped at 256"
+    );
 }
 
 pub(crate) fn record_engine_metrics(db: &str, repo: &str, snapshot: &EngineMetricsSnapshot) {
@@ -94,4 +99,6 @@ pub(crate) fn record_engine_metrics(db: &str, repo: &str, snapshot: &EngineMetri
         .absolute(snapshot.rows_viewed);
     metrics::counter!("shamir_query_rows_returned_total", "db" => db.to_owned(), "repo" => repo.to_owned())
         .absolute(snapshot.rows_returned);
+    metrics::gauge!("shamir_shapes_tracked", "db" => db.to_owned(), "repo" => repo.to_owned())
+        .set(snapshot.shapes_tracked as f64);
 }
