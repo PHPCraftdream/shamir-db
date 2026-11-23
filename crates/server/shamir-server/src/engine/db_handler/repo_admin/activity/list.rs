@@ -327,7 +327,9 @@ impl ShamirDbHandler {
     /// per-server observability source at boot (weak handle; after
     /// shutdown the gauges render zeros). Sessions count BOTH the
     /// dispatch session store and the token session store (stateless REST
-    /// holds no store session, so it contributes nothing).
+    /// holds no store session, so it contributes nothing). The
+    /// `cancellations` family counts every cancel outcome, one fixed slot
+    /// per `CancelOutcome` (`shamir_cancellations_total{result=...}`).
     pub(crate) fn activity_counts(&self) -> crate::observability::ActivityMetricsSnapshot {
         crate::observability::ActivityMetricsSnapshot {
             requests: self.activity_requests.in_flight() as u64,
@@ -336,6 +338,7 @@ impl ShamirDbHandler {
                 as u64,
             transactions: self.tx_registry.activity_count() as u64,
             cursors: self.cursor_registry.len() as u64,
+            cancellations: self.cancel_counters.snapshot(),
         }
     }
 

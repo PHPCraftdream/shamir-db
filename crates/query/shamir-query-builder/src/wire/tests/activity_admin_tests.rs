@@ -8,13 +8,15 @@
 //! map ordering `serde_json` chooses.
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::wire::admin::{cancel_request, list_activity};
+use shamir_query_builder::wire::admin::{
+    cancel_cursor_admin, cancel_request, cancel_tx, list_activity,
+};
 use shamir_query_types::admin::activity::{
     ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ListActivityReq,
     RequestExecId,
 };
 use shamir_query_types::batch::BatchOp;
-use shamir_query_types::wire::DbResponse;
+use shamir_query_types::wire::{CursorId, DbResponse};
 
 fn populated_request() -> ListActivityReq {
     ListActivityReq {
@@ -153,4 +155,58 @@ fn cancel_request_builds_one_typed_nontransactional_operation() {
     assert_eq!(decoded.queries.len(), 1);
     let entry = decoded.queries.values().next().expect("sole operation");
     assert_eq!(entry.op, BatchOp::CancelRequest(id));
+}
+
+#[test]
+fn cancel_tx_golden_flat_discriminator_shape() {
+    let op = cancel_tx(42);
+    let bytes = rmp_serde::to_vec_named(&op).expect("operation encodes");
+    let value: serde_json::Value = rmp_serde::from_slice(&bytes).expect("golden decodes");
+    let map = value.as_object().expect("flat op map");
+
+    let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
+    let expected: std::collections::BTreeSet<&str> = ["cancel_tx"].into_iter().collect();
+    assert_eq!(keys, expected, "exactly one discriminator key");
+    assert_eq!(map["cancel_tx"], 42);
+}
+
+#[test]
+fn cancel_cursor_admin_golden_flat_discriminator_shape() {
+    let op = cancel_cursor_admin(CursorId(9));
+    let bytes = rmp_serde::to_vec_named(&op).expect("operation encodes");
+    let value: serde_json::Value = rmp_serde::from_slice(&bytes).expect("golden decodes");
+    let map = value.as_object().expect("flat op map");
+
+    let keys: std::collections::BTreeSet<&str> = map.keys().map(String::as_str).collect();
+    let expected: std::collections::BTreeSet<&str> = ["cancel_cursor_admin"].into_iter().collect();
+    assert_eq!(keys, expected, "exactly one discriminator key");
+    assert_eq!(map["cancel_cursor_admin"], 9);
+}
+
+#[test]
+fn cancel_tx_builds_one_typed_nontransactional_operation() {
+    let mut builder = Batch::new();
+    builder.op("cancel_tx", cancel_tx(42));
+
+    let built = builder.build();
+    let decoded = builder.to_request_via_msgpack().expect("batch round trip");
+    assert_eq!(built, decoded);
+    assert!(!decoded.transactional);
+    assert_eq!(decoded.queries.len(), 1);
+    let entry = decoded.queries.values().next().expect("sole operation");
+    assert_eq!(entry.op, BatchOp::CancelTx(42));
+}
+
+#[test]
+fn cancel_cursor_admin_builds_one_typed_nontransactional_operation() {
+    let mut builder = Batch::new();
+    builder.op("cancel_cursor_admin", cancel_cursor_admin(CursorId(9)));
+
+    let built = builder.build();
+    let decoded = builder.to_request_via_msgpack().expect("batch round trip");
+    assert_eq!(built, decoded);
+    assert!(!decoded.transactional);
+    assert_eq!(decoded.queries.len(), 1);
+    let entry = decoded.queries.values().next().expect("sole operation");
+    assert_eq!(entry.op, BatchOp::CancelCursorAdmin(CursorId(9)));
 }

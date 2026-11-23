@@ -324,6 +324,10 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         // state, not destructive; it is permission-checked at the handler.
         | ListActivity(_)
         | CancelRequest(_)
+        // R4b-3: both operator cancellation ops act on transient server state,
+        // not destructive; they are permission-checked at the handler.
+        | CancelTx(_)
+        | CancelCursorAdmin(_)
         | StartBackup(_)
         | BackupStatus(_)
         | CancelBackup(_) => HmacPolicy::NotGated,

@@ -445,6 +445,18 @@ pub(super) fn admin_batch_cases() -> Vec<(BatchOp, &'static str)> {
         ),
         (ddl::list_publications(), "ListPublications"),
         (ddl::list_subscriptions(), "ListSubscriptions"),
+        // R4b-3: operator cancellation is a SCRAM-session surface; a token
+        // must never reach it, so the handles are deliberately unknown.
+        (
+            shamir_query_builder::wire::admin::cancel_tx(0xDEAD_BEEF_0000_0001),
+            "CancelTx",
+        ),
+        (
+            shamir_query_builder::wire::admin::cancel_cursor_admin(
+                shamir_query_types::wire::CursorId(0xDEAD_BEEF_0000_0002),
+            ),
+            "CancelCursorAdmin",
+        ),
         (ddl::replication_status(), "ReplicationStatus"),
     ]
 }

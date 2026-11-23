@@ -269,9 +269,12 @@ fn classify_batch(
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
             // Activity control is a SCRAM-session surface only. Scoped
-            // tokens must not list activity or cancel an execution by ID.
+            // tokens must not list activity or cancel an execution,
+            // transaction or cursor by ID.
             | BatchOp::ListActivity(_)
             | BatchOp::CancelRequest(_)
+            | BatchOp::CancelTx(_)
+            | BatchOp::CancelCursorAdmin(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

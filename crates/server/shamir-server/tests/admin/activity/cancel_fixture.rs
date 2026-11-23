@@ -17,13 +17,14 @@ use shamir_query_types::admin::activity::{
     ActivityKind, ActivityRequestState, ActivityRow, ActivityScope, CancelOutcome, ListActivityReq,
     RequestExecId,
 };
+use shamir_query_types::wire::CursorId;
 use shamir_server::db_handler::{DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler};
 use shamir_test_diag::FlakeGuard;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::common::{
-    encode, execute, list_activity_req, make_session, on_big_stack, register_session, DB, REPO,
-    TABLE,
+    cancel_cursor_admin_req, cancel_tx_req, encode, execute, list_activity_req, make_session,
+    on_big_stack, register_session, DB, REPO, TABLE,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -52,6 +53,55 @@ where
             .expect("flush persistent fixture");
         guard.mark("done");
     });
+    drop(root);
+}
+
+/// Identical to `acceptance` — same persistent `tempfile` root kept alive
+/// until the runtime shut down, same `FlakeGuard::with_watchdog(name, TIMEOUT)`,
+/// same flush and `"done"` mark — but the 64 MiB test thread builds a
+/// MULTI-THREAD runtime (two workers) instead of a current-thread one.
+/// Anything this runtime spawns with `Fixture::start` genuinely runs
+/// concurrently with work awaited on the test task, which a current-thread
+/// runtime cannot provide.
+pub(super) fn acceptance_multi_thread<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce(Arc<FlakeGuard>, Fixture) -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    // Keep the root alive until the runtime has shut down its background tasks.
+    let root = tempfile::tempdir().expect("Fjall fixture directory");
+    let path = root.path().to_owned();
+    // Same 64 MiB stack as `on_big_stack`; only the runtime flavor differs.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                // Worker threads, not just the test thread, run the deep
+                // engine futures — give them the same roomy stack.
+                .thread_stack_size(64 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("multi-thread test runtime")
+                .block_on(async move {
+                    let guard = Arc::new(FlakeGuard::with_watchdog(name, TIMEOUT));
+                    let fixture = tokio::time::timeout(TIMEOUT, Fixture::open(&path))
+                        .await
+                        .expect("open persistent fixture within timeout");
+                    let db = Arc::clone(fixture.handler.db());
+                    tokio::time::timeout(TIMEOUT, test(Arc::clone(&guard), fixture))
+                        .await
+                        .expect("cancellation scenario within timeout");
+                    tokio::time::timeout(TIMEOUT, db.flush_all_waiting())
+                        .await
+                        .expect("flush persistent fixture within timeout")
+                        .expect("flush persistent fixture");
+                    guard.mark("done");
+                });
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     drop(root);
 }
 
@@ -141,6 +191,32 @@ impl Fixture {
         }
     }
 
+    pub(super) async fn transactions(&self) -> Vec<ActivityRow> {
+        let request = list_activity_req(ListActivityReq {
+            scope: ActivityScope::All,
+            kind: ActivityKind::Transactions,
+            limit: None,
+            continuation: None,
+        });
+        match self.send(&self.admin, &request).await {
+            DbResponse::ActivityPage { page } => page.rows,
+            other => panic!("list transactions: {other:?}"),
+        }
+    }
+
+    pub(super) async fn cursors(&self) -> Vec<ActivityRow> {
+        let request = list_activity_req(ListActivityReq {
+            scope: ActivityScope::All,
+            kind: ActivityKind::Cursors,
+            limit: None,
+            continuation: None,
+        });
+        match self.send(&self.admin, &request).await {
+            DbResponse::ActivityPage { page } => page.rows,
+            other => panic!("list cursors: {other:?}"),
+        }
+    }
+
     /// Wait for a public state published by the target, or fail immediately
     /// on early completion. Polling the join handle does not poll the target.
     pub(super) async fn waiting(
@@ -188,6 +264,40 @@ impl Fixture {
         assert!(
             matches!(response, DbResponse::CancelOutcome { outcome } if outcome == expected),
             "cancel {id:?}: expected {expected:?}, got {response:?}"
+        );
+    }
+
+    pub(super) async fn cancel_tx(&self, caller: &Session, handle: u64) -> DbResponse {
+        self.send(caller, &cancel_tx_req(handle)).await
+    }
+
+    pub(super) async fn cancel_cursor(&self, caller: &Session, id: CursorId) -> DbResponse {
+        self.send(caller, &cancel_cursor_admin_req(id)).await
+    }
+
+    pub(super) async fn expect_tx_cancel(
+        &self,
+        caller: &Session,
+        handle: u64,
+        expected: CancelOutcome,
+    ) {
+        let response = self.cancel_tx(caller, handle).await;
+        assert!(
+            matches!(response, DbResponse::CancelOutcome { outcome } if outcome == expected),
+            "cancel tx {handle}: expected {expected:?}, got {response:?}"
+        );
+    }
+
+    pub(super) async fn expect_cursor_cancel(
+        &self,
+        caller: &Session,
+        id: CursorId,
+        expected: CancelOutcome,
+    ) {
+        let response = self.cancel_cursor(caller, id).await;
+        assert!(
+            matches!(response, DbResponse::CancelOutcome { outcome } if outcome == expected),
+            "cancel cursor {id}: expected {expected:?}, got {response:?}"
         );
     }
 

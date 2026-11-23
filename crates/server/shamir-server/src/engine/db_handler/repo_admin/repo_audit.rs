@@ -104,8 +104,8 @@ impl RepoAdminObserver for RepoAuditObserver {
 }
 
 #[derive(serde::Serialize)]
-struct CancelRefusalDetails<'a> {
-    target: RequestExecId,
+struct CancelAuditDetails<'a> {
+    target: u64,
     outcome: &'a CancelOutcome,
 }
 
@@ -378,7 +378,7 @@ impl Drop for CancelAuditSlot {
 
 // Report a job discarded before execution (e.g. during runtime teardown).
 struct PendingCancelAudit {
-    target: RequestExecId,
+    target: u64,
     result: &'static str,
     dispatcher: tracing::Dispatch,
     completed: bool,
@@ -399,7 +399,7 @@ impl Drop for PendingCancelAudit {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
                 tracing::error!(
-                    target_id = self.target.0,
+                    target_id = self.target,
                     outcome = self.result,
                     "cancel refusal audit job dropped before append completed"
                 );
@@ -408,20 +408,34 @@ impl Drop for PendingCancelAudit {
     }
 }
 
-pub(super) fn enqueue_cancel_refusal_audit(
+/// Stable audit status/label for one cancellation outcome. Shared by both
+/// enqueue entry points so a refusal's status word never drifts from the
+/// operator ops'.
+fn cancel_outcome_label(outcome: &CancelOutcome) -> &'static str {
+    match outcome {
+        CancelOutcome::Cancelled => "cancelled",
+        CancelOutcome::AlreadyFinished => "already_finished",
+        CancelOutcome::AlreadyCommitting => "already_committing",
+        CancelOutcome::NotCancellable => "not_cancellable",
+    }
+}
+
+/// Best-effort, detached audit append for an OPERATOR-driven cancellation
+/// (`cancel_tx` / `cancel_cursor_admin`): refusals AND successful cross-user
+/// cancels are audited. The details payload carries only the target id and
+/// the outcome. Admission, drain accounting and the blocking append are the
+/// same machinery as [`enqueue_cancel_refusal_audit`].
+pub(super) fn enqueue_operator_cancel_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
     session: &Session,
-    target: RequestExecId,
+    operation: &'static str,
+    target: u64,
     outcome: &CancelOutcome,
 ) -> Option<JoinHandle<()>> {
-    let result = match outcome {
-        CancelOutcome::AlreadyCommitting => "already_committing",
-        CancelOutcome::NotCancellable => "not_cancellable",
-        CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished => return None,
-    };
+    let result = cancel_outcome_label(outcome);
     let slot = queue.try_reserve(&session.username)?;
-    let details = match rmp_serde::to_vec_named(&CancelRefusalDetails { target, outcome }) {
+    let details = match rmp_serde::to_vec_named(&CancelAuditDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
             tracing::error!(%error, "audit append skipped: cancel refusal encoding failed");
@@ -455,7 +469,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
         let guard = pending;
         let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
             if let Err(error) = guard.audit.append(
-                "cancel_request",
+                operation,
                 transport,
                 username,
                 "",
@@ -464,7 +478,7 @@ pub(super) fn enqueue_cancel_refusal_audit(
                 details,
                 now_ns,
             ) {
-                tracing::error!(%error, target_id = guard.target.0, outcome = guard.result,
+                tracing::error!(%error, target_id = guard.target, outcome = guard.result,
                     "audit append rejected cancel refusal");
                 return false;
             }
@@ -472,6 +486,24 @@ pub(super) fn enqueue_cancel_refusal_audit(
         });
         guard.complete(appended);
     })
+}
+
+/// Refusal-only audit for `cancel_request`: appends only for the outcomes
+/// that refuse the cancel (`already_committing` / `not_cancellable`), never
+/// for a successful or already-finished one. Same queue, capability and
+/// drain accounting as [`enqueue_operator_cancel_audit`].
+pub(super) fn enqueue_cancel_refusal_audit(
+    queue: &Arc<CancelRefusalAudit>,
+    audit: &Arc<AuditChainWriter>,
+    session: &Session,
+    target: RequestExecId,
+    outcome: &CancelOutcome,
+) -> Option<JoinHandle<()>> {
+    match outcome {
+        CancelOutcome::AlreadyCommitting | CancelOutcome::NotCancellable => {}
+        CancelOutcome::Cancelled | CancelOutcome::AlreadyFinished => return None,
+    }
+    enqueue_operator_cancel_audit(queue, audit, session, "cancel_request", target.0, outcome)
 }
 
 pub(super) fn repo_audit_observer(

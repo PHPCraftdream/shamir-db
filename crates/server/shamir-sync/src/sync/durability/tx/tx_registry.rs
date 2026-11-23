@@ -467,11 +467,11 @@ impl InteractiveTx {
 
 /// How a registered handle currently sits in the authoritative `open` map.
 ///
-/// `Committing` keeps the handle RESERVED while the commit pipeline runs:
-/// the identity can neither be re-registered (the entry is occupied) nor
-/// acquired/reaped (every executable path skips this variant). Only
-/// [`TxCommitGuard::drop`] removes a `Committing` entry.
-enum Parked {
+/// `Committing` keeps the handle RESERVED while the commit pipeline runs: the identity
+/// can neither be re-registered (the entry is occupied) nor acquired/reaped (every
+/// executable path skips this variant). Only [`TxCommitGuard::drop`] removes it;
+/// `pub(super)` only so the operator-cancel module can share the teardown.
+pub(super) enum Parked {
     Open(Arc<InteractiveTx>),
     Committing,
 }
@@ -504,7 +504,7 @@ enum Parked {
 /// drop delete its fresh row. No admission decision reads the projection.
 #[derive(Default)]
 pub struct TxRegistry {
-    open: DashMap<u64, Parked, THasher>,
+    pub(super) open: DashMap<u64, Parked, THasher>,
     by_session: DashMap<[u8; 32], u64, THasher>,
     activity: HashIndex<u64, Arc<TxActivity>, THasher>,
     /// Gauge mirror for `open` rows — `shamir_active_transactions` reads
@@ -700,7 +700,7 @@ impl TxRegistry {
     /// guard (`slot`) is still held — a racing re-register of the same
     /// handle cannot slip between the two table mutations. Callers must
     /// have verified the variant (and, where required, identity/expiry).
-    fn teardown_open(
+    pub(super) fn teardown_open(
         &self,
         slot: OccupiedEntry<'_, u64, Parked>,
         handle: u64,
