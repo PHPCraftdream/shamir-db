@@ -48,7 +48,8 @@ pub struct CopyPassResult {
 /// `Sealing`). The bounded audit chain rounds of the data-directory pass
 /// fail typed when an archive keeps appearing behind the copy.
 ///
-/// `AuditFilesUnstable`, `AuditListing` and `AuditArchiveLost` are new public Rust surface:
+/// `AuditListing` and `AuditArchiveLost` are new public Rust surface
+/// (`AuditFilesUnstable` was already public on master):
 /// `publish = false` only stops registry publishing, it does not make the API
 /// private — sibling crates (`shamir-server`) can name and match these
 /// variants. There is no semver obligation for them, and neither is a stable

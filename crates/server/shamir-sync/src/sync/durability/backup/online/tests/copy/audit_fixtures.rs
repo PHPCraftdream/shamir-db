@@ -283,7 +283,13 @@ fn join_within(handle: std::thread::JoinHandle<()>, deadline: Instant) -> JoinOu
     let spawned = std::thread::Builder::new()
         .name("join-within".to_string())
         .spawn(move || {
-            let _ = done_tx.send(handle.join());
+            if let Err(unsent) = done_tx.send(handle.join()) {
+                // The guard already stopped waiting, so nobody can receive
+                // this result and its `Err` carries the helper's panic payload.
+                // Dropping it HERE would run an arbitrary payload destructor on
+                // a detached joiner thread; leak it instead.
+                std::mem::forget(unsent);
+            }
         });
     if spawned.is_err() {
         return JoinOutcome::TimedOut;
@@ -321,6 +327,14 @@ impl JoinOnDrop {
     /// the only way a test can assert that a wedged helper was NOT joined.
     pub(super) fn outcome(&self) -> Arc<AtomicU8> {
         self.outcome.clone()
+    }
+
+    /// The ABSOLUTE deadline this guard passes to the join path. Asserting it
+    /// is how a test pins the timing contract without depending on the outcome
+    /// (a mutant that restarts a fresh budget at join would still report
+    /// `TimedOut`, only later).
+    pub(super) fn deadline(&self) -> Instant {
+        self.deadline
     }
 
     /// Join eagerly within the remaining budget, re-raise the helper's panic
@@ -376,34 +390,50 @@ impl Drop for JoinOnDrop {
     }
 }
 
-/// A helper still running at the shared deadline is reported as NOT joined, and
-/// the guard's `Drop` never panics.
+/// A helper still running at the deadline is reported as NOT joined, the guard
+/// keeps the deadline it was GIVEN, and its `Drop` never panics.
 ///
-/// The helper blocks on a channel this test never signals, and the guard gets a
-/// deadline that has already passed (`Instant::now()`), so both the join and
-/// the drop take the timeout path with no sleep.
+/// The deadline is already past (`Instant::now()`), so the join and the drop
+/// take the timeout path with no wait. The helper's own wait is BOUNDED
+/// (`FIXTURE_WAIT`), so a wedged guard can never leave an unbounded thread
+/// behind, and everything it owns lives inside the thread: on timeout the
+/// helper is detached, never joined, and nothing it owns is reclaimed on the
+/// caller's side.
 ///
-/// Mutant caught: a guard whose teardown treats an expired budget as a join (or
-/// restarts the budget) — the outcome reads "joined" for a helper that is still
-/// running.
+/// Mutant caught: a guard that reports a join for a helper still running, or
+/// one that substitutes a fresh budget instead of the deadline it was handed —
+/// the `deadline()` assertion fails. Mutant caught: an unbounded wait in the
+/// fixture itself — the process cannot exit, so CI times out instead of the
+/// test reporting.
 #[test]
 fn a_timed_out_helper_reports_not_joined_and_its_drop_never_panics() {
-    let (keep_open, waiting) = mpsc::channel::<()>();
+    /// Bounded fixture wait: the wedged helper must exit on its own.
+    const FIXTURE_WAIT: Duration = Duration::from_secs(5);
+    let deadline = Instant::now();
     let handle = std::thread::Builder::new()
         .name("wedged-helper".to_string())
         .spawn(move || {
-            let _ = waiting.recv();
+            // A BOUNDED wait whose only sender lives in this thread: the helper
+            // exits by itself even if the guard has already given up, and it
+            // owns nothing the caller must reclaim (a real fixture's helper
+            // owns its Fjall handle the same way — inside the thread).
+            let (_never_sent, waiting) = mpsc::channel::<()>();
+            let _ = waiting.recv_timeout(FIXTURE_WAIT);
         })
         .expect("spawn the wedged helper");
-    let guard = JoinOnDrop::with_deadline(handle, Instant::now());
+    let guard = JoinOnDrop::with_deadline(handle, deadline);
     let outcome = guard.outcome();
+    assert_eq!(
+        guard.deadline(),
+        deadline,
+        "the guard must join with the deadline it was given, never a fresh budget"
+    );
     drop(guard);
     assert_eq!(
         outcome.load(Ordering::SeqCst),
         OUTCOME_TIMED_OUT,
-        "a helper still running at the deadline must be reported as not joined"
+        "a helper still running at the deadline must be reported as NOT joined"
     );
-    drop(keep_open);
 }
 
 /// A panic payload the guard joins is LEAKED by `Drop`, never dropped there.

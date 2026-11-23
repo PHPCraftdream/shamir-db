@@ -22,7 +22,7 @@ use crate::sync::durability::audit_chain_files::{
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
-use self::audit_rounds::refuse_unlisted_destination_audit_file;
+use self::audit_rounds::{unlisted_destination_audit_file, UnlistedAudit, ACTIVE_REOPEN_ROUNDS};
 use self::list_files::list_files;
 pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
 
@@ -450,15 +450,17 @@ pub fn run_copy_pass(
 /// documented pre-existing limit: the copy holds no bytes for it and boot
 /// validates the saved anchor against the copied chain.
 ///
-/// Not covered either, and NOT papered over: `server_meta` is a LIVE Fjall
-/// store the running server keeps writing (its anchor row at every rotation
-/// boundary), and phase 1 copies it file by file outside every seal. A flush
-/// or a compaction between the listing and the hash can leave a mixed image
-/// (a `current` naming a version file the copy never took); the run then FAILS
-/// CLOSED — the leftover destination file is unlisted, so the inventory check
-/// refuses, or the copy's own hash mismatch refuses earlier — and the next
-/// scheduled run retries. The copier never repairs such an image and never
-/// deletes the leftover.
+/// KNOWN LIMIT, not closed by this copy: `server_meta` is a LIVE Fjall store
+/// the running server keeps writing (its anchor row at every rotation
+/// boundary), and phase 1 copies it file by file outside every seal, so it is
+/// NOT captured at one consistent point. Self-verification checks hashes, sizes
+/// and the file inventory and never opens the store, so a MIXED image can pass
+/// verification: a flush that switches `current` to `vN+1` after the listing
+/// but before `current` is copied leaves the new pointer and the old version,
+/// with no extra file and no hash mismatch — and the restored store then cannot
+/// open the version the pointer names. Nothing in this copier repairs,
+/// validates or deletes such an image; the failure surfaces at boot. Compare
+/// [`CopyError::AuditArchiveLost`], which guards AUDIT files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -478,8 +480,13 @@ pub(super) fn run_data_dir_copy_pass(
     };
     // Phase 1: every other file, both anchor stores included.
     let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
-    // Phase 2: the audit chain files, listed only now.
-    for _ in 0..AUDIT_CAPTURE_ROUNDS {
+    // Phase 2: the audit chain files, listed only now. Two BOUNDED budgets
+    // drive the loop: unstable rounds (an archive keeps appearing) and the
+    // rotation window's reopen attempts (the active name is absent between the
+    // appender's rename and its immediate reopen).
+    let mut unstable_rounds = 0usize;
+    let mut reopen_attempts = 0usize;
+    loop {
         let audit = run_copy_pass_inner(
             source_root,
             dest_root,
@@ -498,14 +505,35 @@ pub(super) fn run_data_dir_copy_pass(
             // Nothing is deleted from the destination: a reserved audit name
             // this round did not capture — copied by pass D or by an earlier
             // unstable round — refuses the pass before the manifest exists.
-            refuse_unlisted_destination_audit_file(dest_root, &audit.files)?;
-            result.files.extend(audit.files);
-            return Ok(result);
+            match unlisted_destination_audit_file(dest_root, &audit.files)? {
+                None => {
+                    result.files.extend(audit.files);
+                    return Ok(result);
+                }
+                Some(UnlistedAudit::Archive) => return Err(CopyError::AuditArchiveLost),
+                Some(UnlistedAudit::ActiveLog) => {
+                    // `rotate_locked` renames the active log and reopens it a
+                    // moment later. A listing inside that window leaves the
+                    // destination with an earlier active-log copy this round
+                    // cannot list; give the reopen a bounded chance to close
+                    // the window before refusing (`ACTIVE_REOPEN_ROUNDS`).
+                    // Each attempt re-lists through `list_audit_files`, which
+                    // observes cancellation, so the wait stays interruptible.
+                    reopen_attempts += 1;
+                    if reopen_attempts > ACTIVE_REOPEN_ROUNDS {
+                        return Err(CopyError::AuditArchiveLost);
+                    }
+                    continue;
+                }
+            }
+        }
+        unstable_rounds += 1;
+        if unstable_rounds >= AUDIT_CAPTURE_ROUNDS {
+            return Err(CopyError::AuditFilesUnstable {
+                rounds: AUDIT_CAPTURE_ROUNDS,
+            });
         }
     }
-    Err(CopyError::AuditFilesUnstable {
-        rounds: AUDIT_CAPTURE_ROUNDS,
-    })
 }
 
 /// How one pass treats the audit chain files of its source root.

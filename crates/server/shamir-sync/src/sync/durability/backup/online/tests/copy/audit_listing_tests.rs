@@ -52,6 +52,11 @@ fn one_late_archive_forces_another_round_and_lands_in_the_snapshot() {
     let (source, to) = (source_dir.path(), to_dir.path());
     audit_fixtures::seed_alpha_repo(source);
     let first = archive_name(1);
+    // The SUBJECT of this test: a rotation archive that exists before the run.
+    // Without it the hook below never fires (it is gated on capturing this
+    // file), and D/E would see an empty audit inventory.
+    write_file(&source.join(&first), b"archived-1\n");
+    write_file(&source.join("audit.log"), b"active\n");
     let first_for_hook = first.clone();
     let captures = Arc::new(AtomicUsize::new(0));
     let captures_for_hook = captures.clone();

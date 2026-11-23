@@ -440,3 +440,207 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_refuses_the_run() {
         "R4: the refused snapshot must not survive in the destination"
     );
 }
+
+/// The corrective-open miss is TOLERATED and the backup still publishes when
+/// the appender's reopen closes the rotation window.
+///
+/// `rotate_locked` renames the active log and reopens it a moment later. Here
+/// the rename lands between the active log's copy and its snapshot hash, so the
+/// corrective open genuinely misses it (counted `missing`), and the reopened
+/// file appears only AFTER the next round's listing: that round is stable and
+/// still cannot list the active name, so the pass's bounded reopen attempts
+/// (`ACTIVE_REOPEN_ROUNDS`) re-list, capture the reopened file and publish.
+///
+/// Mutant caught: refusing on the first stale-active observation (the previous
+/// behaviour) — the run ends in `AuditArchiveLost` and `Done` is never reached;
+/// dropping the reopen attempts' re-list — the refused run also never publishes
+/// the reopened log, so the manifest assertion fails; propagating the vanished
+/// source at the corrective OPEN — `CopyError::Io { NotFound }` instead.
+#[test]
+fn a_corrective_open_miss_publishes_when_the_rotation_reopens_the_active_log() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let log_path = source.join(ROTATION_AUDIT_LOG);
+    let log_bytes = b"active-before-rotation\n";
+    write_file(&log_path, log_bytes);
+    let archive = audit_fixtures::archive_name(1);
+    let archive_path = source.join(&archive);
+    let log_for_hook = log_path.clone();
+    let archive_for_hook = archive_path.clone();
+    let source_for_hook = source.to_path_buf();
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root| {
+        // Phase 1 of pass D, then phase 1 of the residual pass E.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
+    let rotated = Arc::new(AtomicBool::new(false));
+    let rotated_for_hook = rotated.clone();
+    let reopened = Arc::new(AtomicBool::new(false));
+    let armed_for_hash = armed.clone();
+    let seam = test_seams::set_hash_file(Box::new(move |path| {
+        if path != log_for_hook.as_path() || !armed_for_hash.load(Ordering::SeqCst) {
+            return None;
+        }
+        if !rotated_for_hook.swap(true, Ordering::SeqCst) {
+            // The rotation window: the active log becomes its archive and is
+            // NOT reopened yet, and the copy's digest no longer matches.
+            fs::rename(&log_for_hook, &archive_for_hook).expect("rotate the active audit log");
+            return Some(Ok(("0".repeat(64), 0)));
+        }
+        None
+    }));
+    // The appender's reopen: it lands only after the NEXT audit round's
+    // listing, so that round is stable and still cannot list the active name.
+    let archive_for_capture = archive.clone();
+    let reopened_for_capture = reopened.clone();
+    let reopen = test_seams::set_after_capture(Box::new(move |path| {
+        if path.file_name().and_then(|name| name.to_str()) != Some(archive_for_capture.as_str()) {
+            return;
+        }
+        if reopened_for_capture.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        write_file(
+            &source_for_hook.join(ROTATION_AUDIT_LOG),
+            b"reopened-active\n",
+        );
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    drop(reopen);
+    drop(arm);
+    let report = result.expect("the reopened active log must let the backup finish");
+    assert!(
+        rotated.load(Ordering::SeqCst),
+        "the fixture must take the corrective-open branch"
+    );
+    assert!(
+        reopened.load(Ordering::SeqCst),
+        "the appender's reopen must land after the next round's listing"
+    );
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "the protocol lists the data dir twice (pass D, then the residual pass E)"
+    );
+    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    assert!(
+        paths.contains(&archive),
+        "the archive the rotation created must be published: {paths:?}"
+    );
+    assert!(
+        paths.contains(&ROTATION_AUDIT_LOG.to_string()),
+        "the reopened active log must be published: {paths:?}"
+    );
+    assert_eq!(
+        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
+        (
+            hex::encode(Sha256::digest(log_bytes)),
+            log_bytes.len() as u64
+        ),
+        "the manifest must describe the archived bytes exactly"
+    );
+    assert_eq!(
+        fs::read(report.dest_dir.join(ROTATION_AUDIT_LOG)).expect("reopened log copy"),
+        b"reopened-active\n",
+        "the destination must carry the reopened active log, not the stale copy"
+    );
+}
+
+/// The corrective RE-HASH miss is tolerated and the backup still publishes when
+/// the reopen lands before the next listing.
+///
+/// The corrective copy itself succeeds; its follow-up hash is where the
+/// rotation renames the active log and reports it gone (`Ok(None)` in
+/// `recopy_until_stable`), so the file is counted `missing` for that round. The
+/// reopened file exists by the next listing, which captures both the new
+/// archive and the active log, and the run publishes.
+///
+/// Mutant caught: restoring `NotFound` propagation in the follow-up-hash arm —
+/// the run returns `CopyError::Io { NotFound }`; dropping the reopen — the run
+/// ends in `AuditArchiveLost`.
+#[test]
+fn a_corrective_re_hash_miss_publishes_when_the_rotation_reopens_the_active_log() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let log_path = source.join(ROTATION_AUDIT_LOG);
+    let log_bytes = b"active-before-rotation\n";
+    write_file(&log_path, log_bytes);
+    let archive = audit_fixtures::archive_name(1);
+    let archive_path = source.join(&archive);
+    let readings = Arc::new(AtomicUsize::new(0));
+    let readings_for_hook = readings.clone();
+    let log_for_hook = log_path.clone();
+    let archive_for_hook = archive_path.clone();
+    let source_for_hook = source.to_path_buf();
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root| {
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
+    let armed_for_hash = armed.clone();
+    let seam = test_seams::set_hash_file(Box::new(move |path| {
+        if path != log_for_hook.as_path() || !armed_for_hash.load(Ordering::SeqCst) {
+            return None;
+        }
+        match readings_for_hook.fetch_add(1, Ordering::SeqCst) {
+            // The copy's snapshot hash no longer matches: corrective re-copy.
+            0 => Some(Ok(("0".repeat(64), 0))),
+            1 => {
+                // The corrective re-hash: the rotation renames the log, and
+                // the appender reopens it immediately.
+                fs::rename(&log_for_hook, &archive_for_hook).expect("rotate the audit log");
+                write_file(
+                    &source_for_hook.join(ROTATION_AUDIT_LOG),
+                    b"reopened-active\n",
+                );
+                Some(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            }
+            _ => None,
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    drop(arm);
+    let report = result.expect("the reopened active log must let the backup finish");
+    assert_eq!(
+        readings.load(Ordering::SeqCst),
+        2,
+        "the residual pass must reach the copy hash and the corrective re-hash"
+    );
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "the protocol lists the data dir twice (pass D, then the residual pass E)"
+    );
+    let paths = audit_fixtures::manifest_paths(&report.dest_dir);
+    for expected in [archive.clone(), ROTATION_AUDIT_LOG.to_string()] {
+        assert!(
+            paths.contains(&expected),
+            "the published manifest must list {expected}: {paths:?}"
+        );
+    }
+    assert_eq!(
+        audit_fixtures::manifest_entry(&report.dest_dir, &archive),
+        (
+            hex::encode(Sha256::digest(log_bytes)),
+            log_bytes.len() as u64
+        ),
+        "the manifest must describe the archived bytes exactly"
+    );
+}

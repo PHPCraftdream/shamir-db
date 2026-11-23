@@ -34,11 +34,13 @@ const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 /// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
 /// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
 /// Top-level audit chain files are skipped when `skip_audit_files` is set
-/// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
-/// clock are checked at every directory iteration — the listing is inside
-/// the re-copy budget. Every directory-entry and metadata failure is a
-/// typed [`CopyError::Io`]; only an entry that vanished before its
-/// metadata read (`NotFound`) is skipped as the documented source race.
+/// (phase 1 of the data-directory pass, run by `copy_engine`). With a gate,
+/// cancel and the clock are checked at every directory iteration — the listing
+/// is inside the re-copy budget. A directory-entry or metadata failure is a
+/// typed error: [`CopyError::Io`] naming the entry, EXCEPT the one audit
+/// classification below (path-free [`CopyError::AuditListing`]); only an entry
+/// that vanished before its metadata read (`NotFound`) is skipped as the
+/// documented source race.
 ///
 /// `skip_audit_files` also scopes the AUDIT CLASSIFICATION: only phase 1 of
 /// the data-directory pass lists the root whose audit chain files are its own,

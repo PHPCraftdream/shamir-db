@@ -49,6 +49,13 @@ pub(super) fn is_audit_log_file_name(name: &OsStr) -> bool {
         })
 }
 
+/// True for the ACTIVE log name alone (`audit.log`), never an archive. The
+/// data-directory pass needs the distinction to tell the rotation window (the
+/// active name absent between `rename` and the reopen) from a pruned archive.
+pub(super) fn is_audit_active_log_name(name: &OsStr) -> bool {
+    name == OsStr::new(AUDIT_LOG_FILE_NAME)
+}
+
 /// The audit chain files of a data directory, listed FRESH: the rotation
 /// archives in ascending suffix order first, the ACTIVE log last (the order
 /// both the copy loop and the hash pass follow, so the manifest's file order
