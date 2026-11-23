@@ -348,9 +348,7 @@ impl Client {
     pub async fn ping(&self) -> Result<(), ClientError> {
         match self.roundtrip(&DbRequest::Ping).await? {
             DbResponse::Pong => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected Pong, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol("expected Pong response".into())),
         }
     }
 
@@ -387,11 +385,7 @@ impl Client {
         };
         let response = match self.roundtrip(&req).await? {
             DbResponse::Batch { response } => response,
-            other => {
-                return Err(ClientError::Protocol(format!(
-                    "expected Batch, got {other:?}"
-                )))
-            }
+            _ => return Err(ClientError::Protocol("expected Batch response".into())),
         };
 
         // AFTER receive: merge interner_delta into the cache. Ids come ONLY
@@ -420,9 +414,7 @@ impl Client {
         self.require_scram()?;
         match self.roundtrip(&DbRequest::Repl(req)).await? {
             DbResponse::Repl(r) => Ok(r),
-            other => Err(ClientError::Protocol(format!(
-                "expected Repl, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol("expected Repl response".into())),
         }
     }
 
@@ -463,9 +455,9 @@ impl Client {
         };
         match self.roundtrip(&req).await? {
             DbResponse::DdlOpStatus { status } => Ok(status),
-            other => Err(ClientError::Protocol(format!(
-                "expected DdlOpStatus, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected DdlOpStatus response".into(),
+            )),
         }
     }
 
@@ -730,9 +722,9 @@ impl Client {
             .await?
         {
             DbResponse::ActivityPage { page } => Ok(page),
-            other => Err(ClientError::Protocol(format!(
-                "expected ActivityPage, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected ActivityPage response".into(),
+            )),
         }
     }
 
@@ -773,9 +765,9 @@ impl Client {
             .await?
         {
             DbResponse::ShapeStatsPage { page } => Ok(page),
-            other => Err(ClientError::Protocol(format!(
-                "expected ShapeStatsPage, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected ShapeStatsPage response".into(),
+            )),
         }
     }
 
@@ -814,9 +806,9 @@ impl Client {
             .await?
         {
             DbResponse::ShapeStatsReset => Ok(()),
-            other => Err(ClientError::Protocol(format!(
-                "expected ShapeStatsReset, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected ShapeStatsReset response".into(),
+            )),
         }
     }
 
@@ -844,9 +836,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 
@@ -871,9 +863,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 
@@ -903,9 +895,9 @@ impl Client {
             .await?
         {
             DbResponse::CancelOutcome { outcome } => Ok(outcome),
-            other => Err(ClientError::Protocol(format!(
-                "expected CancelOutcome, got {other:?}"
-            ))),
+            _ => Err(ClientError::Protocol(
+                "expected CancelOutcome response".into(),
+            )),
         }
     }
 

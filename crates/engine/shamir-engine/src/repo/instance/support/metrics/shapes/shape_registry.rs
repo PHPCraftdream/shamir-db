@@ -30,16 +30,27 @@ const SNAPSHOT_GUARD_ATTEMPTS: u32 = 64;
 /// mirror. Every execution is counted exactly once per state: in a live row,
 /// or folded into `other` when no slot is available or a row is evicted.
 ///
+/// That count-once invariant — `sum(rows.executions) + other.executions ==
+/// executions recorded since the last reset` — is a *quiescent* property: it
+/// holds only while no recorder is concurrently writing. A recorder that adds
+/// to a row after the copy, or inserts a new row after the copy, is missing
+/// from both places. What the guard below guarantees under concurrency is
+/// narrower but true: no counter is counted twice across a trim.
+///
 /// A snapshot copies the rows under the same cold-path guard the trimmer
-/// takes, so its row copy and its `(other)`/mirror read belong to one logical
-/// state: no trim can fold evicted counters in between the two.
+/// takes, so a trim cannot fold evicted counters into `(other)` between the
+/// row copy and the `(other)` read.
 struct ShapeState {
     rows: HashMap<[u8; 16], ShapeRow, THasher>,
     other: ShapeRow,
     tracked: AtomicUsize,
-    /// Cold-path exclusion shared by the trimmer and the snapshot. No
-    /// recorder ever touches it, so the hot path never waits on it; a losing
-    /// trimmer returns immediately and the next overflow retries.
+    /// Cold-path *exclusion* between the trimmer and the snapshot. A recorder
+    /// never *waits* on it: the recorder that finds the registry full makes a
+    /// single `compare_exchange` attempt and, if it loses, returns
+    /// immediately. The one caller that wins that CAS performs the eviction
+    /// synchronously (see [`trim`](ShapeState::trim)), and a snapshot taken
+    /// while it runs exhausts [`SNAPSHOT_GUARD_ATTEMPTS`] attempts and falls
+    /// back to the documented best-effort copy.
     exclusive: AtomicBool,
 }
 
@@ -59,6 +70,18 @@ impl ShapeState {
     /// before the map insert. Production passes a no-op; the tests pass a
     /// hand-shake so a recorder can be parked in exactly that window
     /// without sleeping.
+    ///
+    /// A recorder touches the `exclusive` guard only on the `current >=
+    /// SHAPE_ROWS_CAP` arm: it folds the execution into `other` and calls
+    /// [`trim`](Self::trim), which makes one CAS attempt and returns
+    /// immediately on a loss — no recorder waits. The one caller that wins
+    /// that CAS pays the whole eviction synchronously: one traversal of at
+    /// most [`SHAPE_ROWS_CAP`] rows, one sort, and up to `SHAPE_ROWS_CAP -
+    /// SHAPE_ROWS_LOW_WATER` removals with a merge and a mirror decrement
+    /// each. That cost is amortised and only paid by a *new* key arriving
+    /// while the registry is full: a stable set of shapes never trims, and
+    /// after a trim roughly `SHAPE_ROWS_CAP - SHAPE_ROWS_LOW_WATER` new keys
+    /// insert without one.
     fn record(
         &self,
         key: [u8; 16],
@@ -115,8 +138,16 @@ impl ShapeState {
     /// Copy of every row, the `other` bucket and the mirror of this state.
     ///
     /// The copy is taken under the same cold-path guard as [`trim`](Self::trim),
-    /// so the row copy and the `(other)`/mirror reads belong to one logical
-    /// state even if a trimmer is running.
+    /// so a trim cannot fold evicted counters into `(other)` between the row
+    /// copy and the `(other)` read — that is all the guard buys: no counter is
+    /// counted twice across a trim. The accounting equality
+    /// `sum(rows.executions) + other.executions == executions recorded since
+    /// the last reset` is a *quiescent* property on top of that and holds
+    /// only while no recorder is concurrently writing (a recorder that adds to
+    /// a row after the copy, or inserts a new row after the copy, is missing
+    /// from both places). A snapshot that cannot take the guard within
+    /// [`SNAPSHOT_GUARD_ATTEMPTS`] attempts returns the documented best-effort
+    /// copy.
     fn snapshot(&self) -> ShapeStatsSnapshot {
         self.snapshot_with(|| {})
     }
@@ -124,8 +155,16 @@ impl ShapeState {
     /// [`snapshot`](Self::snapshot) with a hand-shake hole: `between` runs
     /// after the row copy and before the `(other)`/mirror reads, so a test can
     /// park a snapshot inside that window without sleeping.
+    ///
+    /// The guard, when taken, is held across the copy, `between` and the
+    /// `(other)`/mirror reads, and released by [`ExclusiveGuard`] on the way
+    /// out — a panic in `between` still releases it. As in
+    /// [`snapshot`](Self::snapshot), the rows-plus-`(other)` equality holds
+    /// only while no recorder writes concurrently; the guard guarantees the
+    /// narrower property that no counter is counted twice across a trim.
     fn snapshot_with(&self, between: impl FnOnce()) -> ShapeStatsSnapshot {
-        let guarded = self.acquire_exclusive();
+        let guard = ExclusiveGuard::acquire_bounded(&self.exclusive);
+        let guarded = guard.is_some();
         let mut rows: Vec<([u8; 16], ShapeCounters)> = Vec::new();
         self.rows.iter_sync(|key, row| {
             rows.push((*key, row.counters()));
@@ -138,31 +177,9 @@ impl ShapeState {
             tracked: self.tracked.load(Ordering::Relaxed) as u64,
         };
         if guarded {
-            self.exclusive.store(false, Ordering::Release);
+            drop(guard);
         }
         snapshot
-    }
-
-    /// Take the cold-path guard shared with [`trim`](Self::trim), retrying at
-    /// most [`SNAPSHOT_GUARD_ATTEMPTS`] times.
-    ///
-    /// The retry is bounded on purpose: a snapshot is a cold-path read that
-    /// must never stall, so one that cannot take the guard within the bound
-    /// copies anyway and its result is best-effort. A trim holding the guard
-    /// that long means pathological churn; counters stay monotone regardless,
-    /// only the rows-vs-`(other)` split may then straddle the trim.
-    fn acquire_exclusive(&self) -> bool {
-        for _ in 0..SNAPSHOT_GUARD_ATTEMPTS {
-            if self
-                .exclusive
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return true;
-            }
-            std::hint::spin_loop();
-        }
-        false
     }
 
     fn release_reservation(&self) {
@@ -174,15 +191,22 @@ impl ShapeState {
     }
 
     /// Evict the lowest recency ticks down to [`SHAPE_ROWS_LOW_WATER`].
-    /// Single-flight per state: a losing caller returns immediately.
+    ///
+    /// Called by [`record`](Self::record), and only on its `current >=
+    /// SHAPE_ROWS_CAP` arm — a *new* key arriving while the registry is full.
+    /// Single-flight per state: one `compare_exchange` attempt, and a losing
+    /// caller returns immediately without waiting.
+    ///
+    /// The winner runs the eviction synchronously: one traversal of at most
+    /// [`SHAPE_ROWS_CAP`] rows, one sort, and up to `SHAPE_ROWS_CAP -
+    /// SHAPE_ROWS_LOW_WATER` removals with a merge into `other` and a mirror
+    /// decrement each. The cost is amortised: a stable set of shapes never
+    /// trims, and after a trim roughly `SHAPE_ROWS_CAP - SHAPE_ROWS_LOW_WATER`
+    /// new keys insert without one.
     fn trim(&self) {
-        if self
-            .exclusive
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let Some(_guard) = ExclusiveGuard::try_acquire(&self.exclusive) else {
             return;
-        }
+        };
         let mut ticks: Vec<(u64, [u8; 16])> = Vec::new();
         self.rows.iter_sync(|key, row| {
             ticks.push((row.tick(), *key));
@@ -198,13 +222,56 @@ impl ShapeState {
                 }
             }
         }
-        self.exclusive.store(false, Ordering::Release);
+    }
+}
+
+/// Releases [`ShapeState::exclusive`] on drop, so a panic while the guard is
+/// held cannot disable trimming for the life of the state.
+struct ExclusiveGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> ExclusiveGuard<'a> {
+    /// One CAS attempt: the trimmer must never wait.
+    fn try_acquire(flag: &'a AtomicBool) -> Option<Self> {
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            Some(Self { flag })
+        } else {
+            None
+        }
+    }
+
+    /// Up to [`SNAPSHOT_GUARD_ATTEMPTS`] CAS attempts with `spin_loop`, then
+    /// `None`.
+    ///
+    /// The retry is bounded on purpose: a snapshot is a cold-path read that
+    /// must never stall, so one that cannot take the guard within the bound
+    /// copies anyway and its result is best-effort. A trim holding the guard
+    /// that long means pathological churn; counters stay monotone regardless,
+    /// only the rows-vs-`(other)` split may then straddle the trim.
+    fn acquire_bounded(flag: &'a AtomicBool) -> Option<Self> {
+        for _ in 0..SNAPSHOT_GUARD_ATTEMPTS {
+            if let Some(guard) = Self::try_acquire(flag) {
+                return Some(guard);
+            }
+            std::hint::spin_loop();
+        }
+        None
+    }
+}
+
+impl Drop for ExclusiveGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
     }
 }
 
 /// Per-repository bounded registry of canonical shape counters.
 ///
-/// All accounting for one generation lives in a single [`ShapeState`]
+/// All accounting for one generation lives in a single `ShapeState`
 /// published through an [`ArcSwap`]. A recorder pins the state it started on
 /// with one `load_full`, so its whole reserve-insert sequence — and only
 /// that — is charged to one state; [`snapshot`](Self::snapshot) likewise
@@ -294,6 +361,15 @@ impl ShapeRegistry {
     /// reset yields exactly one generation, never a mix, and a concurrent
     /// trim cannot move counters into `(other)` between the row copy and the
     /// `(other)` read (which would count them twice).
+    ///
+    /// The accounting equality `sum(rows.executions) + other.executions ==
+    /// executions recorded since the last reset` is a *quiescent* property: it
+    /// holds only while no recorder is concurrently writing, because a
+    /// recorder that adds to a row after the copy, or inserts a new row after
+    /// the copy, is missing from both places. What the guard guarantees under
+    /// concurrency is narrower: no counter is counted twice across a trim. A
+    /// snapshot that cannot take the guard in its bounded number of attempts
+    /// returns the documented best-effort copy.
     pub fn snapshot(&self) -> ShapeStatsSnapshot {
         let state = self.state.load_full();
         state.snapshot()

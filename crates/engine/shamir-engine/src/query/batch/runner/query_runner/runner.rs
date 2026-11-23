@@ -348,6 +348,19 @@ impl<'a> QueryRunner<'a> {
             }
         }
 
+        // Only the five data ops reach this point: `run_with_wait` dispatches
+        // them above and rejects every other op as admin/unreachable.
+        debug_assert!(
+            matches!(
+                &entry.op,
+                BatchOp::Read(_)
+                    | BatchOp::Insert(_)
+                    | BatchOp::Update(_)
+                    | BatchOp::Delete(_)
+                    | BatchOp::Set(_)
+            ),
+            "only the five data operations may fold a shape key"
+        );
         self.pending_shape =
             Some(ShapeKey::fold(&entry.op, &table_ref.table, interner).into_bytes());
 

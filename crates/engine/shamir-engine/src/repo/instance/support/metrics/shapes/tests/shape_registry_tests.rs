@@ -3,6 +3,8 @@ use std::sync::{Arc, Barrier};
 
 use shamir_test_diag::FlakeGuard;
 
+use crate::repo::instance::support::metrics::EngineMetrics;
+
 use super::super::{
     ShapeCounters, ShapeRegistry, ShapeStatsSnapshot, SHAPE_ROWS_CAP, SHAPE_ROWS_LOW_WATER,
 };
@@ -364,4 +366,74 @@ fn reset_discards_a_pinned_reservation_not_the_live_slot() {
     assert_eq!(registry.tracked(), 3);
     assert_eq!(live.tracked, 3);
     assert_eq!(counted(&live), 3);
+}
+
+/// mutant: no `Drop` release (or a `mem::forget` of the guard) — the panic leaves
+/// `exclusive` at `true`, every later `trim` returns immediately, and the rows stay at
+/// the cap instead of shrinking.
+///
+/// The seam panics while `snapshot_with` holds the guard, so the unwind must run the
+/// guard's `Drop`. Filling the cap and then recording 64 distinct keys makes the 1st
+/// and the 34th overflow key each trim down to [`SHAPE_ROWS_LOW_WATER`] (the keys in
+/// between re-insert), so the final map sits 30 keys above the low-water mark and
+/// strictly below the cap. A leaked guard erases exactly that: all 256 rows stay in
+/// place and every overflow key folds into `(other)` without a single removal.
+#[test]
+fn panic_in_the_snapshot_seam_releases_the_guard() {
+    let guard = FlakeGuard::new("panic_in_the_snapshot_seam_releases_the_guard");
+    let registry = ShapeRegistry::new();
+    guard.mark("snapshot about to panic inside its seam");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.snapshot_paused(|| panic!("seam panic"))
+    }));
+    assert!(
+        caught.is_err(),
+        "the seam panic must unwind through the snapshot"
+    );
+    guard.mark("seam panic unwound");
+
+    for index in 0..SHAPE_ROWS_CAP as u64 {
+        registry.record(key_of(u64::MAX, index), 5, false);
+    }
+    for index in 0..64u64 {
+        registry.record(key_of(u64::MAX, SHAPE_ROWS_CAP as u64 + index), 5, false);
+    }
+
+    let snapshot = registry.snapshot();
+    assert!(
+        snapshot.rows.len() < SHAPE_ROWS_CAP,
+        "rows {} never shrank below the cap: the panicking snapshot leaked the guard",
+        snapshot.rows.len()
+    );
+    assert!(snapshot.other.executions > 0);
+    assert_eq!(counted(&snapshot), SHAPE_ROWS_CAP as u64 + 64);
+    guard.mark("rows shrank below the cap and every execution is counted once");
+    guard.note("rows", snapshot.rows.len().to_string());
+    guard.note("other executions", snapshot.other.executions.to_string());
+}
+
+/// mutant: a gauge that counts the `(other)` fold as an extra row (or `tracked() + 1`) — the folded executions are non-zero here, so the equality fails.
+#[test]
+fn shapes_tracked_gauge_excludes_the_other_fold() {
+    let guard = FlakeGuard::new("shapes_tracked_gauge_excludes_the_other_fold");
+    let metrics = EngineMetrics::default();
+    guard.mark("recording past the cap through the metrics-owned registry");
+    for i in 0..(SHAPE_ROWS_CAP as u64 + 64) {
+        metrics.shape_stats().record(key_of(u64::MAX, i), 5, false);
+    }
+
+    let snapshot = metrics.shape_stats().snapshot();
+    guard.mark("shape snapshot taken");
+    assert!(
+        snapshot.other.executions > 0,
+        "the (other) fold is empty, so this test is vacuous"
+    );
+    assert_eq!(metrics.shape_stats().tracked(), snapshot.rows.len());
+    assert_eq!(
+        metrics.snapshot().shapes_tracked,
+        snapshot.rows.len() as u64
+    );
+    guard.mark("the shapes_tracked gauge equals the live row count");
+    guard.note("rows", snapshot.rows.len().to_string());
+    guard.note("other executions", snapshot.other.executions.to_string());
 }

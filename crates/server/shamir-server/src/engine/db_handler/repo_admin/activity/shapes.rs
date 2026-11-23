@@ -57,6 +57,22 @@ fn error(code: &str, message: &str) -> DbResponse {
     }
 }
 
+/// Fixed, path-free refusal for a failed repository resolution.
+///
+/// The wire codes stay the shared stable `unknown_db` / `unknown_repo`; the
+/// text is fixed on purpose: `BatchError`'s rendering of `QueryError` embeds
+/// the caller-supplied database/repository name and a `[code]:` separator, so
+/// it must never reach a refusal body.
+fn resolve_refusal(e: &BatchError) -> DbResponse {
+    match e.code() {
+        Some("unknown_db") => error("unknown_db", "database not found"),
+        Some("unknown_repo") => error("unknown_repo", "repository not found"),
+        // `resolve_repo` produces only the two codes above; keep the shared
+        // conversion for the (unreachable) rest instead of inventing a code.
+        _ => error_response(e),
+    }
+}
+
 /// Lowercase hex rendering of the 16-byte canonical shape key — the exact
 /// `ShapeKey::to_hex` form (32 characters), applied to the raw key bytes a
 /// [`ShapeStatsSnapshot`] carries.
@@ -113,12 +129,13 @@ impl ShamirDbHandler {
         } as usize;
 
         // 3. Resolve the repository. A failure keeps the existing stable
-        //    typed refusal (`unknown_db` / `unknown_repo`): the shared
-        //    `error_response` conversion, never a new code and never a raw
-        //    string.
+        //    typed refusal codes (`unknown_db` / `unknown_repo`) with a
+        //    fixed, path-free text: `BatchError`'s rendering would echo the
+        //    caller-supplied name and a `[code]:` separator, so it is never
+        //    the refusal body. No new code, no raw string.
         let repo = match resolve_repo(&self.db, db_name, &req.repo) {
             Ok(repo) => repo,
-            Err(e) => return error_response(&e),
+            Err(e) => return resolve_refusal(&e),
         };
 
         // 4. Cold-path snapshot of the lock-free registry (in memory).
@@ -167,7 +184,9 @@ impl ShamirDbHandler {
     /// Same permission-first ordering as [`Self::list_shape_stats`]: the
     /// wipe is never reached by a caller without `ActivityView`/`Manage`,
     /// and an unknown repository is refused with the same stable typed
-    /// error (never a silent no-op).
+    /// codes (`unknown_db` / `unknown_repo`) carrying fixed, path-free
+    /// text — never a `BatchError` rendering (which would echo the
+    /// caller-supplied name) and never a silent no-op.
     ///
     /// The audit record is appended through the operator-cancel audit path
     /// ([`enqueue_shape_reset_audit`]): a detached, bounded, at-most-N
@@ -203,10 +222,11 @@ impl ShamirDbHandler {
             return error("permission_denied", MANAGE_REQUIRED);
         }
 
-        // 2. Resolve the repository (stable `unknown_db` / `unknown_repo`).
+        // 2. Resolve the repository (stable `unknown_db` / `unknown_repo`
+        //    codes, fixed path-free text).
         let repo = match resolve_repo(&self.db, db_name, &req.repo) {
             Ok(repo) => repo,
-            Err(e) => return error_response(&e),
+            Err(e) => return resolve_refusal(&e),
         };
 
         // 3. Wipe the node-local telemetry, then enqueue the detached admin

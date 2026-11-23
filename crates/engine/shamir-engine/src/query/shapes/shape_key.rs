@@ -34,6 +34,10 @@ impl ShapeKey {
     /// Fold one data operation under `table`'s catalog name.
     pub fn fold(op: &BatchOp, table: &str, interner: &Interner) -> ShapeKey {
         let mut fold = Fold::new();
+        // Only the five data operations (`Read`, `Insert`, `Update`, `Delete`,
+        // `Set`) may ever reach this fold. The fallback tag below exists so an
+        // accidental call folds a distinct, harmless value instead of silently
+        // merging into the empty key.
         match op {
             BatchOp::Read(query) => {
                 fold.tag(1);
@@ -59,7 +63,9 @@ impl ShapeKey {
                 fold.tag(5);
                 fold.name(table);
             }
-            _ => {}
+            _ => {
+                fold.tag(0);
+            }
         }
         ShapeKey(fold.finish())
     }
@@ -181,6 +187,7 @@ fn fold_select_item(fold: &mut Fold, item: &SelectItem, interner: &Interner, dep
             field,
             input,
             args,
+            distinct,
             ..
         } => {
             fold.tag(4);
@@ -188,6 +195,7 @@ fn fold_select_item(fold: &mut Fold, item: &SelectItem, interner: &Interner, dep
             fold_aggregate_field(fold, field, interner);
             fold_optional_value(fold, input.as_ref(), interner, depth + 1);
             fold.num(args.len() as u64);
+            fold.tag(u8::from(*distinct));
             for arg in args {
                 fold_filter_value(fold, arg, interner, depth + 1);
             }

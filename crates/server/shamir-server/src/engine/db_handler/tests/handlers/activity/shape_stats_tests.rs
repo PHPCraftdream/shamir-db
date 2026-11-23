@@ -628,6 +628,10 @@ fn shape_stats_limits_order_and_typed_refusals() {
                 DbResponse::Error { code, message } => {
                     assert_eq!(code, expected);
                     assert_refusal_not_path_like(&message);
+                    assert!(
+                        !message.contains("no-such-repo") && !message.contains("no-such-db"),
+                        "a refusal must not echo a caller-supplied name: {message}"
+                    );
                 }
                 _ => panic!("expected the stable typed unknown-db/unknown-repo refusal"),
             }

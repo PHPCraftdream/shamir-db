@@ -1,5 +1,5 @@
 use shamir_query_types::filter::{Filter, FilterValue, ValueCompareOp};
-use shamir_query_types::read::ReadQuery;
+use shamir_query_types::read::{AggregateField, ReadQuery, Select, SelectItem};
 use shamir_query_types::write::UpdateOp;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
@@ -66,6 +66,37 @@ fn shape_folding_same_shape_diff_literals() {
         },
     ));
     assert_eq!(key(&first_param, &interner), key(&second_param, &interner));
+}
+
+/// mutant: `SelectItem::AggregateFn` dropping its `distinct` flag (the pre-change fold) — `median(x)` and `median(distinct x)` fold to one key and the `assert_ne!` fails.
+#[test]
+fn aggregate_fn_distinct_is_folded() {
+    let interner = Interner::default();
+    interner.touch_ind("age").unwrap();
+
+    let item = |distinct: bool| SelectItem::AggregateFn {
+        name: "median".to_string(),
+        field: AggregateField::Field(vec!["age".to_string()]),
+        input: None,
+        args: Vec::new(),
+        alias: None,
+        distinct,
+    };
+    let query = |distinct: bool| {
+        ReadQuery::new("t").select(Select {
+            items: vec![item(distinct)],
+            distinct: false,
+        })
+    };
+
+    assert_ne!(
+        key(&query(false), &interner),
+        key(&query(true), &interner),
+        "distinct must be part of the aggregate-function shape"
+    );
+    // Control: the same non-distinct item twice folds equal, so the `assert_ne!`
+    // above cannot pass by the whole arm hashing differently.
+    assert_eq!(key(&query(false), &interner), key(&query(false), &interner));
 }
 
 #[test]
