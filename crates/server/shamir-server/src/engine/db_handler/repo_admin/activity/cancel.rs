@@ -95,10 +95,18 @@ impl ShamirDbHandler {
         }
 
         let outcome = cancel_entry(&entry);
-        // Lookup has released its epoch guard. The state decision above
-        // does not depend on audit I/O or the existing audit writer lock.
+        // Lookup has released its epoch guard. The state decision above does
+        // not depend on audit I/O.
+        //
+        // The reply is built AFTER this synchronous enqueue, so its real cost
+        // is the enqueue's cost: one per-principal counter update, one
+        // `spawn_blocking` and one short push+prune of the queue's handle list.
+        // None of that waits for the audit writer, its persistence gate or a
+        // flush — a refusal that cannot be admitted is dropped and counted
+        // instead of blocking the reply.
         if let Some(audit) = &self.audit {
-            // Detach by design: the reply must not wait for the writer.
+            // The job is detached: the append runs on a blocking thread and
+            // this reply never awaits it.
             drop(enqueue_cancel_refusal_audit(
                 &self.cancel_refusal_audit,
                 audit,

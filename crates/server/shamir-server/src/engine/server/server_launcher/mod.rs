@@ -10,6 +10,8 @@
 mod accept_loops;
 #[path = "support/audit.rs"]
 mod audit;
+#[path = "support/audit_teardown.rs"]
+pub(crate) mod audit_teardown;
 #[path = "support/helpers.rs"]
 mod helpers;
 mod http;
