@@ -194,8 +194,12 @@ fn backup_start_without_yes_is_refused_before_sending() {
 }
 
 /// `backup start --yes` starts one copy: a nonempty backup id, the echoed
-/// destination and its fixed note; a following status reports the run's
-/// decimal-string `started_at_unix_ns` (no timing assertion).
+/// destination and its fixed note; a following status reports THAT run's
+/// id (the registry keeps the last run's id, so equality still holds once
+/// the copy has finished) and a decimal-string `started_at_unix_ns` that
+/// is NOT the idle-node placeholder `"0"`. The test then cancels the copy
+/// and waits, bounded, for it to reach a terminal state (no timing
+/// assertion).
 #[test]
 fn backup_start_with_yes_starts_a_copy() {
     let destination_dir = TempDir::new().expect("destination tempdir");
@@ -214,6 +218,10 @@ fn backup_start_with_yes_starts_a_copy() {
         nonempty_text(&started["backup_id"]),
         "backup start returned no backup id"
     );
+    let started_id = started["backup_id"]
+        .as_str()
+        .expect("backup start returned no backup id")
+        .to_owned();
     assert!(
         started["destination"].is_string(),
         "backup start lost its destination"
@@ -229,6 +237,11 @@ fn backup_start_with_yes_starts_a_copy() {
         "backup status",
         "BackupStatus",
     );
+    assert_eq!(
+        status["backup_id"].as_str(),
+        Some(started_id.as_str()),
+        "backup status did not report the run the shell started"
+    );
     let started_at = status["started_at_unix_ns"]
         .as_str()
         .expect("started_at_unix_ns is not a decimal string");
@@ -236,6 +249,55 @@ fn backup_start_with_yes_starts_a_copy() {
         !started_at.is_empty() && started_at.bytes().all(|byte| byte.is_ascii_digit()),
         "started_at_unix_ns is not a decimal string"
     );
+    assert_ne!(
+        status["started_at_unix_ns"].as_str(),
+        Some("0"),
+        "backup status reported the idle-node placeholder started_at_unix_ns"
+    );
+
+    let cancelled = result(
+        &fixture,
+        &["--", "backup", "cancel", "--yes"],
+        "backup cancel",
+        "CancelBackup",
+    );
+    assert!(
+        cancelled["cancelled"].is_boolean(),
+        "the cancel outcome is not a boolean"
+    );
+
+    // bounded wait for the run to reach a terminal state; not a latency assertion
+    let mut polls = 0usize;
+    let mut last_stdout = 0usize;
+    let mut last_stderr = 0usize;
+    let mut running = true;
+    while running && polls < 300 {
+        if polls > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        polls += 1;
+        let run = run_checked(&fixture, &["--", "backup", "status"]);
+        last_stdout = run.stdout.len();
+        last_stderr = run.stderr.len();
+        assert_exit(&run, 0);
+        let polled = record(&run);
+        assert_eq!(
+            polled["op"].as_str(),
+            Some("BackupStatus"),
+            "wrong op label"
+        );
+        running = polled["data"]["running"]
+            .as_bool()
+            .expect("backup status did not report a boolean `running`");
+    }
+    assert!(
+        !running,
+        "the copy did not reach a terminal state within {polls} status polls; \
+         last status stdout {last_stdout} bytes, stderr {last_stderr} bytes",
+    );
+    fixture
+        .guard
+        .mark("bounded wait: the online copy reached a terminal state");
 }
 
 /// An unconfirmed `backup cancel` is refused locally: exit 6 with the fixed
@@ -257,7 +319,9 @@ fn backup_cancel_without_yes_is_refused() {
 }
 
 /// `backup cancel --yes` answers the node's current run: the typed boolean
-/// outcome and the fixed run-scoped note (`cancel` carries no id).
+/// outcome and the fixed run-scoped note (`cancel` carries no id), and a
+/// following status still reports the run the shell started — so the
+/// `cancelled` leaf is not an idle-node `false`.
 #[test]
 fn backup_cancel_with_yes_answers_the_current_run() {
     let destination_dir = TempDir::new().expect("destination tempdir");
@@ -266,12 +330,20 @@ fn backup_cancel_with_yes_answers_the_current_run() {
     use_admin_profile(&fixture);
     let to = destination(&destination_dir);
 
-    result(
+    let started = result(
         &fixture,
         &["--", "backup", "start", "--to", &to, "--yes"],
         "backup start",
         "StartBackup",
     );
+    assert!(
+        nonempty_text(&started["backup_id"]),
+        "backup start returned no backup id"
+    );
+    let started_id = started["backup_id"]
+        .as_str()
+        .expect("backup start returned no backup id")
+        .to_owned();
     let cancelled = result(
         &fixture,
         &["--", "backup", "cancel", "--yes"],
@@ -285,6 +357,17 @@ fn backup_cancel_with_yes_answers_the_current_run() {
     assert!(
         nonempty_text(&cancelled["current_run_note"]),
         "cancel lost its current-run note"
+    );
+    let status = result(
+        &fixture,
+        &["--", "backup", "status"],
+        "backup status",
+        "BackupStatus",
+    );
+    assert_eq!(
+        status["backup_id"].as_str(),
+        Some(started_id.as_str()),
+        "backup status does not report the run the shell started and cancelled"
     );
 }
 

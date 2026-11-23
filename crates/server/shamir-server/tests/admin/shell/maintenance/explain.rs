@@ -146,9 +146,22 @@ fn collect_hashes(
                 .expect("data file below the data directory")
                 .to_string_lossy()
                 .replace('\\', "/");
-            let bytes = std::fs::read(&path).expect("read fixture data file");
-            let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
-            hashes.insert(relative, hex::encode(digest));
+            let digest = match std::fs::read(&path) {
+                Ok(bytes) => hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+                // Windows: the running fixture server holds a byte-range lock
+                // on some data files (os error 33, ERROR_LOCK_VIOLATION), so
+                // they cannot be read. Such a file is pinned by its length:
+                // weaker than a content hash, but the idle server does not
+                // resize it and an explained command must not touch it.
+                Err(error) if error.raw_os_error() == Some(33) => {
+                    let length = std::fs::metadata(&path)
+                        .expect("metadata of a locked fixture data file")
+                        .len();
+                    format!("locked:{length}")
+                }
+                Err(error) => panic!("read fixture data file: {error}"),
+            };
+            hashes.insert(relative, digest);
         }
     }
 }
@@ -272,7 +285,9 @@ fn explained_commands_print_the_documented_sections() {
 /// The no-effect proof: the whole fixture data directory is content-hashed
 /// before and after all seven explained commands, and the two maps must be
 /// EQUAL. The shell opens nothing for these commands (no store, no
-/// manifest, no config), so not one byte may change.
+/// manifest, no config), so not one byte may change. On Windows a data
+/// file that the running fixture server holds byte-range locked cannot be
+/// read: such a file is pinned by its length instead.
 #[test]
 fn explained_commands_change_nothing_on_disk() {
     let fixture = super::harness::boot("explained_commands_change_nothing_on_disk");

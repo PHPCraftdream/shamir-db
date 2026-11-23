@@ -37,6 +37,7 @@ use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
 use shamir_server::backup;
+use shamir_server::backup::BackupError as Failure;
 use shamir_server::config::Config;
 use shamir_server::doctor;
 use shamir_server::server::BootstrapMode;
@@ -307,6 +308,8 @@ fn run_main() -> anyhow::Result<u8> {
     // `Cli::parse()` (design §2, §4.7): neither needs server config, logging
     // or a data directory, so `--config` is not required. Match the first
     // argument EXACTLY: a later token goes through clap and is rejected below.
+    // A flag token (one starting with `--`) is never accepted as the
+    // `backup-verify` path: it is refused as a usage error instead.
     let mut raw_args = std::env::args_os();
     let _argv0 = raw_args.next();
     let first = raw_args.next();
@@ -319,6 +322,10 @@ fn run_main() -> anyhow::Result<u8> {
             eprintln!("{BACKUP_VERIFY_USAGE}");
             return Ok(1);
         };
+        if snapshot.to_string_lossy().starts_with("--") {
+            eprintln!("{BACKUP_VERIFY_USAGE}");
+            return Ok(1);
+        }
         if rest.next().is_some() {
             eprintln!("{BACKUP_VERIFY_USAGE}");
             return Ok(1);
@@ -434,7 +441,6 @@ fn backup_kind(kind: shamir_server::backup::online::manifest::BackupKind) -> &'s
 /// message text is never printed; a variant this build does not name reports
 /// the general `corrupt` class.
 fn backup_error_class(error: &shamir_server::backup::BackupError) -> &'static str {
-    use shamir_server::backup::BackupError as Failure;
     match error {
         Failure::Io(_) => "io",
         Failure::SourceMissing(_) => "source_missing",

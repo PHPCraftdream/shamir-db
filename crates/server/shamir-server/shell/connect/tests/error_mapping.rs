@@ -134,3 +134,26 @@ fn not_found_text_names_a_resource() {
     assert_eq!(mapped.exit(), 5);
     assert_eq!(mapped.message(), "the addressed resource was not found");
 }
+
+/// A node-local online-copy I/O failure (`backup_io_error`) keeps its OWN typed
+/// error: its stable code, the server-error class (exit 5), and a fixed local
+/// message — the server's own `io::Error` text is never reproduced. Mutant:
+/// falling through to the generic `server_error` arm.
+#[test]
+fn backup_io_error_maps_to_the_typed_io_refusal() {
+    let mapped = request_error(ClientError::Db {
+        code: "backup_io_error".to_string(),
+        message: "hostile server text: /srv/secret path denied".to_string(),
+    });
+    assert_eq!(mapped, ShellError::BackupIo);
+    assert_eq!(mapped.code(), "backup_io_error");
+    assert_eq!(mapped.exit(), 5, "a server-side failure is exit 5");
+    assert_eq!(
+        mapped.message(),
+        "the online copy failed on an I/O error on the server node; its own message text is never reproduced"
+    );
+    assert!(
+        !mapped.message().contains("hostile"),
+        "the server text is never reproduced"
+    );
+}

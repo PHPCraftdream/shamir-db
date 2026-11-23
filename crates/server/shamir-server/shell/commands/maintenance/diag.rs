@@ -76,3 +76,7 @@ pub(in crate::shell) async fn durability(
         .insert(String::from("caveat"), json!(DURABILITY_NOTE));
     Ok(payload)
 }
+
+#[cfg(test)]
+#[path = "tests/hostile_projection_tests.rs"]
+mod hostile_projection_tests;

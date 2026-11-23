@@ -50,8 +50,14 @@ mod access_activity_mutations;
 mod access_activity_rights_gaps;
 #[path = "maintenance/backup.rs"]
 mod maintenance_backup;
+#[path = "maintenance/diag.rs"]
+mod maintenance_diag;
 #[path = "maintenance/explain.rs"]
 mod maintenance_explain;
+#[path = "maintenance/migrations.rs"]
+mod maintenance_migrations;
+#[path = "maintenance/policy.rs"]
+mod maintenance_policy;
 #[path = "maintenance/verify.rs"]
 mod maintenance_verify;
 #[path = "maintenance/versions.rs"]

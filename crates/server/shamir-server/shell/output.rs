@@ -123,6 +123,9 @@ pub(crate) enum ShellError {
     /// (R2d backup schedule state, R3 online export); never a placeholder
     /// success (`unsupported_prerequisite`).
     PendingCapability,
+    /// A node-local online-copy operation failed on I/O (destination setup or
+    /// the runner thread): `backup_io_error`.
+    BackupIo,
 }
 
 impl ShellError {
@@ -180,6 +183,7 @@ impl ShellError {
             ShellError::OnlineBackupFollowerReadOnly => "online_backup_follower_read_only",
             ShellError::SchemaMigrationFollowerReadOnly => "schema_migration_follower_read_only",
             ShellError::PendingCapability => "unsupported_prerequisite",
+            ShellError::BackupIo => "backup_io_error",
         }
     }
 
@@ -302,6 +306,9 @@ impl ShellError {
             ShellError::PendingCapability => {
                 "this command depends on a capability that is not part of this release and is never reported as a success"
             }
+            ShellError::BackupIo => {
+                "the online copy failed on an I/O error on the server node; its own message text is never reproduced"
+            }
         }
     }
 
@@ -334,7 +341,8 @@ impl ShellError {
             | ShellError::BackupInvalidDestination
             | ShellError::BackupUnavailable
             | ShellError::OnlineBackupFollowerReadOnly
-            | ShellError::SchemaMigrationFollowerReadOnly => 5,
+            | ShellError::SchemaMigrationFollowerReadOnly
+            | ShellError::BackupIo => 5,
             ShellError::Unsupported
             | ShellError::Plaintext
             | ShellError::Token

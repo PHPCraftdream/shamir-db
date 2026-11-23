@@ -261,6 +261,36 @@ fn missing_argument_is_a_usage_error() {
     );
 }
 
+/// A flag token is a usage error, not a path to verify: `--config` must never
+/// reach `verify_manifest` as a snapshot directory.
+#[test]
+fn backup_verify_rejects_a_flag_token() {
+    let _dir = TempDir::new().expect("tempdir");
+    let output = run(&["backup-verify", "--config", "server.ktav"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "exit code {:?}; stdout {} bytes, stderr {} bytes",
+        output.status.code(),
+        output.stdout.len(),
+        output.stderr.len(),
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must be empty; exit code {:?}; stdout {} bytes, stderr {} bytes",
+        output.status.code(),
+        output.stdout.len(),
+        output.stderr.len(),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("usage: shamir-server backup-verify SNAPSHOT"),
+        "stderr missing the fixed usage line; stdout {} bytes, stderr {} bytes",
+        output.stdout.len(),
+        output.stderr.len(),
+    );
+}
+
 #[test]
 fn extra_argument_is_a_usage_error() {
     let dir = TempDir::new().expect("tempdir");

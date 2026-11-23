@@ -404,6 +404,7 @@ fn server_code(code: &str) -> ShellError {
         "backup_already_running" => ShellError::BackupAlreadyRunning,
         "backup_invalid_destination" => ShellError::BackupInvalidDestination,
         "backup_unavailable" => ShellError::BackupUnavailable,
+        "backup_io_error" => ShellError::BackupIo,
         "online_backup_follower_read_only" => ShellError::OnlineBackupFollowerReadOnly,
         "schema_migration_follower_read_only" => ShellError::SchemaMigrationFollowerReadOnly,
         // The VICTIM side of a cooperative cancellation: this session's own
