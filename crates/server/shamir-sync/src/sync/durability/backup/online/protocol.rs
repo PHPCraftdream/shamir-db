@@ -11,8 +11,10 @@
 //! hooks; Sealing stays the reported stage through E including the
 //! residual pass.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -23,8 +25,9 @@ use super::copy_engine::test_seams;
 use super::copy_engine::{self, CopiedFile, CopyError, CopyOptions, CopyPassResult, SealGate};
 use super::manifest::{self, ConsistencySection, WalDirEntry, WalSection, WalSegmentEntry};
 use super::progress::{BackupProgress, BackupStage, CancelFlag};
+use super::snapshot_name;
 use super::wal_capture::{CapturedPoint, OnlineBackupPort, PortError, RepoSource};
-use crate::sync::durability::backup::{utc_timestamp, ManifestFileEntry};
+use crate::sync::durability::backup::ManifestFileEntry;
 
 /// One in-process backup permit (design 4.4 / D9): a second concurrent
 /// online backup is refused.
@@ -65,6 +68,17 @@ pub enum OnlineBackupFailure {
     Manifest(#[from] manifest::ManifestError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The DESTINATION side could not be prepared or published: the atomic
+    /// create of the snapshot child and the manifest / backup-metadata
+    /// publication. Kept apart from [`OnlineBackupFailure::Io`] so the
+    /// scheduled reason names a DESTINATION failure
+    /// (`destination-io-<kind>`) instead of looking like a generic io
+    /// error; it carries no path, so the rendering stays path-free.
+    #[error("destination io error: {source}")]
+    Dest {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("snapshot self-verification failed: {0}")]
     Verify(String),
     #[error("seal re-copy cap exceeded: {0}")]
@@ -105,18 +119,34 @@ pub struct SealRecopyCap {
     pub max_seconds: Option<u64>,
 }
 
+/// A failed run's partial-tree cleanup failure, reported SEPARATELY
+/// from the primary error: bounded and path-free by construction — it
+/// carries only the `io::ErrorKind` of the failed removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupFailure {
+    pub kind: ErrorKind,
+}
+
 /// Protocol failure carrying the stage it failed at.
 #[derive(Debug, thiserror::Error)]
 pub enum OnlineBackupError {
     #[error("another online backup is in progress")]
     Busy,
     #[error("backup cancelled at stage {stage:?}")]
-    Cancelled { stage: BackupStage },
+    Cancelled {
+        stage: BackupStage,
+        /// Failure of removing the owned partial destination, if any;
+        /// the cancellation stays the PRIMARY outcome.
+        cleanup: Option<CleanupFailure>,
+    },
     #[error("backup failed at stage {stage:?}")]
     Failed {
         stage: BackupStage,
         #[source]
         source: OnlineBackupFailure,
+        /// Failure of removing the owned partial destination, if any;
+        /// `source` stays the PRIMARY error.
+        cleanup: Option<CleanupFailure>,
     },
 }
 
@@ -124,10 +154,61 @@ impl OnlineBackupError {
     pub fn stage(&self) -> BackupStage {
         match self {
             OnlineBackupError::Busy => BackupStage::Preparing,
-            OnlineBackupError::Cancelled { stage } => *stage,
+            OnlineBackupError::Cancelled { stage, .. } => *stage,
             OnlineBackupError::Failed { stage, .. } => *stage,
         }
     }
+
+    /// Attach the cleanup failure of the owned partial destination to a
+    /// failed OR cancelled run; the primary outcome is unchanged. A no-op
+    /// on `Busy` (it owns no destination).
+    pub fn with_cleanup_failure(mut self, cleanup: CleanupFailure) -> Self {
+        match &mut self {
+            OnlineBackupError::Failed { cleanup: slot, .. }
+            | OnlineBackupError::Cancelled { cleanup: slot, .. } => *slot = Some(cleanup),
+            OnlineBackupError::Busy => {}
+        }
+        self
+    }
+
+    /// Stage plus a bounded reason: the rendering a SCHEDULED run stores
+    /// and logs. Never contains a filesystem path and never the OS error
+    /// text (no `Display` of a source chain, no `io::Error` message).
+    pub fn stage_and_reason(&self) -> String {
+        let mut rendered = format!("{}: {}", stage_word(self.stage()), self.reason_token());
+        if let Some(cleanup) = self.cleanup() {
+            rendered.push_str("; cleanup-failed-");
+            rendered.push_str(&kind_token(cleanup.kind));
+        }
+        rendered
+    }
+
+    /// The failed partial-tree removal, when one was attached.
+    fn cleanup(&self) -> Option<&CleanupFailure> {
+        match self {
+            OnlineBackupError::Failed { cleanup, .. }
+            | OnlineBackupError::Cancelled { cleanup, .. } => cleanup.as_ref(),
+            OnlineBackupError::Busy => None,
+        }
+    }
+
+    /// The fixed reason token of this failure (see
+    /// [`OnlineBackupError::stage_and_reason`]).
+    fn reason_token(&self) -> String {
+        match self {
+            OnlineBackupError::Busy => "busy".to_string(),
+            OnlineBackupError::Cancelled { .. } => "cancelled".to_string(),
+            OnlineBackupError::Failed { source, .. } => failure_token(source),
+        }
+    }
+}
+
+/// Stage plus a bounded `io-<kind>` reason for a failure that has no
+/// [`OnlineBackupError`] value (the scheduled spawn-failure path). Shares
+/// the SCHEDULED vocabulary with [`OnlineBackupError::stage_and_reason`];
+/// `kind_token` stays private here.
+pub fn stage_and_io_reason(stage: BackupStage, kind: ErrorKind) -> String {
+    format!("{}: io-{}", stage_word(stage), kind_token(kind))
 }
 
 /// Successful run summary.
@@ -142,7 +223,70 @@ fn failed(stage: BackupStage, source: impl Into<OnlineBackupFailure>) -> OnlineB
     OnlineBackupError::Failed {
         stage,
         source: source.into(),
+        cleanup: None,
     }
+}
+
+/// Lowercase stage word of the path-free rendering (never `{:?}` of the
+/// enum).
+fn stage_word(stage: BackupStage) -> &'static str {
+    match stage {
+        BackupStage::Preparing => "preparing",
+        BackupStage::Captured => "captured",
+        BackupStage::Copying => "copying",
+        BackupStage::Sealing => "sealing",
+        BackupStage::Verifying => "verifying",
+        BackupStage::Done => "done",
+        BackupStage::Failed => "failed",
+    }
+}
+
+/// Fixed reason token of a failure cause: a stage vocabulary, never an
+/// OS message or a path.
+fn failure_token(failure: &OnlineBackupFailure) -> String {
+    match failure {
+        OnlineBackupFailure::Port(_) => "port-failed".to_string(),
+        OnlineBackupFailure::Manifest(_) => "manifest-failed".to_string(),
+        OnlineBackupFailure::Verify(_) => "verify-failed".to_string(),
+        OnlineBackupFailure::RecopyCap(_) => "recopy-cap-exceeded".to_string(),
+        OnlineBackupFailure::Io(error) => format!("io-{}", kind_token(error.kind())),
+        OnlineBackupFailure::Dest { source } => {
+            format!("destination-io-{}", kind_token(source.kind()))
+        }
+        OnlineBackupFailure::Copy(error) => copy_token(error),
+    }
+}
+
+/// Fixed reason token of a copy failure, distinguishing a destination
+/// error from a source (`io-`) error.
+fn copy_token(error: &CopyError) -> String {
+    match error {
+        CopyError::Cancelled => "copy-cancelled".to_string(),
+        CopyError::Io { source, .. } => format!("copy-io-{}", kind_token(source.kind())),
+        CopyError::Dest { source, .. } => {
+            format!("copy-destination-io-{}", kind_token(source.kind()))
+        }
+        CopyError::RecopyCap(_) => "copy-recopy-cap".to_string(),
+        CopyError::AuditFilesUnstable { .. } => "copy-audit-files-unstable".to_string(),
+    }
+}
+
+/// Stable kebab-case spelling of an `io::ErrorKind`'s `Debug` name
+/// (`NotFound` -> `not-found`, `PermissionDenied` ->
+/// `permission-denied`); underscores are kept.
+fn kind_token(kind: ErrorKind) -> String {
+    let mut token = String::new();
+    for (index, character) in format!("{kind:?}").chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                token.push('-');
+            }
+            token.push(character.to_ascii_lowercase());
+        } else {
+            token.push(character);
+        }
+    }
+    token
 }
 
 /// Destination directory for a repo's WAL: the wal dir's path relative to
@@ -171,13 +315,24 @@ fn rel_slash(path: &Path) -> String {
 /// stage.
 fn copy_failed(stage: BackupStage, error: CopyError) -> OnlineBackupError {
     match error {
-        CopyError::Cancelled => OnlineBackupError::Cancelled { stage },
+        CopyError::Cancelled => OnlineBackupError::Cancelled {
+            stage,
+            cleanup: None,
+        },
         CopyError::RecopyCap(message) => failed(
             BackupStage::Sealing,
             OnlineBackupFailure::RecopyCap(message),
         ),
         other => failed(stage, other),
     }
+}
+
+/// A DESTINATION-side publication failure (the snapshot child's create,
+/// the manifest and backup-metadata files) as a stage-tagged protocol
+/// error: it is `OnlineBackupFailure::Dest`, never a generic io error, so
+/// `stage_and_reason` names the destination (`destination-io-<kind>`).
+fn dest_failed(stage: BackupStage, error: std::io::Error) -> OnlineBackupError {
+    failed(stage, OnlineBackupFailure::Dest { source: error })
 }
 
 /// One copy pass's shared context (keeps argument lists short): the
@@ -338,19 +493,32 @@ impl Drop for SealGuard<'_> {
 /// (a pre-existing destination tree is never touched) and releases the
 /// pins exactly once, so nothing leaks past a panic and there is no
 /// explicit release that could double-panic; the success path only sets
-/// `keep_dir` before dropping the guard. The per-repo `SealGuard`s live
-/// inside `run_steps` and drop before this guard, so no seal hold is
-/// still open at cleanup.
+/// `keep_dir` before dropping the guard. A failed removal is stored in
+/// `cleanup_failure`, which `run_online_backup` attaches to the PRIMARY
+/// error before reporting it. The per-repo `SealGuard`s live inside
+/// `run_steps` and drop before this guard, so no seal hold is still open
+/// at cleanup.
 struct RunCleanup<'a> {
     port: &'a dyn OnlineBackupPort,
     dir: &'a Path,
     keep_dir: bool,
+    /// Kind of a failed removal of the owned partial directory; read by
+    /// `run_online_backup` after the guard drops.
+    cleanup_failure: &'a Cell<Option<CleanupFailure>>,
 }
 
 impl Drop for RunCleanup<'_> {
     fn drop(&mut self) {
         if !self.keep_dir {
-            let _ = fs::remove_dir_all(self.dir);
+            #[cfg(test)]
+            let removed = test_seams::fire_remove_dir_all(self.dir)
+                .unwrap_or_else(|| fs::remove_dir_all(self.dir));
+            #[cfg(not(test))]
+            let removed = fs::remove_dir_all(self.dir);
+            if let Err(error) = removed {
+                self.cleanup_failure
+                    .set(Some(CleanupFailure { kind: error.kind() }));
+            }
         }
         self.port.release_pins();
     }
@@ -366,22 +534,26 @@ pub fn run_online_backup(
     options: &CopyOptions,
     cap: &SealRecopyCap,
 ) -> Result<BackupReport, OnlineBackupError> {
-    let dir = to.join(utc_timestamp());
+    let dir = to.join(snapshot_name());
     // Atomic create: on failure nothing is owned and nothing is deleted —
     // a pre-existing destination tree stays untouched; no cleanup guard is
     // armed, so there is nothing to drop and no pins to release (they are
     // acquired only inside `run_steps`). The failure is still RECORDED in
     // the progress like every other error path, so the registry never
-    // publishes a bare `Preparing` without a failed stage.
+    // publishes a bare `Preparing` without a failed stage. A failure here
+    // is a DESTINATION failure: the snapshot child is the protocol's own
+    // output, never the source.
     if let Err(error) = fs::create_dir(&dir) {
-        let error = failed(BackupStage::Preparing, error);
+        let error = dest_failed(BackupStage::Preparing, error);
         progress.record_failure(error.stage(), &error);
         return Err(error);
     }
+    let cleanup_failure: Cell<Option<CleanupFailure>> = Cell::new(None);
     let mut cleanup = RunCleanup {
         port,
         dir: &dir,
         keep_dir: false,
+        cleanup_failure: &cleanup_failure,
     };
     let result = run_steps(port, source_root, &dir, cancel, progress, options, cap);
     match result {
@@ -397,8 +569,14 @@ pub fn run_online_backup(
         Err(error) => {
             // The guard's Drop removes the owned partial directory and
             // releases the pins (also on the unwind path); the stage and
-            // the error are preserved for the failure report.
+            // the error are preserved for the failure report. A failed
+            // removal is attached SEPARATELY: the original error stays
+            // primary.
             drop(cleanup);
+            let error = match cleanup_failure.take() {
+                Some(cleanup) => error.with_cleanup_failure(cleanup),
+                None => error,
+            };
             progress.record_failure(error.stage(), &error);
             Err(error)
         }
@@ -418,6 +596,7 @@ fn run_steps(
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Preparing,
+            cleanup: None,
         });
     }
     let repos = port
@@ -436,6 +615,7 @@ fn run_steps(
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Captured,
+            cleanup: None,
         });
     }
     for repo in &repos {
@@ -452,6 +632,7 @@ fn run_steps(
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Copying,
+            cleanup: None,
         });
     }
     // Publish the real `Copying` phase to the server before the first
@@ -502,6 +683,7 @@ fn run_steps(
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Sealing,
+            cleanup: None,
         });
     }
     let recopy: SealRecopy = {
@@ -576,6 +758,7 @@ fn run_steps(
                     if cancel.is_cancelled() {
                         return Err(OnlineBackupError::Cancelled {
                             stage: BackupStage::Sealing,
+                            cleanup: None,
                         });
                     }
                     return Err(failed(BackupStage::Sealing, error));
@@ -623,6 +806,7 @@ fn run_steps(
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Verifying,
+            cleanup: None,
         });
     }
     port.begin_verify();
@@ -684,8 +868,9 @@ fn run_steps(
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
     manifest::write_manifest(dest_dir, &encoded)
-        .map_err(|error| failed(BackupStage::Verifying, error))?;
-    manifest::write_backup_meta(dest_dir).map_err(|error| failed(BackupStage::Verifying, error))?;
+        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
+    manifest::write_backup_meta(dest_dir)
+        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
     self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;

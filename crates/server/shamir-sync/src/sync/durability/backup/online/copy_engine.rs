@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::BACKUP_META_FILE_NAME;
+use super::manifest::{self, BACKUP_META_FILE_NAME};
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
@@ -63,17 +63,27 @@ pub struct CopyPassResult {
 }
 
 /// Copy failures. Sharing violations exhausted after the bounded retry
-/// surface as `Io` carrying the original error; a tripped seal gate
-/// surfaces as typed `RecopyCap` (the protocol maps it to
-/// `OnlineBackupFailure::RecopyCap` at `Sealing`). The bounded audit chain
-/// rounds of the data-directory pass fail typed when an archive keeps
-/// appearing behind the copy.
+/// surface as `Io` (source) or `Dest` (destination) carrying the
+/// original error; a tripped seal gate surfaces as typed `RecopyCap`
+/// (the protocol maps it to `OnlineBackupFailure::RecopyCap` at
+/// `Sealing`). The bounded audit chain rounds of the data-directory pass
+/// fail typed when an archive keeps appearing behind the copy.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyError {
     #[error("backup copy cancelled")]
     Cancelled,
     #[error("copy failed for {path}: {source}")]
     Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The DESTINATION side failed (create, write, fsync, parent
+    /// directory): kept distinct from [`CopyError::Io`] so a destination
+    /// error can never be mistaken for the tolerated vanished-SOURCE
+    /// race that `Io { NotFound }` encodes.
+    #[error("destination write failed for {path}: {source}")]
+    Dest {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -195,8 +205,17 @@ impl SealGate {
     }
 }
 
+/// Windows sharing violations retry on BOTH sides: a source open/read
+/// (`Io`) and a destination create/write/fsync (`Dest`) are equally
+/// transient while another process holds the file.
 fn is_sharing_violation(error: &CopyError) -> bool {
-    matches!(error, CopyError::Io { source, .. } if matches!(source.raw_os_error(), Some(32) | Some(33)))
+    let source = match error {
+        CopyError::Io { source, .. } | CopyError::Dest { source, .. } => source,
+        CopyError::Cancelled | CopyError::RecopyCap(_) | CopyError::AuditFilesUnstable { .. } => {
+            return false;
+        }
+    };
+    matches!(source.raw_os_error(), Some(32) | Some(33))
 }
 
 /// The gate's monotonic now: the test clock seam under `cfg(test)`
@@ -213,8 +232,20 @@ fn gate_now() -> Instant {
 
 /// Every engine I/O failure is typed `CopyError::Io` naming the path it
 /// was operating on — never string-erased through `io::Error::other`.
+/// Destination-side writes use [`dest_at`] instead, so a destination
+/// failure is never read as a vanished source.
 fn io_at(path: &Path, error: std::io::Error) -> CopyError {
     CopyError::Io {
+        path: path.to_path_buf(),
+        source: error,
+    }
+}
+
+/// Every destination-side write failure is typed `CopyError::Dest`
+/// naming the DESTINATION path it was writing — never the source, whose
+/// `Io { NotFound }` is the tolerated vanished-file race.
+fn dest_at(path: &Path, error: std::io::Error) -> CopyError {
+    CopyError::Dest {
         path: path.to_path_buf(),
         source: error,
     }
@@ -232,9 +263,11 @@ fn hex_encode(digest: &[u8]) -> String {
 /// module body lives in `tests/copy_seams.rs`). Compiled ONLY under
 /// `#[cfg(test)]` — no release build carries any of this code, and no
 /// production behaviour reads it. Each hook is a scoped thread-local
-/// cleared when its guard drops, so no state can leak between tests;
-/// the protocol runs on the caller's thread, so the hooks observe
-/// exactly the copy/hash calls of the run under test.
+/// cleared when its OWN guard drops — a guard never clears another
+/// hook's slot, so independently registered faults coexist and can be
+/// dropped in any order — and no state can leak between tests; the
+/// protocol runs on the caller's thread, so the hooks observe exactly
+/// the copy/hash calls of the run under test.
 #[cfg(test)]
 #[path = "tests/copy_seams.rs"]
 pub(crate) mod test_seams;
@@ -289,8 +322,9 @@ fn hash_file_inner(
 
 /// Copy `source` to `dest` through the fixed buffer, hashing the bytes
 /// written. Windows sharing violations are retried with a bounded
-/// delay (clamped to the gate's deadline). Only `CopyError::Io`
-/// sharing violations retry; caps and cancellation propagate typed.
+/// delay (clamped to the gate's deadline). Only `CopyError::Io` and
+/// `CopyError::Dest` sharing violations retry; caps and cancellation
+/// propagate typed.
 fn copy_with_retry(
     source: &Path,
     dest: &Path,
@@ -326,7 +360,7 @@ fn copy_once(
     gate: Option<&SealGate>,
 ) -> Result<(String, u64), CopyError> {
     let mut input = fs::File::open(source).map_err(|error| io_at(source, error))?;
-    let mut output = fs::File::create(dest).map_err(|error| io_at(source, error))?;
+    let mut output = fs::File::create(dest).map_err(|error| dest_at(dest, error))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; STREAM_BUFFER_SIZE];
     let mut size = 0u64;
@@ -354,7 +388,7 @@ fn copy_once(
         }
         output
             .write_all(&buf[..read])
-            .map_err(|error| io_at(source, error))?;
+            .map_err(|error| dest_at(dest, error))?;
         #[cfg(test)]
         test_seams::fire_after_first_write(source).map_err(|error| io_at(source, error))?;
         hasher.update(&buf[..read]);
@@ -364,24 +398,23 @@ fn copy_once(
         // Before and after the file fsync.
         gate.check(cancel)?;
     }
-    output.sync_all().map_err(|error| io_at(source, error))?;
+    output.sync_all().map_err(|error| dest_at(dest, error))?;
     if let Some(gate) = gate {
         gate.check(cancel)?;
     }
     Ok((hex_encode(&hasher.finalize()), size))
 }
 
-fn fsync_dir_best_effort(dir: &Path) {
-    #[cfg(unix)]
-    {
-        if let Ok(file) = fs::File::open(dir) {
-            let _ = file.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-    }
+/// Fsync one destination directory; a failure is [`CopyError::Dest`] naming
+/// the DIRECTORY (a destination failure, never a source one) and always
+/// propagates — never swallowed. `manifest::fsync_dest_dir` documents the
+/// tolerated filesystem-capability kinds and is the seam's fallback result.
+fn fsync_dir_fallible(dir: &Path) -> Result<(), CopyError> {
+    #[cfg(test)]
+    let result = test_seams::fire_fsync_dir(dir).unwrap_or_else(|| manifest::fsync_dest_dir(dir));
+    #[cfg(not(test))]
+    let result = manifest::fsync_dest_dir(dir);
+    result.map_err(|error| dest_at(dir, error))
 }
 
 fn is_regular_file(meta: &fs::Metadata) -> bool {
@@ -407,7 +440,9 @@ const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 /// Top-level audit chain files are skipped when `skip_audit_files` is set
 /// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
 /// clock are checked at every directory iteration — the listing is inside
-/// the re-copy budget.
+/// the re-copy budget. Every directory-entry and metadata failure is a
+/// typed [`CopyError::Io`]; only an entry that vanished before its
+/// metadata read (`NotFound`) is skipped as the documented source race.
 fn list_files(
     source_root: &Path,
     skip_top_level_dirs: &[&str],
@@ -424,13 +459,19 @@ fn list_files(
         } else if cancel.is_cancelled() {
             return Err(CopyError::Cancelled);
         }
-        let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
-            .map_err(|error| CopyError::Io {
-                path: dir.clone(),
-                source: error,
-            })?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .collect();
+        // EVERY directory-entry error is typed, naming the directory:
+        // a dropped entry would silently omit a file from the listing.
+        let mut entries: Vec<PathBuf> = Vec::new();
+        let read_dir = fs::read_dir(&dir).map_err(|error| CopyError::Io {
+            path: dir.clone(),
+            source: error,
+        })?;
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => entries.push(entry.path()),
+                Err(error) => return Err(io_at(&dir, error)),
+            }
+        }
         entries.sort();
         for entry in entries {
             if let Some(gate) = gate {
@@ -439,9 +480,22 @@ fn list_files(
             } else if cancel.is_cancelled() {
                 return Err(CopyError::Cancelled);
             }
-            let meta = match fs::symlink_metadata(&entry) {
+            // Test-only seam: an injected metadata RESULT for this entry
+            // REPLACES the result the listing consumes, so the injected
+            // failure travels the same match arm as a genuine one.
+            #[cfg(test)]
+            let meta_result = match test_seams::fire_symlink_metadata(&entry) {
+                Some(result) => result,
+                None => fs::symlink_metadata(&entry),
+            };
+            #[cfg(not(test))]
+            let meta_result = fs::symlink_metadata(&entry);
+            // Only an entry that VANISHED between the listing and this
+            // metadata read is tolerated; every other failure is typed.
+            let meta = match meta_result {
                 Ok(meta) => meta,
-                Err(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_at(&entry, error)),
             };
             if meta.is_dir() {
                 let at_top = entry.parent() == Some(source_root);
@@ -775,7 +829,10 @@ fn run_copy_pass_inner(
             .join("/");
         let dest_path = dest_root.join(rel);
         if let Some(parent) = dest_path.parent() {
-            if fs::create_dir_all(parent).is_ok() && !synced_dirs.contains(&parent.to_path_buf()) {
+            // A parent-directory failure is a DESTINATION error and
+            // always propagates: it can never be a vanished source.
+            fs::create_dir_all(parent).map_err(|error| dest_at(parent, error))?;
+            if !synced_dirs.contains(&parent.to_path_buf()) {
                 synced_dirs.push(parent.to_path_buf());
             }
         }
@@ -842,7 +899,7 @@ fn run_copy_pass_inner(
         if let Some(gate) = gate {
             gate.check(cancel)?;
         }
-        fsync_dir_best_effort(dir);
+        fsync_dir_fallible(dir)?;
         if let Some(gate) = gate {
             gate.check(cancel)?;
         }
@@ -850,7 +907,11 @@ fn run_copy_pass_inner(
     if let Some(gate) = gate {
         gate.check(cancel)?;
     }
-    fsync_dir_best_effort(dest_root);
+    // A pass that copied nothing (an empty WAL directory) never created
+    // its destination root: there are no new entries to make durable.
+    if dest_root.is_dir() {
+        fsync_dir_fallible(dest_root)?;
+    }
     if let Some(gate) = gate {
         gate.check(cancel)?;
     }

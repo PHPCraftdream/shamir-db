@@ -8,6 +8,8 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
+#[cfg(test)]
+use super::copy_engine::test_seams;
 use crate::sync::durability::backup::ManifestFileEntry;
 
 /// Current online-backup manifest format.
@@ -208,7 +210,16 @@ pub fn write_manifest(dest_dir: &Path, encoded: &str) -> std::io::Result<()> {
         file.write_all(encoded.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(&tmp, dest_dir.join("manifest.json"))?;
+    let target = dest_dir.join("manifest.json");
+    // Test-only seam: an injected result REPLACES the rename result the
+    // publication consumes, so the injected failure is classified by the
+    // protocol exactly like a genuine rename failure.
+    #[cfg(test)]
+    let renamed =
+        test_seams::fire_manifest_rename(&target).unwrap_or_else(|| fs::rename(&tmp, &target));
+    #[cfg(not(test))]
+    let renamed = fs::rename(&tmp, &target);
+    renamed?;
     fsync_dir(dest_dir)
 }
 
@@ -223,6 +234,38 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
         let _ = file.sync_all();
     }
     Ok(())
+}
+
+/// Fsync a destination directory so the entries created inside it are
+/// durable across a crash. Two kinds stay tolerated by design:
+/// `Unsupported` (the platform cannot fsync a directory at all) and
+/// `InvalidInput` (some filesystems, e.g. network/FUSE mounts, reject an
+/// fsync of a directory handle): failing the backup for them would make
+/// it impossible on such a filesystem while the published bytes are as
+/// durable as that filesystem offers. Every other failure propagates to
+/// the caller, which types it as a destination failure naming the
+/// DIRECTORY it could not sync.
+pub(crate) fn fsync_dest_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let result = fs::File::open(dir).and_then(|file| file.sync_all());
+    #[cfg(not(unix))]
+    let result: std::io::Result<()> = {
+        // Windows cannot open a directory handle for fsync.
+        let _ = dir;
+        Ok(())
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Manifest codec and file writes can fail on malformed input or storage errors.

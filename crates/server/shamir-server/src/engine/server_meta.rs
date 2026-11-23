@@ -12,6 +12,9 @@
 //!   read on startup to rehydrate, written every 60s by a background task —
 //!   see `server::launch`)
 //! - Install / boot timestamps
+//! - Backup staleness evidence, restart-independent: the last successful
+//!   online-backup copy stamp and the schedule's FIRST arming stamp (one row
+//!   each, epoch seconds; feeds `shamir_backup_last_success_timestamp_seconds`)
 //!
 //! Layout: ONE fjall keyspace `server_meta_v1` mapping `&str` (key name) →
 //! `&[u8]` (msgpack-encoded value). Each setter performs an atomic write
@@ -72,6 +75,16 @@ const KEY_TOKEN_KEY: &str = "token_key";
 /// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 const KEY_BACKUP_OWNER_ID: &str = "backup_owner_id_v1";
+/// Durable evidence of the last successful online-backup copy, stored as
+/// epoch SECONDS to match the exported `last_success_timestamp_seconds`
+/// series. Written at copy success — before retention — so a real success
+/// survives a restart. With no success at all the armed-at row below is the
+/// restart-independent evidence instead.
+const KEY_BACKUP_LAST_SUCCESS_UNIX_SECS: &str = "backup_last_success_unix_secs_v1";
+/// Durable FIRST arming of the backup schedule (epoch SECONDS): written once
+/// when a schedule is configured, removed when none is, so restarts before the
+/// first interval tick keep the original staleness age. A scrape never writes it.
+const KEY_BACKUP_ARMED_AT_UNIX_SECS: &str = "backup_armed_at_unix_secs_v1";
 const LOGIN_LISTENER_ID_PREFIX: &str = "http_login_listener_id:";
 
 // ---------------------------------------------------------------------------
@@ -432,6 +445,20 @@ impl ServerMetaStore {
             .insert(KEY_BACKUP_OWNER_ID.as_bytes(), id.as_slice())?;
         self.persist()?;
         Ok(id)
+    }
+
+    /// Last successful online-backup copy stamp, if the row was ever written.
+    ///
+    /// `None` means "no durable evidence yet" — never zero. Epoch SECONDS; the
+    /// `_unix_ns` spelling is the shared accessor name, not the unit.
+    pub(crate) fn backup_last_success_unix_ns(&self) -> Result<Option<u64>, MetaError> {
+        self.get(KEY_BACKUP_LAST_SUCCESS_UNIX_SECS)
+    }
+
+    /// First arming of the backup schedule, if a schedule ever armed here
+    /// (`None` = never armed, never zero). Epoch SECONDS.
+    pub(crate) fn backup_armed_at_unix_secs(&self) -> Result<Option<u64>, MetaError> {
+        self.get(KEY_BACKUP_ARMED_AT_UNIX_SECS)
     }
 
     /// Get or durably create the random identity for one configured HTTP login listener.
@@ -915,14 +942,35 @@ impl ServerMetaStore {
         self.persist()
     }
 
-    /// TEST-ONLY: overwrite the raw bytes stored under `KEY_BOOTSTRAP` with
-    /// garbage, bypassing the serde encode path (`put`) entirely, so the
-    /// next `read_blob::<PersistedBootstrap>` (and therefore
-    /// [`read_bootstrap_token_state`]) hits a REAL `rmp_serde::from_slice`
-    /// decode error — a genuine, reproducible metadata read failure, not a
-    /// mock. Used by the F-38 fault-injection test in
-    /// `src/tests/connection_tests.rs` to prove the fail-closed TTL gate
-    /// rejects a login when the underlying blob read errors.
+    /// Durably record the last successful online-backup copy stamp (epoch
+    /// SECONDS; [`Self::backup_last_success_unix_ns`] reads it at boot). Takes
+    /// `write_lock` like every other setter, keeping the one-`persist()` window.
+    pub(crate) fn store_backup_last_success_unix_ns(&self, unix_ns: u64) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.put(KEY_BACKUP_LAST_SUCCESS_UNIX_SECS, &unix_ns)?;
+        self.persist()
+    }
+
+    /// Durably record the schedule's FIRST arming stamp (epoch SECONDS); the
+    /// boot wiring writes it only while [`Self::backup_armed_at_unix_secs`] is absent.
+    pub(crate) fn store_backup_armed_at_unix_secs(&self, unix_secs: u64) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.put(KEY_BACKUP_ARMED_AT_UNIX_SECS, &unix_secs)?;
+        self.persist()
+    }
+
+    /// Drop the armed-at row (no schedule configured) so re-enabling starts a
+    /// fresh clock. An absent row is not an error.
+    pub(crate) fn remove_backup_armed_at_unix_secs(&self) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.meta.remove(KEY_BACKUP_ARMED_AT_UNIX_SECS.as_bytes())?;
+        self.persist()
+    }
+
+    /// TEST-ONLY: overwrite the raw bytes under `KEY_BOOTSTRAP` with garbage,
+    /// bypassing the `put` encode path, so the next
+    /// `read_blob::<PersistedBootstrap>` hits a REAL `rmp_serde` decode error.
+    /// Used by the F-38 fail-closed TTL-gate test.
     #[cfg(test)]
     pub(crate) fn corrupt_bootstrap_blob_for_test(&self) {
         self.meta

@@ -250,7 +250,7 @@ fn run(port: &FaultPort, source: &Path, to: &Path) -> Result<BackupReport, Onlin
 
 fn expect_failed(error: OnlineBackupError) -> (BackupStage, OnlineBackupFailure) {
     match error {
-        OnlineBackupError::Failed { stage, source } => (stage, source),
+        OnlineBackupError::Failed { stage, source, .. } => (stage, source),
         other => panic!("expected Failed, got: {other:?}"),
     }
 }
@@ -442,9 +442,11 @@ fn manifest_write_conflict_fails_verifying_and_removes_destination() {
     assert!(
         matches!(
             failure,
-            OnlineBackupFailure::Io(_) | OnlineBackupFailure::Manifest(_)
+            OnlineBackupFailure::Io(_)
+                | OnlineBackupFailure::Manifest(_)
+                | OnlineBackupFailure::Dest { .. }
         ),
-        "the manifest write conflict must surface as an io/manifest error: {failure:?}"
+        "the manifest write conflict must surface as an io/manifest/destination error: {failure:?}"
     );
     assert!(
         !to.join("manifest.json").exists(),

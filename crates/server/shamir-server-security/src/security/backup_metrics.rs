@@ -15,6 +15,15 @@
 //! window per phase as recorded by the engine (a last-window gauge, not an
 //! aggregate, unset until the first barrier completes); the pin duration
 //! and the WAL segment count have no observable source yet and stay unset.
+//!
+//! Four LAST-VALUE gauges (`SCRAPE_RENDERED_GAUGES`) are NOT stored in the
+//! shared recorder: `render_backup_scrape_gauges` appends them to the
+//! `/metrics` body from the scrape's OWN snapshot, like the per-server
+//! activity gauges (`export::activity`). A `gauge!(..).set(..)` is a plain
+//! last-writer-wins store, so two overlapping scrapes could otherwise apply in
+//! the reverse of their read order and an older scrape would republish an
+//! older value. Rendering from the snapshot makes each response internally
+//! consistent and independent of every other scrape.
 
 use std::sync::OnceLock;
 
@@ -80,6 +89,17 @@ pub struct BackupMetricsSnapshot {
     /// bytes/files, so the segment count is not yet measured.
     pub wal_segments_copied_total: Option<u64>,
 }
+
+/// The four LAST-VALUE gauges rendered per scrape by
+/// [`render_backup_scrape_gauges`]; they are never written to the shared
+/// recorder (see the module doc). Their `describe_gauge!` help text stays in
+/// [`register_backup_metrics`].
+pub(crate) const SCRAPE_RENDERED_GAUGES: [&str; 4] = [
+    "shamir_backup_last_success_timestamp_seconds",
+    "shamir_backup_scheduled_failure_streak",
+    "shamir_backup_last_duration_seconds",
+    "shamir_backup_duration_seconds",
+];
 
 static SOURCE: OnceLock<fn() -> BackupMetricsSnapshot> = OnceLock::new();
 
@@ -207,16 +227,16 @@ pub(crate) fn register_backup_metrics() {
     record_schedule_metrics(&BackupMetricsSnapshot::default());
 }
 
+/// The scheduled/retention subset that STAYS in the shared recorder. The
+/// LAST-VALUE gauges of [`SCRAPE_RENDERED_GAUGES`] are deliberately absent:
+/// the recorder path would emit a second, last-writer-wins copy the response
+/// body also carries (duplicate series) — they are rendered per scrape by
+/// [`render_backup_scrape_gauges`] instead.
 fn record_schedule_metrics(snap: &BackupMetricsSnapshot) {
-    metrics::gauge!("shamir_backup_last_success_timestamp_seconds")
-        .set(snap.last_success_timestamp_seconds as f64);
-    metrics::gauge!("shamir_backup_last_duration_seconds").set(snap.last_success_duration_seconds);
     metrics::gauge!("shamir_backup_last_bytes").set(snap.last_bytes as f64);
     for (result, count) in SCHEDULED_RESULTS.into_iter().zip(snap.scheduled_runs_total) {
         metrics::counter!("shamir_backup_scheduled_runs_total", "result" => result).absolute(count);
     }
-    metrics::gauge!("shamir_backup_scheduled_failure_streak")
-        .set(snap.scheduled_failure_streak as f64);
     metrics::gauge!("shamir_backup_schedule_enabled")
         .set(f64::from(u8::from(snap.schedule_enabled)));
     metrics::gauge!("shamir_backup_schedule_started_timestamp_seconds")
@@ -227,30 +247,34 @@ fn record_schedule_metrics(snap: &BackupMetricsSnapshot) {
     metrics::gauge!("shamir_backup_retention_untouched").set(snap.retention_untouched as f64);
 }
 
-/// Per-scrape rendering: read the owner's snapshot and raise the recorder.
-pub(crate) fn record_backup_metrics() {
-    let Some(source) = SOURCE.get() else {
-        return;
-    };
-    let snap = source();
-    record_schedule_metrics(&snap);
+/// Read the owner-installed snapshot for THIS scrape. `None` while no owner is
+/// installed (a process that never booted a server, or a test harness) — the
+/// caller then renders and records nothing for the backup family.
+pub(crate) fn backup_scrape_snapshot() -> Option<BackupMetricsSnapshot> {
+    let source = SOURCE.get().copied()?;
+    Some(source())
+}
+
+/// Per-scrape recorder update of every backup series EXCEPT the four
+/// LAST-VALUE gauges of [`SCRAPE_RENDERED_GAUGES`], which
+/// [`render_backup_scrape_gauges`] renders from this same snapshot straight
+/// into the response body.
+pub(crate) fn record_backup_metrics(snap: &BackupMetricsSnapshot) {
+    record_schedule_metrics(snap);
 
     metrics::counter!("shamir_backup_started_total", "kind" => "online")
         .absolute(snap.started_total);
     metrics::counter!("shamir_backup_completed_total", "kind" => "online")
         .absolute(snap.completed_total);
-    for (stage, count) in snap.failed_total_by_stage {
+    for (stage, count) in &snap.failed_total_by_stage {
         metrics::counter!(
             "shamir_backup_failed_total",
-            "kind" => "online", "stage" => stage
+            "kind" => "online", "stage" => stage.clone()
         )
-        .absolute(count);
+        .absolute(*count);
     }
     metrics::gauge!("shamir_backup_active").set(u8::from(snap.active) as f64);
     metrics::gauge!("shamir_backup_bytes_copied").set(snap.bytes_copied_total as f64);
-    if let Some(seconds) = snap.last_duration_seconds {
-        metrics::gauge!("shamir_backup_duration_seconds").set(seconds);
-    }
     // Observable-only emission: a barrier/pin/segment value the backup step
     // cannot measure is never rendered as a fabricated zero.
     if let Some(seconds) = snap.writer_block_capture_seconds {
@@ -265,4 +289,30 @@ pub(crate) fn record_backup_metrics() {
     if let Some(segments) = snap.wal_segments_copied_total {
         metrics::counter!("shamir_backup_wal_segments_copied_total").absolute(segments);
     }
+}
+
+/// Render the four LAST-VALUE gauges of [`SCRAPE_RENDERED_GAUGES`] in
+/// Prometheus text format from THIS scrape's snapshot, ready to append after
+/// the global recorder's render output (the `render_activity_series`
+/// precedent). Exactly one `# TYPE` line per emitted series; nothing here
+/// touches the shared recorder, so no second copy can exist.
+///
+/// `shamir_backup_duration_seconds` is observable-only, the same rule the
+/// recorder path used: it is omitted until the first successful copy of the
+/// process supplies a duration (`last_duration_seconds` is `None`).
+pub(crate) fn render_backup_scrape_gauges(snap: &BackupMetricsSnapshot) -> String {
+    let [last_success, streak, last_duration, duration] = SCRAPE_RENDERED_GAUGES;
+    let mut out = String::new();
+    push_scrape_gauge(&mut out, last_success, snap.last_success_timestamp_seconds);
+    push_scrape_gauge(&mut out, streak, snap.scheduled_failure_streak);
+    push_scrape_gauge(&mut out, last_duration, snap.last_success_duration_seconds);
+    if let Some(seconds) = snap.last_duration_seconds {
+        push_scrape_gauge(&mut out, duration, seconds);
+    }
+    out
+}
+
+/// One typed unlabeled gauge series: the `# TYPE` line then the sample line.
+fn push_scrape_gauge(out: &mut String, name: &str, value: impl std::fmt::Display) {
+    out.push_str(&format!("# TYPE {name} gauge\n{name} {value}\n"));
 }

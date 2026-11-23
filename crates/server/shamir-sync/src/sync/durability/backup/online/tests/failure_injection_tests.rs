@@ -591,10 +591,15 @@ fn d_store_copy_open_failure_at_destination_fails_at_copying_and_cleans_up() {
     // engine's File::create on that exact destination path errors
     // (is-a-directory) before copying any bytes.
     let dest_for_hook = to.clone();
+    let dest_path = Arc::new(Mutex::new(None::<PathBuf>));
+    let dest_path_for_hook = Arc::clone(&dest_path);
     let port = InjectPort::single_repo(&source).with_capture_hook(move |_| {
         let snapshot = snapshot_dir_of(&dest_for_hook);
-        fs::create_dir_all(snapshot.join("repos/alpha/store.bin"))
-            .expect("plant destination blocker directory");
+        // The destination file the copy pass will open: the same
+        // `<snapshot>/repos/alpha/store.bin` path planted below.
+        let store_dest = snapshot.join("repos/alpha/store.bin");
+        *dest_path_for_hook.lock().expect("dest path lock") = Some(store_dest.clone());
+        fs::create_dir_all(store_dest).expect("plant destination blocker directory");
     });
     let cancel = CancelFlag::default();
     let (result, progress) = run(&port, &source, &to, &cancel);
@@ -605,13 +610,17 @@ fn d_store_copy_open_failure_at_destination_fails_at_copying_and_cleans_up() {
     else {
         panic!("expected Failed, got {error:?}");
     };
-    let OnlineBackupFailure::Copy(CopyError::Io { path, .. }) = failure else {
-        panic!("the failure must be a typed copy error, got {failure:?}");
+    let OnlineBackupFailure::Copy(CopyError::Dest { path, .. }) = failure else {
+        panic!("the failure must be a typed copy-destination error, got {failure:?}");
     };
+    let expected_dest = dest_path
+        .lock()
+        .expect("dest path lock")
+        .clone()
+        .expect("the capture hook must have recorded the destination path");
     assert_eq!(
-        path,
-        &source.join("repos/alpha/store.bin"),
-        "CopyError::Io must name the source path whose destination open failed"
+        path, &expected_dest,
+        "CopyError::Dest must name the destination file whose open failed"
     );
     assert_cleanup(
         &to,
@@ -701,7 +710,10 @@ fn f_manifest_write_failure_fails_at_verifying_with_no_success_report() {
     // DIRECTORY at the destination, and `write_manifest` writes its tmp
     // file at exactly that name before renaming to `manifest.json`, so
     // the create of the tmp file itself fails (is-a-directory) — no
-    // manifest, and no success report, can ever be written.
+    // manifest, and no success report, can ever be written. The failure
+    // is a DESTINATION failure (`OnlineBackupFailure::Dest`), never a
+    // generic io error: the published manifest is the protocol's own
+    // output, not anything read from the source.
     write_file(&source.join("manifest.json.tmp/blocker"), b"blocker");
     let before = snapshot_dir(&source);
     let port = InjectPort::two_repos(&source);
@@ -714,11 +726,24 @@ fn f_manifest_write_failure_fails_at_verifying_with_no_success_report() {
         &progress,
         BackupStage::Verifying,
         &error,
-        "io error:",
+        "destination io error:",
     );
-    let OnlineBackupFailure::Io(_) = failure else {
-        panic!("the manifest failure must surface its io error, got {failure:?}");
+    let OnlineBackupFailure::Dest { source: io } = failure else {
+        panic!("the manifest failure must surface as a DESTINATION io failure, got {failure:?}");
     };
+    assert!(
+        !io.to_string().is_empty(),
+        "the destination failure must carry the io cause"
+    );
+    let rendered = error.stage_and_reason();
+    assert!(
+        rendered.starts_with("verifying: destination-io-"),
+        "the scheduled reason must name the destination, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains('/') && !rendered.contains('\\'),
+        "the rendering must stay path-free: {rendered}"
+    );
     assert_source_untouched(&before, &source);
 }
 
@@ -739,7 +764,8 @@ fn g_cancel_at_the_captured_boundary_cleans_up_and_releases_pins() {
         matches!(
             error,
             OnlineBackupError::Cancelled {
-                stage: BackupStage::Captured
+                stage: BackupStage::Captured,
+                ..
             }
         ),
         "expected Cancelled(Captured), got {error:?}"
@@ -784,7 +810,8 @@ fn g_cancel_inside_end_seal_fails_at_sealing_cleans_up_and_releases_pins() {
         matches!(
             error,
             OnlineBackupError::Cancelled {
-                stage: BackupStage::Sealing
+                stage: BackupStage::Sealing,
+                ..
             }
         ),
         "expected Cancelled(Sealing), got {error:?}"
