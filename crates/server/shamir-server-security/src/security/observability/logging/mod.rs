@@ -64,6 +64,10 @@ const BURST_FLUSH_THRESHOLD: usize = 256 * 1024;
 /// Per-namespace overrides can be applied via [`set_namespace_level`].
 pub mod audit_appender;
 
+mod sink_guard;
+
+pub use sink_guard::{boot_logging, sink_mode_for, validate_sink_path, LogSinkError, SinkMode};
+
 pub mod ns {
     /// Access control / permissions enforcement (Shomer).
     pub const SHOMER: &str = "shomer";
@@ -390,23 +394,23 @@ pub fn reload(cfg: &LoggingConfig) {
     set_mask(LogMask::new(parse_level_filter(&cfg.level)));
 }
 
-/// Initialise the global tracing subscriber.
+/// Initialise the global tracing subscriber with an explicit sink mode.
 ///
-/// * `cfg.file == None` → non-blocking stdout (slice 1).
-/// * `cfg.file == Some(path)` → batched file appender with periodic flush.
-///
-/// The boot default for the runtime mask comes from `cfg.level`. The mask
-/// can be changed at runtime via [`set_mask`] / [`set_namespace_level`].
-///
-/// Returns a [`LogGuard`] the caller must keep alive for the whole process.
-pub fn init(cfg: &LoggingConfig) -> LogGuard {
+/// [`SinkMode::StdoutOnly`] takes exactly the `cfg.file == None` branch: the
+/// configured path is never opened, created or stat-ed.
+pub(crate) fn init_for(cfg: &LoggingConfig, sink: SinkMode) -> LogGuard {
     // Set the boot mask from config level.
     let boot_mask = LogMask::new(parse_level_filter(&cfg.level));
     set_mask(boot_mask);
 
     let mask_filter = MaskFilter;
 
-    if let Some(ref path) = cfg.file {
+    let configured_file = match sink {
+        SinkMode::Config => cfg.file.as_deref(),
+        SinkMode::StdoutOnly => None,
+    };
+
+    if let Some(path) = configured_file {
         let p = Path::new(path);
         let (sender, guard) = match batched_file_writer(p, cfg.flush_interval_ms) {
             Ok(pair) => pair,

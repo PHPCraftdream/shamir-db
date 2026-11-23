@@ -432,6 +432,9 @@
 //! ```text
 
 pub mod batch;
+// Shape keys live here (not in the instance layer) so `query::batch` can
+// reach them without an upward edge.
+pub mod shapes;
 // #1548 S1: the evaluation leaf lives in `shamir-engine-query`; re-exported
 // so every `crate::query::{admin, auth, filter, read, write}::…` path holds.
 #[doc(no_inline)]

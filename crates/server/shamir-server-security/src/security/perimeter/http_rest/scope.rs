@@ -272,6 +272,9 @@ fn classify_batch(
             // tokens must not list activity or cancel an execution,
             // transaction or cursor by ID.
             | BatchOp::ListActivity(_)
+            // Shape statistics are a SCRAM-session surface: tokens may neither list nor wipe them.
+            | BatchOp::ListShapeStats(_)
+            | BatchOp::ResetShapeStats(_)
             | BatchOp::CancelRequest(_)
             | BatchOp::CancelTx(_)
             | BatchOp::CancelCursorAdmin(_)

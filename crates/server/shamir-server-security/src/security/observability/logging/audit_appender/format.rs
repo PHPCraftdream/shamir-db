@@ -4,7 +4,7 @@ use super::AuditEntry;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 /// Encode a free-text field for embedding in the tab-separated log line.
-pub(super) fn escape_field(s: &str) -> String {
+fn escape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

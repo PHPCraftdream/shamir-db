@@ -106,7 +106,14 @@ fn service_main_inner() -> anyhow::Result<()> {
             );
         }
     }
-    let _log_guard = crate::logging::init(&config.logging);
+    // The SAME boot path as the foreground server: refuse a sink that would
+    // land in the audit-log namespace, then install the subscriber. The
+    // service is always the server path, so it always honours `logging.file`.
+    let _log_guard = crate::logging::boot_logging(
+        &config.logging,
+        &config.data_dir,
+        crate::logging::SinkMode::Config,
+    )?;
 
     // Shutdown signal: the SCM control handler signals this Notify when
     // Stop or Shutdown is requested.

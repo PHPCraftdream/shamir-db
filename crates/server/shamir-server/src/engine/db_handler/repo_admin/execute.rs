@@ -5,6 +5,7 @@ use shamir_connect::server::session::Session;
 
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::admin::activity::{ListActivityReq, RequestExecId};
+use shamir_query_types::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
 use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::wire::CursorId;
 use shamir_query_types::wire::DbResponse;
@@ -61,6 +62,11 @@ impl ShamirDbHandler {
         let mut single_cancel: Option<RequestExecId> = None;
         let mut single_cancel_tx: Option<u64> = None;
         let mut single_cancel_cursor: Option<CursorId> = None;
+        // R4b step 4 — the shape-statistics control ops ride the same
+        // standalone, non-transactional form rules as the activity listing
+        // and the cancels.
+        let mut single_list_shapes: Option<ListShapeStatsReq> = None;
+        let mut single_reset_shapes: Option<ResetShapeStatsReq> = None;
         // R4b-1 — classification rides the same walk: static
         // discriminant names only. Vocabulary: a homogeneous batch keeps
         // its exact `activity_name` (`read` / `write` / `admin:<op>`);
@@ -89,6 +95,11 @@ impl ShamirDbHandler {
                     BatchOp::CancelRequest(_) => Some("CancelRequest"),
                     BatchOp::CancelTx(_) => Some("CancelTx"),
                     BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
+                    // R4b step 4: a shape listing or wipe is never
+                    // transactional and never nested (it addresses
+                    // node-local telemetry, not the batch's data view).
+                    BatchOp::ListShapeStats(_) => Some("ListShapeStats"),
+                    BatchOp::ResetShapeStats(_) => Some("ResetShapeStats"),
                     _ => None,
                 };
                 if let Some(name) = control_op {
@@ -103,6 +114,11 @@ impl ShamirDbHandler {
                         BatchOp::CancelRequest(_)
                             | BatchOp::CancelTx(_)
                             | BatchOp::CancelCursorAdmin(_)
+                            // A reset mutates local registry state, so it
+                            // carries the cancels' no-conditions rule; a
+                            // listing follows `ListActivity` and may carry
+                            // `when`/`after` like any other single op.
+                            | BatchOp::ResetShapeStats(_)
                     ) && (visit.entry.when.is_some() || !visit.entry.after.is_empty())
                     {
                         Some("does not support execution conditions or dependencies")
@@ -129,6 +145,14 @@ impl ShamirDbHandler {
                     }
                     BatchOp::CancelCursorAdmin(id) => {
                         single_cancel_cursor = Some(*id);
+                        None
+                    }
+                    BatchOp::ListShapeStats(req) => {
+                        single_list_shapes = Some(req.clone());
+                        None
+                    }
+                    BatchOp::ResetShapeStats(req) => {
+                        single_reset_shapes = Some(req.clone());
                         None
                     }
                     BatchOp::Batch(sub) => sub.batch.visibility_wait,
@@ -270,7 +294,18 @@ impl ShamirDbHandler {
 
             // Listing is tracked but never parks behind the shared byte budget.
             // Other requests register first so operators can see and wake them.
-            let needs_budget = single_activity.is_none() && self.byte_budget.cap().is_some();
+            // R4b step 4: the shape listing and the shape reset follow the
+            // same rule — both address node-local telemetry (a bounded
+            // in-memory snapshot, or one atomic wipe) and neither may be
+            // held behind a saturated data-path budget. Only the cancel
+            // family is a `control_op` for the encoded-result cap, because
+            // its refusal envelope must reach saturated work; a shape page
+            // stays bounded by the caller's own `max_result_size` exactly
+            // like `ListActivity`.
+            let needs_budget = single_activity.is_none()
+                && single_list_shapes.is_none()
+                && single_reset_shapes.is_none()
+                && self.byte_budget.cap().is_some();
             if needs_budget {
                 budget_guard = self
                     .byte_budget
@@ -282,6 +317,32 @@ impl ShamirDbHandler {
             } else if let Some(req) = single_activity {
                 let response = self
                     .list_activity(session, db_name, &req, Some(exec_id))
+                    .await;
+                if in_flight.finish() {
+                    response
+                } else {
+                    error_response(&BatchError::Cancelled)
+                }
+            } else if let Some(req) = single_list_shapes {
+                // Read-only, local: no node-mode gate (the registry is
+                // in-memory per-repository telemetry, `is_write() == false`),
+                // exactly like `ListActivity`.
+                let response = self.list_shape_stats(session, db_name, &req).await;
+                if in_flight.finish() {
+                    response
+                } else {
+                    error_response(&BatchError::Cancelled)
+                }
+            } else if let Some(req) = single_reset_shapes {
+                // One in-memory wipe, gated by the same completion shape as
+                // the listing above: the reset claims the commit slot before
+                // it touches the registry, so a cancellation that already
+                // won is answered `cancelled` and nothing is wiped, while a
+                // cancellation arriving after the claim loses to
+                // `finish()`. No node-mode gate for the same reason as the
+                // listing above.
+                let response = self
+                    .reset_shape_stats(session, db_name, &req, in_flight.cancel_handle())
                     .await;
                 if in_flight.finish() {
                     response

@@ -45,6 +45,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
         params: &empty_params,
         result_encoding: ResultEncoding::Name,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result = runner
         .run(
@@ -74,6 +75,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
         params: &empty_params2,
         result_encoding: ResultEncoding::Name,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result = runner
         .run("q", &read_entry, &shamir_types::types::common::new_map())
@@ -125,6 +127,7 @@ async fn insert_returning_id_encoding_yields_id_bytes() {
         params: &empty_params,
         result_encoding: ResultEncoding::Id,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result_id = runner
         .run(
@@ -206,6 +209,7 @@ async fn insert_returning_id_vs_name_encoding_parity() {
         params: &params,
         result_encoding: ResultEncoding::Name,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result_name = runner_name
         .run("ins", &entry, &shamir_types::types::common::new_map())
@@ -249,6 +253,7 @@ async fn insert_returning_id_vs_name_encoding_parity() {
         params: &params2,
         result_encoding: ResultEncoding::Id,
         scope: &ExecScope::from_duration(&BatchLimits::default(), std::time::Duration::MAX),
+        pending_shape: None,
     };
     let result_id = runner_id
         .run("ins", &entry2, &shamir_types::types::common::new_map())

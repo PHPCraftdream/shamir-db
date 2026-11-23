@@ -40,6 +40,7 @@ use shamir_server::backup;
 use shamir_server::backup::BackupError as Failure;
 use shamir_server::config::Config;
 use shamir_server::doctor;
+use shamir_server::logging::sink_mode_for;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
@@ -487,7 +488,45 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             );
         }
     }
-    let _log_guard = shamir_server::logging::init(&config.logging);
+    // Offline subcommands take the data-directory lock (or refuse it) and must
+    // not create any file before their preconditions and their lock hold, so
+    // they get no file sink. `Run` / `None` are the server path.
+    //
+    // Exhaustive on purpose — no `_` arm and no `matches!`: a new `Subcmd`
+    // variant must state which sink it gets instead of silently inheriting
+    // one (a compile error is the point).
+    //
+    // The `FormatMigrate`, `Shell` and `BackupVerify` arms below are
+    // UNREACHABLE for this selection — all three return earlier in this
+    // function — and are listed only to keep the match exhaustive.
+    let offline = match cli.command {
+        Some(
+            Subcmd::Token { .. }
+            | Subcmd::Restore { .. }
+            | Subcmd::Backup { .. }
+            | Subcmd::LogicalExport(_)
+            | Subcmd::LogicalImport(_)
+            | Subcmd::ReplicationSeedExport { .. }
+            | Subcmd::ReplicationSeedInstall { .. }
+            | Subcmd::ReplicationSeedVerify { .. }
+            | Subcmd::AccessTree { .. }
+            | Subcmd::Service { .. }
+            | Subcmd::Doctor { .. }
+            | Subcmd::FormatMigrate(_)
+            | Subcmd::BackupVerify { .. }
+            | Subcmd::Shell,
+        ) => true,
+        Some(Subcmd::Run { .. }) | None => false,
+    };
+    // The ONE boot path for both server entries: it refuses a sink that would
+    // land in the audit-log namespace (nothing is opened for a refused sink),
+    // then installs the subscriber. `SinkMode::StdoutOnly` — every offline
+    // command — never validates, opens, creates or stat-s the path at all.
+    let _log_guard = shamir_server::logging::boot_logging(
+        &config.logging,
+        &config.data_dir,
+        sink_mode_for(offline),
+    )?;
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.
