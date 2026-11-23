@@ -82,7 +82,10 @@ pub use crate::security::backup_metrics::{install_backup_metrics_source, BackupM
 pub use export::activity::ActivityMetricsSnapshot;
 pub use export::activity::LoadMetricsSnapshot;
 
-use crate::security::backup_metrics::{record_backup_metrics, register_backup_metrics};
+use crate::security::backup_metrics::{
+    backup_scrape_snapshot, record_backup_metrics, register_backup_metrics,
+    render_backup_scrape_gauges,
+};
 use durability_export::{record_durability_metrics, register_durability_metrics};
 use export::activity::{render_activity_series, render_load_series, ActivitySource, LoadSource};
 use export::functions::{record_functions_metrics, register_functions_metrics};
@@ -639,7 +642,16 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
             }
             record_functions_metrics();
             record_replication_metrics();
-            record_backup_metrics();
+            // ONE snapshot per scrape for the whole backup family: the
+            // counters/active/bytes go through the shared recorder, while the
+            // four LAST-VALUE gauges are rendered from this same snapshot
+            // straight into the body below (`render_backup_scrape_gauges`).
+            // They are never stored in the shared recorder, so an older
+            // overlapping scrape cannot republish an older value.
+            let backup_snapshot = backup_scrape_snapshot();
+            if let Some(snapshot) = backup_snapshot.as_ref() {
+                record_backup_metrics(snapshot);
+            }
             // R4b-1: the four `shamir_active_*` gauges are rendered from
             // THIS server's per-state source and appended after the
             // process-global recorder's text. They never go through the
@@ -653,6 +665,14 @@ async fn metrics_handler(State(s): State<AppState>) -> Response {
                 s.state.load_snapshot(),
                 s.byte_budget.as_ref(),
             );
+            if let Some(snapshot) = backup_snapshot.as_ref() {
+                // A leading newline if the previous body did not end with one,
+                // so the first appended `# TYPE` line starts on its own line.
+                if !rendered.ends_with('\n') {
+                    rendered.push('\n');
+                }
+                rendered.push_str(&render_backup_scrape_gauges(snapshot));
+            }
             (StatusCode::OK, rendered).into_response()
         }
         None => (

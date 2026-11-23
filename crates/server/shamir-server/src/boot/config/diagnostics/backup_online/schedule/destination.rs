@@ -24,6 +24,7 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_preflight(
         if cancel.is_cancelled() {
             Err(OnlineBackupError::Cancelled {
                 stage: BackupStage::Preparing,
+                cleanup: None,
             })
         } else {
             Ok(())
@@ -32,6 +33,7 @@ pub(in crate::boot::config::diagnostics::backup_online) fn scheduled_preflight(
     let invalid = |error| OnlineBackupError::Failed {
         stage: BackupStage::Preparing,
         source: OnlineBackupFailure::Io(error),
+        cleanup: None,
     };
     check_cancel()?;
     let canonical = to.canonicalize().map_err(invalid)?;
