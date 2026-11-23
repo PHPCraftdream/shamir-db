@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use crate::query::batch::ExecScope;
 use async_trait::async_trait;
 use shamir_query_types::batch::{
-    BatchError, BatchLimits, BatchRequest, ExecPolicy, RequestMetadata,
+    BatchError, BatchLimits, BatchOp, BatchRequest, BatchTreeVisitor, ExecPolicy, RequestMetadata,
 };
 use shamir_tx::CancelHandle;
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
@@ -83,6 +83,21 @@ pub struct Authorized<'a> {
     cancel: Option<Arc<CancelHandle>>,
 }
 
+/// The ONE table-refusal constructor of this layer.
+///
+/// A TABLE-scoped READ that cannot be served answers exactly this, whether
+/// the table is ABSENT from the catalogue or EXISTS but is closed to the
+/// actor: same `unknown_table` code, same fixed text, empty alias. Nothing
+/// here names the table, its repository, the requesting alias or the ACL
+/// decision that produced the refusal, so the refusal is not an existence
+/// oracle. Every refusal site in `crate::query::batch`
+/// ([`Authorized::authorize`], `validate_tables`, the runtime
+/// re-resolution and the subscription source check) calls THIS function, so
+/// the texts cannot drift apart again.
+pub(in crate::query::batch) fn table_unavailable() -> BatchError {
+    BatchError::query_coded("", "unknown_table", "table is unavailable")
+}
+
 impl<'a> Authorized<'a> {
     /// Run authorization and mint a token on success.
     ///
@@ -95,18 +110,25 @@ impl<'a> Authorized<'a> {
     ///    the SAME `gate`. Pairs are deduplicated (a batch touching the
     ///    same table N times pays the gate cost once), mirroring the
     ///    inline ACL cache `tx_execute_as` used to keep by hand.
+    /// 3. Every `Subscribe` source (also at any depth) for
+    ///    [`Action::Read`] on its table — subscription sources carry no
+    ///    entry in the metadata's pair list, so without this they would be
+    ///    granted without a check. A denial answers the fixed table refusal
+    ///    (see below), so it matches what an absent source answers.
     ///
     /// Returns `BatchError::QueryError` on the first denial:
     /// - the database check keeps `code: Some("access_denied")` — it runs
     ///   before any table is resolved and therefore discloses nothing about
     ///   one;
     /// - a denied `(Action::Read, ResourcePath::Table { .. })` answers
-    ///   `code: Some("unknown_table")` instead — the SAME code every read
-    ///   path answers for an absent table. This is the no-existence-oracle
-    ///   rule: the table ACL is open by default for a name with no
-    ///   catalogue record, so a table-Read denial is only reachable for a
-    ///   table that EXISTS, and replying `access_denied` there would let an
-    ///   unauthorized caller tell a closed table from an absent one;
+    ///   [`table_unavailable`] instead — the SAME `unknown_table` code and
+    ///   the SAME fixed `"table is unavailable"` text every read path
+    ///   answers for an absent table. This is the no-existence-oracle rule:
+    ///   the table ACL is open by default for a name with no catalogue
+    ///   record, so a table-Read denial is only reachable for a table that
+    ///   EXISTS, and replying `access_denied` (or any diagnostic echoing
+    ///   the name) there would let an unauthorized caller tell a closed
+    ///   table from an absent one;
     /// - every other table action (writes/DDL) keeps `access_denied`: that
     ///   rule masks existence on READS only.
     pub async fn authorize(
@@ -122,14 +144,35 @@ impl<'a> Authorized<'a> {
         let metadata = RequestMetadata::collect(&request.queries, db_name);
         for (action, path) in &metadata.required_access {
             gate.check(&actor, path, *action).await.map_err(|e| {
-                let code = if *action == Action::Read && matches!(path, ResourcePath::Table { .. })
-                {
-                    "unknown_table"
+                if *action == Action::Read && matches!(path, ResourcePath::Table { .. }) {
+                    table_unavailable()
                 } else {
-                    "access_denied"
-                };
-                BatchError::query_coded("", code, e.to_string())
+                    BatchError::query_coded("", "access_denied", e.to_string())
+                }
             })?;
+        }
+
+        // Subscription sources carry no `required_access` entry
+        // (`BatchOp::required_access` answers `None` for `Subscribe`), so a
+        // source closed to the actor would otherwise be handed a
+        // subscription grant. Classify every source here, before any
+        // manager is resolved, with the SAME fixed refusal an absent source
+        // answers in the runner — a closed source and an absent one must
+        // stay indistinguishable.
+        for visit in BatchTreeVisitor::new(&request.queries) {
+            let BatchOp::Subscribe(op) = &visit.entry.op else {
+                continue;
+            };
+            for source in &op.subscribe {
+                let path = ResourcePath::Table {
+                    db: db_name.to_string(),
+                    store: source.table.repo.clone(),
+                    table: source.table.table.clone(),
+                };
+                gate.check(&actor, &path, Action::Read)
+                    .await
+                    .map_err(|_| table_unavailable())?;
+            }
         }
 
         Ok(Self {

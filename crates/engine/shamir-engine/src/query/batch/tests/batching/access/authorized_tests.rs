@@ -10,6 +10,7 @@
 //! that `execute_batch` genuinely executes against.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -27,6 +28,10 @@ use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 use shamir_types::types::common::new_map;
+
+/// Every awaited call in this module is bounded, so a regression that parks
+/// a call can never hang the suite.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ============================================================================
 // Test gates
@@ -82,6 +87,30 @@ impl AccessGate for DenyTableGate {
         action: Action,
     ) -> Result<(), AccessError> {
         if action == self.action && matches!(path, ResourcePath::Table { .. }) {
+            return Err(AccessError {
+                actor: actor.clone(),
+                path: path.to_string(),
+                action,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Allows every triple except one: the DATABASE resource. Used to prove a
+/// repository-visibility (database) denial is NOT folded into the table
+/// refusal — it keeps `access_denied` and the gate's own diagnostic.
+struct DenyDatabaseGate;
+
+#[async_trait::async_trait]
+impl AccessGate for DenyDatabaseGate {
+    async fn check(
+        &self,
+        actor: &Actor,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<(), AccessError> {
+        if matches!(path, ResourcePath::Database { .. }) {
             return Err(AccessError {
                 actor: actor.clone(),
                 path: path.to_string(),
@@ -270,13 +299,15 @@ async fn authorize_recurses_into_nested_batch_ops() {
     );
 }
 
-/// Read-refusal parity: a denied TABLE `Read` answers `unknown_table` — the
-/// SAME code every read path answers for an ABSENT table — so an
+/// Read-refusal parity: a denied TABLE `Read` answers the ONE fixed table
+/// refusal — `unknown_table` with the text `"table is unavailable"` — the
+/// SAME refusal every read path answers for an ABSENT table, so an
 /// unauthorized caller cannot tell a closed table from a missing one.
 ///
-/// WITHOUT the mapping the denial carries `access_denied`, which (because the
-/// table ACL is open by default for a name with no catalogue record) can only
-/// ever be observed for a table that exists: that difference IS the oracle.
+/// WITHOUT the mapping the denial carries `access_denied` (and the gate's
+/// own diagnostic naming the table), which — because the table ACL is open
+/// by default for a name with no catalogue record — can only ever be
+/// observed for a table that exists: that difference IS the oracle.
 #[tokio::test]
 async fn denied_table_read_reports_unknown_table() {
     let mut b = Batch::new();
@@ -284,17 +315,61 @@ async fn denied_table_read_reports_unknown_table() {
     b.query("q1", Query::from("users"));
     let req = b.build();
 
-    let err = Authorized::authorize(
-        &req,
-        Actor::User(7),
-        "test",
-        &DenyTableGate {
-            action: Action::Read,
-        },
+    let err = tokio::time::timeout(
+        CALL_TIMEOUT,
+        Authorized::authorize(
+            &req,
+            Actor::User(7),
+            "test",
+            &DenyTableGate {
+                action: Action::Read,
+            },
+        ),
     )
     .await
+    .expect("authorization must be bounded by CALL_TIMEOUT")
     .unwrap_err();
-    assert_eq!(err.code(), Some("unknown_table"));
+    match err {
+        BatchError::QueryError {
+            alias,
+            message,
+            code,
+        } => {
+            assert_eq!(code.as_deref(), Some("unknown_table"));
+            assert_eq!(alias, "");
+            assert_eq!(message, "table is unavailable");
+        }
+        other => panic!("expected QueryError, got {other:?}"),
+    }
+}
+
+/// A DATABASE (repo-visibility) denial runs before any table is resolved,
+/// so it discloses nothing about a table and keeps `access_denied` with the
+/// gate's own diagnostic — it is NOT the fixed table refusal.
+#[tokio::test]
+async fn denied_database_read_keeps_access_denied() {
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    let req = b.build();
+
+    let err = tokio::time::timeout(
+        CALL_TIMEOUT,
+        Authorized::authorize(&req, Actor::User(7), "test", &DenyDatabaseGate),
+    )
+    .await
+    .expect("authorization must be bounded by CALL_TIMEOUT")
+    .unwrap_err();
+    assert_eq!(err.code(), Some("access_denied"));
+    match err {
+        BatchError::QueryError { message, .. } => {
+            assert_ne!(
+                message, "table is unavailable",
+                "a database-level denial must not reuse the table refusal"
+            );
+        }
+        other => panic!("expected QueryError, got {other:?}"),
+    }
 }
 
 /// The masking is READ-only: a denied table WRITE keeps `access_denied`

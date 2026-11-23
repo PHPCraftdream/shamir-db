@@ -109,6 +109,38 @@ struct CancelAuditDetails<'a> {
     outcome: &'a CancelOutcome,
 }
 
+/// Admission class of a detached audit job.
+///
+/// `Security` covers cancellation refusals, operator cancels and shape-stat
+/// resets — events an operator must be able to see even under read load.
+/// `Observability` covers successful typed-read audits: high volume,
+/// best-effort telemetry that must never crowd a security event out of the
+/// queue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuditEventClass {
+    Security,
+    Observability,
+}
+
+impl AuditEventClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Security => "security",
+            Self::Observability => "observability",
+        }
+    }
+}
+
+/// One principal's live admission counts. `total` is bounded by
+/// [`CANCEL_AUDIT_PRINCIPAL_SHARE`]; `observability` is the subset of that
+/// total charged to [`AuditEventClass::Observability`] and is bounded by
+/// [`CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE`].
+#[derive(Clone, Copy)]
+struct PrincipalHeld {
+    total: usize,
+    observability: usize,
+}
+
 // The low bits count queued and running jobs; the high bits close admission
 // and latch the first rejected submission of each saturation episode.
 const CANCEL_AUDIT_CAPACITY: usize = 256;
@@ -119,6 +151,22 @@ const CANCEL_AUDIT_CAPACITY: usize = 256;
 /// between two names — so one principal reaching its share can never deny
 /// another while global slots are free.
 pub(crate) const CANCEL_AUDIT_PRINCIPAL_SHARE: usize = 32;
+/// Global slots `Observability` jobs may occupy — three quarters of
+/// [`CANCEL_AUDIT_CAPACITY`] (192 of 256). Successful typed-read audits are
+/// best-effort telemetry, so they are confined to this part of the cap and
+/// the remaining quarter (64 slots) is always available to `Security`
+/// events. Without the split, enough busy readers could fill all 256 slots
+/// and drop a cancellation refusal. `Security` keeps using the full
+/// [`CANCEL_AUDIT_CAPACITY`].
+pub(crate) const CANCEL_AUDIT_OBSERVABILITY_CAPACITY: usize = CANCEL_AUDIT_CAPACITY / 4 * 3;
+/// Per-principal slots `Observability` jobs may occupy — three quarters of
+/// [`CANCEL_AUDIT_PRINCIPAL_SHARE`] (24 of 32). A principal's own read audits
+/// may fill at most 24 slots, so the remaining 8 are always available to that
+/// same principal's `Security` events: 32 pending read jobs must not make the
+/// principal's next audit-worthy cancellation drop. `Security` keeps using
+/// the full [`CANCEL_AUDIT_PRINCIPAL_SHARE`].
+pub(crate) const CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE: usize =
+    CANCEL_AUDIT_PRINCIPAL_SHARE / 4 * 3;
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const SATURATED: usize = CLOSED >> 1;
 const COUNT_MASK: usize = !(CLOSED | SATURATED);
@@ -139,7 +187,11 @@ pub(crate) struct CancelRefusalAudit {
     /// release on the scc bucket of that name — the map's own bucket lock for
     /// the increment/decrement only, never across an `.await`, never inside the
     /// audit append. No `std` mutex is added to the reply path.
-    principals: scc::HashMap<String, usize, THasher>,
+    principals: scc::HashMap<String, PrincipalHeld, THasher>,
+    /// Live `Observability` jobs (queued + running) across every principal.
+    /// Bounded by [`CANCEL_AUDIT_OBSERVABILITY_CAPACITY`]; `Security` jobs
+    /// never touch it, so the rest of the global cap is theirs alone.
+    observability: AtomicUsize,
     /// Abort handles of accepted-but-unfinished audit jobs. Bounded by
     /// `CANCEL_AUDIT_CAPACITY` live slots (finished entries are pruned on
     /// the next refusal), taken once per accepted refusal for one bounded
@@ -155,29 +207,57 @@ pub(crate) struct CancelRefusalAudit {
     /// admission and sweep the queue inside that exact window.
     #[cfg(test)]
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test seam (drop accounting): when set, the shared detached-audit clock
+    /// lookup fails without touching the system clock, so a test can drive the
+    /// "clock unavailable" branch deterministically.
+    #[cfg(test)]
+    pub(crate) fail_clock: std::sync::atomic::AtomicBool,
 }
 
 impl CancelRefusalAudit {
-    /// Reserve one share slot for `principal`, or refuse without waiting.
+    /// Reserve one share slot for `principal` in `class`, or refuse without
+    /// waiting.
     ///
     /// Exact per NAME: the share test and the increment run in one
     /// `update_sync` inside the map's own bucket lock, so two principals never
     /// share a counter and the count cannot drift from the live slots.
-    fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
+    ///
+    /// `Observability` is additionally confined to
+    /// [`CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE`] of the principal's
+    /// share and [`CANCEL_AUDIT_OBSERVABILITY_CAPACITY`] of the global cap;
+    /// `Security` may use the full share and the full cap. Because the two
+    /// observability limits are separate from the total counters, the
+    /// reserved headroom is available to `Security` even when observability
+    /// is saturated.
+    fn try_reserve(
+        self: &Arc<Self>,
+        principal: &str,
+        class: AuditEventClass,
+    ) -> Option<CancelAuditSlot> {
+        let observability = class == AuditEventClass::Observability;
         loop {
             let reserved = self.principals.update_sync(principal, |_, held| {
-                if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
+                if held.total >= CANCEL_AUDIT_PRINCIPAL_SHARE {
                     return false;
                 }
-                *held += 1;
+                if observability && held.observability >= CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE
+                {
+                    return false;
+                }
+                held.total += 1;
+                if observability {
+                    held.observability += 1;
+                }
                 true
             });
             match reserved {
                 Some(true) => break,
                 Some(false) => {
-                    let dropped = self.record_drop();
+                    let dropped = self.record_drop(class);
                     tracing::warn!(
+                        class = class.label(),
                         share = CANCEL_AUDIT_PRINCIPAL_SHARE,
+                        observability_share = CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE,
                         dropped,
                         "cancel refusal audit principal share full; dropping event"
                     );
@@ -187,24 +267,63 @@ impl CancelRefusalAudit {
                     // First refusal for this name: insert it already holding
                     // our slot. A concurrent insert wins the entry, and the next
                     // pass increments against that winner instead.
-                    if self.principals.insert_sync(principal.to_owned(), 1).is_ok() {
+                    let fresh = PrincipalHeld {
+                        total: 1,
+                        observability: if observability { 1 } else { 0 },
+                    };
+                    if self
+                        .principals
+                        .insert_sync(principal.to_owned(), fresh)
+                        .is_ok()
+                    {
                         break;
                     }
+                }
+            }
+        }
+        if observability {
+            let mut held = self.observability.load(Ordering::Acquire);
+            loop {
+                if held >= CANCEL_AUDIT_OBSERVABILITY_CAPACITY {
+                    self.release_share(principal, class);
+                    let dropped = self.record_drop(class);
+                    tracing::warn!(
+                        class = class.label(),
+                        capacity = CANCEL_AUDIT_OBSERVABILITY_CAPACITY,
+                        dropped,
+                        "observability audit quota full; dropping event"
+                    );
+                    return None;
+                }
+                match self.observability.compare_exchange_weak(
+                    held,
+                    held + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(current) => held = current,
                 }
             }
         }
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CLOSED != 0 {
-                self.release_share(principal);
-                let dropped = self.record_drop();
-                tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
+                self.release_observability(class);
+                self.release_share(principal, class);
+                let dropped = self.record_drop(class);
+                tracing::debug!(
+                    class = class.label(),
+                    dropped,
+                    "cancel refusal audit dropped: admission closed"
+                );
                 return None;
             }
             let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
             if full && state & SATURATED != 0 {
-                self.release_share(principal);
-                self.record_drop();
+                self.release_observability(class);
+                self.release_share(principal, class);
+                self.record_drop(class);
                 return None;
             }
             let next = if full { state | SATURATED } else { state + 1 };
@@ -213,9 +332,11 @@ impl CancelRefusalAudit {
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) if full => {
-                    self.release_share(principal);
-                    let dropped = self.record_drop();
+                    self.release_observability(class);
+                    self.release_share(principal, class);
+                    let dropped = self.record_drop(class);
                     tracing::warn!(
+                        class = class.label(),
                         capacity = CANCEL_AUDIT_CAPACITY,
                         dropped,
                         "cancel refusal audit queue full; dropping events"
@@ -226,6 +347,7 @@ impl CancelRefusalAudit {
                     return Some(CancelAuditSlot {
                         queue: Arc::clone(self),
                         principal: principal.to_owned(),
+                        class,
                         appended: false,
                     });
                 }
@@ -234,21 +356,36 @@ impl CancelRefusalAudit {
         }
     }
 
-    /// Release one principal slot and retire the entry when it reaches zero.
+    /// Release one principal slot of `class` and retire the entry when it
+    /// reaches zero.
     ///
     /// The decrement and the removal both run inside the name's bucket lock, so
     /// a reservation arriving in between is never lost: it either increments
     /// before the removal (the removal then sees a non-zero count and keeps the
     /// entry) or inserts a fresh entry afterwards.
-    fn release_share(&self, principal: &str) {
+    fn release_share(&self, principal: &str, class: AuditEventClass) {
         self.principals.update_sync(principal, |_, held| {
-            *held = held.saturating_sub(1);
+            held.total = held.total.saturating_sub(1);
+            if class == AuditEventClass::Observability {
+                held.observability = held.observability.saturating_sub(1);
+            }
         });
-        self.principals.remove_if_sync(principal, |held| *held == 0);
+        self.principals
+            .remove_if_sync(principal, |held| held.total == 0);
     }
 
-    fn record_drop(&self) -> usize {
-        self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    /// Release one global observability slot; a no-op for `Security` jobs,
+    /// which never charged one.
+    fn release_observability(&self, class: AuditEventClass) {
+        if class == AuditEventClass::Observability {
+            self.observability.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn record_drop(&self, class: AuditEventClass) -> usize {
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        tracing::trace!(class = class.label(), dropped, "audit job dropped");
+        dropped
     }
 
     /// Drops recorded so far — the test observable for the refusal accounting
@@ -344,15 +481,19 @@ struct CancelAuditSlot {
     /// The NAME this slot is charged to — never a hash bucket, so two
     /// principals can never share one counter.
     principal: String,
+    /// The class the slot was admitted under; `Observability` slots also hold
+    /// one global observability slot that [`Self::drop`] must release.
+    class: AuditEventClass,
     appended: bool,
 }
 
 impl Drop for CancelAuditSlot {
     fn drop(&mut self) {
         if !self.appended {
-            self.queue.record_drop();
+            self.queue.record_drop(self.class);
         }
-        self.queue.release_share(&self.principal);
+        self.queue.release_observability(self.class);
+        self.queue.release_share(&self.principal, self.class);
         // Releasing any slot necessarily makes the queue non-full. Clear
         // the saturation latch in the same transition as the decrement.
         let mut state = self.queue.state.load(Ordering::Acquire);
@@ -365,7 +506,10 @@ impl Drop for CancelAuditSlot {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    if next == CLOSED {
+                    // An OPEN queue's drain waiter needs the zero crossing,
+                    // not only the shutdown signal: `drain` loops on
+                    // `idle.notified()` until the count reaches zero.
+                    if next == CLOSED || next & COUNT_MASK == 0 {
                         self.queue.idle.notify_waiters();
                     }
                     break;
@@ -399,6 +543,7 @@ impl Drop for PendingCancelAudit {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
                 tracing::error!(
+                    class = self.slot.class.label(),
                     target_id = self.target,
                     outcome = self.result,
                     "cancel refusal audit job dropped before append completed"
@@ -434,7 +579,7 @@ pub(super) fn enqueue_operator_cancel_audit(
     outcome: &CancelOutcome,
 ) -> Option<JoinHandle<()>> {
     let result = cancel_outcome_label(outcome);
-    let slot = queue.try_reserve(&session.username)?;
+    let slot = queue.try_reserve(&session.username, AuditEventClass::Security)?;
     let details = match rmp_serde::to_vec_named(&CancelAuditDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
@@ -541,7 +686,7 @@ impl Drop for PendingDetachedAudit {
     fn drop(&mut self) {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
-                tracing::error!("{}", self.dropped_message);
+                tracing::error!(class = self.slot.class.label(), "{}", self.dropped_message);
             });
         }
     }
@@ -557,15 +702,51 @@ struct DetachedAuditJob<'a> {
     session: &'a Session,
     operation: &'static str,
     details: Vec<u8>,
+    class: AuditEventClass,
     dropped_message: &'static str,
     rejected_message: &'static str,
 }
 
+/// Clock gate shared by the detached audit enqueues.
+///
+/// A clock failure drops the job BEFORE any reservation, so it must record the
+/// drop itself (for `class`) — otherwise the queue's counter would miss a
+/// dropped job. The test-only `fail_clock` seam makes this branch
+/// deterministic without touching the system clock.
+fn detached_audit_now(queue: &CancelRefusalAudit, class: AuditEventClass) -> Option<u64> {
+    #[cfg(test)]
+    let clock_failure = queue.fail_clock.load(Ordering::Acquire);
+    #[cfg(not(test))]
+    let clock_failure = false;
+    if clock_failure {
+        let dropped = queue.record_drop(class);
+        tracing::error!(
+            class = class.label(),
+            dropped,
+            "audit append skipped: clock unavailable"
+        );
+        return None;
+    }
+    match UnixNanos::try_now() {
+        Ok(now) => Some(now.as_u64()),
+        Err(error) => {
+            let dropped = queue.record_drop(class);
+            tracing::error!(
+                %error,
+                class = class.label(),
+                dropped,
+                "audit append skipped: clock unavailable"
+            );
+            None
+        }
+    }
+}
+
 /// Shared body of every best-effort, detached `ok` audit append: reserve one
-/// bounded share slot, spawn a tracked blocking job and append under the
-/// caller's dispatcher. A job that cannot be built (clock unavailable, share
-/// exhausted) never spawns and accounts as a drop exactly like the cancel
-/// enqueues.
+/// bounded share slot in `class`, spawn a tracked blocking job and append
+/// under the caller's dispatcher. A job that cannot be built (clock
+/// unavailable, share or observability quota exhausted) never spawns and
+/// accounts as a drop exactly like the cancel enqueues.
 fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
     let DetachedAuditJob {
         queue,
@@ -573,19 +754,14 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         session,
         operation,
         details,
+        class,
         dropped_message,
         rejected_message,
     } = job;
-    let now_ns = match UnixNanos::try_now() {
-        Ok(now) => now.as_u64(),
-        Err(error) => {
-            tracing::error!(%error, "audit append skipped: clock unavailable");
-            return None;
-        }
-    };
+    let now_ns = detached_audit_now(queue, class)?;
     // Reserve after the encode/clock gates, exactly like the cancel enqueue:
     // a job that cannot be built never consumes a share slot.
-    let slot = queue.try_reserve(&session.username)?;
+    let slot = queue.try_reserve(&session.username, class)?;
     let mut session_prefix = [0u8; 8];
     session_prefix.copy_from_slice(&session.session_id[..8]);
     let transport = transport_name(session.transport_kind);
@@ -627,7 +803,8 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
 ///
 /// Operation label `reset_shape_stats` names the reset; the status word is
 /// the fixed `ok` (the wipe has no partial outcome) and the details carry
-/// the repository name only.
+/// the repository name only. Admitted as [`AuditEventClass::Security`]: it is
+/// an operator-visible admin event, so it keeps the full cap and share.
 pub(super) fn enqueue_shape_reset_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
@@ -647,6 +824,7 @@ pub(super) fn enqueue_shape_reset_audit(
         session,
         operation: "reset_shape_stats",
         details,
+        class: AuditEventClass::Security,
         dropped_message: "shape reset audit job dropped before append completed",
         rejected_message: "audit append rejected shape reset",
     })
@@ -680,7 +858,9 @@ struct TypedReadAuditDetails<'a> {
 /// read. The status word is the fixed
 /// `ok`: this is called only on the success path, so a refusal is never
 /// audited. The payload carries names only — never a record value, key, filter
-/// or caller literal.
+/// or caller literal. Admitted as [`AuditEventClass::Observability`]: it is
+/// high-volume, best-effort telemetry, confined to the reserved observability
+/// part of the cap and share.
 pub(super) fn enqueue_typed_read_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
@@ -697,7 +877,15 @@ pub(super) fn enqueue_typed_read_audit(
     let details = match rmp_serde::to_vec_named(&TypedReadAuditDetails { db, repo, table }) {
         Ok(details) => details,
         Err(error) => {
-            tracing::error!(%error, "audit append skipped: typed read encoding failed");
+            // No reservation was taken, so this path must record the dropped
+            // observability job itself.
+            let dropped = queue.record_drop(AuditEventClass::Observability);
+            tracing::error!(
+                %error,
+                class = AuditEventClass::Observability.label(),
+                dropped,
+                "audit append skipped: typed read encoding failed"
+            );
             return None;
         }
     };
@@ -707,6 +895,7 @@ pub(super) fn enqueue_typed_read_audit(
         session,
         operation,
         details,
+        class: AuditEventClass::Observability,
         dropped_message: "typed read audit job dropped before append completed",
         rejected_message: "audit append rejected typed read",
     })

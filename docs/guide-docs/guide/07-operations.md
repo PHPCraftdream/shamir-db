@@ -405,7 +405,21 @@ in `transaction.error`, independently of pending/visible. Aborts and
 exposes the failing op's stable code in `transaction.abort_code` when one
 exists (`crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`); indeterminate
 WAL is not proof that writes are absent and is reported as
-`status: "indeterminate"`. No value-only transaction convenience
+`status: "indeterminate"`. `transaction.reason` is not uniformly debug text:
+`skip_aborted` is the one plan-abort special case that is written into
+`reason` as its own code
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`),
+and commit-time classifications also populate `abort_code` now — `tx_conflict`,
+`unique_violation`, `version_conflict`, `table_migrating`,
+`wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`,
+`cancelled`
+(`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`).
+Inside `for_each`, a transactional body's `indeterminate` outcome stops the
+loop with `wal_requires_reopen` (the iteration may have committed, so the
+prefix is unknown and must be reconciled, not retried), while a committed
+prefix is NOT rolled back when a later iteration fails
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`).
+No value-only transaction convenience
 hides these outcomes.
 
 ```ts
@@ -883,9 +897,9 @@ intent для алерта — неограниченный рост без но
 
 Известные ограничения (ни одно не обходит гейт):
 
-1. Стабильный код отказавшей операции в строгом транзакционном батче читается из `transaction.abort_code`, а не из `transaction.reason`: у отклонённого `CreateUser` там будет `server_busy` (`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`). `reason` остаётся debug-текстом и парсингу не подлежит; поля `abort_code` может не быть вовсе — когда у аборта нет стабильного кода (`crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`), — поэтому полагаться на код в каждом аборте нельзя.
-2. Внешний `Call` хранимой функции несёт стабильный код отказа, который классифицировал шлюз БД на вызове `db_execute` или другого `db_*` (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:47-65`). Код пишет только сервер (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:14-19`), поэтому гость не может его подделать: текст guest-trap, лишь упоминающий кодовое слово, кодом не становится. Если шлюз отказ не классифицировал, стабильного кода у `Call` нет, и судить о причине по тексту ошибки нельзя.
-3. Фиксированный конверт ошибки, включая `server_busy`, доходит до клиента со своим кодом при любом клиентском `limits.max_result_size`; `result_too_large` заменяет только DATA-ответ, превысивший лимит. Конверт ошибки ограничен лишь серверным `max_result_size_bytes`, а не клиентским лимитом (`engine/db_handler/repo_admin/execute.rs:456-472`).
+1. Стабильный код отказавшей операции в строгом транзакционном батче читается из `transaction.abort_code`, а не из `transaction.reason`: у отклонённого `CreateUser` там будет `server_busy` (`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`). `reason` парсингу не подлежит, но и не всегда является debug-текстом: `skip_aborted` — единственный план-аборт, который записывается в `reason` собственным кодом (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`), а commit-time классификации теперь тоже заполняют `abort_code` — `tx_conflict`, `unique_violation`, `version_conflict`, `table_migrating`, `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`, `cancelled` (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`). Поля `abort_code` может не быть вовсе — когда у аборта нет стабильного слова (`Storage` без собственного `code`, `Expired`; `crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`), — поэтому полагаться на код в каждом аборте нельзя. Внутри `for_each` исход `indeterminate` у транзакционного тела останавливает цикл кодом `wal_requires_reopen` (итерация могла закоммититься — префикс неизвестен, нужен reconcile, не слепой повтор), а уже закоммиченный префикс при падении поздней итерации не откатывается (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`).
+2. Внешний `Call` хранимой функции несёт стабильный код отказа, который классифицировал шлюз БД на вызове `db_execute` или другого `db_*` (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:47-65`). Код пишет только сервер (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:14-19`), поэтому гость не может его подделать: текст guest-trap, лишь упоминающий кодовое слово, кодом не становится. Если шлюз отказ не классифицировал, стабильного кода у `Call` нет, и судить о причине по тексту ошибки нельзя. Вложенный хранимый вызов (функция вызывает функцию), внутри которого транзакционный `db_execute` абортится, кода наружу не передаёт: абортированный `BatchResponse` — это успех на шлюзе (данные, которые разбирает гость), а транзакционная проверка гостя поднимает общий abort без кода (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:23-32`; `crates/wasm/shamir-lang/src/back/emit/support/db/tx.rs:254-300`), тогда как код наружного `Call` берётся только из ускользнувшего отказа шлюза (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:45-62`). `DbGatewayError::code()` классифицирует только `not_found` и `access_denied`, поэтому отказ на ЧТЕНИЕ таблицы по ACL даёт наружному `Call` вообще без стабильного кода (не `unknown_table`): `unknown_table` намеренно не имеет ветки и попадает в общий `ExecutionSource` (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:208-238`), а сам `code()` возвращает код лишь для этих двух классов (`crates/wasm/shamir-wasm-host/src/gateway/db_gateway.rs:67-82`).
+3. Фиксированный конверт ошибки, включая `server_busy`, доходит до клиента со своим кодом при любом клиентском `limits.max_result_size`; закрытый набор канонических кодов отказа `unknown_table | server_busy | cancelled | resync_required | permission_denied | read_only_replica | schema_migration_follower_read_only`, а также success-shaped `DbResponse::AsOfVisibilityTimeout`, освобождён от клиентского `limits.max_result_size` и ограничен только серверным `max_result_size_bytes`, а любой ДРУГОЙ конверт ошибки выше клиентского лимита заменяется на `result_too_large`. Канонический конверт отказа ограничен лишь серверным `max_result_size_bytes`, а не клиентским лимитом (`crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs:429-499,548-593`).
 
 Если создание было отклонено до записи, повторите после паузы только обычный нетранзакционный `CreateScramUser`, не весь батч. Стабильный код теперь и есть ответ гейта, но он не обещает, что повтор пройдёт: `server_busy` утверждает занятость, а не успех, и клиент не может вывести из кода ничего сверх того, что код сам утверждает.
 
@@ -2975,7 +2989,15 @@ batch-чтение (`data count` / `data head`), создание и чтени�
 статуса DDL. Отказ уровня **базы** (`Database Read`) по-прежнему
 `access_denied` (exit 4): он выполняется до любого разрешения таблицы и
 поэтому о таблице ничего не сообщает. Отсутствующие родители сохраняют свои
-коды `unknown_db` / `unknown_repo`.
+коды `unknown_db` / `unknown_repo`. Той же маской закрыты `DescribeTable` и
+`GetTableSchema`: закрытая и отсутствующая таблица дают один `unknown_table`
+(`crates/engine/shamir-db/src/shamir_db/execute/admin_meta/admin_describe.rs:24-29,48-65`;
+`crates/engine/shamir-db/src/shamir_db/execute/admin_ddl/admin_schema.rs:940-958`).
+`Subscribe` с ЛЮБЫМ нечитаемым или отсутствующим источником отклоняется
+ЦЕЛИКОМ тем же фиксированным отказом — частичной выдачи и молчаливого
+исключения отдельных источников нет: все источники проверяются до разрешения
+менеджера, и первая же неудача возвращает тот же `unknown_table`
+(`crates/engine/shamir-engine/src/query/batch/control/authorized.rs:86-99,155-176`).
 
 Практическое следствие: раньше пути расходились — закрытая таблица давала
 `access_denied` (exit 4), а отсутствующая на batch-пути приходила общим кодом

@@ -406,14 +406,14 @@ async fn mid_scroll_drop_table_produces_clean_error_not_stale_reads() {
     // (which would mean stale reads against a dropped table went through).
     let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
     match resp {
-        DbResponse::Error { code, .. } => {
-            // Not asserting a specific code here (a dropped table now
-            // surfaces through `wrap_table_lookup_err` as `unknown_table`,
-            // the same code an absent table answers, but the point of THIS
-            // test is that it IS an error, not a silently-served page).
-            assert_ne!(
-                code, "",
-                "a concurrent drop_table mid-scroll must produce SOME clean error code"
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_table",
+                "a concurrent drop_table mid-scroll must answer the fixed table refusal"
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "the refusal must carry the fixed text: {message}"
             );
         }
         other => panic!(

@@ -19,35 +19,33 @@
 //!    authorization before any lookup: the exact two-call ACL of
 //!    [`authorize_cursor_read`] (`Action::Read` on the `Database`, then
 //!    on the `Table`; the ancestor walk inside `authorize_access` covers
-//!    the `Store` link). Authorizing before resolution keeps an
-//!    unauthorized caller's response indistinguishable from a genuine
-//!    not-found (same property `get_ddl_op_status` relies on): a Table
-//!    denial and an absent table BOTH answer the typed `unknown_table`
-//!    (see [`authorize_cursor_read`]), so the point read never reveals
-//!    whether the table exists. The Database denial keeps `access_denied`
-//!    — it runs before any table resolution.
-//! 2. The same repository quarantine probe as the cursor read path
+//!    the `Store` link). The Database denial keeps `access_denied` and is
+//!    first. Immediately after the ACL, still in the SAME availability
+//!    phase, `resolve_repo` gives the typed `unknown_db`/`unknown_repo`
+//!    codes and `table_config` is the configured-table check (it returns
+//!    `None` exactly when `has_table` is false), so a Table denial and an
+//!    absent table BOTH answer the fixed `unknown_table` refusal before the
+//!    request slot and the quarantine probe; the point read never reveals
+//!    whether the table exists. Capture the authorized table REGISTRATION
+//!    as a `TableRegistration` token (see `TableCatalog::table_registration`)
+//!    plus its `store_id`.
+//! 2. Per-session in-flight slot (`Session::try_acquire_request_slot`,
+//!    AFTER the availability decision — an exhausted session still gets its
+//!    table answer first; stateless handle-0 sessions skip the cap, same as
+//!    `try_track_activity_request`).
+//! 3. The same repository quarantine probe as the cursor read path
 //!    ([`quarantine_cursor_error`] — one `read_quarantine_reason`
 //!    atomic-map probe, the same reason the batch path carries inside
-//!    `BatchError::ResyncRequired`). The stored reason is deliberately
-//!    NOT forwarded on this path: an identity-fence reason can name
-//!    recorded and observed replication identities, which a table reader
-//!    without subscription-admin rights must not receive, so `GetRecord`
-//!    answers with the fixed [`quarantined_repo_response`] text under the
-//!    same typed code. The shared batch path keeps its own reason.
-//! 3. Per-session in-flight slot (`Session::try_acquire_request_slot`,
-//!    after auth — an exhausted session gets the fixed-text `server_busy`
-//!    rejection before any engine work; stateless handle-0 sessions skip
-//!    the cap, same as `try_track_activity_request`).
-//! 4. A single fixed-16-byte [`RecordId`] lookup. Resolve the parent
-//!    database/repository with `resolve_repo` (typed `unknown_db` /
-//!    `unknown_repo` from its explicit `BatchError.code`) and refuse an
-//!    unconfigured table with `unknown_table` BEFORE the budget wait and
-//!    before `ShamirDb::get_table` (whose cold resolver would insert a
-//!    catalogue cell for the unknown name). Capture the authorized table
-//!    REGISTRATION as a `TableRegistration` token (see
-//!    `TableCatalog::table_registration`) plus its `store_id`. After the
-//!    parking point (a RESPONSE-BUDGET wait, never a visibility wait) the
+//!    `BatchError::ResyncRequired`). It runs AFTER availability so a
+//!    quarantined repo cannot change the absent-vs-closed answer. The
+//!    stored reason is deliberately NOT forwarded on this path: an
+//!    identity-fence reason can name recorded and observed replication
+//!    identities, which a table reader without subscription-admin rights
+//!    must not receive, so `GetRecord` answers with the fixed
+//!    [`quarantined_repo_response`] text under the same typed code. The
+//!    shared batch path keeps its own reason.
+//! 4. A single fixed-16-byte [`RecordId`] lookup. After the parking point
+//!    (a RESPONSE-BUDGET wait, never a visibility wait) the
 //!    same ACL is re-run, the name is re-resolved and the registration is
 //!    compared with the captured token; `TableRegistration` is the
 //!    catalogue cell the registry handed out, so it distinguishes ANY two
@@ -58,7 +56,7 @@
 //!    replaced, or no identity could be pinned for it — the typed
 //!    `access_denied` with the fixed [`changed_registration_response`]
 //!    text (never a payload, never an identity); (c) the NAME is gone with
-//!    no replacement — `unknown_table` ([`unknown_table_response`]):
+//!    no replacement — `unknown_table` ([`table_unavailable_response`]):
 //!    absence is reported as absence.
 //!    Then acquire the table through `ShamirDb::get_table`, which
 //!    rechecks the repository quarantine at acquisition; the table's own
@@ -94,6 +92,7 @@ use shamir_collections::TFxMap;
 use shamir_connect::server::session::Session;
 use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
 use shamir_db::engine::repo::DurabilityPolicy;
+use shamir_db::query::batch::BatchError;
 use shamir_query_types::durability::DurabilityOverride;
 use shamir_query_types::read::QueryRecord;
 use shamir_query_types::wire::{
@@ -108,7 +107,7 @@ use super::repo_audit::enqueue_typed_read_audit;
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard};
 use crate::db_handler::cursor_handlers::error_response;
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
-use crate::db_handler::handler::{session_actor, ShamirDbHandler};
+use crate::db_handler::handler::{error_code, session_actor, ShamirDbHandler};
 use crate::db_handler::visibility_handlers::quarantine_cursor_error;
 
 /// Longest accepted `db`/`repo`/`table` name, in UTF-8 bytes: the
@@ -141,18 +140,35 @@ fn invalid_name_response() -> DbResponse {
     }
 }
 
-/// Fixed-text refusal for a table that is not CONFIGURED in the repository —
-/// raised before the cold table resolver. `ShamirDb::get_table` inserts a
-/// catalogue cell for an unregistered name before checking configuration
-/// (`insert_table_cell`,
-/// `crates/engine/shamir-engine/src/tx/commit/core/catalog_access.rs:186`,
-/// retained by `crates/engine/shamir-engine-table/src/support/storage/catalog.rs:120`).
-/// The batch path shares that retention defect; it is out of scope here.
-/// The message never echoes the caller's name.
-fn unknown_table_response() -> DbResponse {
+/// Fixed-text refusal for a table that is ABSENT or EXISTS-but-CLOSED. The
+/// two cases MUST be indistinguishable on every table-scoped read surface, so
+/// the literal lives here once and every server read path answers through
+/// [`table_unavailable_response`] (or [`table_unavailable_error`] where the
+/// intermediate value is a [`BatchError`]). The message never echoes the
+/// caller's name and carries no ACL/resolver diagnostic.
+pub(super) const TABLE_UNAVAILABLE_MESSAGE: &str = "table is unavailable";
+
+/// The fixed refusal as the wire response. This is the ONE constructor; the
+/// `BatchError` adapter below keeps the same code/message without a second
+/// literal.
+pub(super) fn table_unavailable_response() -> DbResponse {
     DbResponse::Error {
         code: "unknown_table".to_string(),
-        message: "table is not registered in the repository".to_string(),
+        message: TABLE_UNAVAILABLE_MESSAGE.to_string(),
+    }
+}
+
+/// The SAME refusal as a [`BatchError`], for the cursor-support gate whose
+/// signature returns a `BatchError`. Built from [`table_unavailable_response`]
+/// so the code and the fixed message can never drift from the direct response.
+pub(super) fn table_unavailable_error() -> BatchError {
+    let DbResponse::Error { code, message } = table_unavailable_response() else {
+        unreachable!("table_unavailable_response always builds an Error")
+    };
+    BatchError::QueryError {
+        alias: String::new(),
+        message,
+        code: Some(code),
     }
 }
 
@@ -192,7 +208,7 @@ fn final_lookup_error_response(
 ) -> DbResponse {
     match error {
         shamir_db::DbError::NotFound(_) => match resolve_repo(db, db_name, repo_name) {
-            Ok(_) => unknown_table_response(),
+            Ok(_) => table_unavailable_response(),
             Err(parent) => error_response(&parent),
         },
         // The quarantine gate inside `get_table` carries the stored reason,
@@ -262,7 +278,10 @@ impl ShamirDbHandler {
         repo_table: Option<(&str, &str)>,
         started: Instant,
     ) {
-        let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let measured_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        // The pinned test seam overrides the measured value; the WARN logs the
+        // SAME value the decision compared.
+        let elapsed_us = self.slow_query_elapsed(measured_us);
         if self.slow_query.threshold_us > 0 && elapsed_us > self.slow_query.threshold_us {
             tracing::warn!(
                 elapsed_us = elapsed_us,
@@ -303,22 +322,54 @@ impl ShamirDbHandler {
             return invalid_name_response();
         }
 
-        // 2. Authorization BEFORE any lookup (Database Read, then Table Read).
-        //    Cheap refusals must not wait for the budget, so this stays ahead
-        //    of the parking point below.
+        // 2. Availability phase — Database Read FIRST (keeps `access_denied`),
+        //    then Table Read and the configured-table decision. This runs
+        //    BEFORE the per-session slot and BEFORE the quarantine probe:
+        //    an ABSENT table and an EXISTING-but-CLOSED table must answer the
+        //    SAME fixed refusal even when the request-slot pool is exhausted,
+        //    and no later gate (quarantine, parking) may tell them apart.
         let actor = session_actor(session);
-        let authorized =
-            authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await;
-        if let Err(e) = authorized {
+        if let Err(e) =
+            authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await
+        {
+            if error_code(&e) == "unknown_table" {
+                return table_unavailable_response();
+            }
             return error_response(&e);
         }
+        // `resolve_repo` gives the typed `unknown_db` / `unknown_repo` codes
+        // (authorized callers only — strictly after the Database ACL), so a
+        // vanished PARENT keeps its own code and is never mislabelled as a
+        // table miss.
+        let repo = match resolve_repo(&self.db, db_name, repo_name) {
+            Ok(repo) => repo,
+            Err(parent) => return error_response(&parent),
+        };
+        // `table_config` IS the configured-table check: it returns `None`
+        // exactly when `has_table` is false (`configs.get` vs
+        // `configs.contains_key`), so a separate `has_table` guard could
+        // never produce a different answer. An unregistered name is refused
+        // here because the cold table resolver would otherwise insert a
+        // catalogue cell for it.
+        let Some(authorized_config) = repo.table_config(table_name) else {
+            return table_unavailable_response();
+        };
+        let authorized_store_id = authorized_config.store_id;
+        // Fail closed: a registration that cannot be pinned is never read
+        // after a park. `store_id` alone is NOT an identity — a legacy table
+        // has `store_id: None`, so two distinct legacy registrations compare
+        // equal; the token is the catalogue cell this registration reserved
+        // and is held until the response is built.
+        let Some(authorized_registration) = repo.table_registration(table_name) else {
+            return changed_registration_response();
+        };
 
-        // 3. Per-session in-flight slot (AFTER auth, mirroring the batch
-        //    `execute` path): an exhausted session gets the fixed-text
-        //    `server_busy` rejection before any engine work. The stateless
-        //    handle-0 fallback skips the cap exactly like
-        //    `try_track_activity_request`. The slot is held to the end of
-        //    the request (drop on every early-return path).
+        // 3. Per-session in-flight slot (AFTER the availability decision,
+        //    mirroring the batch `execute` path): an exhausted session still
+        //    gets its table answer first. The stateless handle-0 fallback
+        //    skips the cap exactly like `try_track_activity_request`. The
+        //    slot is held to the end of the request (drop on every
+        //    early-return path).
         let _request_slot = if session.activity_handle() == 0 {
             // Stateless token-REST fallback: no minted handle, no slot.
             None
@@ -333,47 +384,19 @@ impl ShamirDbHandler {
 
         // 4. The same repository quarantine the cursor read path probes
         //    (the batch path carries the same reason inside its own error).
-        //    The stored reason is deliberately not forwarded on this path (it
-        //    can name replication identities); only the point read is changed.
+        //    It runs AFTER availability so a quarantined repo cannot change
+        //    the absent-vs-closed table answer. The stored reason is
+        //    deliberately not forwarded on this path (it can name replication
+        //    identities); only the point read is changed.
         if quarantine_cursor_error(&self.db, db_name, repo_name).is_some() {
             return quarantined_repo_response();
         }
 
-        // 5. Typed parent resolution + configured-table check + capture of
-        //    the authorized incarnation, all BEFORE the budget wait and
-        //    before any `ShamirDb::get_table` call. `resolve_repo` gives the
-        //    typed `unknown_db` / `unknown_repo` codes (authorized callers
-        //    only — strictly after the two-call ACL). `has_table` is a cheap
-        //    catalogue `configs.contains_key` read; an unregistered name is
-        //    refused here because the cold table resolver would insert a
-        //    catalogue cell for it (see `unknown_table_response`). The
-        //    captured `store_id` is the incarnation identity of the table the
-        //    ACL just approved — re-read after the parking point below.
-        let repo = match resolve_repo(&self.db, db_name, repo_name) {
-            Ok(repo) => repo,
-            Err(parent) => return error_response(&parent),
-        };
-        if !repo.has_table(table_name) {
-            return unknown_table_response();
-        }
-        let Some(authorized_config) = repo.table_config(table_name) else {
-            return unknown_table_response();
-        };
-        let authorized_store_id = authorized_config.store_id;
-        // Fail closed: a registration that cannot be pinned is never read
-        // after a park. `store_id` alone is NOT an identity — a legacy table
-        // has `store_id: None`, so two distinct legacy registrations compare
-        // equal; the token is the catalogue cell this registration reserved
-        // and is held until the response is built.
-        let Some(authorized_registration) = repo.table_registration(table_name) else {
-            return changed_registration_response();
-        };
-
-        // 6. Upfront RI-15 slice (both gates active only — see above),
+        // 5. Upfront RI-15 slice (both gates active only — see above),
         //    released by drop on every early-return path below.
         let budget_guard = reserve_record_budget_upfront(self).await;
 
-        // 7. Re-run the SAME two-call ACL now that every parking point is
+        // 6. Re-run the SAME two-call ACL now that every parking point is
         //    behind us, then re-resolve and re-check the captured
         //    incarnation. WHY the seam is here and nowhere else: name-based
         //    authorization is a shared seam with the batch and cursor read
@@ -383,6 +406,9 @@ impl ShamirDbHandler {
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await
         {
+            if error_code(&e) == "unknown_table" {
+                return table_unavailable_response();
+            }
             return error_response(&e);
         }
         let repo = match resolve_repo(&self.db, db_name, repo_name) {
@@ -390,13 +416,12 @@ impl ShamirDbHandler {
             Err(parent) => return error_response(&parent),
         };
         // Absence is reported as absence: a table that disappeared with no
-        // replacement stays `unknown_table`; only a replacement is the
-        // changed-registration refusal.
-        if !repo.has_table(table_name) {
-            return unknown_table_response();
-        }
+        // replacement stays the fixed `unknown_table` refusal; only a
+        // replacement is the changed-registration refusal. `table_config` is
+        // the same configured-table check, so the separate `has_table` guard
+        // is not repeated.
         let Some(current_config) = repo.table_config(table_name) else {
-            return unknown_table_response();
+            return table_unavailable_response();
         };
         let Some(current_registration) = repo.table_registration(table_name) else {
             return changed_registration_response();
@@ -407,7 +432,7 @@ impl ShamirDbHandler {
             return changed_registration_response();
         }
 
-        // 8. Table acquisition goes through `ShamirDb::get_table` so its
+        // 7. Table acquisition goes through `ShamirDb::get_table` so its
         //    repository quarantine gate is re-checked AT ACQUISITION,
         //    closing the probe→lookup race. The table's own `get` preserves
         //    the reopen fence. A `NotFound` here is classified by
@@ -426,7 +451,7 @@ impl ShamirDbHandler {
             Err(e) => return db_error_response(e),
         };
 
-        // 9. Same decoding as the batch read path: interner-backed
+        // 8. Same decoding as the batch read path: interner-backed
         //    `InnerValue` → `QueryValue`, wrapped as `QueryRecord::Direct`.
         let value = match table
             .info_store_read_view()
@@ -440,7 +465,7 @@ impl ShamirDbHandler {
             record: QueryRecord::Direct(value),
         };
 
-        // 10. Result controls — measure the FULL `DbResponse` envelope once,
+        // 9. Result controls — measure the FULL `DbResponse` envelope once,
         //    reject oversize (`result_too_large`, mirroring `execute`'s
         //    rejection shape), shrink/reacquire the RI-15 reservation, then
         //    stash the exact bytes so `RequestHandler::handle` reuses them

@@ -6,39 +6,68 @@ use crate::engine::query::read::ReadQuery;
 use crate::engine::query::write::InsertOp;
 use crate::engine::query::{Filter, FilterValue, TableRef};
 use crate::types::value::QueryValue;
-use crate::{access::Actor, shamir_db::shamir_db::ShamirDb};
+use crate::{access::Actor, shamir_db::shamir_db::ShamirDb, DbError};
 use async_trait::async_trait;
 use shamir_query_types::batch::BatchTreeVisitor;
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
 
-/// Server-side sink for the stable code of the batch error that refused the
-/// most recent gateway operation.
+/// Outcome of a root function invocation, preserving the stable code of the
+/// failure that actually ESCAPED it — nothing is stored outside this error.
 ///
-/// Only [`FacadeDbGateway`] writes here (then hands the classified
-/// [`DbGatewayError`] to the guest), so the guest cannot forge a code: trap
-/// messages never reach this channel.
-pub(crate) struct GatewayCodeSink {
-    code: Mutex<Option<String>>,
+/// `invoke_function_root` builds it by matching the returned
+/// [`crate::engine::function::FunctionError`] through its `code()` accessor,
+/// so a plain/compute/user failure is [`InvokeFailure::Other`] even if an
+/// earlier gateway call in the same invocation was refused. Concurrent or
+/// interleaved operations cannot interfere because no shared slot exists.
+///
+/// Notes on the boundaries (defined here, once):
+/// - An inner transactional `db_execute` whose gateway call returns an `Ok`
+///   aborted [`crate::engine::query::batch::BatchResponse`] does NOT set a
+///   code: the abort is data the guest inspects. If the guest then raises its
+///   own error, the outer `Call` carries that raise's code — which is none,
+///   because a guest `throw` is not a gateway refusal.
+/// - A gateway refusal the guest cannot handle is the ESCAPING failure, so its
+///   code is the one reported. The shipped shamir language has no
+///   exceptions/try-catch (`throw` is terminal), so there is no "handled
+///   refusal followed by an unrelated failure" inside one invocation.
+pub(crate) enum InvokeFailure {
+    /// The escaping failure was a gateway refusal carrying `code`.
+    Refused { code: String, error: DbError },
+    /// Any other escaping failure; it carries no code.
+    Other(DbError),
 }
 
-impl GatewayCodeSink {
-    pub(crate) fn new() -> Self {
-        Self {
-            code: Mutex::new(None),
+impl InvokeFailure {
+    /// Stable code of the ESCAPING failure, if it was a gateway refusal.
+    pub(crate) fn code(&self) -> Option<&str> {
+        match self {
+            InvokeFailure::Refused { code, .. } => Some(code),
+            InvokeFailure::Other(_) => None,
         }
     }
 
-    /// Record the refused operation's stable code; `None` leaves the sink
-    /// empty.
-    pub(crate) fn record(&self, code: Option<&str>) {
-        if let Some(code) = code {
-            *self.code.lock().expect("gateway code sink mutex") = Some(code.to_string());
+    /// Consume the wrapper, yielding the underlying database error unchanged.
+    pub(crate) fn into_db_error(self) -> DbError {
+        match self {
+            InvokeFailure::Refused { error, .. } | InvokeFailure::Other(error) => error,
         }
     }
+}
 
-    /// Take the recorded code, clearing the sink.
-    pub(crate) fn take(&self) -> Option<String> {
-        self.code.lock().expect("gateway code sink mutex").take()
+impl std::fmt::Display for InvokeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvokeFailure::Refused { error, .. } | InvokeFailure::Other(error) => {
+                write!(f, "{error}")
+            }
+        }
+    }
+}
+
+impl From<DbError> for InvokeFailure {
+    fn from(error: DbError) -> Self {
+        InvokeFailure::Other(error)
     }
 }
 
@@ -62,21 +91,9 @@ pub(super) struct FacadeDbGateway {
     /// under setuid).  The gateway runs the function's DB access AS this
     /// actor so per-table ACLs apply — NOT as System.
     pub(super) actor: Actor,
-    /// Optional server-side channel that receives the stable code of a
-    /// refused operation before the guest sees the classified error.
-    pub(super) code_sink: Option<Arc<GatewayCodeSink>>,
 }
 
 impl FacadeDbGateway {
-    /// Record the refused operation's stable code (only when a sink is
-    /// installed), then classify exactly as before.
-    fn record_and_classify(&self, e: BatchError) -> DbGatewayError {
-        if let Some(sink) = &self.code_sink {
-            sink.record(e.code());
-        }
-        classify_batch_error(e)
-    }
-
     /// Convert a [`QueryValue`] scalar into a [`FilterValue`] for use in a
     /// `Filter::Eq` predicate. Unsupported values retain the field-specific
     /// error classification expected by the function gateway.
@@ -236,7 +253,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(|e| self.record_and_classify(e))?;
+            .map_err(classify_batch_error)?;
         Ok(response
             .results
             .get("r")
@@ -261,7 +278,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(|e| self.record_and_classify(e))?;
+            .map_err(classify_batch_error)?;
         let result = match response.results.get("i") {
             Some(r) => r,
             None => {
@@ -296,7 +313,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
-            .map_err(|e| self.record_and_classify(e))?;
+            .map_err(classify_batch_error)?;
         Ok(response
             .results
             .get("q")
@@ -327,7 +344,7 @@ impl DbGateway for FacadeDbGateway {
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
-            .map_err(|e| self.record_and_classify(e))?;
+            .map_err(classify_batch_error)?;
         rmp_serde::to_vec_named(&response).map_err(|e| DbGatewayError::ExecutionSource {
             message: format!("execute: response encode error: {e}"),
             source: Box::new(e),

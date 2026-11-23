@@ -41,6 +41,8 @@ const BOB_SID: [u8; 32] = [0xBB; 32];
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The never-created table name used as the absent case in every pair.
 const ABSENT_TABLE: &str = "absent_items";
+/// The single fixed refusal text an absent table and a closed table share.
+const FIXED_REFUSAL: &str = "table is unavailable";
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -410,10 +412,12 @@ async fn send_with_call_timeout(
     rmp_serde::from_slice(&resp_bytes).expect("decode response")
 }
 
-/// Extract the wire error code, panicking on a non-error response.
-fn error_code_of(resp: DbResponse, context: &str) -> String {
+/// Extract the WHOLE wire error (code AND message), panicking on a
+/// non-error response. Comparing the pair is what makes the refusal parity
+/// whole-response, not code-only.
+fn error_pair_of(resp: DbResponse, context: &str) -> (String, String) {
     match resp {
-        DbResponse::Error { code, .. } => code,
+        DbResponse::Error { code, message } => (code, message),
         other => panic!("{context}: expected an error, got {other:?}"),
     }
 }
@@ -440,20 +444,21 @@ async fn get_record_refusal_is_identical_for_closed_and_absent_tables() {
     let bob = bob_session();
     let key = RecordId([1u8; 16]);
 
-    let closed = error_code_of(
+    let closed = error_pair_of(
         send_with_call_timeout(&handler, &bob, get_record("app", "main", "items", key)).await,
         "GetRecord on the closed table",
     );
-    let absent = error_code_of(
+    let absent = error_pair_of(
         send_with_call_timeout(&handler, &bob, get_record("app", "main", ABSENT_TABLE, key)).await,
         "GetRecord on the absent table",
     );
 
     assert_eq!(
         closed, absent,
-        "GetRecord must not reveal whether the table exists: closed={closed}, absent={absent}"
+        "GetRecord must not reveal whether the table exists"
     );
-    assert_eq!(closed, "unknown_table");
+    assert_eq!(closed.0, "unknown_table");
+    assert_eq!(closed.1, FIXED_REFUSAL);
 }
 
 /// Batch read: a closed table and an absent name must answer the SAME code.
@@ -466,20 +471,27 @@ async fn batch_read_refusal_is_identical_for_closed_and_absent_tables() {
     open_db_and_store_only(&handler, 0o777).await;
     let bob = bob_session();
 
-    let closed = error_code_of(
+    let closed = error_pair_of(
         send_with_call_timeout(&handler, &bob, batch_read_req("items")).await,
         "batch read of the closed table",
     );
-    let absent = error_code_of(
+    let absent = error_pair_of(
         send_with_call_timeout(&handler, &bob, batch_read_req(ABSENT_TABLE)).await,
         "batch read of the absent table",
     );
 
     assert_eq!(
         closed, absent,
-        "a batch read must not reveal whether the table exists: closed={closed}, absent={absent}"
+        "a batch read must not reveal whether the table exists"
     );
-    assert_eq!(closed, "unknown_table");
+    assert_eq!(closed.0, "unknown_table");
+    // The whole message must be identical for both cases and carry the fixed
+    // refusal text (the batch path may wrap it in its own error envelope).
+    assert!(
+        closed.1.ends_with(FIXED_REFUSAL),
+        "batch read must carry the fixed refusal text, got {:?}",
+        closed.1
+    );
 }
 
 /// Cursor create: a closed table and an absent name must answer the SAME
@@ -493,7 +505,7 @@ async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
     open_db_and_store_only(&handler, 0o777).await;
     let bob = bob_session();
 
-    let closed = error_code_of(
+    let closed = error_pair_of(
         send_with_call_timeout(
             &handler,
             &bob,
@@ -502,7 +514,7 @@ async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
         .await,
         "cursor create on the closed table",
     );
-    let absent = error_code_of(
+    let absent = error_pair_of(
         send_with_call_timeout(
             &handler,
             &bob,
@@ -514,14 +526,159 @@ async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
 
     assert_eq!(
         closed, absent,
-        "cursor create must not reveal whether the table exists: closed={closed}, absent={absent}"
+        "cursor create must not reveal whether the table exists"
     );
-    assert_eq!(closed, "unknown_table");
+    assert_eq!(closed.0, "unknown_table");
+    // `create_cursor` maps the shared `BatchError` through `error_response`,
+    // so the fixed text rides inside that envelope; the whole message must
+    // still be identical for both cases and end with the fixed refusal.
+    assert!(
+        closed.1.ends_with(FIXED_REFUSAL),
+        "cursor create must carry the fixed refusal text, got {:?}",
+        closed.1
+    );
     assert_eq!(
         handler.cursor_registry().len(),
         0,
         "a refused cursor create must not register a cursor"
     );
+}
+
+/// Give the uniformity fixture enough rows for a page_size-1 cursor to keep
+/// a live cursor (its first page must report `has_more`).
+async fn seed_extra_items(handler: &ShamirDbHandler) {
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "extra0",
+        insert("items").row(doc! { "id" => "k001", "v" => 1_i64 }),
+    );
+    b.insert(
+        "extra1",
+        insert("items").row(doc! { "id" => "k002", "v" => 2_i64 }),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::User(principal64([0xAB; 16])), "app", &b.build()),
+    )
+    .await
+    .expect("seed must complete within the 120s bound")
+    .expect("seed must succeed");
+}
+
+/// Chmod `app.main.items` to `mode` as the System actor.
+async fn chmod_items_table_to(handler: &ShamirDbHandler, mode: u16) {
+    let mut batch = Batch::new();
+    batch.chmod(
+        "table",
+        shamir_query_builder::ddl::chmod(
+            ResourceRef::Table {
+                table: ["app".into(), "main".into(), "items".into()],
+            },
+            mode,
+        )
+        .hmac("cursor-quarantine-fetch-refusal-test")
+        .build()
+        .expect("build chmod table"),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("chmod must complete within the 120s bound")
+    .expect("chmod must succeed");
+}
+
+/// Drop `app.main.items` through the engine's admission-checked path.
+async fn drop_items_table(handler: &ShamirDbHandler) {
+    let db = handler.db().get_db("app").expect("app database");
+    let removed = tokio::time::timeout(CALL_TIMEOUT, db.drop_table("main", "items"))
+        .await
+        .expect("drop must complete within the 120s bound")
+        .expect("drop must succeed");
+    assert!(removed, "the fixture table must actually be dropped");
+}
+
+/// Fetch-lifecycle PAIR: a Read revoked before `FetchNext` and the table
+/// dropped before `FetchNext` must answer the SAME fixed refusal, BOTH must
+/// leave the cursor registry empty, and an explicit close afterwards must
+/// stay idempotent (`CursorClosed`).
+#[tokio::test]
+async fn fetch_refusal_is_identical_for_revoked_and_dropped_tables_and_retires_cursor() {
+    let handler = build_uniformity_handler().await;
+    seed_extra_items(&handler).await;
+    let alice = alice_session();
+
+    let revoked_cursor = expect_first_page(
+        send_with_call_timeout(
+            &handler,
+            &alice,
+            create_cursor_req(ReadQuery::with_repo("main", "items"), 1),
+        )
+        .await,
+    );
+    chmod_items_table_to(&handler, 0o000).await;
+    let revoked = send_with_call_timeout(&handler, &alice, fetch_next_req(revoked_cursor, 1)).await;
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a revoked Read on FetchNext must retire the cursor"
+    );
+    let closed = send_with_call_timeout(
+        &handler,
+        &alice,
+        DbRequest::CancelCursor {
+            cursor_id: revoked_cursor,
+        },
+    )
+    .await;
+    assert!(
+        matches!(closed, DbResponse::CursorClosed { cursor_id } if cursor_id == revoked_cursor),
+        "an explicit close after the refusal must stay idempotent"
+    );
+
+    chmod_items_table_to(&handler, 0o777).await;
+    let dropped_cursor = expect_first_page(
+        send_with_call_timeout(
+            &handler,
+            &alice,
+            create_cursor_req(ReadQuery::with_repo("main", "items"), 1),
+        )
+        .await,
+    );
+    drop_items_table(&handler).await;
+    let dropped = send_with_call_timeout(&handler, &alice, fetch_next_req(dropped_cursor, 1)).await;
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a table miss on FetchNext must retire the cursor"
+    );
+    let closed = send_with_call_timeout(
+        &handler,
+        &alice,
+        DbRequest::CancelCursor {
+            cursor_id: dropped_cursor,
+        },
+    )
+    .await;
+    assert!(
+        matches!(closed, DbResponse::CursorClosed { cursor_id } if cursor_id == dropped_cursor),
+        "an explicit close after the table miss must stay idempotent"
+    );
+
+    let revoked = error_pair_of(revoked, "FetchNext after a revoked Read");
+    let dropped = error_pair_of(dropped, "FetchNext after the table is dropped");
+    assert_eq!(
+        revoked, dropped,
+        "a revoked Read and a table miss must be the same refusal"
+    );
+    assert_eq!(revoked.0, "unknown_table");
+    assert_eq!(revoked.1, FIXED_REFUSAL);
 }
 
 /// Control: the seed row actually EXISTS and the closed table really is the

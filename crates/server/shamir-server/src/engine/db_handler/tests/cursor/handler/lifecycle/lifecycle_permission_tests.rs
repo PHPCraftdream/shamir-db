@@ -587,8 +587,8 @@ async fn plain_read_with_version_true_still_returns_versions_regression() {
 // ---------------------------------------------------------------------------
 
 /// Bob (non-owner, no grant) attempts `CreateCursor` against alice's table
-/// → must be denied with `access_denied`, and no cursor may be registered as
-/// a side effect of the attempt.
+/// → must be refused with the fixed `unknown_table` table-read refusal, and
+/// no cursor may be registered as a side effect of the attempt.
 #[tokio::test]
 async fn create_cursor_denies_non_owner_without_grant() {
     let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
@@ -598,13 +598,17 @@ async fn create_cursor_denies_non_owner_without_grant() {
     let resp = send(&handler, &bob, create_cursor_req(query, 2)).await;
 
     match resp {
-        DbResponse::Error { code, .. } => {
+        DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
+                code, "unknown_table",
                 "enforced default (0o700) must deny bob"
-            )
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {message}"
+            );
         }
-        other => panic!("expected access_denied, got {other:?}"),
+        other => panic!("expected unknown_table, got {other:?}"),
     }
     assert_eq!(
         handler.cursor_registry().len(),

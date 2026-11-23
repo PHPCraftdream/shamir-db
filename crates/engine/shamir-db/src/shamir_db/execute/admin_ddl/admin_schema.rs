@@ -937,7 +937,9 @@ impl ShamirAdminExecutor {
         let repo = &op.repo;
         let db = &self.db_name;
 
-        // Authz: Action::Read on the table (introspection).
+        // Authz: Action::Read on the table (introspection). A denial here is
+        // the fixed table-unavailable refusal: an existing-but-closed table
+        // and an absent table must be indistinguishable to the caller.
         self.shamir
             .authorize_access(
                 &self.actor,
@@ -945,7 +947,7 @@ impl ShamirAdminExecutor {
                 Action::Read,
             )
             .await
-            .map_err(err_access)?;
+            .map_err(|_| err_code("unknown_table", "table is unavailable"))?;
 
         let rec = self
             .shamir
@@ -953,7 +955,7 @@ impl ShamirAdminExecutor {
             .load_table_record(db, repo, table)
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?
-            .ok_or_else(|| err_code("not_found", format!("table '{db}/{repo}/{table}'")))?;
+            .ok_or_else(|| err_code("unknown_table", "table is unavailable"))?;
 
         let interner_mgr = self
             .shamir

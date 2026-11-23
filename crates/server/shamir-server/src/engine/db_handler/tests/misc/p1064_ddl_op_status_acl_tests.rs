@@ -10,6 +10,7 @@
 //! `RequestHandler::handle` round trip, real in-memory `ShamirDb`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -24,6 +25,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_types::types::record_id::RecordId;
 
@@ -31,6 +33,8 @@ use crate::db_handler::handler::ShamirDbHandler;
 
 const ALICE_SID: [u8; 32] = [0xAA; 32];
 const BOB_SID: [u8; 32] = [0xBB; 32];
+/// Generous per-call bound (hang detector; slow Windows runner).
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Owner of `app.main.items` and its index -- authorized to poll DDL status
 /// on it.
@@ -219,6 +223,85 @@ async fn get_ddl_op_status_unauthorized_response_indistinguishable_from_unknown_
         real_code, "access_denied",
         "both must be denied at the authorization gate, before op_id resolution"
     );
+}
+
+/// Close `app.main.items` to every non-admin actor (including its owner) by
+/// chmodding the table itself; the Database/Store ancestors stay readable.
+async fn close_items_table(handler: &ShamirDbHandler) {
+    let mut batch = Batch::new();
+    batch.chmod(
+        "table",
+        ddl::chmod(
+            ResourceRef::Table {
+                table: ["app".into(), "main".into(), "items".into()],
+            },
+            0o000,
+        )
+        .hmac("p1064-ddl-status-invalid-op-id-parity")
+        .build()
+        .expect("build chmod table"),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("admin chmod must complete within the 120s bound")
+    .expect("admin chmod must succeed");
+}
+
+/// PAIR: an INVALID `op_id` against an existing-but-CLOSED table and against
+/// an ABSENT table must produce the SAME fixed refusal. Availability is
+/// decided BEFORE the id is parsed, so `validation` can never distinguish the
+/// two; the parent survives, so the code is `unknown_table`.
+#[tokio::test]
+async fn invalid_op_id_refusal_is_identical_for_closed_and_absent_tables() {
+    let (handler, _) = build_handler_with_dropped_index().await;
+    let alice = alice_session();
+    close_items_table(&handler).await;
+    let invalid = "not-a-record-id";
+
+    let closed = send(
+        &handler,
+        &alice,
+        DbRequest::GetDdlOpStatus {
+            db: "app".into(),
+            repo: "main".into(),
+            table: "items".into(),
+            op_id: invalid.into(),
+        },
+    )
+    .await;
+    let absent = send(
+        &handler,
+        &alice,
+        DbRequest::GetDdlOpStatus {
+            db: "app".into(),
+            repo: "main".into(),
+            table: "missing".into(),
+            op_id: invalid.into(),
+        },
+    )
+    .await;
+
+    let (closed_code, closed_message) = match closed {
+        DbResponse::Error { code, message } => (code, message),
+        other => panic!("expected the fixed refusal for the closed table, got {other:?}"),
+    };
+    let (absent_code, absent_message) = match absent {
+        DbResponse::Error { code, message } => (code, message),
+        other => panic!("expected the fixed refusal for the absent table, got {other:?}"),
+    };
+
+    assert_eq!(
+        (closed_code.clone(), closed_message.clone()),
+        (absent_code.clone(), absent_message.clone()),
+        "an invalid op_id must not reveal whether the table exists"
+    );
+    assert_eq!(closed_code, "unknown_table");
+    assert_eq!(closed_message, "table is unavailable");
 }
 
 /// Regression guard: the actual owner (authorized) can still poll DDL

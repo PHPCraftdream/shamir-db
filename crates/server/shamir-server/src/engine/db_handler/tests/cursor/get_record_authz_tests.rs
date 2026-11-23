@@ -10,10 +10,10 @@
 //!
 //! The park rendezvous is deterministic and sleep/yield free: the test holds
 //! the whole byte budget, and the session's single request slot is the
-//! observable — the handler takes it (step 3 of `get_record`) and then runs
-//! the synchronous resolve/`has_table`/incarnation capture (step 5) before
-//! its next suspension at the budget acquire (step 6), so "slot taken"
-//! implies "pre-budget resolution finished". The read future is polled
+//! observable — the handler runs the synchronous parent resolution,
+//! configured-table check and incarnation capture BEFORE taking the slot,
+//! then suspends at the budget acquire, so "slot taken" implies
+//! "pre-budget resolution finished". The read future is polled
 //! directly (not spawned), so nothing can race the mutation.
 //!
 //! Fixture mirrors `get_record_tests.rs` (in-memory `ShamirDb`, owner alice,
@@ -199,9 +199,9 @@ fn expect_error(resp: DbResponse, code: &str, context: &str) {
 /// Drive the point read until it is parked at the upfront budget reservation
 /// with the pre-budget resolution already done. The session's single request
 /// slot is the observable: while we can still take it ourselves the child has
-/// not reached step 3, so poll the child once (it must stay Pending, the
-/// budget is held); once we cannot take it, the child took it and ran the
-/// synchronous step 4/5 code in the same poll, so the capture is done.
+/// not reached the slot gate, so poll the child once (it must stay Pending,
+/// the budget is held); once we cannot take it, the child has taken the slot
+/// after its synchronous resolution/availability code, so the capture is done.
 async fn drive_to_capture<F: Future<Output = DbResponse>>(
     read: &mut Pin<Box<F>>,
     session: &Session,
@@ -964,4 +964,36 @@ async fn cursor_creates_over_unknown_tables_do_not_grow_catalogue_cells() {
         before,
         "a refused cursor create must not insert a catalogue cell for its table"
     );
+}
+
+/// PAIR under a SATURATED request-slot pool: absent and existing-but-closed
+/// tables must both answer the fixed refusal, never `server_busy`; availability
+/// is decided BEFORE the slot gate, so the absent name cannot reach the
+/// exhausted slot while the closed one stops at the table ACL.
+#[tokio::test]
+async fn get_record_absent_and_closed_tables_are_never_server_busy_under_saturated_slot() {
+    let (handler, seeded) = build_handler(ByteBudget::unbounded(), parked_limits()).await;
+    let store = SessionStore::new();
+    let session = store.insert(ALICE_SID, alice_session());
+    chmod_items_table(&handler, 0o000).await;
+    let held = session.try_acquire_request_slot(1).expect("the cap-1 slot");
+    let closed = send(&handler, &session, get_record_req(seeded)).await;
+    let absent = send(
+        &handler,
+        &session,
+        get_record("app", "main", "absent_items", seeded),
+    )
+    .await;
+    drop(held);
+    for (resp, label) in [(closed, "closed"), (absent, "absent")] {
+        let (code, message) = match resp {
+            DbResponse::Error { code, message } => (code, message),
+            other => panic!("{label} table: expected the fixed refusal, got {other:?}"),
+        };
+        assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("unknown_table", "table is unavailable"),
+            "{label} table under a saturated slot"
+        );
+    }
 }

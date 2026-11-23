@@ -18,6 +18,7 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+use crate::tx::tests::drain::truncation::truncation_tests::reopen_disk_repo;
 
 // ============================================================================
 // Test 1: for_each_zero_iterations
@@ -796,5 +797,203 @@ async fn transactional_body_abort_fails_the_iteration_with_its_stable_code() {
         read_resp.results["r"].records.len(),
         0,
         "the aborted transactional body must not leave its insert behind"
+    );
+}
+
+/// Resolver: on the EXECUTION-phase resolve of `gate` it runs `writer` (a real
+/// transactional batch), committing a concurrent update between the body's
+/// recorded SELECT and the body's commit — the `ssi_tests.rs`
+/// `GateBarrierResolver` shape. `gate_resolves` 0 = `validate_tables`
+/// (pre-execution), 1 = the stage-1 `g` resolve (`runner.rs`).
+struct CommitConflictResolver {
+    repo: RepoInstance,
+    gate_resolves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    writer: BatchRequest,
+}
+
+#[async_trait::async_trait]
+impl crate::query::batch::TableResolver for CommitConflictResolver {
+    async fn resolve(
+        &self,
+        table_ref: &TableRef,
+    ) -> shamir_storage::error::DbResult<crate::table::TableManager> {
+        if table_ref.table == "gate" {
+            let n = self
+                .gate_resolves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 1 {
+                let writer_resolver = TxTestResolver {
+                    repo: self.repo.clone(),
+                };
+                let resp = execute_batch(
+                    &self.writer,
+                    &writer_resolver,
+                    None,
+                    None,
+                    Actor::System,
+                    "test",
+                )
+                .await
+                .expect("the concurrent writer batch must execute");
+                let info = resp.transaction.expect("writer batch carries tx metadata");
+                assert_eq!(info.status, "committed", "writer must commit, got {info:?}");
+            }
+        }
+        self.repo.get_table(&table_ref.table).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::query::batch::BatchResolver for CommitConflictResolver {
+    async fn resolve_repo(
+        &self,
+        _repo_name: &str,
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
+    }
+}
+
+#[tokio::test]
+async fn transactional_body_commit_conflict_fails_the_iteration_with_tx_conflict() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("gate")],
+    )
+    .await
+    .unwrap();
+    let tx_resolver = TxTestResolver { repo: repo.clone() };
+
+    // Seed one visible row so the body's SELECT records a real version.
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "seed",
+        write::insert("users").row(
+            doc()
+                .set("name", "alice")
+                .unwrap()
+                .set("val", "initial")
+                .unwrap(),
+        ),
+    );
+    let seed_req = seed.build();
+    execute_batch(&seed_req, &tx_resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Concurrent writer: a transactional update that bumps the seeded row's
+    // version while the body's tx is still open.
+    let mut wb = Batch::new();
+    wb.id("writer");
+    wb.transactional();
+    wb.try_update(
+        "w",
+        write::update("users")
+            .where_(shamir_query_builder::filter::eq("name", "alice"))
+            .set(doc().set("val", "rewritten").unwrap()),
+    )
+    .unwrap();
+    let writer_req = wb.build();
+
+    // Body (transactional, Serializable): SELECT the seeded row, then a gate
+    // read in a later stage that runs the writer; the commit must detect it.
+    let mut bb = Batch::new();
+    bb.id("body");
+    bb.transactional();
+    bb.isolation(shamir_query_builder::batch::Isolation::Serializable);
+    let r = bb.query("r", shamir_query_builder::query::Query::from("users"));
+    bb.query(
+        "g",
+        shamir_query_builder::query::Query::from("gate").where_eq("probe", r.first().field("name")),
+    );
+    let body = bb.build();
+
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![FilterValue::Int(1)]),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    let req = wrap_for_each(fe);
+    let resolver = CommitConflictResolver {
+        repo: repo.clone(),
+        gate_resolves: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        writer: writer_req,
+    };
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("a commit-time conflict must fail the iteration, not yield an empty value");
+    assert_eq!(
+        err.code(),
+        Some("tx_conflict"),
+        "the commit-time classification must reach the iteration's code, got: {err:?}"
+    );
+}
+
+// ============================================================================
+// A transactional ForEach body whose commit outcome is INDETERMINATE must stop
+// the loop with `wal_requires_reopen`: the iteration MAY have committed, so
+// continuing would present a result list whose prefix is unknown — and append
+// the empty result map as if the iteration had computed nothing.
+//
+// Seam (no sleeps, no new seam): `WalSink::arm_fail_next_seal_sync_for_test`
+// (`crates/storage/shamir-wal/src/segment/wal_sink.rs:44`) fails the FIRST seal
+// fsync — AFTER the window's frames were written — which `wal_completion`
+// (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry/durability_completion.rs:39-47`)
+// classifies as `WalOutcomeUnknown` → `TransactionInfo::indeterminate`. Both
+// the fault and the tiny `SHAMIR_WAL_SEGMENT_MAX_BYTES` cap that makes the loop
+// rotate (captured at construction, `tx/commit/core/durability_access.rs:148-157`)
+// are process-global → `#[serial]`.
+// ============================================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_requires_reopen() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1024");
+    shamir_wal::WalSink::arm_fail_next_seal_sync_for_test();
+    // Disk repo: the File sink is the only one with the seal-fsync path.
+    // `reopen_disk_repo` is the crate's existing helper (it retries the
+    // transient Windows open failure instead of this test sleeping).
+    let repo = reopen_disk_repo(
+        "fe_indeterminate",
+        tempdir.path().join("repo"),
+        vec![TableConfig::new("orders")],
+    )
+    .await;
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Each iteration opens its OWN transaction (non-transactional outer batch),
+    // so each commits independently; ~520-byte rows cross the tiny segment cap.
+    let big = format!("fe-wal-{}", "p".repeat(512));
+    let over: Vec<FilterValue> = (0..64)
+        .map(|i| FilterValue::String(format!("{big}-{i:04}")))
+        .collect();
+    let mut body = insert_order_body("uid");
+    body.transactional = true;
+    let fe = ForEachOp {
+        over: FilterValue::Array(over),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    let req = wrap_for_each(fe);
+
+    let result = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
+    // Restore the process-global env var BEFORE asserting (no leak on failure).
+    std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
+
+    let err = result.expect_err("an indeterminate outcome must fail the loop");
+    assert_eq!(
+        err.code(),
+        Some("wal_requires_reopen"),
+        "the indeterminate outcome must map to the reopen disposition, got: {err:?}"
+    );
+    // The message proves the INDETERMINATE arm fired (its text is the info's
+    // `error`), not a later fail-stop abort whose reason is `wal_requires_reopen`.
+    assert!(
+        err.to_string().contains("wal_outcome_unknown"),
+        "the iteration failure must carry the indeterminate outcome's text, got: {err}"
     );
 }

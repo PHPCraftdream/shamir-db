@@ -480,14 +480,62 @@ impl<'a> QueryRunner<'a> {
                             },
                         })?;
                         if let Some(info) = tx_info {
-                            if info.status == "aborted" {
-                                return Err(BatchError::query_coded(
-                                    alias.to_string(),
-                                    info.abort_code.as_deref().unwrap_or("transaction_aborted"),
-                                    info.reason
-                                        .as_deref()
-                                        .unwrap_or("transactional body aborted"),
-                                ));
+                            // Every commit outcome is handled explicitly: only
+                            // a COMMITTED body may contribute a value to the
+                            // loop's result list. `status` is the wire word
+                            // (`transaction_info.rs`) — the decision is made on
+                            // it, not on `reason`.
+                            match info.status.as_str() {
+                                // Nothing was committed: fail the iteration
+                                // with the abort's own stable code, falling
+                                // back to today's `transaction_aborted` only
+                                // when the abort carries no code.
+                                "aborted" => {
+                                    return Err(BatchError::query_coded(
+                                        alias.to_string(),
+                                        info.abort_code.as_deref().unwrap_or("transaction_aborted"),
+                                        info.reason
+                                            .as_deref()
+                                            .unwrap_or("transactional body aborted"),
+                                    ));
+                                }
+                                // The body's commit outcome is UNKNOWN: the WAL
+                                // frame may or may not have reached the journal
+                                // (`transactional.rs`'s non-committed arm still
+                                // returns this metadata). The iteration MAY have
+                                // committed, so the loop MUST stop here:
+                                // continuing would present a result list whose
+                                // prefix is unknown, and appending the empty
+                                // result map would report a possibly-committed
+                                // iteration as an empty success. The caller has
+                                // to reconcile first (reopen the repo and let WAL
+                                // replay decide — the `wal_requires_reopen`
+                                // disposition); a blind retry could duplicate
+                                // the write.
+                                "indeterminate" => {
+                                    return Err(BatchError::query_coded(
+                                        alias.to_string(),
+                                        "wal_requires_reopen",
+                                        info.reason.as_deref().or(info.error.as_deref()).unwrap_or(
+                                            "transactional body commit outcome is unknown",
+                                        ),
+                                    ));
+                                }
+                                // Committed: append the body's results (today's
+                                // implicit path, now stated explicitly).
+                                "committed" => {}
+                                // Fail closed: an unrecognised status must never
+                                // be treated as a successful iteration.
+                                _ => {
+                                    return Err(BatchError::query_coded(
+                                        alias.to_string(),
+                                        "internal",
+                                        format!(
+                                            "transactional body returned unrecognised transaction status '{}'",
+                                            info.status
+                                        ),
+                                    ));
+                                }
                             }
                         }
                         results

@@ -3,9 +3,7 @@
 use crate::access::Actor;
 use crate::query::batch::{BatchError, FunctionInvoker};
 use crate::query::read::QueryResult;
-use crate::shamir_db::shamir_db::GatewayCodeSink;
 use crate::types::common::TMap;
-use std::sync::Arc;
 
 use super::super::shamir_db::ShamirDb;
 use super::helpers::filter_value_to_query_value;
@@ -44,9 +42,9 @@ impl FunctionInvoker for ShamirFunctionInvoker {
         }
         params.set("args", crate::types::value::QueryValue::List(args_list));
 
-        // A fresh sink per call keeps an earlier invocation's code out of
-        // this call's error (anti-stale).
-        let code_sink = Arc::new(GatewayCodeSink::new());
+        // The code is read from the failure that actually escapes; nothing is
+        // stored outside it, so an earlier refused gateway call cannot supply
+        // a code to a later unrelated failure.
         let qv = self
             .shamir
             .invoke_function_in_db_as_with_gateway_code(
@@ -55,13 +53,12 @@ impl FunctionInvoker for ShamirFunctionInvoker {
                 &op.call,
                 params,
                 actor.clone(),
-                code_sink.clone(),
             )
             .await
-            .map_err(|e| BatchError::QueryError {
+            .map_err(|failure| BatchError::QueryError {
                 alias: String::new(),
-                message: e.to_string(),
-                code: code_sink.take(),
+                message: failure.to_string(),
+                code: failure.code().map(str::to_string),
             })?;
 
         // Map QueryValue -> QueryResult with `value` field.

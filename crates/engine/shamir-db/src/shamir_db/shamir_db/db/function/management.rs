@@ -10,7 +10,7 @@ use shamir_engine::function::{
 use shamir_types::types::value::QueryValue;
 
 use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
-use super::super::db_gateway::GatewayCodeSink;
+use super::super::db_gateway::InvokeFailure;
 use super::artifact::{fresh_artifact_id, ARTIFACT_ID_FIELD};
 use super::types::{optimize_name, FunctionState};
 #[cfg(test)]
@@ -668,8 +668,9 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, None, caller, None, None)
+        self.invoke_function_root(name, params, None, caller, None)
             .await
+            .map_err(InvokeFailure::into_db_error)
     }
 
     /// Invoke a function sharing an existing batch context.
@@ -694,8 +695,9 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, Some(batch), caller, None, None)
+        self.invoke_function_root(name, params, Some(batch), caller, None)
             .await
+            .map_err(InvokeFailure::into_db_error)
     }
 
     /// Invoke a function with database read/write access (slice 8b).
@@ -730,12 +732,18 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(name, params, None, caller, Some((db_name, repo)), None)
+        self.invoke_function_in_db_as_with_gateway_code(db_name, repo, name, params, caller)
             .await
+            .map_err(InvokeFailure::into_db_error)
     }
 
-    /// Like [`invoke_function_in_db_as`] but reports the stable code of a
-    /// gateway refusal through the server-side `sink` (never guest text).
+    /// Like [`invoke_function_in_db_as`] but preserves the stable code of the
+    /// failure that actually ESCAPED the invocation, for the outer batch
+    /// `Call`.
+    ///
+    /// The code is read from the escaping `FunctionError` through its `code()`
+    /// accessor - there is no shared slot, so an earlier refused gateway call
+    /// cannot contribute a code to a later unrelated failure.
     pub(crate) async fn invoke_function_in_db_as_with_gateway_code(
         &self,
         db_name: &str,
@@ -743,17 +751,9 @@ impl ShamirDb {
         name: &str,
         params: Params,
         caller: Actor,
-        sink: Arc<GatewayCodeSink>,
-    ) -> DbResult<QueryValue> {
-        self.invoke_function_root(
-            name,
-            params,
-            None,
-            caller,
-            Some((db_name, repo)),
-            Some(sink),
-        )
-        .await
+    ) -> Result<QueryValue, InvokeFailure> {
+        self.invoke_function_root(name, params, None, caller, Some((db_name, repo)))
+            .await
     }
 
     /// Like [`invoke_function_in_db`] but shares an existing batch context.
@@ -779,14 +779,8 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.invoke_function_root(
-            name,
-            params,
-            Some(batch),
-            caller,
-            Some((db_name, repo)),
-            None,
-        )
-        .await
+        self.invoke_function_root(name, params, Some(batch), caller, Some((db_name, repo)))
+            .await
+            .map_err(InvokeFailure::into_db_error)
     }
 }

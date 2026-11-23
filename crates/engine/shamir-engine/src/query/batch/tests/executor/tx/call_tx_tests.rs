@@ -303,6 +303,152 @@ async fn transactional_abort_carries_the_failing_op_stable_code() {
 }
 
 // ============================================================================
+// Test 2c: a ForEach whose transactional bodies commit independently — the
+// FIRST iteration commits, a LATER iteration aborts.
+//
+// The outer op fails on the first failing iteration, but the already-committed
+// prefix is NOT rolled back: each iteration owns its own transaction, so the
+// failure only says "stop here", never "undo what committed".
+// ============================================================================
+
+#[tokio::test]
+async fn foreach_committed_prefix_survives_a_later_iteration_abort() {
+    let (_repo, resolver) = setup_repo().await;
+
+    // Body: ONE insert whose `guard` is `$fn: math/mod(1, $param uid)`.
+    // `math/mod` rejects a zero divisor, so iteration `uid = 1` inserts
+    // cleanly while iteration `uid = 0` fails before that row is written —
+    // the same per-iteration fault the for_each tests use.
+    let insert_value = mpack!({
+        "name": { "$param": "uid" },
+        "guard": { "$fn": { "name": "math/mod", "args": [1_i64, { "$param": "uid" }] } }
+    });
+    let mut body_queries = new_map();
+    body_queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("users"),
+                values: vec![insert_value],
+                records_idmsgpack: Vec::new(),
+                select: None,
+            }),
+            return_result: true,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let body = BatchRequest {
+        id: shamir_types::types::value::QueryValue::Int(730),
+        name: None,
+        // The body opens its OWN transaction on each iteration.
+        transactional: true,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: body_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert(
+        "loop".to_string(),
+        QueryEntry {
+            op: BatchOp::ForEach(shamir_query_types::batch::ForEachOp {
+                over: shamir_query_types::filter::FilterValue::Array(vec![
+                    shamir_query_types::filter::FilterValue::Int(1),
+                    shamir_query_types::filter::FilterValue::Int(0),
+                ]),
+                bind_row: "uid".to_string(),
+                batch: body,
+            }),
+            return_result: true,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let outer = BatchRequest {
+        id: shamir_types::types::value::QueryValue::Int(731),
+        name: None,
+        transactional: false,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    crate::query::batch::execute_batch_unchecked(
+        &outer,
+        &resolver,
+        None, // no admin
+        None, // no invoker
+        Actor::System,
+        "test",
+    )
+    .await
+    .expect_err("the later iteration's abort must fail the outer op");
+
+    // Iteration 1 committed independently: its row is still there.
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("users"),
+            )),
+            return_result: true,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: shamir_types::types::value::QueryValue::Int(732),
+        name: None,
+        transactional: false,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = crate::query::batch::execute_batch_unchecked(
+        &read_req,
+        &resolver,
+        None, // no admin
+        None, // no invoker
+        Actor::System,
+        "test",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        1,
+        "the first iteration's commit must survive the later abort — the \
+         contract does not imply that the committed prefix rolled back"
+    );
+}
+
+// ============================================================================
 // Test 3: Regression — Call in a NON-transactional batch works as before
 //
 // tx: None → the guard does NOT fire. The Call op reaches the invoker.

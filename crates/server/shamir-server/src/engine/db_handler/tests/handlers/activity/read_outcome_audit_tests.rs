@@ -55,6 +55,20 @@ fn alice_session() -> Session {
     s
 }
 
+fn bob_session() -> Session {
+    let mut s = Session::new(
+        [0xAC; 16],
+        "bob".into(),
+        SessionPermissions::from_roles(vec!["read_write".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        UnixNanos::now().as_u64(),
+    );
+    s.session_id = [0xBB; 32];
+    s
+}
+
 /// Handler over an in-memory `ShamirDb` with `app/{main,side}.items`,
 /// owned by alice (principal `[0xAB; 16]` — same identity the alice
 /// session carries, so alice is the owner). `main` is seeded with one
@@ -205,7 +219,10 @@ async fn get_record_emits_one_names_only_audit_record() {
         "the point read must succeed: {resp:?}"
     );
 
-    handler.cancel_refusal_audit().drain().await;
+    assert!(
+        handler.cancel_refusal_audit().drain().await,
+        "audit queue did not drain"
+    );
     let entries = captured.0.lock().expect("audit mutex");
     assert_eq!(
         entries.len(),
@@ -241,6 +258,39 @@ async fn get_record_emits_one_names_only_audit_record() {
     );
 }
 
+/// A refused point read leaves the durable audit chain untouched: a non-owner
+/// is stopped by the table gate BEFORE the success observer, so the refusal
+/// emits neither the `ok` audit record nor the `slow query` WARN observation.
+#[tokio::test]
+async fn get_record_refusal_emits_no_audit_record() {
+    let handler = build_handler(QueryLimitsCap::UNLIMITED).await;
+    let storage_id = insert_row_and_get_storage_id(&handler, "k001").await;
+
+    let (captured, writer) = audit_writer();
+    let handler = handler.with_audit_writer(writer);
+
+    let resp = send(&handler, &bob_session(), get_record_req(storage_id)).await;
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "unknown_table", "a non-owner read must be refused");
+            assert!(
+                message.contains("table is unavailable"),
+                "the refusal must carry the fixed text, got {message:?}"
+            );
+        }
+        other => panic!("expected unknown_table for a non-owner read, got {other:?}"),
+    }
+
+    assert!(
+        handler.cancel_refusal_audit().drain().await,
+        "audit queue did not drain"
+    );
+    assert!(
+        captured.0.lock().expect("audit mutex").is_empty(),
+        "a refused point read must not emit an audit record"
+    );
+}
+
 /// The typed point read logs the same `slow query` WARN the batch path does:
 /// threshold 0 stays silent and a crossed threshold emits one record for
 /// `db="app"` with `queries=1`.
@@ -267,11 +317,14 @@ async fn get_record_logs_slow_query_past_the_threshold_and_not_when_disabled() {
         "threshold 0 must disable the WARN"
     );
 
-    // A 1 µs threshold is crossed by the real read without any sleep; the
-    // millisecond granularity of `from_ms` could not be made deterministic.
+    // The elapsed value is pinned, so the WARN decision never depends on the
+    // real read.
     let enabled = build_handler(QueryLimitsCap::UNLIMITED)
         .await
-        .with_slow_query(SlowQueryConfig { threshold_us: 1 });
+        .with_slow_query(SlowQueryConfig {
+            threshold_us: 1_000,
+        })
+        .with_slow_query_elapsed(1_001);
     let id = insert_row_and_get_storage_id(&enabled, "k102").await;
     assert!(matches!(
         send(&enabled, &session, get_record_req(id)).await,
@@ -288,7 +341,7 @@ async fn get_record_logs_slow_query_past_the_threshold_and_not_when_disabled() {
     assert_eq!(record.level, "WARN");
     assert!(record.message.contains("slow query"), "{}", record.message);
     assert!(
-        record.message.contains("threshold_us=1"),
+        record.message.contains("threshold_us=1000"),
         "{}",
         record.message
     );

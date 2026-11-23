@@ -126,17 +126,17 @@ async fn permission_deny_allow_by_mode() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
+                code, "unknown_table",
                 "alice should be denied, got code={}, msg={}",
                 code, message
             );
             assert!(
-                message.contains("access denied"),
-                "message should describe denial: {}",
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
                 message
             );
         }
-        other => panic!("expected access_denied error, got {:?}", other),
+        other => panic!("expected unknown_table error, got {:?}", other),
     }
 
     // --- Admin reads from the same table → ALLOWED ---
@@ -536,12 +536,19 @@ async fn permission_open_default_allows_any_user() {
     )
     .await;
     match resp {
-        DbResponse::Error { code, .. } => assert_eq!(
-            code, "access_denied",
-            "enforced default (0o700) should deny a non-owner stranger"
-        ),
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_table",
+                "enforced default (0o700) should deny a non-owner stranger"
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
+                message
+            );
+        }
         other => panic!(
-            "expected access_denied under enforced default, got {:?}",
+            "expected unknown_table under enforced default, got {:?}",
             other
         ),
     }

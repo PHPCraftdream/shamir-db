@@ -10,9 +10,9 @@ use shamir_types::types::value::QueryValue;
 
 use crate::engine::function::Security;
 use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
-use crate::{DbError, DbResult};
+use crate::DbError;
 
-use super::super::db_gateway::{FacadeDbGateway, GatewayCodeSink};
+use super::super::db_gateway::{FacadeDbGateway, InvokeFailure};
 use super::artifact::artifact_id_from_record;
 
 pub(in crate::shamir_db::shamir_db) struct ShamirDbCallResolver {
@@ -136,7 +136,6 @@ impl ShamirDbCallResolver {
                 shamir: self.shamir.clone(),
                 db_name: db_name.clone(),
                 actor: target.actor().clone(),
-                code_sink: None,
             });
             target = target
                 .with_db(gateway, repo.clone())
@@ -194,8 +193,7 @@ impl ShamirDb {
         batch: Option<&Arc<BatchContext>>,
         caller: Actor,
         db: Option<(&str, &str)>,
-        code_sink: Option<Arc<GatewayCodeSink>>,
-    ) -> DbResult<QueryValue> {
+    ) -> Result<QueryValue, InvokeFailure> {
         let binding = self
             .functions()
             .capture(name)
@@ -210,14 +208,14 @@ impl ShamirDb {
             .capture(name)
             .ok_or_else(|| DbError::Function("function changed during resolution".into()))?;
         if !binding.same_as(&current_binding) {
-            return Err(DbError::Function(
+            return Err(InvokeFailure::from(DbError::Function(
                 "function changed during resolution".into(),
-            ));
+            )));
         }
         if record.is_none() && !binding.is_database_builtin() {
-            return Err(DbError::Function(
+            return Err(InvokeFailure::from(DbError::Function(
                 "catalogue-managed function is missing from the catalogue".to_string(),
-            ));
+            )));
         }
         let row_artifact_id = match record.as_ref() {
             Some(record) => artifact_id_from_record(record)
@@ -225,9 +223,9 @@ impl ShamirDb {
             None => None,
         };
         if row_artifact_id.as_deref() != binding.artifact_id() {
-            return Err(DbError::Function(
+            return Err(InvokeFailure::from(DbError::Function(
                 "function changed during resolution".into(),
-            ));
+            )));
         }
         let (actor, root_owner) = self
             .authorize_invocation(name, &caller, record.as_ref())
@@ -249,9 +247,9 @@ impl ShamirDb {
             Some(Security::Definer)
         ) && root_owner.is_none()
         {
-            return Err(DbError::Function(
+            return Err(InvokeFailure::from(DbError::Function(
                 "root Definer owner is missing or invalid".into(),
-            ));
+            )));
         }
         let mut ctx = self.build_invoke_ctx(actor, resolver, root_owner, metadata.as_ref());
         if let Some((db_name, repo)) = db {
@@ -259,7 +257,6 @@ impl ShamirDb {
                 shamir: self.clone(),
                 db_name: db_name.to_string(),
                 actor: ctx.actor().clone(),
-                code_sink,
             });
             ctx = ctx
                 .with_db(gateway, repo.to_string())
@@ -268,9 +265,24 @@ impl ShamirDb {
         let batch = batch
             .map(|batch| FnBatch::with_context(batch.clone()))
             .unwrap_or_default();
-        self.functions()
+        match self
+            .functions()
             .invoke_captured(&binding, &ctx, &batch, &params)
             .await
-            .map_err(|error| DbError::Function(error.to_string()))
+        {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                // The code travels on the ESCAPING error only: `code()` is
+                // `Some` solely for a `FunctionError::DbRefused`, so a plain
+                // compute/user failure stays uncoded no matter what happened
+                // earlier in the invocation.
+                let code = error.code().map(str::to_string);
+                let error = DbError::Function(error.to_string());
+                Err(match code {
+                    Some(code) => InvokeFailure::Refused { code, error },
+                    None => InvokeFailure::Other(error),
+                })
+            }
+        }
     }
 }

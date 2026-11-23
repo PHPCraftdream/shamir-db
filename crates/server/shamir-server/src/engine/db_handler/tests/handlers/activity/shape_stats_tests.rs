@@ -519,7 +519,10 @@ fn shape_stats_lifecycle_and_single_reset_audit_record() {
         );
 
         // Exactly ONE reset record; repository name only.
-        handler.cancel_refusal_audit().drain().await;
+        assert!(
+            handler.cancel_refusal_audit().drain().await,
+            "audit queue did not drain"
+        );
         let entries = captured.0.lock().expect("audit mutex");
         assert_eq!(entries.len(), 1, "exactly one reset audit record");
         let entry = &entries[0];

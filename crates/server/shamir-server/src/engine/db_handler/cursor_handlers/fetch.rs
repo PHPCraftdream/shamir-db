@@ -20,7 +20,8 @@ use super::keyset::{
     build_filter_context, fetch_keyset_page, order_by_field_value, row_record_id, KeysetOutcome,
 };
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
-use crate::db_handler::handler::{session_actor, DbResponse, ShamirDbHandler};
+use crate::db_handler::handler::{error_code, session_actor, DbResponse, ShamirDbHandler};
+use crate::db_handler::operator_state::table_unavailable_response;
 use crate::db_handler::visibility_handlers::quarantine_cursor_error;
 
 /// Outcome of [`fetch_offset_page`]: the up-to-`effective_page_size` rows
@@ -241,7 +242,26 @@ impl ShamirDbHandler {
         {
             self.cursor_registry.remove(cursor_id.0);
             drop(state);
+            if error_code(&e) == "unknown_table" {
+                return table_unavailable_response();
+            }
             return error_response(&e);
+        }
+
+        // Availability BEFORE any gate that can differ: resolve the parents
+        // (typed `unknown_db`/`unknown_repo`) and require the table to still
+        // be configured. An ABSENT table therefore answers the SAME fixed
+        // refusal a CLOSED table answered at the ACL above, in the same
+        // availability phase and before the quarantine probe can distinguish
+        // them.
+        let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
+            Ok(repo) => repo,
+            Err(parent) => return error_response(&parent),
+        };
+        if !repo.has_table(&table_name) {
+            self.cursor_registry.remove(cursor_id.0);
+            drop(state);
+            return table_unavailable_response();
         }
 
         // S5c-X PR8b: a cursor created BEFORE its repo was quarantined must
@@ -252,14 +272,6 @@ impl ShamirDbHandler {
         if let Some(e) = quarantine_cursor_error(&self.db, cursor.db(), cursor.repo()) {
             self.cursor_registry.remove(cursor_id.0);
             drop(state);
-            return error_response(&e);
-        }
-
-        // `resolve_repo` is still called here (its `RepoInstance` result is
-        // now unused) purely for its distinct `unknown_db`/`unknown_repo`
-        // error classification (CR-C1) ahead of `ShamirDb::get_table`'s own,
-        // less-specific not-found error below.
-        if let Err(e) = resolve_repo(&self.db, cursor.db(), cursor.repo()) {
             return error_response(&e);
         }
 
@@ -276,16 +288,19 @@ impl ShamirDbHandler {
             .await
         {
             Ok(t) => t,
-            // An absent table answers `unknown_table` (same code as the
-            // table-Read denial above); a vanished parent keeps its typed
-            // `unknown_db`/`unknown_repo`.
+            // A table that vanished between the configured-table check and
+            // this lookup is a terminal table miss: answer the SAME fixed
+            // refusal and retire the cursor (like the revoked-Read path
+            // above). A vanished PARENT keeps its typed `unknown_db`/
+            // `unknown_repo` and is not a table miss.
             Err(e) => {
-                return error_response(&wrap_table_lookup_err(
-                    &self.db,
-                    cursor.db(),
-                    cursor.repo(),
-                    e,
-                ));
+                let wrapped = wrap_table_lookup_err(&self.db, cursor.db(), cursor.repo(), e);
+                if error_code(&wrapped) == "unknown_table" {
+                    self.cursor_registry.remove(cursor_id.0);
+                    drop(state);
+                    return table_unavailable_response();
+                }
+                return error_response(&wrapped);
             }
         };
 

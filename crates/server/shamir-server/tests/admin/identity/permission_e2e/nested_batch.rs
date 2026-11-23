@@ -99,7 +99,8 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
 
     // Carol sends Batch{ sub: Read(secret_table) }. The container is not an
     // admin op, so the coarse gate lets the data-only leaf through and the
-    // per-resource authorization denies the READ on the forbidden table.
+    // per-resource authorization refuses the READ on the forbidden table with
+    // the same `unknown_table` refusal an absent table answers.
     let resp = roundtrip(
         &nested_batch_read_req(db_name, secret_table),
         carol_sid,
@@ -111,13 +112,18 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
-                "nested Batch{{Read(forbidden)}} must be denied by per-resource authorization, got code={}, msg={}",
+                code, "unknown_table",
+                "nested Batch{{Read(forbidden)}} must be refused by per-resource authorization, got code={}, msg={}",
                 code, message
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
+                message
             );
         }
         other => panic!(
-            "expected access_denied for nested Batch{{Read(forbidden)}}, got {:?}",
+            "expected unknown_table for nested Batch{{Read(forbidden)}}, got {:?}",
             other
         ),
     }

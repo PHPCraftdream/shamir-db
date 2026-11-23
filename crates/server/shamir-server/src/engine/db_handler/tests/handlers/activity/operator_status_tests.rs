@@ -241,6 +241,35 @@ async fn status_requires_superuser_and_boot_context() {
     );
 }
 
+/// A refused `status` leaves the durable audit chain untouched: the success
+/// observer runs only AFTER the superuser and boot gates, so a refusal emits
+/// no `status`/`ok` record.
+///
+/// Catches: an enqueue placed before the gates, which would append one
+/// `status` record even though the caller was denied.
+#[tokio::test]
+async fn status_refusal_emits_no_audit_record() {
+    let handler = build_handler(QueryLimitsCap::UNLIMITED, true).await;
+    let (captured, writer) = audit_writer();
+    let handler = handler.with_audit_writer(writer);
+
+    let non_superuser = alice_session();
+    expect_error(
+        send(&handler, &non_superuser, DbRequest::Status).await,
+        "permission_denied",
+        "non-superuser",
+    );
+
+    assert!(
+        handler.cancel_refusal_audit().drain().await,
+        "audit queue did not drain"
+    );
+    assert!(
+        captured.0.lock().expect("audit mutex").is_empty(),
+        "a refused status must not emit an audit record"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // First-pending pairing rule (pure; no live repository needed).
 // ---------------------------------------------------------------------------
@@ -310,7 +339,10 @@ async fn status_emits_one_names_only_audit_record() {
         "status must succeed: {resp:?}"
     );
 
-    handler.cancel_refusal_audit().drain().await;
+    assert!(
+        handler.cancel_refusal_audit().drain().await,
+        "audit queue did not drain"
+    );
     let entries = captured.0.lock().expect("audit mutex");
     assert_eq!(
         entries.len(),
@@ -359,11 +391,14 @@ async fn status_logs_slow_query_past_the_threshold_and_not_when_disabled() {
         "threshold 0 must disable the WARN"
     );
 
-    // A 1 µs threshold is crossed by the real read without any sleep; the
-    // millisecond granularity of `from_ms` could not be made deterministic.
+    // The elapsed value is pinned, so the WARN decision never depends on the
+    // real read.
     let enabled = build_handler(QueryLimitsCap::UNLIMITED, true)
         .await
-        .with_slow_query(SlowQueryConfig { threshold_us: 1 });
+        .with_slow_query(SlowQueryConfig {
+            threshold_us: 1_000,
+        })
+        .with_slow_query_elapsed(1_001);
     assert!(matches!(
         send(&enabled, &session, DbRequest::Status).await,
         DbResponse::Status { .. }
@@ -379,7 +414,7 @@ async fn status_logs_slow_query_past_the_threshold_and_not_when_disabled() {
     assert_eq!(record.level, "WARN");
     assert!(record.message.contains("slow query"), "{}", record.message);
     assert!(
-        record.message.contains("threshold_us=1"),
+        record.message.contains("threshold_us=1000"),
         "{}",
         record.message
     );
