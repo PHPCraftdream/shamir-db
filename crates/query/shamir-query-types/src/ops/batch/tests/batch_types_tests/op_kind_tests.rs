@@ -205,6 +205,9 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "scope": "all",
             "kind": "all"
         }),
+        OpKind::ListShapeStats | OpKind::ResetShapeStats => json!({
+            "repo": "main"
+        }),
     };
 
     let marker = match kind {
@@ -226,7 +229,9 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::StartBackup
         | OpKind::BackupStatus
         | OpKind::CancelBackup
-        | OpKind::ListActivity => json!(true),
+        | OpKind::ListActivity
+        | OpKind::ListShapeStats
+        | OpKind::ResetShapeStats => json!(true),
         OpKind::ChangesSince
         | OpKind::Unsubscribe
         | OpKind::CancelRequest
@@ -388,6 +393,8 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::BackupStatus(_) => OpKind::BackupStatus,
         BatchOp::CancelBackup(_) => OpKind::CancelBackup,
         BatchOp::ListActivity(_) => OpKind::ListActivity,
+        BatchOp::ListShapeStats(_) => OpKind::ListShapeStats,
+        BatchOp::ResetShapeStats(_) => OpKind::ResetShapeStats,
         BatchOp::CancelRequest(_) => OpKind::CancelRequest,
         BatchOp::CancelTx(_) => OpKind::CancelTx,
         BatchOp::CancelCursorAdmin(_) => OpKind::CancelCursorAdmin,
@@ -448,6 +455,38 @@ fn cancel_tx_duplicate_discriminator_is_rejected() {
         second: json!(6),
     };
     let error = decode_malformed(&wire).expect_err("duplicated cancel_tx must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn list_shape_stats_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `list_shape_stats` arm of the duplicate guard in
+    // `batch_op.rs` => the second key overwrites the first and the op decodes.
+    let wire = DuplicateDiscriminator {
+        key: "list_shape_stats",
+        first: json!({ "list_shape_stats": true, "repo": "main" }),
+        second: json!({ "list_shape_stats": true, "repo": "other" }),
+    };
+    let error = decode_malformed(&wire).expect_err("duplicated list_shape_stats must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reset_shape_stats_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `reset_shape_stats` arm of the duplicate guard in
+    // `batch_op.rs` => the second key overwrites the first and the op decodes.
+    let wire = DuplicateDiscriminator {
+        key: "reset_shape_stats",
+        first: json!({ "reset_shape_stats": true, "repo": "main" }),
+        second: json!({ "reset_shape_stats": true, "repo": "other" }),
+    };
+    let error = decode_malformed(&wire).expect_err("duplicated reset_shape_stats must not decode");
     assert!(
         error.to_string().contains("duplicate field"),
         "unexpected error: {error}"

@@ -126,6 +126,8 @@ impl BatchOp {
             BatchOp::BackupStatus(_) => "admin:backup_status",
             BatchOp::CancelBackup(_) => "admin:cancel_backup",
             BatchOp::ListActivity(_) => "admin:list_activity",
+            BatchOp::ListShapeStats(_) => "admin:list_shape_stats",
+            BatchOp::ResetShapeStats(_) => "admin:reset_shape_stats",
             BatchOp::CancelRequest(_) => "admin:cancel_request",
             BatchOp::CancelTx(_) => "admin:cancel_tx",
             BatchOp::CancelCursorAdmin(_) => "admin:cancel_cursor_admin",

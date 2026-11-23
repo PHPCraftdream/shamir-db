@@ -11,10 +11,13 @@
 //! - `cancel` — the `CancelRequest` / `CancelTx` / `CancelCursorAdmin`
 //!   workers, their ownership/permission rule, their detached audit path
 //!   and the per-server outcome counters.
+//! - `shapes` — the R4b step 4 shape-statistics surface (`ListShapeStats` /
+//!   `ResetShapeStats`), the second operational-views admin surface.
 
 mod cancel;
 mod continuation;
 mod requests;
+mod shapes;
 
 // The paging implementation (`list.rs`) implements `list_activity` as an
 // method on `ShamirDbHandler`; no `pub` module re-export is needed.

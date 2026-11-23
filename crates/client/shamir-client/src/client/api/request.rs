@@ -736,6 +736,90 @@ impl Client {
         }
     }
 
+    /// Read-only per-shape statistics for one repository (release-1 R4b
+    /// step 4).
+    ///
+    /// Sends the typed
+    /// `shamir_query_types::batch::BatchOp::ListShapeStats` operation as
+    /// the sole entry of a standalone nontransactional batch; the server
+    /// answers with the dedicated typed page `ShapeStatsPage` wrapped in
+    /// the top-level `DbResponse::ShapeStatsPage` (NOT a `Batch`), returned
+    /// here unwrapped. Authorization is server-side: the operation is a
+    /// SCRAM-session surface only (API-token callers are refused with
+    /// `token_request_denied`), and the `ActivityView` resource with
+    /// `Action::Manage` is required. The page carries shape-key hashes and
+    /// counters only — never literals, field names, table names or
+    /// identities.
+    pub async fn list_shape_stats(
+        &self,
+        db: &str,
+        request: shamir_query_types::admin::shape_stats::ListShapeStatsReq,
+    ) -> Result<shamir_query_types::admin::shape_stats::ShapeStatsPage, ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "list_shape_stats",
+            shamir_query_builder::wire::admin::list_shape_stats(request),
+        );
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::ShapeStatsPage { page } => Ok(page),
+            other => Err(ClientError::Protocol(format!(
+                "expected ShapeStatsPage, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Wipe one repository's query-shape statistics registry (release-1 R4b
+    /// step 4).
+    ///
+    /// Sends the typed
+    /// `shamir_query_types::batch::BatchOp::ResetShapeStats` operation as
+    /// the sole entry of a standalone nontransactional batch; the server
+    /// answers with `DbResponse::ShapeStatsReset`, mapped to `Ok(())` here.
+    /// Authorization is server-side: the operation is a SCRAM-session
+    /// surface only (API-token callers are refused with
+    /// `token_request_denied`), and the `ActivityView` resource with
+    /// `Action::Manage` is required. The reset wipes the repository's
+    /// registry, including the `(other)` fold row, and is audited.
+    pub async fn reset_shape_stats(
+        &self,
+        db: &str,
+        request: shamir_query_types::admin::shape_stats::ResetShapeStatsReq,
+    ) -> Result<(), ClientError> {
+        self.require_scram()?;
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.op(
+            "reset_shape_stats",
+            shamir_query_builder::wire::admin::reset_shape_stats(request),
+        );
+        let batch = batch
+            .try_build()
+            .map_err(crate::error::client_batch_error)?;
+        match self
+            .roundtrip(&DbRequest::Execute {
+                query_version: CURRENT_QUERY_LANG_VERSION,
+                db: db.to_string(),
+                batch,
+            })
+            .await?
+        {
+            DbResponse::ShapeStatsReset => Ok(()),
+            other => Err(ClientError::Protocol(format!(
+                "expected ShapeStatsReset, got {other:?}"
+            ))),
+        }
+    }
+
     /// Attempt to cancel a batch by its server-minted execution id.
     ///
     /// Use a separate SCRAM connection from the one running the target batch.

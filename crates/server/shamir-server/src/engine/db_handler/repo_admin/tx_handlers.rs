@@ -178,7 +178,8 @@ impl ShamirDbHandler {
     /// the static discriminant summary of the batch (homogeneous batches
     /// keep their `activity_name`; heterogeneous ones are conservatively
     /// `write`), derived in the same pre-flight visitor pass that rejects
-    /// `ListActivity`, `CancelRequest`, `CancelTx` and `CancelCursorAdmin` —
+    /// `ListActivity`, `CancelRequest`, `CancelTx`, `CancelCursorAdmin`,
+    /// `ListShapeStats` and `ResetShapeStats` —
     /// never from arguments (privacy, D3).
     pub(super) async fn tx_execute_with_rid(
         &self,
@@ -220,6 +221,12 @@ impl ShamirDbHandler {
                 BatchOp::CancelRequest(_) => Some("CancelRequest"),
                 BatchOp::CancelTx(_) => Some("CancelTx"),
                 BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
+                // R4b step 4: a shape listing or wipe is never transactional
+                // (node-local telemetry outside the snapshot), and a reset
+                // must never be applied under an open transaction's view of
+                // the repository.
+                BatchOp::ListShapeStats(_) => Some("ListShapeStats"),
+                BatchOp::ResetShapeStats(_) => Some("ResetShapeStats"),
                 _ => None,
             };
             if let Some(op) = control_op {

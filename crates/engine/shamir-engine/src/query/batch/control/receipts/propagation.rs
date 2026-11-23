@@ -166,6 +166,7 @@ pub(in crate::query::batch) async fn execute_plan(
                 params,
                 result_encoding: encoding,
                 scope,
+                pending_shape: None,
             };
             let _guard = crate::query::batch::op_watchdog::register_op_watchdog(alias);
             let started = std::time::Instant::now();
