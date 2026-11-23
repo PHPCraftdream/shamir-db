@@ -384,15 +384,12 @@ impl ShamirDb {
         tx: crate::engine::tx::TxContext,
         wait: Option<VisibilityWait>,
     ) -> Result<TransactionInfo, BatchError> {
-        self.authorize_access(
-            &actor,
-            &ResourcePath::Database {
-                db: db_name.to_string(),
-            },
-            Action::Write,
-        )
-        .await
-        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+        // Resolve the store BEFORE the authorization gate: the caller has
+        // already taken the context out of the parked transaction, so an early
+        // return must release this transaction's Level-3 record locks itself —
+        // `InteractiveTx::drop` cannot (its context is gone). A database or
+        // repository that no longer resolves has no reachable store left, so
+        // there is nothing to release there.
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -405,6 +402,23 @@ impl ShamirDb {
                 message: format!("Repository '{}' not found", repo_name),
                 code: None,
             })?;
+        // `TxBegin` authorizes Read on the database node, `TxCommit` Write: a
+        // session whose database ACL narrowed while the transaction was parked
+        // lands here with staged record locks still held. Release them the way
+        // the pipeline's own abort arms do (`acknowledgement/tail.rs`).
+        if let Err(e) = self
+            .authorize_access(
+                &actor,
+                &ResourcePath::Database {
+                    db: db_name.to_string(),
+                },
+                Action::Write,
+            )
+            .await
+        {
+            crate::engine::tx::release_interactive_tx_locks(&tx, repo.core()).await;
+            return Err(BatchError::query_coded("", "access_denied", e.to_string()));
+        }
         let tx_id = tx.tx_id.0;
         let snapshot_version = tx.snapshot_version;
         let wait = wait.unwrap_or_else(|| repo.commit_visibility_wait());
