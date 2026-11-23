@@ -3590,6 +3590,379 @@ shamir-server shell --profile prod --secret-prompt -- activity cancel 42 --yes
   держать интерактивную транзакцию по проводу, поэтому в shell-тесте
   припаркованный запрос не создаётся детерминированно.
 
+## Административный шелл: копии, версии, диагностика (R5c)
+
+Пять тем: online-копия без остановки сервера, версии и штампы формата,
+статус миграций прикладной схемы, поясняющие мануалы вместо запуска и
+диагностика; отдельно — автономная проверка копии, которая командой
+шелла не является. Все команды раздела — только SCRAM. Шелл остаётся
+тонким клиентом: каталог данных он не читает, пути не разбирает и
+серверную валидацию не переизобретает — каждая удалённая команда
+становится либо одной admin-операцией существующего batch-протокола,
+либо одним типизированным запросом
+([`command.rs:1-14`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L1-L14)).
+
+### Копии без остановки сервера
+
+```sh
+shamir-server shell --profile prod --secret-prompt -- backup start --to /srv/copies --yes
+shamir-server shell --profile prod --secret-prompt -- backup status
+shamir-server shell --profile prod --secret-prompt -- backup cancel --yes
+```
+
+* Три команды — оболочки над уже существующими admin-операциями
+  online-копии `StartBackup` / `BackupStatus` / `CancelBackup`
+  ([`MaintenanceCommand::op`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L64-L77)):
+  новых серверных операций ради шелла нет. Семантика снимка, стадии,
+  кооперативная отмена и границы копии — в
+  [разделе «Online-копия: когда и как»](#online-копия-когда-и-как);
+  здесь только поведение командной строки.
+* Операции **node-local**: копируется `data_dir` этого узла, а не база.
+  Batch-путь шелла при этом требует базу маршрутизации из профиля
+  (`database:`): без неё — `usage`, код 1, до чтения секрета и до
+  соединения
+  ([`MaintenanceCommand::requires_routing_db`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L79-L88),
+  [`session.rs:118-127`](../../../crates/server/shamir-server/shell/parser/session.rs#L118-L127)).
+* Все три — admin-операции, то есть **только для суперпользователя**:
+  серверный хендлер отвергает не-суперпользователя до запуска работы
+  (грубый admin-гейт,
+  [`execute.rs:176-194`](../../../crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs#L176-L194)),
+  а классификатор сессии даёт `StartBackup`/`CancelBackup` глобальный
+  `Alter`, `BackupStatus` — глобальный `Read`
+  ([`session.rs:582-587`](../../../crates/engine/shamir-engine-query/src/query/auth/session.rs#L582-L587)).
+* `--to` — **серверный** абсолютный путь, переданный без изменений:
+  шелл его не разрешает, не создаёт и не проверяет
+  ([`MaintenanceCommand::execute`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L166)),
+  и прикладывает к ответу фиксированную оговорку `destination_note`
+  (`backup.rs:16`). Относительный путь отвергает **сервер** —
+  типизированным `backup_invalid_destination` (код 5), а не оболочка
+  ([`validate_destination`](../../../crates/server/shamir-server/src/boot/config/diagnostics/backup_online/schedule/destination.rs#L54)).
+* `backup start` печатает `backup_id`, `destination` и
+  `destination_note`. Второй прогон на узле отвергается
+  `backup_already_running` (код 5): одна online-копия за раз.
+* `backup status` — read-only и **не доходит до follower-гейта записи**.
+  Поля результата: `backup_id` (`null`, если прогонов ещё не было),
+  `destination`, `dest_dir`, `started_at_unix_ns`, `running`,
+  `cancel_requested`, `stage`, `failed`, `failed_stage`,
+  `excluded_repos`, `repos_in_snapshot`, `repos_created_during`, `repos`
+  (по репозиторию: `repo`, `bytes_hashed`, `files_hashed`),
+  `progress_stage`, `progress_started_at_unix_ns` и фиксированный
+  `current_run_note`; при отказе прогона добавляется `failure_note`
+  (текст серверной ошибки не воспроизводится) — `backup.rs:41-174`.
+* `backup cancel` не несёт id и всегда адресует **текущий** прогон на
+  узле (`current_run_note`, `backup.rs:12-13`). `cancelled: false` —
+  отменять было нечего (прогон не идёт); это ответ, а не отказ.
+* Подтверждение: `backup start` и `backup cancel` его требуют —
+  интерактивно `yes`, в пакетном режиме `--yes`
+  ([`dispatch.rs`](../../../crates/server/shamir-server/shell/parser/dispatch.rs#L550),
+  вызов `ctx.confirm` внутри `maintenance_outcome`).
+  Без подтверждения — `confirmation_required`, код 6, **до соединения и
+  до отправки**: пакетный прогон без `--yes` не отправляет ничего.
+* На follower `backup start` и `backup cancel` отвергаются
+  `online_backup_follower_read_only` (код 5), а `backup status`
+  по-прежнему отвечает
+  ([`backup_handlers.rs:13-30`](../../../crates/server/shamir-server/src/engine/db_handler/handlers/backup_handlers.rs#L13-L30)).
+* `backup schedule show` не поддержан: `unsupported_prerequisite`, код 6,
+  ничего не отправляется
+  ([`MaintenanceCommand::local`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L113)).
+  Это типизированный отказ, а
+  не заглушка-успех.
+
+### Версии и миграции схемы
+
+```sh
+shamir-server shell --profile prod --secret-prompt -- version stamp
+shamir-server shell --profile prod --secret-prompt -- version migrate
+shamir-server shell --profile prod --secret-prompt -- schema-migration status --database-id "<ID>"
+```
+
+* `version stamp` — вид P1 status DTO: поля `server_version`,
+  `format_epoch`, `stamp_outcome`, `role`, `node_id` — те же значения и
+  типы, что у `version show`, потому что это буквально та же проекция и
+  тот же запрос `Status` (`state.rs:727-737`,
+  [`MaintenanceCommand::op`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L69)). Эпоху
+  формата и исход штампа захватил лаунчер при загрузке существующим
+  on-disk `inspect`; сам шелл каталог данных не читает и при запросе
+  штамп не перечитывает. Оговорка `status` про чтение **сохранённых**
+  переопределений durable-политики во время запроса относится и сюда:
+  запрос тот же, поэтому типизированный код при неудаче этого чтения
+  возможен. База маршрутизации не нужна. Запись результата успешна и её
+  op — `Status`, поэтому поле `node` (наблюдённые роль и id) заполнено и
+  здесь
+  ([`observed_node`](../../../crates/server/shamir-server/shell/output.rs#L456-L469)).
+* `version migrate` — **только объяснение**, шелл миграцию никогда не
+  применяет: печатаются две ручные строки (`format-migrate --plan` и
+  `format-migrate --yes --from-backup SNAPSHOT`, обе с `--config CONFIG`),
+  см. [«Объяснения вместо запуска»](#объяснения-вместо-запуска).
+* `schema-migration status --database-id ID` — ровно одна запись статуса
+  одной базы. `--database-id` — Base58 `RecordId` (короткая форма
+  допустима, предел — 22 байта), проверяется **локально, до любого
+  dial**: пустой, слишком длинный или неразбираемый id — типизированный
+  `invalid_record_id`, код 1, запрос не уходит
+  ([`versions.rs:19-29`](../../../crates/server/shamir-server/shell/commands/maintenance/versions.rs#L19-L29)).
+* Операция — существующая под-операция `ApplicationSchema` Status
+  ([`MaintenanceCommand::op`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L70),
+  `versions.rs:41-52`). Сервер авторизует `Read` на базе
+  ([`authorize_database_read`](../../../crates/engine/shamir-db/src/shamir_db/execute/admin_db/schema_migration/schema_migration.rs#L67-L80))
+  и не проходит грубый admin-гейт: операция в списке исключений
+  ([`admin.rs:632-658`](../../../crates/server/shamir-server/src/engine/db_handler/handlers/admin.rs#L632-L658)),
+  то есть суперпользователь не обязателен, а право на базу обязательно.
+* На follower статус отвергается `schema_migration_follower_read_only`
+  (код 5): у follower нет согласованного вида журнала и схемы
+  ([`execute.rs:199-215`](../../../crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs#L199-L215)).
+* Запись несёт `database_identity`, `protocol_version`,
+  `last_applied_id` (`null`, если применённых нет), `last_applied_ordinal`,
+  `last_applied_checksum` (hex или `null`), `checksum_validation`
+  (`valid` / `missing_body` / `mismatch` / `unknown_version` /
+  `not_checked`), `fence_generation`, `in_flight` (`null` или объект),
+  `applied_count`, `applied` (по записи: `id`, `ordinal`, `checksum`) и
+  серверный `error` из закрытого набора либо `null`; счётчики —
+  десятичные строки
+  ([`project`](../../../crates/server/shamir-server/shell/commands/maintenance/versions.rs#L76-L260)).
+* Важное различие: `schema_migration_identity_mismatch` приходит с
+  **нулевым** `last_applied_ordinal`, нулевым `fence_generation` и
+  `applied_count` «0» — это **не** пустой журнал, а ответ «identity в
+  запросе не та, что обслуживает база»; `database_identity` в записи —
+  обслуживающая, не запрошенная
+  ([`status_result`](../../../crates/engine/shamir-db/src/shamir_db/execute/admin_db/schema_migration/schema_migration.rs#L85-L100)).
+* Проекция строгая: неизвестный ключ или несовпадение формы —
+  `server_error`, код 5, а не «данные».
+
+### Объяснения вместо запуска
+
+Семь команд шелла отвечают **локально** напечатанным мануалом и никогда
+ничего не запускают; их список и текст — одна таблица `EXPLAINED`
+([`EXPLAINED`](../../../crates/server/shamir-server/shell/commands/maintenance/explain.rs#L84-L151)).
+Печатаются ровно такие строки:
+
+```sh
+shamir-server backup-verify SNAPSHOT
+shamir-server --config CONFIG restore --from SNAPSHOT
+shamir-server --config CONFIG backup --to DIR
+shamir-server --config CONFIG format-migrate --plan
+shamir-server --config CONFIG format-migrate --yes --from-backup SNAPSHOT
+shamir-server --config CONFIG logical-export --db DATABASE --output PATH
+shamir-server --config CONFIG logical-import --input PATH --target DIR
+shamir-server --config CONFIG doctor
+```
+
+* `SNAPSHOT`, `DIR`, `PATH`, `DATABASE`, `REPO`, `TABLE`, `CONFIG` —
+  литеральные плейсхолдеры: шелл не подставляет значения и **не
+  повторяет** переданный argv (для `backup verify` печатается
+  `backup-verify SNAPSHOT`, а сам аргумент проверяется только на
+  непустоту,
+  [`MaintenanceCommand::validate`](../../../crates/server/shamir-server/shell/commands/maintenance/command.rs#L137)).
+* Каждая запись несёт `os_rights`, `destructive_effects`,
+  `implementation_limits`, `caveats` и `executed: false`
+  ([`Explained::payload`](../../../crates/server/shamir-server/shell/commands/maintenance/explain.rs#L167-L180)).
+* Права ОС и предусловия: `backup verify` — чтение каталога снимка и
+  каждого перечисленного файла; `backup restore` — владение каталогом
+  данных и его родителем, сервер остановлен; `backup snapshot` — запись в
+  `DIR` и владение каталогом данных; `version migrate` — владение
+  каталогом данных, сервер остановлен; `export logical` — владение
+  каталогом данных, сервер остановлен (только офлайн); `import logical` —
+  запись в родителя `DIR`, сам `DIR` отсутствует или пуст и никем не
+  занят; `diag integrity` — владение каталогом данных, сервер
+  остановлен, потому что проверка открывает каталог напрямую.
+* Разрушительные эффекты: `backup restore` подменяет живой каталог
+  данных, оставляя текущий рядом как `.pre_restore_backup_<timestamp>`
+  (сохраняется, не удаляется); `doctor --apply` чинит нездоровые таблицы
+  на месте, пересоздавая все их индексы; `format-migrate --yes`
+  перезаписывает on-disk штампы формата, а без `--yes` только печатает
+  план; `logical-import` создаёт **новый** каталог данных и никогда не
+  заменяет существующий.
+* Шелл не выполняет ничего и не открывает ничего: эти ответы строятся до
+  соединения, поэтому им не нужны ни профиль, ни секрет, ни dial
+  ([`dispatch.rs:534-564`](../../../crates/server/shamir-server/shell/parser/dispatch.rs#L534-L564)).
+* Печатные флаги закреплены тестом в двух половинах. Реальная:
+  `logical-export`, `logical-import` и `format-migrate` разбирают токены
+  своих мануалов настоящими `clap::Args` сервера, включая флаги, которых
+  нет в командной строке. Исходная: объявления `backup-verify`,
+  `backup`, `restore`, `doctor` и их флагов ищутся в тексте
+  `src/main.rs`, где они объявлены inline, а не как `clap::Args`. Первая
+  половина ловит переименование, удаление и перенос флага внутри
+  `clap::Args`; вторая не отличает флаг, **перемещённый** между двумя
+  inline-подкомандами
+  ([`printed_flags_exist_in_the_server_argument_parser`](../../../crates/server/shamir-server/tests/admin/shell/maintenance/explain.rs#L358)).
+  `--force` не печатается никогда. Ответ несёт ровно `manual`
+  (напечатанные строки), `os_rights`, `destructive_effects`,
+  `implementation_limits`, `caveats` и `executed: false` — и ничего
+  больше.
+
+### backup-verify: проверка копии
+
+Это команда бинарника, а не шелла:
+
+```sh
+shamir-server backup-verify SNAPSHOT
+```
+
+* Диспетчеризация — **до загрузки конфига** и до `Cli::parse()`: команда
+  должна быть первым аргументом, `--config` не нужен
+  ([`run_main`](../../../crates/server/shamir-server/src/main.rs#L306-L334)).
+  Аргумент ровно один; иначе — фиксированная строка
+  `usage: shamir-server backup-verify SNAPSHOT` и код 1, причём argv не
+  эхом (`main.rs:319-333`).
+* Ничего не загружается: сервер не стартует, каталог данных не
+  открывается, сеть не используется. Команда работает с правами ОС
+  вызывающего пользователя и только читает.
+* Она проверяет `manifest.json` и **хеширует каждый перечисленный файл**,
+  поэтому дешёвой не является: время пропорционально размеру снимка.
+* Вывод — строки `label` и значение: `result` (`verified` / `failed`),
+  `kind` (`offline` / `online`), `files_checked`, `total_bytes`,
+  необязательный `format_epoch` и фиксированный `note`
+  ([`backup_verify`](../../../crates/server/shamir-server/src/main.rs#L396-L422)).
+* При отказе: `result failed`, `error_class`, `note`. Класс берётся из
+  закрытого набора — `manifest_missing`, `manifest_invalid`,
+  `checksum_mismatch`, `unmanifested_file`, `unsafe_manifest_path`,
+  `unsupported_manifest_format_version`, `managed_snapshot`, `io`,
+  `source_missing`, `source_not_dir`, `cache_manifest_path`,
+  `duplicate_manifest_entry`, `wal_sequence_gap`; любой неназванный
+  вариант сообщается как `corrupt` (`main.rs:442-460`).
+* Коды: 0 — снимок проверен, 1 — ошибка использования, 5 — снимок не
+  прошёл проверку. Текст сообщений библиотеки не печатается никогда:
+  только класс.
+
+### Диагностика
+
+```sh
+shamir-server shell --profile prod --secret-prompt -- diag wal
+shamir-server shell --profile prod --secret-prompt -- diag durability main
+shamir-server shell --profile prod --secret-prompt -- diag integrity
+```
+
+* `diag wal` — телеметрия WAL по репозиториям из того же P1 status DTO
+  (запрос `Status`): `backend_mem`, `watermark_w`,
+  `recoverable_through`, `pending_versions`, первый отложенный
+  (`first_pending_version`, `first_pending_age_ns`) и счётчики
+  синхронизации (`sync_now_calls`, `sync_rounds`, `sync_coalesced`,
+  `sync_errors`, `sync_duration_ns`) — `diag.rs:24-60`.
+  `pending_versions` — **граница**, а не точное число незаписанных
+  записей; это фиксированная оговорка `caveat`. Строка `source` говорит
+  прямо: это экспорт сервера, а шелл файл WAL не открывает. Нужен
+  суперпользователь (запрос `Status`,
+  [`operator_state.rs:536-541`](../../../crates/server/shamir-server/src/engine/db_handler/repo_admin/operator_state.rs#L536-L541));
+  база маршрутизации не нужна.
+* `diag durability REPO` — проекция существующей admin-операции
+  `DescribeRepo`: поле `durability` — действующая политика с учётом
+  настроенного переопределения, `durability_override` — записанная в
+  каталоге, плюс фиксированная оговорка `caveat` (`diag.rs:63-78`).
+  Нужны суперпользователь (admin-гейт) и `Read` на
+  репозитории
+  ([`admin_repo_durability.rs:188-197`](../../../crates/engine/shamir-db/src/shamir_db/execute/repo_admin/admin_repo_durability.rs#L188-L197));
+  только SCRAM; база маршрутизации из профиля нужна.
+* `diag integrity` — только объяснение (`doctor`). Проверка офлайн по
+  построению: скан живого хранилища может увидеть переходные
+  miscount'ы, поэтому команда печатает мануал, а не запускает проверку.
+
+### Коды возврата и токенные сессии
+
+* Все команды раздела — только SCRAM. В сессии с API-токеном каждая
+  отвергается на клиенте `token_request_denied` (код 4) до отправки: на
+  провод не уходит ничего
+  ([`dispatch.rs:30-86`](../../../crates/server/shamir-server/shell/parser/dispatch.rs#L30-L86)).
+* 0 — успех или напечатанный мануал; 1 — ошибка использования (включая
+  `invalid_record_id`); 4 — отказ токена или прав; 5 — серверный отказ
+  (`backup_already_running`, `backup_invalid_destination`,
+  `backup_io_error`, `backup_unavailable`,
+  `online_backup_follower_read_only`,
+  `schema_migration_follower_read_only`, `not_found`, …); 6 —
+  неподтверждённая разрушающая команда или `unsupported_prerequisite`;
+  7 — таймаут после отправки: исход неизвестен, повторять автоматически
+  нельзя; 130 — прерывание.
+* Ни один отказ не выдаётся за успех: таблица кодов не отображает ошибку
+  в 0
+  ([`ShellError::exit`](../../../crates/server/shamir-server/shell/output.rs#L316-L370)).
+
+### Что покрыто тестами, а что нет
+
+Приёмочный набор для команд раздела лежит в
+`crates/server/shamir-server/tests/admin/shell/maintenance/`
+(`backup.rs`, `versions.rs`, `explain.rs`, `verify.rs`, `diag.rs`,
+`policy.rs`, `migrations.rs`) и объявлен в
+[`mod.rs`](../../../crates/server/shamir-server/tests/admin/shell/mod.rs);
+он входит в интеграционную цель `admin`. Зелёный CI этой главой не
+обещан: имена тестов приведены, чтобы их можно было найти, а
+утверждения раздела сверены с кодом, а не с прогоном.
+
+Покрыто — online-копии (`maintenance/backup.rs`):
+`backup_status_reports_no_running_copy`,
+`backup_start_without_yes_is_refused_before_sending`,
+`backup_start_with_yes_starts_a_copy`,
+`backup_cancel_without_yes_is_refused`,
+`backup_cancel_with_yes_answers_the_current_run`,
+`relative_destination_is_refused_by_the_server_unmodified` (относительный
+`--to` отвергает сервер, а не шелл),
+`follower_refuses_start_and_cancel`,
+`token_session_is_refused_with_no_request` (все пятнадцать команд
+раздела под токенной сессией: код 4, ничего не отправлено).
+
+Покрыто — версии и статус миграций (`maintenance/versions.rs`,
+`maintenance/migrations.rs`):
+`version_stamp_reports_the_boot_captured_stamp`,
+`malformed_database_id_is_refused_locally`,
+`identity_mismatch_is_not_an_empty_journal`,
+`follower_refuses_the_status_read`.
+`schema_migration_status_reports_an_applied_migration` применяет одну
+миграцию по настоящему проводу и затем проверяет через шелл
+`last_applied_id`, ненулевой `last_applied_ordinal`, `applied_count`,
+единственную запись в `applied` с её hex-`checksum`,
+`last_applied_checksum`, равный ей, и `in_flight` — null или объект.
+Предел остаётся честным: применение требует SDK-клиента в тесте (сам
+шелл миграцию не применяет), а отказ сервера в применении провалит
+тест, а не пропустит его.
+
+Покрыто — объяснения (`maintenance/explain.rs`):
+`explained_commands_print_the_documented_sections` (точные печатные
+строки), `explained_commands_change_nothing_on_disk` (sha256 каждого
+обычного файла каталога данных до и после),
+`schedule_show_is_unsupported_not_a_placeholder_success`,
+`explained_command_options_are_refused`,
+`printed_flags_exist_in_the_server_argument_parser`.
+
+Покрыто — `backup-verify` (`maintenance/verify.rs`):
+`valid_v1_snapshot_verifies`,
+`corrupted_content_reports_checksum_mismatch`,
+`missing_manifest_reports_manifest_missing`,
+`unlisted_file_reports_unmanifested_file`,
+`unsafe_manifest_path_is_refused`,
+`malformed_manifest_reports_manifest_invalid`,
+`missing_argument_is_a_usage_error`,
+`backup_verify_rejects_a_flag_token`,
+`extra_argument_is_a_usage_error`,
+`pre_existing_dispatch_still_requires_config`.
+
+Покрыто — диагностика и справка (`maintenance/diag.rs`,
+`maintenance/policy.rs`): `diag_wal_reports_the_status_wal_projection`
+(голден проекции против загруженного сервера: одиннадцать полей `wal`,
+`source`, `caveat`), `diag_durability_reports_the_describe_repo_projection`
+(проекция `DescribeRepo` плюс `caveat`) и
+`help_lists_every_command_family` (каждое семейство команд раздела
+присутствует в `help`, `--force` — нет).
+
+Покрыто — только юнит-тестами (`shell/commands/maintenance/tests/`):
+`backup_status_never_reflects_a_hostile_server_value`,
+`diag_wal_never_reflects_a_hostile_repository_name` и
+`schema_migration_status_never_reflects_a_hostile_server_value`.
+Управляющие символы, ANSI-escape, bidi и длинный текст с канарейкой не
+отражаются; последний тест заодно закрепляет ровно одиннадцать ключей
+проекции статуса миграций. Живой тест `diag wal` закрепляет одиннадцать
+имён полей проекции; отдельного общего помощника у шелла и `state.rs` нет
+(проекционные помощники `state.rs` приватны, расширять их запрещено).
+
+Не покрыто — прямо: (a) в харнессе нет fake-server seam, поэтому защита
+от «злонамеренного пира» — это юнит-тест проекций, а не живой враждебный
+сервер; (b) `explained_commands_change_nothing_on_disk` сравнивает
+СОДЕРЖИМОЕ файлов (в Windows файл, который запущенный сервер фикстуры
+держит под блокировкой диапазона байт и потому не читается, сверяется по
+длине): он доказывает отсутствие постоянной записи, а не «ни один файл не
+открыт»; (c) интерактивный человеческий рендер (он обрезает
+длинные ячейки на 200 символах) для длинных текстов объяснений не
+проверяется; (d) начатую копию тест завершает через `backup cancel` —
+естественное завершение оракула не имеет; (e) исходная половина флагового
+пина не отличает флаг, **перемещённый** между двумя inline-подкомандами
+(реальная половина покрывает три `clap::Args`-подкоманды).
+
 ## Поиск и отмена зависшего запроса
 
 Откройте **второе аутентифицированное SCRAM-соединение**, даже если отменяете

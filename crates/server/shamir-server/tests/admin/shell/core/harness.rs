@@ -42,6 +42,7 @@ use shamir_server::config::ListenerConfig;
 use shamir_server::config::ListenerKind;
 use shamir_server::config::ProfileKind;
 use shamir_server::config::SecurityConfig;
+use shamir_server::db_handler::NodeMode;
 use shamir_server::server::BootError;
 use shamir_server::server::BootstrapMode;
 use shamir_server::server::ServerHandle;
@@ -249,7 +250,12 @@ impl Drop for ShellFixture {
 /// Boot the full fixture; the returned fixture owns everything and shuts
 /// down gracefully on drop.
 pub fn boot(name: &str) -> ShellFixture {
-    boot_with(name, false, |_| {}).0
+    boot_with(name, false, Default::default(), |_| {}).0
+}
+
+/// Boot the same fixture on a READ-ONLY node (a follower).
+pub fn boot_follower(name: &str) -> ShellFixture {
+    boot_with(name, false, NodeMode::ReadOnly, |_| {}).0
 }
 
 /// Extend the PR1 listener configuration and return the actual bind slots
@@ -257,6 +263,7 @@ pub fn boot(name: &str) -> ShellFixture {
 fn boot_with(
     name: &str,
     root_list: bool,
+    node_mode: NodeMode,
     extend: impl FnOnce(&mut Config) + Send + 'static,
 ) -> (ShellFixture, Vec<Option<SocketAddr>>, PathBuf) {
     let guard = FlakeGuard::with_watchdog(name, WATCHDOG_AFTER);
@@ -286,7 +293,7 @@ fn boot_with(
                     username: ADMIN.into(),
                     password: boot_password.clone(),
                 },
-                node_mode: Default::default(),
+                node_mode,
             }
             .launch()
             .await;
@@ -697,6 +704,11 @@ pub(super) fn server_command() -> tokio::process::Command {
 /// Run a real shell subprocess with the bootstrap password on stdin.
 pub fn run_shell(fixture: &ShellFixture, args: &[&str]) -> ShellRun {
     secure_fixture::run_with_secret(fixture, fixture.canary.clone(), false, args)
+}
+
+/// Assert one run exited with `code`; the message carries only the exit code.
+pub fn assert_exit(run: &ShellRun, code: i32) {
+    assert_eq!(run.exit_code, code, "unexpected shell exit");
 }
 
 /// [`run_shell`] plus a success assertion whose message carries ONLY the

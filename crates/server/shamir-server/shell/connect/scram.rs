@@ -398,6 +398,15 @@ fn server_code(code: &str) -> ShellError {
         // Read-only follower write refusal (§6 "follower behavior": the
         // stable diagnostic is surfaced, never retried or redirected).
         "read_only_replica" => ShellError::ReadOnlyReplica,
+        // Online-copy and schema-migration refusals: each keeps its own
+        // stable code and fixed local message; the server text is never
+        // echoed.
+        "backup_already_running" => ShellError::BackupAlreadyRunning,
+        "backup_invalid_destination" => ShellError::BackupInvalidDestination,
+        "backup_unavailable" => ShellError::BackupUnavailable,
+        "backup_io_error" => ShellError::BackupIo,
+        "online_backup_follower_read_only" => ShellError::OnlineBackupFollowerReadOnly,
+        "schema_migration_follower_read_only" => ShellError::SchemaMigrationFollowerReadOnly,
         // The VICTIM side of a cooperative cancellation: this session's own
         // batch was cancelled by another operator. Its effects may be partial,
         // so it is its own typed refusal, not a generic server failure.

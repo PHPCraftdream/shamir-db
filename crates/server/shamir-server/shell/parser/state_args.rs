@@ -10,6 +10,10 @@
 pub(super) enum VersionCommand {
     /// Show the observed format epoch and stamp outcome (no disk read).
     Show,
+    /// Show the boot-captured format-stamp state (the P1 status view).
+    Stamp,
+    /// Explained only: the manual offline format migration.
+    Migrate,
 }
 
 #[derive(clap::Subcommand)]
