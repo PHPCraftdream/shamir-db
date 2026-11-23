@@ -244,10 +244,12 @@ fn scan_refusal_keeps_the_fresh_copy_owned() {
     );
 
     // A later scheduled run has a NEW fresh copy: the earlier fresh copy is
-    // classified by the scan like any other candidate, so it only counts as
-    // the newest owned copy (and the older one is pruned) when it was tagged.
+    // classified by the scan like any other candidate. The floor counts the
+    // new fresh copy as one of the newest, so `keep_last = 2` keeps the earlier
+    // fresh copy only when it was tagged (otherwise the older copy is the
+    // second newest owned one and nothing is pruned).
     let later = copy_with_payload(&root, "20200101_000003", 3, None, &[0u8; 1 << 10]);
-    let next = retain(&root, &later, 1);
+    let next = retain(&root, &later, 2);
     assert_eq!(
         (next.deleted, next.failed, next.untouched),
         (1, 0, Some(0)),
