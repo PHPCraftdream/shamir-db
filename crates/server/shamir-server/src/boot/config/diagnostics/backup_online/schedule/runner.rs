@@ -8,6 +8,7 @@ use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::super::metrics::{enable_schedule, note_scheduled, ScheduledResult};
+use super::super::registry::ScheduledRunSignals;
 use super::super::{OnlineBackupRegistry, StartBackupError};
 use crate::config::{DailyWindow, ResolvedSchedule};
 
@@ -65,13 +66,28 @@ fn spawn_with_observer(
     ))
 }
 
+/// One admitted run the scheduler is still tracking. The slot clears only on
+/// the LATE `finished` signal, so a tick during retention is still busy.
+struct InFlight {
+    outcome: oneshot::Receiver<bool>,
+    finished: oneshot::Receiver<()>,
+    /// The COPY outcome was already noted; only `finished` is still awaited.
+    outcome_received: bool,
+}
+
+/// Which of a run's two signals arrived first.
+enum Signal {
+    Outcome(Result<bool, oneshot::error::RecvError>),
+    Finished,
+}
+
 /// cancel-safe: NO — cancel the shared registry root and join this task so it can drain an admitted run through cleanup.
 pub(super) async fn run(
     (boot, interval, run_on_start): (Instant, Duration, bool),
     window: Option<DailyWindow>,
     shutdown: CancellationToken,
     mut local_minute: impl FnMut() -> u32,
-    mut start: impl FnMut() -> Result<oneshot::Receiver<bool>, StartBackupError>,
+    mut start: impl FnMut() -> Result<ScheduledRunSignals, StartBackupError>,
     mut note: impl FnMut(ScheduledResult),
 ) {
     let mut next = if run_on_start {
@@ -79,15 +95,20 @@ pub(super) async fn run(
     } else {
         boot.checked_add(interval)
     };
-    let mut in_flight: Option<oneshot::Receiver<bool>> = None;
+    let mut in_flight: Option<InFlight> = None;
     while let Some(deadline) = next {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
-            result = receive(&mut in_flight) => {
-                in_flight = None;
-                note(terminal(result));
-            }
+            signal = advance(&mut in_flight) => match signal {
+                Signal::Outcome(result) => {
+                    if let Some(run) = in_flight.as_mut() {
+                        run.outcome_received = true;
+                    }
+                    note(terminal(result));
+                }
+                Signal::Finished => in_flight = None,
+            },
             () = async {
                 // Already-due ticks must not wait for Tokio's timer granularity.
                 if deadline > Instant::now() {
@@ -103,8 +124,12 @@ pub(super) async fn run(
                     note(ScheduledResult::SkippedBusy);
                 } else {
                     match start() {
-                        Ok(receiver) => {
-                            in_flight = Some(receiver);
+                        Ok(signals) => {
+                            in_flight = Some(InFlight {
+                                outcome: signals.outcome,
+                                finished: signals.finished,
+                                outcome_received: false,
+                            });
                             note(ScheduledResult::Started);
                         }
                         Err(StartBackupError::AlreadyRunning) => note(ScheduledResult::SkippedBusy),
@@ -118,18 +143,45 @@ pub(super) async fn run(
     if next.is_none() {
         tracing::warn!("scheduled backup stopped: next deadline is not representable");
     }
-    if let Some(receiver) = in_flight {
-        note(terminal(receiver.await));
+    if let Some(run) = in_flight {
+        // Drain the admitted run: exactly one outcome note, then the late
+        // signal once retention and the final publication are over.
+        if !run.outcome_received {
+            note(terminal(run.outcome.await));
+        }
+        let _ = run.finished.await;
     }
 }
 
-/// cancel-safe: yes — polling borrows the receiver; a losing branch leaves it available to drain.
-async fn receive(
-    in_flight: &mut Option<oneshot::Receiver<bool>>,
-) -> Result<bool, oneshot::error::RecvError> {
-    match in_flight {
-        Some(receiver) => receiver.await,
-        None => std::future::pending().await,
+/// cancel-safe: yes — polling borrows the run's receivers; a losing branch
+/// leaves them available to drain.
+async fn advance(in_flight: &mut Option<InFlight>) -> Signal {
+    let Some(run) = in_flight.as_mut() else {
+        return std::future::pending().await;
+    };
+    let outcome_received = run.outcome_received;
+    let outcome = &mut run.outcome;
+    let finished = &mut run.finished;
+    // Precedence keeps one note per run: a FINISHED that races ahead of the
+    // outcome (the unwind path) waits until the outcome has been noted.
+    tokio::select! {
+        result = async {
+            if outcome_received {
+                std::future::pending::<Result<bool, oneshot::error::RecvError>>().await
+            } else {
+                outcome.await
+            }
+        } => Signal::Outcome(result),
+        result = async {
+            if outcome_received {
+                finished.await
+            } else {
+                std::future::pending::<Result<(), oneshot::error::RecvError>>().await
+            }
+        } => {
+            let _ = result;
+            Signal::Finished
+        },
     }
 }
 

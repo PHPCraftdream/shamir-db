@@ -47,7 +47,7 @@ use shamir_connect::server::audit_chain::{AuditChain, AuditChainWriter};
 use shamir_server_security::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
-use super::failure_injection_tests::{
+use super::super::failure_injection_tests::{
     assert_source_untouched, run, snapshot_dir, write_file, Fixture, InjectPort, JoinOnDrop,
 };
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
@@ -215,6 +215,7 @@ fn c_mid_file_io_error_after_a_write_fails_at_copying_and_cleans_up() {
     let OnlineBackupError::Failed {
         stage,
         source: failure,
+        ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
@@ -326,6 +327,7 @@ fn source_deleted_after_its_own_copy_leaves_a_stale_destination_refused_at_verif
     let OnlineBackupError::Failed {
         stage,
         source: failure,
+        ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
@@ -387,6 +389,7 @@ fn persistent_re_pass_hash_mismatch_surfaces_at_self_verification() {
     let OnlineBackupError::Failed {
         stage,
         source: failure,
+        ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
