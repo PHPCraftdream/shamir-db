@@ -3,6 +3,8 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::Duration;
 
 use shamir_db::{ShamirDb, ShutdownReport};
@@ -236,6 +238,45 @@ pub(crate) struct ShutdownOwner {
     data_dir_lock: Option<std::fs::File>,
 }
 
+/// One-shot probe fired immediately before the owner starts awaiting the
+/// scheduled worker's completion signal. Test-only: a shutdown test that
+/// parks the worker waits for this marker instead of guessing how long the
+/// earlier teardown stages take, so "shutdown must not return while the
+/// worker is parked" can never pass vacuously on a slow runner.
+#[cfg(test)]
+static SCHEDULED_JOIN_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+
+/// Clears an unfired [`arm_scheduled_join_probe`] on drop; a probe that fires
+/// removes itself from the slot.
+#[cfg(test)]
+pub(crate) struct ScheduledJoinProbeGuard;
+
+#[cfg(test)]
+impl Drop for ScheduledJoinProbeGuard {
+    fn drop(&mut self) {
+        *SCHEDULED_JOIN_PROBE.lock().expect("scheduled join probe") = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn arm_scheduled_join_probe(
+    probe: impl FnOnce() + Send + 'static,
+) -> ScheduledJoinProbeGuard {
+    *SCHEDULED_JOIN_PROBE.lock().expect("scheduled join probe") = Some(Box::new(probe));
+    ScheduledJoinProbeGuard
+}
+
+#[cfg(test)]
+fn fire_scheduled_join_probe() {
+    let probe = SCHEDULED_JOIN_PROBE
+        .lock()
+        .expect("scheduled join probe")
+        .take();
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
 impl ShutdownOwner {
     /// Await the scheduled worker in place and forget its handle.
     ///
@@ -255,6 +296,8 @@ impl ShutdownOwner {
         // Awaited THROUGH `&mut`: while the wait is pending the handle and its
         // drop guard stay in the owner, so the deadline dropping this future
         // mid-wait leaves them for `drain` instead of detaching the worker.
+        #[cfg(test)]
+        fire_scheduled_join_probe();
         let joined = task.await;
         // Finished: forget the handle (the guard drops with it).
         self.schedule_task = None;

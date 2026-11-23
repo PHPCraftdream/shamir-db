@@ -400,12 +400,8 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     let cancel = CancelFlag::default();
     cancel.cancel();
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Preparing
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Preparing);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
@@ -421,12 +417,8 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
         cancel_for_hook.cancel();
     });
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Copying
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Copying);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
@@ -442,12 +434,8 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
         cancel_for_hook.cancel();
     });
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Sealing
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Sealing);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -514,13 +502,13 @@ fn byte_cap_exceeded_fails_closed_and_cleans_up() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "cap failure must be the source error"
@@ -712,13 +700,13 @@ fn seal_recopy_of_a_new_big_file_is_capped_during_the_second_chunk() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "cap failure must be the source error, got {failure:?}"
@@ -909,13 +897,13 @@ fn clock_cap_trips_mid_copy_through_the_monotonic_seam() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "the deadline must trip as RecopyCap mid-copy, got {failure:?}"
