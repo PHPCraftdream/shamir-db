@@ -3,7 +3,7 @@ use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::batch::{BatchTreeVisitor, IsolationLevel, VisibilityWait};
 use std::sync::Arc;
 
-use crate::tx_registry::{InteractiveTx, TxRegistryError};
+use crate::tx_registry::{InteractiveTx, TxAbortRelease, TxRegistryError};
 
 use super::activity::server_busy_response;
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
@@ -40,6 +40,20 @@ fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<
 }
 
 impl ShamirDbHandler {
+    /// The releaser a newly parked [`InteractiveTx`] must carry: it is bound to
+    /// the repository RESOLVED for this handle, so a `RenameDb`/`RenameRepo`
+    /// (or a `DropDb`) between `TxBegin` and the end of the transaction cannot
+    /// make the release resolve nothing. `None` (the repository vanished
+    /// between `tx_begin_as` and this insert) logs instead of dropping the
+    /// locks silently.
+    pub fn tx_abort_release(&self, db_name: &str, repo_name: &str) -> TxAbortRelease {
+        let repo = self
+            .db
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name));
+        super::activity::tx_abort_release(repo)
+    }
+
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
     ///
@@ -118,6 +132,7 @@ impl ShamirDbHandler {
             db_name.to_string(),
             repo_name.to_string(),
             INTERACTIVE_TX_MAX_LIFETIME,
+            self.tx_abort_release(db_name, repo_name),
         );
         match self.tx_registry.register_activity(
             handle,
