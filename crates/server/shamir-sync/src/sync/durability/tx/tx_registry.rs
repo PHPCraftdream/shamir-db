@@ -67,11 +67,14 @@ use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::{Entry, OccupiedEntry};
 use dashmap::DashMap;
+use futures_util::future::BoxFuture;
 use scc::{Guard, HashIndex};
 use shamir_collections::THasher;
 use shamir_tx::{SnapshotGuard, TxContext};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+use super::tx_abort_release::spawn_abort_release;
 
 /// Phase B Stage 6 — default idle TTL for an open interactive tx.
 /// Matches `TRANSACTIONS.md` (30 s) and `PHASE_B_INTERACTIVE_TX.md` §6.4.
@@ -86,6 +89,12 @@ pub const DEFAULT_INTERACTIVE_TX_IDLE_TTL: Duration = Duration::from_secs(30);
 /// Comfortably below the 30 s idle TTL so a tx that idles past its TTL is
 /// reaped within a few seconds of becoming reapable.
 pub const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Releases the Level-3 pessimistic record locks a parked transaction still holds when the
+/// LAST reference to its context goes away outside the commit pipeline. Receives the taken
+/// [`TxContext`]; the releaser ALREADY holds the repository resolved when the handle was parked, so
+/// `RenameDb` / `RenameRepo` between begin and end cannot make it resolve nothing.
+pub type TxAbortRelease = Arc<dyn Fn(TxContext) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Phase B Stage 6 — handle for the periodic interactive-tx reaper task.
 /// Just the `JoinHandle<()>` — the stop signal is the shared root
@@ -356,6 +365,9 @@ pub struct InteractiveTx {
     /// `tokio::sync::Mutex` because `TxExecute` holds the guard across the
     /// async plan run (the sanctioned across-await lock).
     ctx: tokio::sync::Mutex<Option<TxContext>>,
+    /// Releases the record locks this context may still hold when the last
+    /// reference to it goes away outside the commit pipeline — see [`TxAbortRelease`].
+    abort_release: TxAbortRelease,
     /// Pins the MVCC snapshot for GC. Held only for its `Drop`; released when
     /// the owning `Arc` drops (after commit/rollback/timeout removal).
     _snapshot: SnapshotGuard,
@@ -397,9 +409,11 @@ impl InteractiveTx {
         db: String,
         repo: String,
         max_lifetime: Duration,
+        abort_release: TxAbortRelease,
     ) -> Self {
         Self {
             ctx: tokio::sync::Mutex::new(Some(ctx)),
+            abort_release,
             _snapshot: snapshot,
             owner_sid,
             owner_user_id,
@@ -462,6 +476,24 @@ impl InteractiveTx {
     /// than `idle_ttl` as of `now`. The sweep reaps any tx that returns true.
     pub fn is_expired(&self, now: Instant, idle_ttl: Duration) -> bool {
         self.timing.is_expired(now, idle_ttl)
+    }
+
+    /// The releaser this transaction carries, used by the synchronous operator-cancel path.
+    pub fn abort_release(&self) -> &TxAbortRelease {
+        &self.abort_release
+    }
+}
+
+impl Drop for InteractiveTx {
+    /// The single release point for a transaction that ended outside the commit
+    /// pipeline — rollback, the reaper, session teardown, an execution-limit
+    /// abort, or a request that loses its race with them. The context is parked
+    /// here only when no commit path took it; `get_mut` needs no lock because
+    /// this is the last reference, so nobody holds the guard.
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.get_mut().take() {
+            spawn_abort_release(&self.abort_release, ctx, &self.db, &self.repo);
+        }
     }
 }
 

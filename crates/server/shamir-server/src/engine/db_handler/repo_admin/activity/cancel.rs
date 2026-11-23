@@ -252,7 +252,7 @@ impl ShamirDbHandler {
             TxParkedState::Open(tx) => match ctx.take() {
                 Some(parked) => {
                     drop(ctx);
-                    self.release_tx_locks(&parked, &tx).await;
+                    self.release_tx_locks(parked, &tx).await;
                     CancelOutcome::Cancelled
                 }
                 None => CancelOutcome::AlreadyFinished,
@@ -262,19 +262,16 @@ impl ShamirDbHandler {
         }
     }
 
-    /// Release the Level-3 pessimistic record locks a parked transaction still
-    /// holds. `TxContext` has no `Drop` that frees them, so every path that ends
-    /// a transaction outside the commit pipeline must call the engine's explicit
-    /// release before dropping the context (the drop itself runs the ordinary
-    /// RAII rollback and snapshot release).
-    async fn release_tx_locks(&self, parked: &TxContext, tx: &InteractiveTx) {
-        let Some(db) = self.db.get_db(tx.db()) else {
-            return;
-        };
-        let Some(repo) = db.get_repo(tx.repo()) else {
-            return;
-        };
-        shamir_db::engine::tx::release_interactive_tx_locks(parked, repo.core()).await;
+    /// The operator-cancel path's own synchronous release of the Level-3
+    /// record locks the cancelled context still holds, kept so the locks are
+    /// gone before the cancel reply returns. Every other end of an interactive
+    /// transaction is covered by the registry's `Drop` release, and a repeated
+    /// release of the same transaction is a harmless no-op because
+    /// `MvccStore::release_locks` removes only holders whose `tx_version`
+    /// matches.
+    async fn release_tx_locks(&self, parked: TxContext, tx: &InteractiveTx) {
+        let release = tx.abort_release();
+        release(parked).await;
     }
 
     /// Cancel another session's result cursor by its id. Ownership comes from
