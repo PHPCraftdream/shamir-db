@@ -160,5 +160,5 @@ pub(in crate::shell) fn normalized_path(selector: &Selector) -> String {
 }
 
 #[cfg(test)]
-#[path = "tests/selector_tests.rs"]
+#[path = "../tests/selector_tests.rs"]
 mod selector_tests;

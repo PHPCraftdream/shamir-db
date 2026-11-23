@@ -177,6 +177,31 @@ pub(super) enum Command {
         #[command(subcommand)]
         action: ActivityCli,
     },
+    /// Online copy of the running server (design §4.7); SCRAM only.
+    Backup {
+        #[command(subcommand)]
+        action: BackupCli,
+    },
+    /// Application-schema migration status of one database (design §4.8).
+    SchemaMigration {
+        #[command(subcommand)]
+        action: SchemaMigrationCli,
+    },
+    /// Logical export manual (design §4.9); explained only, never executed.
+    Export {
+        #[command(subcommand)]
+        action: ExportCli,
+    },
+    /// Logical import manual (design §4.9); explained only, never executed.
+    Import {
+        #[command(subcommand)]
+        action: ImportCli,
+    },
+    /// Diagnostics (design §4.10).
+    Diag {
+        #[command(subcommand)]
+        action: DiagCli,
+    },
     /// `chmod PATH MODE`: change the mode bits of one resource (rights
     /// §4.3); SCRAM only and confirmation required.
     Chmod {
@@ -227,6 +252,73 @@ pub(super) enum ActivityCli {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum BackupCli {
+    /// Start an online copy into a server-side absolute destination root;
+    /// the path is passed unmodified and only the server validates it.
+    Start {
+        #[arg(long, value_name = "DIR")]
+        to: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the typed status of the current (or last) copy.
+    Status,
+    /// Cancel the current run on this node (no id).
+    Cancel {
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Explained only: verify one snapshot offline.
+    Verify { snapshot: String },
+    /// Explained only: restore one snapshot.
+    Restore,
+    /// Explained only: take a stopped-server snapshot.
+    Snapshot,
+    /// Backup schedule state; unsupported in this release.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleCli,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum ScheduleCli {
+    /// Show the configured schedule; unsupported in this release.
+    Show,
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum SchemaMigrationCli {
+    /// One line of migration status for the database identity ID.
+    Status {
+        #[arg(long, value_name = "ID")]
+        database_id: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum ExportCli {
+    /// Explained only: the server's offline logical-export command.
+    Logical,
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum ImportCli {
+    /// Explained only: the server's offline logical-import command.
+    Logical,
+}
+
+#[derive(clap::Subcommand)]
+pub(super) enum DiagCli {
+    /// Explained only: the offline integrity check.
+    Integrity,
+    /// WAL watermark / pending / commit telemetry.
+    Wal,
+    /// Effective-versus-stored durability of one repository.
+    Durability { repo: String },
 }
 
 #[derive(clap::Subcommand)]
@@ -324,9 +416,11 @@ pub(super) fn command_id(command: &Command) -> &'static str {
             action: FunctionCommand::List { .. },
         } => "function list",
         Command::Status => "status",
-        Command::Version {
-            action: VersionCommand::Show,
-        } => "version show",
+        Command::Version { action } => match action {
+            VersionCommand::Show => "version show",
+            VersionCommand::Stamp => "version stamp",
+            VersionCommand::Migrate => "version migrate",
+        },
         Command::Replication {
             action: ReplicationCommand::Subscriptions,
         } => "replication subscriptions",
@@ -349,6 +443,31 @@ pub(super) fn command_id(command: &Command) -> &'static str {
             ActivityCli::Sessions { .. } => "activity sessions",
             ActivityCli::Requests { .. } => "activity requests",
             ActivityCli::Cancel { .. } => "activity cancel",
+        },
+        Command::Backup { action } => match action {
+            BackupCli::Start { .. } => "backup start",
+            BackupCli::Status => "backup status",
+            BackupCli::Cancel { .. } => "backup cancel",
+            BackupCli::Verify { .. } => "backup verify",
+            BackupCli::Restore => "backup restore",
+            BackupCli::Snapshot => "backup snapshot",
+            BackupCli::Schedule {
+                action: ScheduleCli::Show,
+            } => "backup schedule show",
+        },
+        Command::SchemaMigration {
+            action: SchemaMigrationCli::Status { .. },
+        } => "schema-migration status",
+        Command::Export {
+            action: ExportCli::Logical,
+        } => "export logical",
+        Command::Import {
+            action: ImportCli::Logical,
+        } => "import logical",
+        Command::Diag { action } => match action {
+            DiagCli::Integrity => "diag integrity",
+            DiagCli::Wal => "diag wal",
+            DiagCli::Durability { .. } => "diag durability",
         },
         Command::Chmod { .. } => "chmod",
         Command::Chown { .. } => "chown",
