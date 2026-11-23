@@ -13,17 +13,20 @@ pub struct TransactionInfo {
     /// Outcome: `"committed"`, `"aborted"`, or `"indeterminate"`.
     pub status: String,
 
-    /// Human-readable abort reason (null when committed; omitted for
+    /// Human-readable abort diagnostic (null when committed; omitted for
     /// indeterminate, whose `error` is `"wal_outcome_unknown"`).
-    /// E.g. `"tx_conflict"`, `"tx_cross_repo_not_supported"`.
     ///
-    /// This remains the debug text; the stable machine-readable code of the
-    /// operation that aborted the transaction is [`Self::abort_code`].
+    /// Legacy plan-error debug text is distinct from the literal
+    /// `"skip_aborted"` plan-level label; commit-time classifications may
+    /// also be retained here. Do not parse `reason` for a stable code:
+    /// [`Self::abort_code`] is authoritative when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 
     /// Stable code of the operation that aborted the transaction (for
     /// example `"call_in_tx_not_supported"` or `"skip_aborted"`).
+    /// Commit-time classifications use their stable label here when one
+    /// exists; this is the authoritative machine-readable abort code.
     ///
     /// Absent when the abort carries no stable code, and for committed and
     /// indeterminate outcomes (neither aborts at the plan level).

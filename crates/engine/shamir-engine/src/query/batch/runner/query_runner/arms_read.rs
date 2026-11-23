@@ -16,6 +16,17 @@ use crate::query::filter::read_budget::ReadByteMeter;
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 
+fn is_canonical_table_unavailable(error: &BatchError) -> bool {
+    matches!(
+        error,
+        BatchError::QueryError {
+            code: Some(code),
+            alias,
+            message,
+        } if code == "unknown_table" && alias.is_empty() && message == "table is unavailable"
+    )
+}
+
 impl<'a> QueryRunner<'a> {
     pub(super) async fn run_sub_batch_arm(
         &mut self,
@@ -105,6 +116,7 @@ impl<'a> QueryRunner<'a> {
         // top-level outcome, identical to a timeout detected at any
         // outer checkpoint.
         let wrap_sub_batch_err = |e: BatchError| match e {
+            e if is_canonical_table_unavailable(&e) => e,
             limit_error @ (BatchError::ExecutionTimedOut { .. }
             | BatchError::TooManyQueries { .. }
             | BatchError::TooManyIterations { .. }
@@ -153,6 +165,7 @@ impl<'a> QueryRunner<'a> {
                 )
                 .await
                 .map_err(|e| match e {
+                    e if is_canonical_table_unavailable(&e) => e,
                     limit_error @ (BatchError::ExecutionTimedOut { .. }
                     | BatchError::TooManyQueries { .. }
                     | BatchError::TooManyIterations { .. }
@@ -351,6 +364,7 @@ impl<'a> QueryRunner<'a> {
             // reused (via a fresh `&mut` reborrow) by every iteration below.
             self.scope.check()?;
             let wrap_for_each_body_err = |e: BatchError| match e {
+                e if is_canonical_table_unavailable(&e) => e,
                 limit_error @ (BatchError::ExecutionTimedOut { .. }
                 | BatchError::TooManyQueries { .. }
                 | BatchError::TooManyIterations { .. }
@@ -435,6 +449,7 @@ impl<'a> QueryRunner<'a> {
                     )
                     .await
                     .map_err(|e| match e {
+                        e if is_canonical_table_unavailable(&e) => e,
                         limit_error @ (BatchError::ExecutionTimedOut { .. }
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
@@ -467,6 +482,7 @@ impl<'a> QueryRunner<'a> {
                         )
                         .await
                         .map_err(|e| match e {
+                            e if is_canonical_table_unavailable(&e) => e,
                             limit_error @ (BatchError::ExecutionTimedOut { .. }
                             | BatchError::TooManyQueries { .. }
                             | BatchError::TooManyIterations { .. }

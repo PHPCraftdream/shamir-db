@@ -870,62 +870,54 @@ fn create_cursor_req(table: &str) -> DbRequest {
     }
 }
 
-/// The batch path refuses an unknown table in `validate_tables`, which tags
-/// the engine's `NotFound` with the batch alias — the stable `unknown_table`
-/// code the neighbouring missing-table read test asserts
-/// (`tx_execute_lifecycle_tests::ordinary_query_error_preserves_handle_for_successful_execute`).
-/// The message must carry the configured-table text, proving the refusal
-/// came from the check under test rather than from an earlier gate.
+/// The batch path refuses an unknown table with the canonical, name-hiding
+/// `unknown_table` response.
 fn expect_batch_unknown_table_refusal(resp: DbResponse, table: &str) {
     match resp {
-        DbResponse::Error { code, message } => {
-            assert_eq!(
-                code, "unknown_table",
-                "batch read of unknown table '{table}'"
-            );
-            assert!(
-                message.contains(table),
-                "the refusal must name the probed table, got {message:?}"
-            );
-            assert!(
-                message.contains("is not configured in this repository"),
-                "the refusal must come from the configured-table check, got {message:?}"
-            );
-        }
-        other => panic!("expected the unknown-table refusal for '{table}', got {other:?}"),
+        DbResponse::Error { code, message } => assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("unknown_table", "table is unavailable"),
+            "batch read of unknown table '{table}'"
+        ),
+        other => panic!("batch read of unknown table '{table}': got {other:?}"),
     }
 }
 
-/// `create_cursor` surfaces the same engine `NotFound` through
-/// `wrap_engine_err`, which leaves the code to the legacy message-sniffing
-/// heuristic. Its wire code is therefore NOT pinned here — the neighbouring
-/// pagination tests take the same stance for a generic engine "table not
-/// found" after a mid-scroll drop. What must hold is that the request is
-/// refused by the configured-table check and never becomes a cursor.
+/// Cursor creation uses the same canonical, name-hiding refusal and never
+/// becomes a cursor.
 fn expect_cursor_unknown_table_refusal(resp: DbResponse, table: &str) {
     match resp {
-        DbResponse::Error { code, message } => {
-            assert!(
-                !code.is_empty(),
-                "cursor create of unknown table '{table}' must produce a code"
-            );
-            assert!(
-                message.contains(table),
-                "the refusal must name the probed table, got {message:?}"
-            );
-            assert!(
-                message.contains("is not configured in this repository"),
-                "the refusal must come from the configured-table check, got {message:?}"
-            );
-        }
-        other => panic!("expected the unknown-table refusal for '{table}', got {other:?}"),
+        DbResponse::Error { code, message } => assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("unknown_table", "table is unavailable"),
+            "cursor create of unknown table '{table}'"
+        ),
+        other => panic!("cursor create of unknown table '{table}': got {other:?}"),
     }
 }
 
-/// (a) Eight distinct never-created names, each a refused batch read, must
-/// leave the repository's cell map byte-for-byte unchanged.
-///
-/// WITHOUT the fix these eight requests grow the cell map by eight.
+/// Directly probe the cold resolver (not `GetRecord`, `Execute`, or cursor
+/// preflight): two distinct unknown names must not allocate catalogue cells.
+#[tokio::test]
+async fn cold_resolver_unknown_names_do_not_grow_catalogue_cells() {
+    let handler = build_growth_handler().await;
+    let before = table_cell_count(&handler);
+    let db = handler.db();
+
+    for name in ["cold_absent_one", "cold_absent_two"] {
+        assert!(
+            db.get_table("app", "main", name).await.is_err(),
+            "the cold resolver must refuse unknown table '{name}'"
+        );
+    }
+
+    assert_eq!(
+        table_cell_count(&handler),
+        before,
+        "direct cold-resolver refusals must not insert catalogue cells"
+    );
+}
+
 #[tokio::test]
 async fn batch_reads_of_unknown_tables_do_not_grow_catalogue_cells() {
     let handler = build_growth_handler().await;

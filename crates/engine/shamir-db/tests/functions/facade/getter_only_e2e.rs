@@ -318,8 +318,8 @@ async fn without_setuid_stranger_is_denied() {
 
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("denied") || msg.contains("Denied"),
-        "denial must come from the per-table ACL gate, got: {msg}"
+        msg.contains("unknown_table") && msg.contains("table is unavailable"),
+        "table read refusal must use the canonical response, got: {msg}"
     );
 }
 

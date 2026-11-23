@@ -328,12 +328,26 @@ fn assert_gateway_denial(result: DbResult<QueryValue>, operation: &str, action: 
         message.contains(&format!("{operation}: db gateway: {gateway_class}:")),
         "expected the gateway {gateway_class} denial for {operation}, got: {message}"
     );
-    let denial =
-        format!("access denied: User({RESTRICTED_ID}) cannot {action} on db://testdb/main/secrets");
-    assert!(
-        message.contains(&denial),
-        "expected exact table/action denial `{denial}`, got: {message}"
-    );
+    if action == "READ" {
+        assert!(
+            message.contains("table is unavailable"),
+            "expected the fixed unknown_table read refusal, got: {message}"
+        );
+        assert!(
+            !message.contains("access denied:")
+                && !message.contains(&format!("User({RESTRICTED_ID})"))
+                && !message.contains("secrets"),
+            "a read refusal must not disclose table ACL details, got: {message}"
+        );
+    } else {
+        let denial = format!(
+            "access denied: User({RESTRICTED_ID}) cannot {action} on db://testdb/main/secrets"
+        );
+        assert!(
+            message.contains(&denial),
+            "expected exact table/action denial `{denial}`, got: {message}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -445,6 +459,8 @@ async fn shamir_invoker_batch_read_execute_is_denied_independently() {
     );
     assert_native_row(&db, 1, "seeded").await;
     assert_gateway_denial(invoke(&db, "batch_invoker").await, "db_execute", "READ");
+    // The denial must not expose a table ACL message or disclose the table;
+    // the native check above independently confirms the seeded row remains.
 }
 
 /// The outer batch `Call` must report the SAME stable code the stored

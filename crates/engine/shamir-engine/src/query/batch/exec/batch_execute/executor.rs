@@ -423,7 +423,7 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
         scope.check()?;
 
         // 3. Execute — branch on transactional.
-        let (all_results, tx_info) = if request.transactional {
+        let (all_results, mut tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
                 plan,
@@ -457,10 +457,30 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
             (r, None)
         };
 
-        // 3.5. Durability: same as `execute_batch_impl`.
-        flush_if_synced_durability(request, resolver, db_name, scope, depth).await?;
+        // 3.5. Durability: same as `execute_batch_impl`. Once transactional
+        // execution has produced a TransactionInfo, the commit disposition is
+        // authoritative; a later sync failure must not replace it with Err and
+        // make ForEach lose the attempted outcome. Preserve an existing outcome
+        // error (notably wal_outcome_unknown / wal_durability); otherwise retain
+        // the sync diagnostic in the optional error field. Non-transactional
+        // batches have no transaction metadata, so their sync failure propagates.
+        if let Err(flush_error) =
+            flush_if_synced_durability(request, resolver, db_name, scope, depth).await
+        {
+            if request.transactional {
+                if let Some(info) = tx_info.as_mut() {
+                    if info.error.is_none() {
+                        info.error = Some(flush_error.to_string());
+                    }
+                } else {
+                    return Err(flush_error);
+                }
+            } else {
+                return Err(flush_error);
+            }
+        }
 
-        // 4. Filter results for response. The transaction outcome is returned
+        // 4. Filter results. The transaction outcome is returned
         // alongside them so the caller can fail an aborted iteration instead
         // of presenting the empty result set the body never produced.
         Ok((

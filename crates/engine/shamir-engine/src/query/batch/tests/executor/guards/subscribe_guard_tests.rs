@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use shamir_query_builder::batch::subscribe::{SourceBuilder, Subscribe};
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::TableRef;
 
@@ -65,7 +66,32 @@ async fn setup_resolver() -> TestResolver {
     }
 }
 
-/// Allows everything except a TABLE `Read` — the closed source of the pair.
+/// Catalogue preflight reports every source present except `absent_items`;
+/// this also permits a second-repository source to reach availability checks.
+struct CatalogueGate;
+
+#[async_trait::async_trait]
+impl AccessGate for CatalogueGate {
+    async fn check(
+        &self,
+        _actor: &Actor,
+        _path: &ResourcePath,
+        _action: Action,
+    ) -> Result<(), AccessError> {
+        Ok(())
+    }
+
+    async fn table_read_exists(
+        &self,
+        _db_name: &str,
+        _repo_name: &str,
+        table_name: &str,
+    ) -> Result<Option<bool>, AccessError> {
+        Ok(Some(table_name != "absent_items"))
+    }
+}
+
+/// Closed-source gate: available source, but actor cannot read it.
 struct ClosedSourceGate;
 
 #[async_trait::async_trait]
@@ -76,7 +102,9 @@ impl AccessGate for ClosedSourceGate {
         path: &ResourcePath,
         action: Action,
     ) -> Result<(), AccessError> {
-        if action == Action::Read && matches!(path, ResourcePath::Table { .. }) {
+        if action == Action::Read
+            && matches!(path, ResourcePath::Table { table, .. } if table == "closed_items")
+        {
             return Err(AccessError {
                 actor: actor.clone(),
                 path: path.to_string(),
@@ -87,8 +115,53 @@ impl AccessGate for ClosedSourceGate {
     }
 }
 
-/// One single-source subscription — the SAME request shape for both halves
-/// of the pair; only the source table NAME differs.
+fn skipped_nested_source_request(table: &str) -> shamir_query_types::batch::BatchRequest {
+    let mut child = Batch::new();
+    let source = child.query("inner_read", Query::from(table));
+    child.when(
+        &source,
+        Filter::IsNotNull {
+            field: vec!["never_present".to_string()],
+        },
+    );
+
+    let mut outer = Batch::new();
+    outer.id(1);
+    outer.sub_batch_no_bind("nested", child.build());
+    outer.build()
+}
+
+/// Even though the nested read is guarded by a false `when`, source
+/// availability preflight must happen before execution decides to skip it.
+/// mutant: skipping preflight for the false branch grants the closed source
+/// and lets the absent source through instead of producing the same refusal.
+#[tokio::test]
+async fn absent_and_closed_reads_in_skipped_nested_batch_refuse_identically() {
+    let closed_req = skipped_nested_source_request("closed_items");
+    let absent_req = skipped_nested_source_request("absent_items");
+
+    let closed = Authorized::authorize(&closed_req, Actor::User(7), "test", &ClosedSourceGate)
+        .await
+        .unwrap_err();
+    let absent = Authorized::authorize(&absent_req, Actor::User(7), "test", &CatalogueGate)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        refusal(&closed),
+        refusal(&absent),
+        "a skipped nested read must be preflighted before its false condition"
+    );
+    assert_eq!(
+        refusal(&closed),
+        (
+            Some("unknown_table".to_string()),
+            String::new(),
+            "table is unavailable".to_string()
+        )
+    );
+}
+
 fn single_source_subscribe(alias: &str, table: &str) -> shamir_query_types::batch::BatchRequest {
     let sub_op = Subscribe::table(TableRef::with_repo("default", table)).build();
     let mut b = Batch::new();
@@ -120,11 +193,7 @@ fn refusal(error: &BatchError) -> (Option<String>, String, String) {
 /// table name echoed. Both halves of this assertion fail on the parent.
 #[tokio::test]
 async fn absent_and_closed_subscription_sources_refuse_identically() {
-    let resolver = tokio::time::timeout(CALL_TIMEOUT, setup_resolver())
-        .await
-        .expect("setup must be bounded by CALL_TIMEOUT");
-
-    let closed_req = single_source_subscribe("sub1", "users");
+    let closed_req = single_source_subscribe("sub1", "closed_items");
     let absent_req = single_source_subscribe("sub1", "absent_items");
 
     let closed = tokio::time::timeout(
@@ -136,10 +205,10 @@ async fn absent_and_closed_subscription_sources_refuse_identically() {
     .unwrap_err();
     let absent = tokio::time::timeout(
         CALL_TIMEOUT,
-        execute_batch(&absent_req, &resolver, None, None, Actor::System, "test"),
+        Authorized::authorize(&absent_req, Actor::User(7), "test", &CatalogueGate),
     )
     .await
-    .expect("execution must be bounded by CALL_TIMEOUT")
+    .expect("authorization must be bounded by CALL_TIMEOUT")
     .unwrap_err();
 
     assert_eq!(
@@ -158,7 +227,7 @@ async fn absent_and_closed_subscription_sources_refuse_identically() {
 
     let (_, alias, message) = refusal(&absent);
     assert!(
-        !message.contains("users") && !message.contains("absent_items"),
+        !message.contains("closed_items") && !message.contains("absent_items"),
         "the refusal must not echo the source table: {message}"
     );
     assert!(
@@ -168,29 +237,51 @@ async fn absent_and_closed_subscription_sources_refuse_identically() {
 }
 
 #[tokio::test]
+async fn absent_source_precedes_multi_repo_gate() {
+    let request = |second_table: &str| {
+        let first = SourceBuilder::table(TableRef::with_repo("default", "users")).build();
+        let second = SourceBuilder::table(TableRef::with_repo("other_repo", second_table)).build();
+        let mut batch = Batch::new();
+        batch.id(1);
+        batch.subscribe("multi", Subscribe::sources(vec![first, second]).build());
+        batch.build()
+    };
+    let closed_req = request("closed_items");
+    let absent_req = request("absent_items");
+    let closed = Authorized::authorize(&closed_req, Actor::User(7), "test", &ClosedSourceGate)
+        .await
+        .unwrap_err();
+    let absent = Authorized::authorize(&absent_req, Actor::User(7), "test", &CatalogueGate)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(&closed), refusal(&absent));
+    assert_eq!(
+        refusal(&closed),
+        (
+            Some("unknown_table".into()),
+            String::new(),
+            "table is unavailable".into()
+        )
+    );
+}
+
+#[tokio::test]
 async fn subscribe_multi_repo_rejected() {
     let resolver = setup_resolver().await;
-
     let src1 = SourceBuilder::table(TableRef::with_repo("default", "users")).build();
     let src2 = SourceBuilder::table(TableRef::with_repo("other_repo", "sessions")).build();
-    let sub_op = Subscribe::sources(vec![src1, src2]).build();
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.subscribe("sub1", sub_op);
-    let req = b.build();
-
-    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.subscribe("sub1", Subscribe::sources(vec![src1, src2]).build());
+    let err = execute_batch(&batch.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap_err();
     match &err {
-        BatchError::QueryError { code, .. } => {
-            assert_eq!(
-                code.as_deref(),
-                Some("multi_repo_subscriptions_not_supported")
-            );
-        }
-        other => panic!("expected QueryError with multi_repo code, got {:?}", other),
+        BatchError::QueryError { code, .. } => assert_eq!(
+            code.as_deref(),
+            Some("multi_repo_subscriptions_not_supported")
+        ),
+        other => panic!("expected QueryError with multi_repo code, got {other:?}"),
     }
 }
 

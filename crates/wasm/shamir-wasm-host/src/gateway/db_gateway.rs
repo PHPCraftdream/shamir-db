@@ -42,6 +42,7 @@ pub enum DbGatewayError {
     #[error("db gateway: not found: {message}")]
     NotFound {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -49,6 +50,7 @@ pub enum DbGatewayError {
     #[error("db gateway: permission denied: {message}")]
     Permission {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -59,6 +61,7 @@ pub enum DbGatewayError {
     #[error("db gateway: execution failed: {message}")]
     ExecutionSource {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -66,18 +69,12 @@ pub enum DbGatewayError {
 
 impl DbGatewayError {
     /// Stable, server-minted code of this failure, when the gateway has one.
-    ///
-    /// Only the two typed refusal classes carry a code: [`Self::NotFound`] is
-    /// `not_found` and [`Self::Permission`] is `access_denied`. Everything
-    /// else answers `None`; in particular an [`Self::ExecutionSource`] does
-    /// NOT reconstruct a code from its source (the source is an opaque boxed
-    /// error this crate cannot name), so a read refusal that the database
-    /// classifies as a generic execution failure stays uncoded here.
-    pub(crate) fn code(&self) -> Option<&'static str> {
+    pub(crate) fn code(&self) -> Option<&str> {
         match self {
-            DbGatewayError::NotFound { .. } => Some("not_found"),
-            DbGatewayError::Permission { .. } => Some("access_denied"),
-            DbGatewayError::Execution(_) | DbGatewayError::ExecutionSource { .. } => None,
+            DbGatewayError::NotFound { code, .. }
+            | DbGatewayError::Permission { code, .. }
+            | DbGatewayError::ExecutionSource { code, .. } => code.as_deref(),
+            DbGatewayError::Execution(_) => None,
         }
     }
 }

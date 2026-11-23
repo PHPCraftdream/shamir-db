@@ -16,6 +16,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tracing::field::{Field, Visit};
+use tracing::instrument::WithSubscriber;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::audit_chain::{
@@ -24,7 +29,6 @@ use shamir_connect::server::audit_chain::{
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
-use shamir_test_diag::try_install_global_tracing_ring;
 
 use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::durability_policy::DurabilityMetricsSnapshot;
@@ -154,16 +158,69 @@ fn audit_writer() -> (Arc<CapturedAudit>, Arc<AuditChainWriter>) {
     (captured, writer)
 }
 
-/// Ring records whose rendered message is a `slow query` WARN carrying
-/// `needle`. `status` is server-wide, so its WARN carries `db=""`.
-fn slow_query_records(needle: &str) -> Vec<shamir_test_diag::ring::RingRecord> {
-    shamir_test_diag::ring::shared_ring()
-        .snapshot()
-        .into_iter()
-        .filter(|record| {
-            record.message.starts_with("slow query") && record.message.contains(needle)
-        })
-        .collect()
+/// A test-owned subscriber layer; unlike the shared diagnostic ring, these
+/// records cannot include events from concurrently running tests.
+type SlowQueryRecords = Arc<Mutex<Vec<(String, String)>>>;
+
+#[derive(Clone)]
+struct SlowQueryCapture(SlowQueryRecords);
+
+#[derive(Default)]
+struct EventFields(Vec<String>);
+
+impl Visit for EventFields {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+}
+
+impl<S: Subscriber> Layer<S> for SlowQueryCapture {
+    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        let message = fields.0.join(" ");
+        if message.contains("slow query") {
+            self.0
+                .lock()
+                .expect("slow-query capture mutex")
+                .push((event.metadata().level().to_string(), message));
+        }
+    }
+}
+
+fn slow_query_dispatch() -> (tracing::Dispatch, SlowQueryRecords) {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(SlowQueryCapture(records.clone()));
+    (tracing::Dispatch::new(subscriber), records)
+}
+
+/// Send under the test-owned dispatch. `WithSubscriber` carries the dispatch
+/// through every poll, unlike a thread-local default spanning an `.await`.
+async fn send_captured(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    req: DbRequest,
+    dispatch: &tracing::Dispatch,
+) -> DbResponse {
+    send(handler, session, req)
+        .with_subscriber(dispatch.clone())
+        .await
 }
 
 /// A status envelope is far bigger than 32 bytes, so a 32-byte cap must
@@ -374,20 +431,21 @@ async fn status_emits_one_names_only_audit_record() {
 /// still logs, and a WARN missing the mirror field names.
 #[tokio::test]
 async fn status_logs_slow_query_past_the_threshold_and_not_when_disabled() {
-    try_install_global_tracing_ring();
+    let (dispatch, captured) = slow_query_dispatch();
     let session = superuser_alice_session();
 
     let disabled = build_handler(QueryLimitsCap::UNLIMITED, true)
         .await
         .with_slow_query(SlowQueryConfig::from_ms(0));
-    let before = slow_query_records("db=\"\"").len();
     assert!(matches!(
-        send(&disabled, &session, DbRequest::Status).await,
+        send_captured(&disabled, &session, DbRequest::Status, &dispatch).await,
         DbResponse::Status { .. }
     ));
-    assert_eq!(
-        slow_query_records("db=\"\"").len(),
-        before,
+    assert!(
+        captured
+            .lock()
+            .expect("slow-query capture mutex")
+            .is_empty(),
         "threshold 0 must disable the WARN"
     );
 
@@ -400,23 +458,16 @@ async fn status_logs_slow_query_past_the_threshold_and_not_when_disabled() {
         })
         .with_slow_query_elapsed(1_001);
     assert!(matches!(
-        send(&enabled, &session, DbRequest::Status).await,
+        send_captured(&enabled, &session, DbRequest::Status, &dispatch).await,
         DbResponse::Status { .. }
     ));
 
-    let records = slow_query_records("db=\"\"");
-    assert_eq!(
-        records.len(),
-        before + 1,
-        "the crossed threshold must emit exactly one WARN"
-    );
-    let record = records.last().expect("slow query record");
-    assert_eq!(record.level, "WARN");
-    assert!(record.message.contains("slow query"), "{}", record.message);
-    assert!(
-        record.message.contains("threshold_us=1000"),
-        "{}",
-        record.message
-    );
-    assert!(record.message.contains("queries=1"), "{}", record.message);
+    let records = captured.lock().expect("slow-query capture mutex");
+    assert_eq!(records.len(), 1, "exactly one slow-query WARN");
+    let (level, message) = &records[0];
+    assert_eq!(level, "WARN");
+    assert!(message.contains("slow query"), "{message}");
+    assert!(message.contains("threshold_us=1000"), "{message}");
+    assert!(message.contains("db=\"\""), "{message}");
+    assert!(message.contains("queries=1"), "{message}");
 }

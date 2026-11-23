@@ -26,7 +26,8 @@ use crate::db_handler::handler::ShamirDbHandler;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
 // Red before W10: bounded mode grows and stashes this oversized error;
-// unbounded mode never checks its encoded size at all.
+// unbounded mode never checks its encoded size at all. An uncoded INSERT miss
+// keeps the engine's table-derived diagnostic (READ misses are canonicalized).
 #[tokio::test]
 async fn encoded_oversize_refuses_and_releases_with_or_without_global_budget() {
     for cap in [Some(1024), None] {
@@ -60,7 +61,9 @@ async fn encoded_oversize_refuses_and_releases_with_or_without_global_budget() {
         );
         let conn = ConnectionServices::without_push(0);
         let mut batch = Batch::new();
-        batch.query("r", Query::from("x".repeat(10_240)));
+        // An INSERT miss is deliberately uncoded: unlike a READ miss, the
+        // engine keeps its table-derived diagnostic (see query_runner.rs).
+        batch.insert("r", insert("t".repeat(10_240)).row(doc! { "id" => "k1" }));
         run_with_guard_slot(async {
             let response = handler
                 .execute(
@@ -71,10 +74,21 @@ async fn encoded_oversize_refuses_and_releases_with_or_without_global_budget() {
                     &conn,
                 )
                 .await;
-            assert!(
-                matches!(&response, DbResponse::Error { code, .. } if code == "result_too_large"),
-                "{response:?}",
-            );
+            match &response {
+                DbResponse::Error { code, message } => {
+                    assert_eq!(code, "result_too_large", "{message}");
+                    let encoded_len = message
+                        .strip_prefix("encoded response is ")
+                        .and_then(|rest| rest.split_once(" bytes; maximum is 1024"))
+                        .and_then(|(len, _)| len.parse::<usize>().ok())
+                        .expect("the refusal reports the oversized INSERT diagnostic length");
+                    assert!(
+                        encoded_len > 1024,
+                        "the request-derived diagnostic must exceed the operator cap: {message}",
+                    );
+                }
+                other => panic!("expected the per-response operator-cap refusal, got {other:?}"),
+            }
             assert_eq!(budget.used(), 0);
             assert!(take_stashed_guard().is_none());
             assert!(take_stashed_serialized_response().is_none());
@@ -186,13 +200,24 @@ async fn tiny_caller_result_cap_keeps_the_fixed_error_envelope_and_its_code() {
         max_result_size: 1,
         ..BatchLimits::default()
     });
-    batch.query("missing", Query::from("absent_table"));
+    batch.query(
+        "secret-alias-".to_owned() + &"x".repeat(10_240),
+        Query::from("absent_table"),
+    );
 
     match dispatch(&handler, batch.build()).await {
-        DbResponse::Error { code, message } => assert_eq!(
-            code, "unknown_table",
-            "a fixed refusal must keep its own code instead of result_too_large: {message}",
-        ),
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "unknown_table");
+            assert_eq!(message, "table is unavailable");
+            assert!(!message.contains("secret-alias"));
+            let wire = rmp_serde::to_vec_named(&DbResponse::Error { code, message })
+                .expect("encode bounded refusal");
+            assert!(
+                wire.len() <= 513,
+                "fixed allowance bound exceeded: {}",
+                wire.len()
+            );
+        }
         other => panic!("expected the coded refusal, got {other:?}"),
     }
 }
@@ -233,14 +258,13 @@ async fn tiny_caller_result_cap_still_refuses_a_larger_data_reply() {
 /// exempt up to the operator cap" exception: a LONG, caller-derived
 /// diagnostic must NOT slip past a 1-byte caller limit.
 ///
-/// The request is an INSERT into a 10 KiB table name. The engine's
-/// `validate_tables` tags only READS with `unknown_table`, so this refusal
-/// keeps `code: None` and resolves to the untagged, caller-text-carrying
-/// `query` code — a NON-canonical code, exactly what the closed set must
-/// leave fenced. The OPERATOR cap (`16_384`) comfortably fits the ~10 KiB
-/// message, so ONLY the caller's limit can refuse it: before B6 the reply
-/// was transmitted whole (the exception admitted it up to the operator cap),
-/// afterwards it is refused with `result_too_large` naming the CALLER's cap.
+/// The request is an INSERT into a 10 KiB table name. In
+/// `query_runner.rs`, non-READ table-resolution misses retain `error.to_string()`
+/// with `code: None`; unlike READs, they are not replaced by `unknown_table`.
+/// The diagnostic contains the table name once (plus fixed engine/wrapper
+/// text), so its encoded envelope is over the caller's 1-byte cap but below
+/// the operator cap. The observed encoded length in the refusal below guards
+/// that size relationship directly.
 #[tokio::test]
 async fn tiny_caller_result_cap_refuses_a_long_non_canonical_diagnostic() {
     let handler = seeded_handler(16_384).await;
@@ -258,6 +282,19 @@ async fn tiny_caller_result_cap_refuses_a_long_non_canonical_diagnostic() {
                 "a caller-derived diagnostic must be fenced by the CALLER's cap, \
                  never transmitted as a canonical refusal: {message}",
             );
+            let encoded_len = message
+                .strip_prefix("encoded response is ")
+                .and_then(|rest| rest.split_once(" bytes; maximum is 1"))
+                .and_then(|(len, _)| len.parse::<usize>().ok())
+                .expect("the caller-cap refusal reports the original diagnostic envelope size");
+            assert!(
+                encoded_len > 1,
+                "diagnostic must exceed caller cap: {message}"
+            );
+            assert!(
+                encoded_len < 16_384,
+                "the request-derived diagnostic must fit the operator cap: {message}",
+            );
             assert!(
                 message.contains("maximum is 1"),
                 "the fence that fired must be the caller's 1-byte cap, not the \
@@ -268,18 +305,8 @@ async fn tiny_caller_result_cap_refuses_a_long_non_canonical_diagnostic() {
     }
 }
 
-/// B6 — accounting: a canonical refusal under a tiny caller limit still
-/// REACHES the caller (operator fence), and the bytes it transmits are
-/// charged to the bounded global budget before the writer-side release.
-///
-/// Asserted invariant, in order: the serialized envelope decodes to the
-/// canonical `unknown_table` code (it was not rewritten into
-/// `result_too_large`); the stashed writer guard's reservation covers the
-/// transmitted wire bytes (`bytes_reserved() >= wire.len()` — impossible
-/// from the 1-byte upfront reservation alone, so the envelope really was
-/// grown/charged); the global budget accounts exactly that reservation
-/// while the writer still holds it (`used() == bytes_reserved()`); and after
-/// the writer-side guard drops the budget is fully released (`used() == 0`).
+/// B6 — a canonical refusal is charged from a fixed allowance reserved before
+/// execution; it is never grown after the writer guard has been acquired.
 #[tokio::test]
 async fn bounded_budget_charges_the_canonical_envelope_it_transmits() {
     let cap = 1024;
@@ -316,12 +343,10 @@ async fn bounded_budget_charges_the_canonical_envelope_it_transmits() {
         );
 
         let guard = take_stashed_guard().expect("the bounded budget acquires a guard");
+        assert!(guard.bytes_reserved() >= wire.len());
         assert!(
-            guard.bytes_reserved() >= wire.len(),
-            "the reservation must COVER the transmitted {} bytes, not stay at the \
-             1-byte upfront estimate: {} reserved",
-            wire.len(),
-            guard.bytes_reserved(),
+            guard.bytes_reserved() <= 513,
+            "fixed allowance reservation bound"
         );
         assert_eq!(
             budget.used(),

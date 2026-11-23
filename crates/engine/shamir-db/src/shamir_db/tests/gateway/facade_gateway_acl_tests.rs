@@ -139,10 +139,16 @@ async fn execute_as_user_denied_on_restricted_table() {
         .await
         .expect_err("User(99) must be denied read on restricted table");
 
-    let msg = format!("{err:?}");
+    assert_eq!(err.code(), Some("unknown_table"));
+    assert_eq!(err.to_string(), "unknown_table: table is unavailable");
+    let diagnostic = format!("{err:?}");
     assert!(
-        msg.contains("denied") || msg.contains("Denied"),
-        "error should mention denial, got: {msg}"
+        !diagnostic.contains("access denied") && !diagnostic.contains("Denied"),
+        "error should not expose ACL diagnostics, got: {diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains("items"),
+        "error should not leak the restricted table name, got: {diagnostic}"
     );
 }
 

@@ -258,28 +258,18 @@ impl<'a> QueryRunner<'a> {
             };
         }
 
-        // Subscribe — validate sources exist, return a grant marker.
-        // Real activation happens in the server handler post-processing.
+        // Subscribe — validate every source before applying the single-repo
+        // feature gate, then return a grant marker. Authorization preflight
+        // has already classified source availability and READ access; this
+        // resolver check closes the execution-time race before the grant is
+        // constructed. Real activation happens in the server handler.
         if let BatchOp::Subscribe(op) = &entry.op {
-            let unique_repos: TFxSet<&str> =
-                op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
-            if unique_repos.len() > 1 {
-                return Err(BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: "multi-repo subscriptions not yet supported".to_string(),
-                    code: Some("multi_repo_subscriptions_not_supported".to_string()),
-                });
-            }
-
             for src in &op.subscribe {
                 if let Err(error) = self.resolver.resolve(&src.table).await {
                     // One unavailable source refuses the whole op BEFORE the
-                    // grant map / subscription id below is built. An absent
-                    // source answers the layer's ONE table refusal — the
-                    // same refusal a closed source answers from
-                    // `Authorized::authorize` — so the two cannot be told
-                    // apart. `resolve_repo` is the catalogue probe that
-                    // keeps a missing PARENT out of the table refusal.
+                    // grant map / subscription id below. Preserve missing
+                    // parent errors; a missing table within an existing repo
+                    // uses the canonical table refusal.
                     if matches!(&error, DbError::NotFound(_))
                         && self.resolver.resolve_repo(&src.table.repo).await.is_ok()
                     {
@@ -291,6 +281,16 @@ impl<'a> QueryRunner<'a> {
                         code: Some("table_not_found".to_string()),
                     });
                 }
+            }
+
+            let unique_repos: TFxSet<&str> =
+                op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
+            if unique_repos.len() > 1 {
+                return Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: "multi-repo subscriptions not yet supported".to_string(),
+                    code: Some("multi_repo_subscriptions_not_supported".to_string()),
+                });
             }
 
             for src in &op.subscribe {

@@ -41,6 +41,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::query::batch::exec::batch_validate::tables_created_in_batch;
 use crate::query::batch::ExecScope;
 use async_trait::async_trait;
 use shamir_query_types::batch::{
@@ -64,6 +65,18 @@ pub trait AccessGate: Send + Sync {
         path: &ResourcePath,
         action: Action,
     ) -> Result<(), AccessError>;
+
+    /// Catalogue-only existence probe for a table READ. `None` means the
+    /// repository is absent (preserve the legacy parent error); custom gates
+    /// may keep the default and rely on the executor's normal validation.
+    async fn table_read_exists(
+        &self,
+        _db_name: &str,
+        _repo_name: &str,
+        _table_name: &str,
+    ) -> Result<Option<bool>, AccessError> {
+        Ok(None)
+    }
 }
 
 /// A [`BatchRequest`] that has already cleared authorization.
@@ -121,7 +134,7 @@ impl<'a> Authorized<'a> {
     ///   before any table is resolved and therefore discloses nothing about
     ///   one;
     /// - a denied `(Action::Read, ResourcePath::Table { .. })` answers
-    ///   [`table_unavailable`] instead — the SAME `unknown_table` code and
+    ///   `table_unavailable` instead — the SAME `unknown_table` code and
     ///   the SAME fixed `"table is unavailable"` text every read path
     ///   answers for an absent table. This is the no-existence-oracle rule:
     ///   the table ACL is open by default for a name with no catalogue
@@ -142,6 +155,31 @@ impl<'a> Authorized<'a> {
             .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
 
         let metadata = RequestMetadata::collect(&request.queries, db_name);
+        let (created_tables, created_repos) = tables_created_in_batch(&request.queries);
+        // Resolve ordinary table READs against the catalogue before ACL,
+        // planning, pagination and execution. Same-request DDL is exempt: its
+        // dependency ordering materializes the table before the read.
+        for (action, path) in &metadata.required_access {
+            let ResourcePath::Table { db, store, table } = path else {
+                continue;
+            };
+            if *action != Action::Read
+                || db != db_name
+                || created_tables.contains(&format!("{store}/{table}"))
+                || created_repos.contains(store)
+            {
+                continue;
+            }
+            if gate
+                .table_read_exists(db, store, table)
+                .await
+                .ok()
+                .flatten()
+                == Some(false)
+            {
+                return Err(table_unavailable());
+            }
+        }
         for (action, path) in &metadata.required_access {
             gate.check(&actor, path, *action).await.map_err(|e| {
                 if *action == Action::Read && matches!(path, ResourcePath::Table { .. }) {
@@ -169,9 +207,17 @@ impl<'a> Authorized<'a> {
                     store: source.table.repo.clone(),
                     table: source.table.table.clone(),
                 };
-                gate.check(&actor, &path, Action::Read)
+                let exists = gate
+                    .table_read_exists(db_name, &source.table.repo, &source.table.table)
                     .await
-                    .map_err(|_| table_unavailable())?;
+                    .ok()
+                    .flatten();
+                if exists == Some(false) {
+                    return Err(table_unavailable());
+                }
+                if gate.check(&actor, &path, Action::Read).await.is_err() {
+                    return Err(table_unavailable());
+                }
             }
         }
 

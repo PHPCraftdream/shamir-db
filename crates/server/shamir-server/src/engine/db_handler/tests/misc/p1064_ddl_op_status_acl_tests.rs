@@ -76,17 +76,20 @@ fn bob_session() -> Session {
 /// orthogonal to what THIS test authorizes: the poll, not the DDL op
 /// itself). Returns the handler and the minted `op_id` string.
 async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
-    let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal64([0xAB; 16]));
-    shamir
-        .create_db_as("app", owner.clone())
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
         .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
         .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
-    shamir
-        .add_repo_as("app", cfg, owner.clone())
+    tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner.clone()))
         .await
+        .expect("add repo must complete within the 120s bound")
         .expect("add repo");
 
     let table = shamir
@@ -95,9 +98,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
         .get_table("main", "items")
         .await
         .expect("table exists");
-    table
-        .create_index("idx_city", &["city"])
+    tokio::time::timeout(CALL_TIMEOUT, table.create_index("idx_city", &["city"]))
         .await
+        .expect("create index must complete within the 120s bound")
         .expect("create index");
 
     let mut b = Batch::new();
@@ -111,9 +114,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
             .expect("build drop index"),
     );
     let batch = b.build();
-    let resp = shamir
-        .execute_as(owner, "app", &batch)
+    let resp = tokio::time::timeout(CALL_TIMEOUT, shamir.execute_as(owner, "app", &batch))
         .await
+        .expect("drop index must complete within the 120s bound")
         .expect("drop index");
     let op_id = resp.results["d"]
         .op_id
@@ -127,9 +130,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
 async fn send(handler: &ShamirDbHandler, session: &Session, req: DbRequest) -> DbResponse {
     let bytes = rmp_serde::to_vec_named(&req).expect("encode request");
     let conn = ConnectionServices::without_push(0);
-    let resp_bytes = handler
-        .handle(session, &bytes, &conn)
+    let resp_bytes = tokio::time::timeout(CALL_TIMEOUT, handler.handle(session, &bytes, &conn))
         .await
+        .expect("handle must complete within the 120s bound")
         .expect("handle must not error at the protocol level");
     rmp_serde::from_slice(&resp_bytes).expect("decode response")
 }

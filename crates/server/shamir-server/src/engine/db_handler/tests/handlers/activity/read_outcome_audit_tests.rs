@@ -10,6 +10,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tracing::field::{Field, Visit};
+use tracing::instrument::WithSubscriber;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::audit_chain::{
@@ -18,9 +23,8 @@ use shamir_connect::server::audit_chain::{
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
-use shamir_test_diag::try_install_global_tracing_ring;
 
-use shamir_db::access::{principal64, Actor};
+use shamir_db::access::{principal64, Actor, ResourceMeta, ResourcePath};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -72,24 +76,41 @@ fn bob_session() -> Session {
 /// Handler over an in-memory `ShamirDb` with `app/{main,side}.items`,
 /// owned by alice (principal `[0xAB; 16]` — same identity the alice
 /// session carries, so alice is the owner). `main` is seeded with one
-/// row `{ id: "k000", v: 0 }`; `side` stays empty for the
-/// non-replicated-repo assertions. The enforced 0o700 default keeps
-/// bob out of everything until a test chmod's levels open.
+/// row `{ id: "k000", v: 0 }`; `side` stays empty. The database and
+/// stores are open while the target table remains at its enforced 0o700 default.
 async fn build_handler(query_limits: QueryLimitsCap) -> ShamirDbHandler {
-    let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal64([0xAB; 16]));
-    shamir
-        .create_db_as("app", owner.clone())
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
         .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
         .expect("create_db");
+    let open = ResourceMeta::open();
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        shamir.set_resource_meta(&ResourcePath::database("app"), &open),
+    )
+    .await
+    .expect("open database must complete within the 120s bound")
+    .expect("open database");
     for repo in ["main", "side"] {
         let cfg =
             RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
-        shamir
-            .add_repo_as("app", cfg, owner.clone())
+        tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner.clone()))
             .await
+            .expect("add repo must complete within the 120s bound")
             .expect("add repo");
     }
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        shamir.set_resource_meta(&ResourcePath::store("app", "main"), &open),
+    )
+    .await
+    .expect("open store must complete within the 120s bound")
+    .expect("open store");
 
     let mut b = Batch::new();
     b.id(1);
@@ -137,11 +158,13 @@ async fn insert_row_and_get_storage_id(handler: &ShamirDbHandler, payload_id: &s
         "row",
         insert("items").row(doc! { "id" => payload_id, "v" => 1_i64 }),
     );
-    let response = handler
-        .db()
-        .execute_as(Actor::System, "app", &b.build())
-        .await
-        .expect("engine insert must succeed");
+    let response = tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler.db().execute_as(Actor::System, "app", &b.build()),
+    )
+    .await
+    .expect("engine insert must complete within the 120s bound")
+    .expect("engine insert must succeed");
     let result = response.results.get("row").expect("insert alias returned");
     match result.records.first() {
         Some(QueryRecord::Inserted(record)) => {
@@ -180,16 +203,67 @@ fn audit_writer() -> (Arc<CapturedAudit>, Arc<AuditChainWriter>) {
     (captured, writer)
 }
 
-/// Ring records whose rendered message is a `slow query` WARN carrying
-/// `needle` (used to isolate the `db="app"` records from other paths).
-fn slow_query_records(needle: &str) -> Vec<shamir_test_diag::ring::RingRecord> {
-    shamir_test_diag::ring::shared_ring()
-        .snapshot()
-        .into_iter()
-        .filter(|record| {
-            record.message.starts_with("slow query") && record.message.contains(needle)
-        })
-        .collect()
+/// Test-owned capture for slow-query WARN events, isolated from other tests.
+type SlowQueryRecords = Arc<Mutex<Vec<(String, String)>>>;
+
+#[derive(Clone)]
+struct SlowQueryCapture(SlowQueryRecords);
+
+#[derive(Default)]
+struct EventFields(Vec<String>);
+
+impl Visit for EventFields {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0.push(format!("{}={value:?}", field.name()));
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.push(format!("{}={value}", field.name()));
+    }
+}
+
+impl<S: Subscriber> Layer<S> for SlowQueryCapture {
+    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+        let mut fields = EventFields::default();
+        event.record(&mut fields);
+        let message = fields.0.join(" ");
+        if message.contains("slow query") {
+            self.0
+                .lock()
+                .expect("slow-query capture mutex")
+                .push((event.metadata().level().to_string(), message));
+        }
+    }
+}
+
+fn slow_query_dispatch() -> (tracing::Dispatch, SlowQueryRecords) {
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(SlowQueryCapture(records.clone()));
+    (tracing::Dispatch::new(subscriber), records)
+}
+
+/// Carry the test dispatch into the task that polls the request future.
+async fn send_captured(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    req: DbRequest,
+    dispatch: &tracing::Dispatch,
+) -> DbResponse {
+    send(handler, session, req)
+        .with_subscriber(dispatch.clone())
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -269,17 +343,46 @@ async fn get_record_refusal_emits_no_audit_record() {
     let (captured, writer) = audit_writer();
     let handler = handler.with_audit_writer(writer);
 
-    let resp = send(&handler, &bob_session(), get_record_req(storage_id)).await;
-    match resp {
-        DbResponse::Error { code, message } => {
-            assert_eq!(code, "unknown_table", "a non-owner read must be refused");
-            assert!(
-                message.contains("table is unavailable"),
-                "the refusal must carry the fixed text, got {message:?}"
-            );
+    let session = bob_session();
+    let mut responses = Vec::new();
+    for table in ["absent", "items"] {
+        if table == "items" {
+            let closed = ResourceMeta {
+                owner: Actor::User(principal64([0xAB; 16])),
+                group: None,
+                mode: 0o700,
+            };
+            tokio::time::timeout(
+                CALL_TIMEOUT,
+                handler
+                    .db()
+                    .set_resource_meta(&ResourcePath::table("app", "main", "items"), &closed),
+            )
+            .await
+            .expect("close table must complete within the 120s bound")
+            .expect("close table");
         }
-        other => panic!("expected unknown_table for a non-owner read, got {other:?}"),
+        let request = if table == "absent" {
+            get_record("app", "main", "absent", storage_id)
+        } else {
+            get_record_req(storage_id)
+        };
+        let resp = send(&handler, &session, request).await;
+        match resp {
+            DbResponse::Error { code, message } => responses.push((code, message)),
+            other => panic!("expected unknown_table for unavailable table, got {other:?}"),
+        }
+        assert!(
+            captured.0.lock().expect("audit mutex").is_empty(),
+            "each refused point read must leave the audit chain untouched"
+        );
     }
+    assert_eq!(responses[0].0, "unknown_table");
+    assert_eq!(responses[0].1, "table is unavailable");
+    assert_eq!(
+        responses[0], responses[1],
+        "refusals must be indistinguishable"
+    );
 
     assert!(
         handler.cancel_refusal_audit().drain().await,
@@ -287,7 +390,7 @@ async fn get_record_refusal_emits_no_audit_record() {
     );
     assert!(
         captured.0.lock().expect("audit mutex").is_empty(),
-        "a refused point read must not emit an audit record"
+        "refused point reads must not emit an audit record"
     );
 }
 
@@ -299,21 +402,22 @@ async fn get_record_refusal_emits_no_audit_record() {
 /// still logs, and a WARN missing the mirror field names.
 #[tokio::test]
 async fn get_record_logs_slow_query_past_the_threshold_and_not_when_disabled() {
-    try_install_global_tracing_ring();
+    let (dispatch, captured) = slow_query_dispatch();
     let session = alice_session();
 
     let disabled = build_handler(QueryLimitsCap::UNLIMITED)
         .await
         .with_slow_query(SlowQueryConfig::from_ms(0));
     let id = insert_row_and_get_storage_id(&disabled, "k101").await;
-    let before = slow_query_records("db=\"app\"").len();
     assert!(matches!(
-        send(&disabled, &session, get_record_req(id)).await,
+        send_captured(&disabled, &session, get_record_req(id), &dispatch).await,
         DbResponse::Record { .. }
     ));
-    assert_eq!(
-        slow_query_records("db=\"app\"").len(),
-        before,
+    assert!(
+        captured
+            .lock()
+            .expect("slow-query capture mutex")
+            .is_empty(),
         "threshold 0 must disable the WARN"
     );
 
@@ -327,23 +431,16 @@ async fn get_record_logs_slow_query_past_the_threshold_and_not_when_disabled() {
         .with_slow_query_elapsed(1_001);
     let id = insert_row_and_get_storage_id(&enabled, "k102").await;
     assert!(matches!(
-        send(&enabled, &session, get_record_req(id)).await,
+        send_captured(&enabled, &session, get_record_req(id), &dispatch).await,
         DbResponse::Record { .. }
     ));
 
-    let records = slow_query_records("db=\"app\"");
-    assert_eq!(
-        records.len(),
-        before + 1,
-        "the crossed threshold must emit exactly one WARN"
-    );
-    let record = records.last().expect("slow query record");
-    assert_eq!(record.level, "WARN");
-    assert!(record.message.contains("slow query"), "{}", record.message);
-    assert!(
-        record.message.contains("threshold_us=1000"),
-        "{}",
-        record.message
-    );
-    assert!(record.message.contains("queries=1"), "{}", record.message);
+    let records = captured.lock().expect("slow-query capture mutex");
+    assert_eq!(records.len(), 1, "exactly one slow-query WARN");
+    let (level, message) = &records[0];
+    assert_eq!(level, "WARN");
+    assert!(message.contains("slow query"), "{message}");
+    assert!(message.contains("threshold_us=1000"), "{message}");
+    assert!(message.contains("db=\"app\""), "{message}");
+    assert!(message.contains("queries=1"), "{message}");
 }

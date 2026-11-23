@@ -443,14 +443,14 @@ impl TxError {
             ),
             // Batch callers return cancellation on the error path instead.
             Self::Cancelled => ("cancelled".to_string(), Some("cancelled")),
-            // No stable word of its own: the reason may be the storage
-            // error's own code or debug text, so `abort_code` stays absent
-            // rather than echoing text as if it were a classification.
+            // Preserve a storage error's stable classification in both fields:
+            // `reason` remains byte-for-byte the existing diagnostic/code, while
+            // `abort_code` is populated only when DbError exposes a code.
             Self::Storage(e) => (
                 e.code()
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("storage: {}", e)),
-                None,
+                e.code(),
             ),
             Self::Expired { elapsed, max } => (
                 format!("tx expired: elapsed {:?} > max {:?}", elapsed, max),

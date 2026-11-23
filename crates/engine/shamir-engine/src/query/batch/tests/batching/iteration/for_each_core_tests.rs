@@ -18,6 +18,7 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+#[cfg(feature = "fjall")]
 use crate::tx::tests::drain::truncation::truncation_tests::reopen_disk_repo;
 
 // ============================================================================
@@ -666,21 +667,6 @@ async fn for_each_all_iterations_succeed_commits_and_all_rows_visible() {
 // ============================================================================
 // Epic04/D (#655) — `over` resolution, all three sources + "resolved once"
 // ============================================================================
-//
-// Test 1 above (`for_each_zero_iterations`) and tests 2/3/4 already cover the
-// literal-array `over` source end to end. The tests below add the two
-// remaining sources — `$query`-column-ref (`@alias[].field`) and `$fn` call
-// — plus a dedicated test proving `over` is resolved EXACTLY ONCE, before
-// the loop starts, never re-resolved per iteration.
-
-// ============================================================================
-// A transactional ForEach body that ABORTS must fail its iteration.
-//
-// `execute_planned_batch_impl` used to discard the body's `TransactionInfo`,
-// so an aborted transactional body looked like a successful empty iteration.
-// Nothing was committed, so reporting the empty map as the iteration's value
-// would be a lie; the iteration now fails with the abort's stable code.
-// ============================================================================
 
 #[tokio::test]
 async fn transactional_body_abort_fails_the_iteration_with_its_stable_code() {
@@ -932,31 +918,23 @@ async fn transactional_body_commit_conflict_fails_the_iteration_with_tx_conflict
     );
 }
 
-// ============================================================================
-// A transactional ForEach body whose commit outcome is INDETERMINATE must stop
-// the loop with `wal_requires_reopen`: the iteration MAY have committed, so
-// continuing would present a result list whose prefix is unknown — and append
-// the empty result map as if the iteration had computed nothing.
-//
-// Seam (no sleeps, no new seam): `WalSink::arm_fail_next_seal_sync_for_test`
-// (`crates/storage/shamir-wal/src/segment/wal_sink.rs:44`) fails the FIRST seal
-// fsync — AFTER the window's frames were written — which `wal_completion`
-// (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry/durability_completion.rs:39-47`)
-// classifies as `WalOutcomeUnknown` → `TransactionInfo::indeterminate`. Both
-// the fault and the tiny `SHAMIR_WAL_SEGMENT_MAX_BYTES` cap that makes the loop
-// rotate (captured at construction, `tx/commit/core/durability_access.rs:148-157`)
-// are process-global → `#[serial]`.
-// ============================================================================
-
+#[cfg(feature = "fjall")]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_requires_reopen() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
-    std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1024");
-    shamir_wal::WalSink::arm_fail_next_seal_sync_for_test();
-    // Disk repo: the File sink is the only one with the seal-fsync path.
-    // `reopen_disk_repo` is the crate's existing helper (it retries the
-    // transient Windows open failure instead of this test sleeping).
+    struct SegmentCapEnvGuard(Option<std::ffi::OsString>);
+    impl Drop for SegmentCapEnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", value);
+            } else {
+                std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
+            }
+        }
+    }
+    let _segment_cap_env = SegmentCapEnvGuard(std::env::var_os("SHAMIR_WAL_SEGMENT_MAX_BYTES"));
+    std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1");
     let repo = reopen_disk_repo(
         "fe_indeterminate",
         tempdir.path().join("repo"),
@@ -965,8 +943,6 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
     .await;
     let resolver = TxTestResolver { repo: repo.clone() };
 
-    // Each iteration opens its OWN transaction (non-transactional outer batch),
-    // so each commits independently; ~520-byte rows cross the tiny segment cap.
     let big = format!("fe-wal-{}", "p".repeat(512));
     let over: Vec<FilterValue> = (0..64)
         .map(|i| FilterValue::String(format!("{big}-{i:04}")))
@@ -980,9 +956,8 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
     };
     let req = wrap_for_each(fe);
 
+    shamir_wal::WalSink::arm_fail_next_seal_sync_for_test();
     let result = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
-    // Restore the process-global env var BEFORE asserting (no leak on failure).
-    std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
 
     let err = result.expect_err("an indeterminate outcome must fail the loop");
     assert_eq!(
@@ -990,8 +965,6 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
         Some("wal_requires_reopen"),
         "the indeterminate outcome must map to the reopen disposition, got: {err:?}"
     );
-    // The message proves the INDETERMINATE arm fired (its text is the info's
-    // `error`), not a later fail-stop abort whose reason is `wal_requires_reopen`.
     assert!(
         err.to_string().contains("wal_outcome_unknown"),
         "the iteration failure must carry the indeterminate outcome's text, got: {err}"

@@ -118,7 +118,9 @@ export class Db {
    * the handle on registration.
    *
    * Returns the raw `BatchResponse` (so non-subscribe ops in the same batch
-   * are still observable) and `subs` keyed by alias.
+   * are still observable) and `subs` keyed by alias. If the server refuses
+   * any subscription source, the whole batch promise rejects; no readable
+   * stream is returned, even for sources that would individually be readable.
    */
   async runLive(batch: Batch): Promise<RunLiveResult> {
     const response = await batch.run();

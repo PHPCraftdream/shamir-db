@@ -441,25 +441,62 @@ async fn typed_read_clock_failure_is_counted_as_a_dropped_job() {
         "a clock-failed observability job must be counted as a dropped event"
     );
 
-    // The clock gate fails before admission, so no share slot was consumed:
-    // with the clock healthy again the same principal is admissible.
+    // Clock failure precedes reservation. After clearing the seam, fill
+    // precisely the per-principal allowance while the appender is gated.
     queue.fail_clock.store(false, Ordering::SeqCst);
-    let admitted = enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
-    let was_admitted = admitted.is_some();
+    let mut accepted = Vec::new();
+    let mut admitted = 0usize;
+    for _ in 0..CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE {
+        let job = enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+        if let Some(job) = job {
+            admitted += 1;
+            accepted.push(job);
+        }
+    }
+    let over_principal_share =
+        enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+    let principal_refused = over_principal_share.is_none();
+    if let Some(job) = over_principal_share {
+        accepted.push(job);
+    }
+
+    // Use the full remaining per-principal allowance, then enough distinct
+    // principals to reach the exact global observability boundary as well.
+    let mut global_accepted = Vec::new();
+    let global_slots_needed = CANCEL_AUDIT_OBSERVABILITY_CAPACITY - admitted;
+    for index in 0..global_slots_needed {
+        let other = session(&format!("clock-global-{index}"), (index % 251) as u8);
+        let job = enqueue_typed_read_audit(&queue, &writer, &other, "status", "app", None);
+        if let Some(job) = job {
+            global_accepted.push(job);
+        }
+    }
+    let global_overflow = session("clock-global-overflow", 251);
+    let global_refused =
+        enqueue_typed_read_audit(&queue, &writer, &global_overflow, "status", "app", None)
+            .is_none();
+
+    let global_accepted_count = global_accepted.len();
     appender.release_all();
-    if let Some(job) = admitted {
+    for job in accepted.into_iter().chain(global_accepted) {
         tokio::time::timeout(TIMEOUT, job)
             .await
-            .expect("admitted audit job timed out")
+            .expect("admitted quota audit job timed out")
             .unwrap();
     }
+    assert_eq!(admitted, CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE);
     assert!(
-        was_admitted,
-        "a clock failure must not leak an admission slot"
+        principal_refused,
+        "per-principal observability quota must stop at 24"
+    );
+    assert_eq!(global_accepted_count, global_slots_needed);
+    assert!(
+        global_refused,
+        "global observability quota must stop at 192"
     );
     assert_eq!(
         queue.dropped_count(),
-        1,
-        "only the clock-failed job was dropped"
+        3,
+        "clock failure plus both quota refusals are the only drops"
     );
 }

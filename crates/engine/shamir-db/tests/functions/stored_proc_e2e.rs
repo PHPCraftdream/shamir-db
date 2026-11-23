@@ -476,8 +476,8 @@ async fn without_setuid_call_is_denied() {
         Err(e) => {
             let msg = format!("{e}");
             assert!(
-                msg.contains("denied") || msg.contains("Denied"),
-                "denial must come from the per-table ACL gate, got: {msg}"
+                msg.contains("unknown_table") && msg.contains("table is unavailable"),
+                "table read refusal must use the canonical response, got: {msg}"
             );
         }
         Ok(r) => {

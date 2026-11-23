@@ -256,10 +256,8 @@ async fn crit5_acl_authorized_table_still_delivers() {
     assert_eq!(env.push, PushKind::Event);
 }
 
-/// Mixed: one subscription over BOTH `messages` (allowed) and `secrets`
-/// (denied). There is NO partial delivery any more — one unavailable source
-/// refuses the whole op with the same fixed `unknown_table` refusal, so not
-/// even the readable `messages` source is granted.
+/// One mixed-source subscription with a closed/unreadable source refuses the whole batch; no
+/// partial delivery is permitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crit5_mixed_subscription_with_a_denied_source_is_refused_whole() {
     let shamir = make_db_one_repo_split_acl("app", "main").await;

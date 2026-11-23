@@ -433,6 +433,54 @@ fn batch_read_req(table: &str) -> DbRequest {
     }
 }
 
+/// A quarantined repository must not bypass READ availability preflight:
+/// for the same database-READ-authorized session, an absent table and an
+/// existing table with Table Read closed both produce the fixed table
+/// refusal before the quarantine gate can disclose the repository state.
+#[tokio::test]
+async fn quarantined_get_record_refusal_is_identical_for_closed_and_absent_tables() {
+    let handler = build_uniformity_handler().await;
+    // Preserve Database Read (and Store access); only the table's default
+    // 0o700 ACL remains closed to bob.
+    open_db_and_store_only(&handler, 0o777).await;
+    quarantine(&handler, "sub", "prof", "main").await;
+    let bob = bob_session();
+    let key = RecordId([1u8; 16]);
+
+    let closed = error_pair_of(
+        send_with_call_timeout(&handler, &bob, get_record("app", "main", "items", key)).await,
+        "GetRecord on the closed table in a quarantined repo",
+    );
+    let absent = error_pair_of(
+        send_with_call_timeout(&handler, &bob, get_record("app", "main", ABSENT_TABLE, key)).await,
+        "GetRecord on the absent table in a quarantined repo",
+    );
+
+    assert_eq!(
+        closed, absent,
+        "quarantine must not change READ availability parity"
+    );
+    assert_eq!(
+        closed,
+        ("unknown_table".to_string(), FIXED_REFUSAL.to_string())
+    );
+
+    // Positive control: the table exists and the repository quarantine is
+    // active; a reader with Table Read reaches the quarantine refusal.
+    open_db_and_store_only(&handler, 0o777).await;
+    chmod_items_table_to(&handler, 0o777).await;
+    let quarantined = error_pair_of(
+        send_with_call_timeout(
+            &handler,
+            &alice_session(),
+            get_record("app", "main", "items", key),
+        )
+        .await,
+        "GetRecord on an open table in a quarantined repo",
+    );
+    assert_eq!(quarantined.0, "resync_required");
+}
+
 /// `GetRecord`: a closed table and an absent name must answer the SAME
 /// code. WITHOUT the rule the closed table answers `access_denied` while
 /// the absent name answers `unknown_table`, so both the equality and the
@@ -494,13 +542,11 @@ async fn batch_read_refusal_is_identical_for_closed_and_absent_tables() {
     );
 }
 
-/// Cursor create: a closed table and an absent name must answer the SAME
-/// code. WITHOUT the rule the closed table is denied by
-/// `authorize_cursor_read` (`access_denied`) while the absent name reaches
-/// `get_table` and gets the legacy-mapped generic `query`, so the equality
-/// fails.
+/// Cursor create with invalid pagination: a closed table and an absent name
+/// must answer the same fixed refusal before pagination validation can reveal
+/// that the request reached target-dependent checks.
 #[tokio::test]
-async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
+async fn cursor_create_invalid_page_size_refusal_precedes_validation_for_closed_and_absent() {
     let handler = build_uniformity_handler().await;
     open_db_and_store_only(&handler, 0o777).await;
     let bob = bob_session();
@@ -509,7 +555,7 @@ async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
         send_with_call_timeout(
             &handler,
             &bob,
-            create_cursor_req(ReadQuery::with_repo("main", "items"), 1),
+            create_cursor_req(ReadQuery::with_repo("main", "items"), 0),
         )
         .await,
         "cursor create on the closed table",
@@ -518,7 +564,7 @@ async fn cursor_create_refusal_is_identical_for_closed_and_absent_tables() {
         send_with_call_timeout(
             &handler,
             &bob,
-            create_cursor_req(ReadQuery::with_repo("main", ABSENT_TABLE), 1),
+            create_cursor_req(ReadQuery::with_repo("main", ABSENT_TABLE), 0),
         )
         .await,
         "cursor create on the absent table",

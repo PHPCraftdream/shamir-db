@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_db::access::Actor;
@@ -144,25 +144,38 @@ pub(crate) async fn activate_subscriptions(
         }
     }
     for (sub_id, ready_rx) in ready_waiters {
-        // Not ready (bridge exited: denied/unavailable source, or the wait timed out): the ack
-        // goes out either way, exactly as before the barrier existed.
-        let waited = Instant::now();
-        match tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await {
-            Ok(Ok(())) => tracing::info!(
-                sub_id,
-                waited_us = waited.elapsed().as_micros() as u64,
-                "activation barrier released; acknowledging the subscription",
-            ),
-            Ok(Err(_)) => tracing::warn!(
-                sub_id,
-                waited_us = waited.elapsed().as_micros() as u64,
-                "bridge exited before attaching; acknowledging without a live stream",
-            ),
-            Err(_) => tracing::warn!(
-                sub_id,
-                waited_ms = ACTIVATION_WAIT.as_millis() as u64,
-                "activation barrier timed out; acknowledging anyway",
-            ),
+        // `sub_id` remains monotonic, but a failed activation must not leave
+        // a registry slot or a client-visible grant.
+        let activation_failed = match tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await {
+            Ok(Ok(())) => false,
+            Ok(Err(_)) => {
+                tracing::warn!(sub_id, "bridge exited before attaching; activation failed");
+                true
+            }
+            Err(_) => {
+                tracing::warn!(sub_id, "activation barrier timed out; activation failed");
+                true
+            }
+        };
+        if activation_failed {
+            registry.remove(sub_id);
+            for (alias, entry) in &batch.queries {
+                if !matches!(&entry.op, BatchOp::Subscribe(_)) {
+                    continue;
+                }
+                if let Some(qr) = response.results.get_mut(alias) {
+                    if let Some(QueryValue::Map(map)) = &mut qr.value {
+                        if matches!(map.get("sub"), Some(QueryValue::Int(id)) if *id as u64 == sub_id)
+                        {
+                            map.shift_remove("sub");
+                            map.insert(
+                                "error".to_string(),
+                                QueryValue::Str("subscription activation failed".to_string()),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

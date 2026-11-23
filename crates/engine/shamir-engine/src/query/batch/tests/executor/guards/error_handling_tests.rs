@@ -255,11 +255,11 @@ async fn absent_repository_is_not_reported_as_unknown_table() {
         code, None,
         "a missing repository must keep the existing shape, not unknown_table"
     );
-    assert!(
-        message.contains("other_repo"),
-        "the repository diagnostic is unchanged: {message}"
+    assert_eq!(alias, "items_alias");
+    assert_eq!(
+        message,
+        "Table 'items' in repo 'other_repo' not found: Item not found: Repository 'other_repo' not found"
     );
-    assert!(!alias.contains("items_alias"));
 }
 
 // ============================================================================

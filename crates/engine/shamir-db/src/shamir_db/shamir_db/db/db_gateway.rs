@@ -221,6 +221,7 @@ pub(crate) fn classify_batch_error(e: BatchError) -> DbGatewayError {
             ..
         } if code == "not_found" => DbGatewayError::NotFound {
             message: message.clone(),
+            code: e.code().map(str::to_owned),
             source: Box::new(e),
         },
         BatchError::QueryError {
@@ -229,10 +230,12 @@ pub(crate) fn classify_batch_error(e: BatchError) -> DbGatewayError {
             ..
         } if code == "access_denied" => DbGatewayError::Permission {
             message: message.clone(),
+            code: e.code().map(str::to_owned),
             source: Box::new(e),
         },
         _ => DbGatewayError::ExecutionSource {
             message: e.to_string(),
+            code: e.code().map(str::to_owned),
             source: Box::new(e),
         },
     }
@@ -330,6 +333,7 @@ impl DbGateway for FacadeDbGateway {
         let req: BatchRequest =
             rmp_serde::from_slice(request).map_err(|e| DbGatewayError::ExecutionSource {
                 message: format!("execute: request decode error: {e}"),
+                code: None,
                 source: Box::new(e),
             })?;
         if BatchTreeVisitor::new(&req.queries)
@@ -347,6 +351,7 @@ impl DbGateway for FacadeDbGateway {
             .map_err(classify_batch_error)?;
         rmp_serde::to_vec_named(&response).map_err(|e| DbGatewayError::ExecutionSource {
             message: format!("execute: response encode error: {e}"),
+            code: None,
             source: Box::new(e),
         })
     }

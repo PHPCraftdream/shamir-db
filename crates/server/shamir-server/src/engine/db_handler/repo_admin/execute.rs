@@ -266,6 +266,13 @@ impl ShamirDbHandler {
             .max_result_size
             .min(self.query_limits.max_result_size_bytes);
         let mut budget_guard = None;
+        // Fixed error headroom is reserved together with the ordinary caller
+        // reservation before DB execution. It is a hard serialized-byte bound,
+        // not permission to grow a live guard after execution.
+        const FIXED_ERROR_ALLOWANCE: usize = 512;
+        let reservation_bytes = reserve_bytes
+            .saturating_add(FIXED_ERROR_ALLOWANCE)
+            .min(self.query_limits.max_result_size_bytes);
         let control_op =
             single_cancel.is_some() || single_cancel_tx.is_some() || single_cancel_cursor.is_some();
         // Keep the request slot through response encoding on tracked paths.
@@ -309,7 +316,7 @@ impl ShamirDbHandler {
             if needs_budget {
                 budget_guard = self
                     .byte_budget
-                    .acquire_cancellable(reserve_bytes, cancel)
+                    .acquire_cancellable(reservation_bytes, cancel)
                     .await;
             }
             if needs_budget && budget_guard.is_none() {
@@ -415,8 +422,8 @@ impl ShamirDbHandler {
             }
         };
 
-        // Like rejection envelopes, the fixed cancellation error is encoded
-        // by the handler even when the target's result cap is too small.
+        // Fixed cancellation error remains a fixed-limit exception, but its
+        // bytes are covered by the pre-execution allowance above.
         if matches!(
             &final_response,
             DbResponse::Error { code, .. }
@@ -426,63 +433,17 @@ impl ShamirDbHandler {
             return final_response;
         }
 
-        // RI-15 (CR-B2) — single convergence point for capped success and
-        // error replies (including all three cancel operations): serialize
-        // the final `DbResponse` envelope exactly ONCE, shrink the upfront
-        // reservation down to that actual size (any reply's tiny actual
-        // size still needs its pessimistic over-reservation narrowed back
-        // down), then stash both the guard and the already-serialized
-        // bytes so `RequestHandler::handle` reuses them instead of encoding
-        // the SAME response a second time.
-        //
-        // Three kinds of reply, three fences — the fence decides which cap
-        // may rewrite the reply into `result_too_large`:
-        //
-        // - a DATA reply is capped at `reserve_bytes` — the caller's own
-        //   `max_result_size` clamped to the operator's limit;
-        // - a BOUNDED CANONICAL refusal ([`is_bounded_canonical_refusal`]:
-        //   `DbResponse::AsOfVisibilityTimeout`, plus the CLOSED set of
-        //   `DbResponse::Error` codes whose message the server composes from
-        //   fixed text) BYPASSES the caller's cap and is fenced only by the
-        //   operator's `max_result_size_bytes`. Such a refusal is the reason
-        //   the caller got nothing, so a caller asking for
-        //   `max_result_size: 1` must not have `unknown_table`,
-        //   `server_busy` (or any other canonical refusal) rewritten into
-        //   `result_too_large` — that would destroy the cause. This is the
-        //   same rule as the `cancelled` carve-out above; the operator's cap
-        //   still bounds it;
-        // - every OTHER reply — INCLUDING a non-canonical error whose
-        //   message embeds caller-supplied text (`validation`, `query`,
-        //   `not_found`, `unknown_db`, `unknown_repo`, `result_too_large`,
-        //   `internal_error`, …) — is fenced by `reserve_bytes`, i.e. the
-        //   CALLER's cap applies to it exactly as it does to a data reply.
-        //   Before B6 EVERY `DbResponse::Error` took the operator fence, so a
-        //   1-byte caller limit transmitted a long request-derived diagnostic
-        //   that was never charged.
-        //
-        // A canonical refusal is then CHARGED its actual encoded size: the
-        // writer's `ByteBudgetGuard` holds the (possibly tiny) upfront
-        // reservation, `shrink_to` is shrink-only and cannot grow, so the
-        // difference is added with the sanctioned `grow_unchecked` — a no-op
-        // on an unbounded budget or a never-acquired guard. The operator cap
-        // checked above bounds that growth, so the charge never exceeds it.
-        //
-        // The guard is stashed in a task-local (`byte_budget::stash_guard`)
-        // rather than returned from this function: `execute`'s return type
-        // is `DbResponse` (asserted on directly by tests) and the caller,
-        // `RequestHandler::handle`, has a fixed `Result<Vec<u8>, String>`
-        // signature owned by `shamir-connect`. `connection::request_loop`
-        // retrieves the guard with `byte_budget::take_stashed_guard` right
-        // after the dispatch future resolves and rides it inside
-        // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
-        // writer task, after the socket write completes — never in this
-        // dispatch task.
+        // B6: the sole caller-cap exception is a typed unknown-table refusal
+        // with server-owned fixed text. Its possible bytes were reserved before
+        // execution as part of FIXED_ERROR_ALLOWANCE; never grow a live guard.
+        // All other replies, including resync/as-of errors with contextual
+        // fields, are caller-capped. The guard is stashed until writer completion.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            // A BOUNDED CANONICAL refusal keeps the operator's fence, never
-            // the caller's; every other reply is fenced like data.
-            let canonical_refusal = is_bounded_canonical_refusal(&final_response);
-            let size_cap = if canonical_refusal {
-                self.query_limits.max_result_size_bytes
+            let fixed_refusal = is_bounded_canonical_refusal(&final_response);
+            let size_cap = if fixed_refusal {
+                reserve_bytes
+                    .saturating_add(FIXED_ERROR_ALLOWANCE)
+                    .min(self.query_limits.max_result_size_bytes)
             } else {
                 reserve_bytes
             };
@@ -498,15 +459,7 @@ impl ShamirDbHandler {
                 };
             }
             if let Some(guard) = budget_guard.as_mut() {
-                if canonical_refusal && bytes.len() > guard.bytes_reserved() {
-                    // Charge the envelope about to be transmitted: it passed
-                    // the OPERATOR's fence, not the caller's, so the upfront
-                    // reservation (`reserve_bytes`) cannot cover it and
-                    // `shrink_to` would refuse to grow.
-                    guard.grow_unchecked(bytes.len() - guard.bytes_reserved());
-                } else {
-                    guard.shrink_to(bytes.len());
-                }
+                guard.shrink_to(bytes.len());
             }
             if let Some(guard) = budget_guard {
                 crate::byte_budget::stash_guard(guard);
@@ -545,51 +498,12 @@ impl ShamirDbHandler {
     }
 }
 
-/// Is `reply` a BOUNDED CANONICAL refusal — a refusal whose code is stable
-/// and whose message the SERVER composes itself, bounded, without embedding
-/// caller-supplied payload text?
-///
-/// RULE: the server owns the text; it may at most echo a LABEL the client
-/// already put on the wire in this same request (a query alias, a table
-/// name), never a value or an arbitrary diagnostic, and never an amount of
-/// text the caller can choose freely. Anything else — `validation`,
-/// `invalid_request`, `query`, `not_found`, `unknown_db`, `unknown_repo`,
-/// `result_too_large`, `internal_error`, … — is deliberately EXCLUDED and
-/// stays fenced by the CALLER's `max_result_size`, because its message is
-/// request-derived and its length is the caller's to choose.
-///
-/// The set is CLOSED and matched on the CODE alone (never on the message
-/// text, which the server is free to reword): `unknown_table` (the fixed
-/// "table is unavailable" text), `server_busy` (the fixed `SERVER_BUSY`
-/// text), `cancelled` (fixed), `resync_required` (the fixed quarantine
-/// text), `permission_denied`, `read_only_replica`, and the fixed-text
-/// `schema_migration_follower_read_only`. A code that is not in this list is
-/// treated as data-shaped and capped at the caller's limit.
-///
-/// [`DbResponse::AsOfVisibilityTimeout`] is classified here rather than
-/// reshaped into `DbResponse::Error`: it is success-SHAPED on the wire yet
-/// carries the failed read-wait (code `as_of_visibility_timeout`, fixed
-/// framing text plus the three positions), and the client matches the
-/// VARIANT (`shamir-client::visibility::error_mapping` maps it onto
-/// `ClientError::AsOfVisibilityTimeout` with `requested`/`visible_through`/
-/// `blocking_version`). Reshaping it would change the wire tag and drop that
-/// structured mapping, so the classification lives at the convergence point
-/// instead — same envelope, same tag, same client handling.
+/// Its only exception is the typed `unknown_table` refusal with its fixed
+/// server message. The response must additionally fit the fixed, pre-reserved
+/// error allowance and the operator cap. Contextual refusals are excluded.
 fn is_bounded_canonical_refusal(reply: &DbResponse) -> bool {
-    match reply {
-        DbResponse::AsOfVisibilityTimeout { .. } => true,
-        DbResponse::Error { code, .. } => matches!(
-            code.as_str(),
-            "unknown_table"
-                | "server_busy"
-                | "cancelled"
-                | "resync_required"
-                | "permission_denied"
-                | "read_only_replica"
-                | "schema_migration_follower_read_only"
-        ),
-        _ => false,
-    }
+    matches!(reply, DbResponse::Error { code, message }
+        if code == "unknown_table" && message == "table is unavailable")
 }
 
 #[cfg(test)]

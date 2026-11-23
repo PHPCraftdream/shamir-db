@@ -6,7 +6,7 @@ use std::time::Duration;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_query_builder::write::{doc, insert};
-use shamir_query_types::batch::VisibilityWait;
+use shamir_query_types::batch::{BatchLimits, BatchRequest, VisibilityWait};
 use shamir_query_types::wire::DbRequest;
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -17,9 +17,11 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::query::Query;
-use shamir_query_types::batch::BatchRequest;
+use shamir_query_types::admin::{ReplDirection, ReplMode};
 
+use crate::db_handler::config::QueryLimitsCap;
 use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 use crate::version::CURRENT_QUERY_LANG_VERSION;
@@ -51,7 +53,11 @@ async fn fixture(lifetime: Duration) -> (ShamirDbHandler, Session, u64) {
         .await
         .expect("begin real transaction");
     let handle = tx.tx_id.0;
-    let handler = ShamirDbHandler::new(Arc::new(db));
+    let handler = ShamirDbHandler::new(Arc::new(db)).with_query_limits(QueryLimitsCap {
+        max_page_size: 2,
+        max_offset: 0,
+        ..QueryLimitsCap::UNLIMITED
+    });
     handler
         .tx_registry
         .register(
@@ -69,6 +75,32 @@ async fn fixture(lifetime: Duration) -> (ShamirDbHandler, Session, u64) {
         )
         .expect("park transaction");
     (handler, session, handle)
+}
+
+async fn quarantine_repo(handler: &ShamirDbHandler) {
+    let mut batch = Batch::new();
+    batch.op(
+        "profile",
+        replication_profile("profile").stream(
+            repl_scope("app").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    batch.op(
+        "sub",
+        subscription("sub", "tcp://peer:9000", "pub", "profile"),
+    );
+    handler
+        .db()
+        .execute_as(Actor::System, "app", &batch.build())
+        .await
+        .expect("create replication subscription");
+    handler
+        .db()
+        .mark_subscription_resync_required("sub", 7, 3)
+        .await
+        .expect("mark repository resync_required");
 }
 
 fn read(table: &str) -> BatchRequest {
@@ -142,15 +174,147 @@ fn zero_lifetime_rejects_execute_removes_handle_and_frees_session() {
 
 /// Preservation control: catches an over-broad change that drops every engine error.
 #[test]
+fn tx_execute_quarantine_masks_absent_and_closed_table_equally() {
+    on_big_stack(|| async {
+        let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
+        quarantine_repo(&handler).await;
+        assert!(handler.db().read_quarantine_reason("app", "main").is_some());
+
+        let open_quarantined = execute(&handler, &session, handle, read("items")).await;
+        assert!(matches!(
+            open_quarantined,
+            DbResponse::Error { code, message }
+                if code == "resync_required"
+                    && message == "repository is quarantined; resynchronize before reading"
+        ));
+
+        let mut close = Batch::new();
+        close.chmod(
+            "table",
+            shamir_query_builder::ddl::chmod(
+                shamir_query_types::admin::ResourceRef::Table {
+                    table: ["app".into(), "main".into(), "items".into()],
+                },
+                0o000,
+            )
+            .hmac("tx-execute-quarantine-test")
+            .build()
+            .expect("build table chmod"),
+        );
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &close.build())
+            .await
+            .expect("close quarantined table");
+        let existing = execute(&handler, &session, handle, read("items")).await;
+        let absent = execute(&handler, &session, handle, read("missing")).await;
+        let existing_error = match existing {
+            DbResponse::Error { code, message } => (code, message),
+            other => panic!("expected closed-table quarantine refusal, got {other:?}"),
+        };
+        let absent_error = match absent {
+            DbResponse::Error { code, message } => (code, message),
+            other => panic!("expected absent-table quarantine refusal, got {other:?}"),
+        };
+        assert_eq!(
+            existing_error, absent_error,
+            "quarantine refusal must not disclose existence"
+        );
+        assert_eq!(
+            existing_error,
+            ("unknown_table".into(), "table is unavailable".into())
+        );
+        handler.tx_rollback(&session, "app", handle).await;
+    });
+}
+
+#[test]
+fn tx_execute_invalid_pagination_masks_absent_and_closed_and_preserves_handle() {
+    on_big_stack(|| async {
+        let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
+        let invalid_read = |table: &str| {
+            let mut batch = Batch::new();
+            batch.limits(BatchLimits::CEILING);
+            batch.query("read", Query::from(table).limit(3));
+            batch.build()
+        };
+        let absent = execute(&handler, &session, handle, invalid_read("missing")).await;
+
+        let mut close = Batch::new();
+        close.chmod(
+            "table",
+            shamir_query_builder::ddl::chmod(
+                shamir_query_types::admin::ResourceRef::Table {
+                    table: ["app".into(), "main".into(), "items".into()],
+                },
+                0o000,
+            )
+            .hmac("tx-execute-pagination-test")
+            .build()
+            .expect("build table chmod"),
+        );
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &close.build())
+            .await
+            .expect("close existing table");
+        let closed = execute(&handler, &session, handle, invalid_read("items")).await;
+        let absent_error = match absent {
+            DbResponse::Error { code, message } => (code, message),
+            other => panic!("expected absent-table pagination refusal, got {other:?}"),
+        };
+        let closed_error = match closed {
+            DbResponse::Error { code, message } => (code, message),
+            other => panic!("expected closed-table pagination refusal, got {other:?}"),
+        };
+        assert_eq!(
+            absent_error, closed_error,
+            "invalid pagination must not disclose table existence"
+        );
+        assert_eq!(
+            absent_error,
+            ("unknown_table".into(), "table is unavailable".into())
+        );
+
+        let mut reopen = Batch::new();
+        reopen.chmod(
+            "table",
+            shamir_query_builder::ddl::chmod(
+                shamir_query_types::admin::ResourceRef::Table {
+                    table: ["app".into(), "main".into(), "items".into()],
+                },
+                0o777,
+            )
+            .hmac("tx-execute-pagination-test")
+            .build()
+            .expect("build table chmod"),
+        );
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &reopen.build())
+            .await
+            .expect("reopen existing table");
+        match execute(&handler, &session, handle, read("items")).await {
+            DbResponse::TxBatch { .. } => {}
+            other => panic!("handle not usable after pagination refusals: {other:?}"),
+        }
+        assert!(matches!(
+            handler.tx_rollback(&session, "app", handle).await,
+            DbResponse::TxRolledBack { .. }
+        ));
+    });
+}
+
+#[test]
 fn ordinary_query_error_preserves_handle_for_successful_execute() {
     on_big_stack(|| async {
         let (handler, session, handle) = fixture(Duration::from_secs(300)).await;
         match execute(&handler, &session, handle, read("missing")).await {
             DbResponse::Error { code, message } => {
-                // A missing table on a READ is the same typed `unknown_table`
-                // every read path answers (no existence oracle).
-                assert_eq!(code, "unknown_table", "{message}");
-                assert!(message.contains("missing"), "{message}");
+                // A missing table on a READ is the same typed, name-hiding
+                // refusal as a closed table (no existence oracle).
+                assert_eq!(code, "unknown_table");
+                assert_eq!(message, "table is unavailable");
             }
             other => panic!("expected missing-table query error, got {other:?}"),
         }

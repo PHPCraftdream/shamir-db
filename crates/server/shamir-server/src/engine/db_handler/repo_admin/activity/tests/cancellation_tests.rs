@@ -844,7 +844,10 @@ async fn operator_cancel_audit_writes_operation_target_and_outcome_only() {
                 wire_cancel(&handler, &caller, cancel_tx(tx_handle)).await,
                 CancelOutcome::Cancelled
             );
-            handler.cancel_refusal_audit().drain().await;
+            assert!(
+                handler.cancel_refusal_audit().drain().await,
+                "audit queue did not drain"
+            );
             {
                 let entries = captured.0.lock().unwrap();
                 assert_eq!(
@@ -867,7 +870,10 @@ async fn operator_cancel_audit_writes_operation_target_and_outcome_only() {
                 wire_cancel(&handler, &same_user, cancel_tx(tx_handle)).await,
                 CancelOutcome::Cancelled
             );
-            handler.cancel_refusal_audit().drain().await;
+            assert!(
+                handler.cancel_refusal_audit().drain().await,
+                "audit queue did not drain"
+            );
             assert_eq!(
                 captured.0.lock().unwrap().len(),
                 1,
@@ -888,7 +894,10 @@ async fn operator_cancel_audit_writes_operation_target_and_outcome_only() {
                 wire_cancel(&handler, &caller, cancel_tx(tx_handle)).await,
                 CancelOutcome::AlreadyCommitting
             );
-            handler.cancel_refusal_audit().drain().await;
+            assert!(
+                handler.cancel_refusal_audit().drain().await,
+                "audit queue did not drain"
+            );
             {
                 let entries = captured.0.lock().unwrap();
                 assert_eq!(entries.len(), 2, "the committing refusal is audited");
@@ -911,7 +920,10 @@ async fn operator_cancel_audit_writes_operation_target_and_outcome_only() {
                 wire_cancel(&handler, &caller, cancel_cursor_admin(foreign_cursor)).await,
                 CancelOutcome::Cancelled
             );
-            handler.cancel_refusal_audit().drain().await;
+            assert!(
+                handler.cancel_refusal_audit().drain().await,
+                "audit queue did not drain"
+            );
             {
                 let entries = captured.0.lock().unwrap();
                 assert_eq!(entries.len(), 3, "a cross-user cursor cancel is audited");
@@ -936,7 +948,10 @@ async fn operator_cancel_audit_writes_operation_target_and_outcome_only() {
                 .await,
                 CancelOutcome::Cancelled
             );
-            handler.cancel_refusal_audit().drain().await;
+            assert!(
+                handler.cancel_refusal_audit().drain().await,
+                "audit queue did not drain"
+            );
             assert_eq!(
                 captured.0.lock().unwrap().len(),
                 3,

@@ -192,8 +192,14 @@ pub(super) fn assert_gateway_read_denial(result: DbResult<QueryValue>) {
         "expected the masked db_execute gateway read denial, got: {message}"
     );
     assert!(
-        message.contains(&format!("access denied: User({RESTRICTED_ID}) cannot READ")),
-        "expected source-table READ denial, got: {message}"
+        message.contains("table is unavailable"),
+        "expected the fixed unknown_table context, got: {message}"
+    );
+    assert!(
+        !message.contains("access denied:")
+            && !message.contains(&format!("User({RESTRICTED_ID})"))
+            && !message.contains("source_rows"),
+        "a read refusal must not disclose a table ACL diagnostic, restricted ID, or table name, got: {message}"
     );
 }
 
