@@ -5,14 +5,16 @@ use futures::StreamExt;
 use shamir_storage::types::RecordKey;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::QueryValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::helpers::{
     body, checksum, context, field, find_journal_row, journal_table, on_big_stack, persistent_db,
     predecessor, prepare_database, rows, run_apply, run_plan, run_status, str_field, submission,
     wal_patch_journal_row,
 };
+use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::record_cow::RecordCow;
+use crate::engine::table::TableConfig;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEvent, JournalEventKind, SchemaMigrationStep, SystemStoreConfig,
 };
@@ -528,5 +530,103 @@ fn malformed_journal_physical_key_fails_the_open() {
         )
         .await
         .expect("malformed journal key scenario timed out");
+    });
+}
+
+/// Second half of brief 112 item A: the STRICT journal scan must not leak into
+/// the ordinary partition scans. A malformed physical key in a USER table is
+/// still skipped by `TableManager::list_stream`, so the open succeeds and the
+/// real rows still come back.
+///
+/// Kills the mutant "route every partition through the strict decoder" (for
+/// example by making `TableManager::list_stream` delegate to the strict twin):
+/// the open would then fail with `SchemaMigrationJournalUnreadable` and the
+/// scan would yield `DbError::Codec`. The PARENT commit has no strict decoder at
+/// all, so it passes this test by construction — it is an isolation oracle for
+/// the new strict path, not a regression against the parent.
+#[test]
+fn malformed_user_partition_key_leaves_the_open_and_scan_working() {
+    on_big_stack(|| async {
+        tokio::time::timeout(
+            Duration::from_secs(300),
+            Box::pin(async {
+                let (dir, db) = persistent_db().await;
+                db.create_db("alpha").await.unwrap();
+                db.add_repo(
+                    "alpha",
+                    RepoConfig::new("main", BoxRepoFactory::fjall(dir.path().join("alpha")))
+                        .add_table(TableConfig::new("items")),
+                )
+                .await
+                .unwrap();
+                let table = db.get_table("alpha", "main", "items").await.unwrap();
+                let first = table.insert(&InnerValue::Map(new_map())).await.unwrap();
+                let second = table.insert(&InnerValue::Map(new_map())).await.unwrap();
+                let raw = {
+                    let mut stream = Box::pin(table.list_stream(16));
+                    let mut batch = stream.next().await.unwrap().unwrap();
+                    let (_, RecordCow::Borrowed(raw)) = batch.pop().unwrap() else {
+                        panic!("user-partition MVCC scan must yield raw record bytes");
+                    };
+                    raw
+                };
+                table
+                    .mvcc_store_for_test()
+                    .unwrap()
+                    .set_versioned(RecordKey::from_slice(b"not-a-record-id"), raw)
+                    .await
+                    .unwrap();
+                db.system_store()
+                    .flush_system_repo_durable(&table)
+                    .await
+                    .unwrap();
+                drop(table);
+                close(db).await;
+
+                let reopened = reopen(dir.path())
+                    .await
+                    .expect("a corrupt key in a USER partition must not break the open");
+                // Journal-free path: the system store still answers after the open,
+                // and the database catalogue re-attached the durable repo.
+                assert!(
+                    reopened.system_store().system_repo().is_ok(),
+                    "the system store must stay usable after a user-partition-only corruption"
+                );
+                assert!(
+                    reopened.get_db("alpha").is_some(),
+                    "the database must re-attach after a user-partition-only corruption"
+                );
+                let table = reopened
+                    .get_table("alpha", "main", "items")
+                    .await
+                    .expect("the durable user table re-attaches after the open");
+                let mut scanned: Vec<RecordId> = Vec::new();
+                let mut stream = Box::pin(table.list_stream(16));
+                while let Some(batch) = stream.next().await {
+                    let batch = batch.expect(
+                        "a malformed key in a USER partition must be skipped, not surfaced",
+                    );
+                    scanned.extend(batch.into_iter().map(|(id, _)| id));
+                }
+                drop(stream);
+                scanned.sort_unstable();
+                let mut expected = vec![first, second];
+                expected.sort_unstable();
+                assert_eq!(
+                    scanned, expected,
+                    "the ordinary scan must still return exactly the two real rows"
+                );
+                assert_eq!(
+                    table
+                        .get(first)
+                        .await
+                        .expect("a real row is still readable"),
+                    InnerValue::Map(new_map()),
+                    "point read of a real row must survive the corrupt sibling key"
+                );
+            }),
+        )
+        .await
+        .expect("user-partition isolation scenario timed out");
     });
 }

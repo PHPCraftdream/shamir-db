@@ -432,16 +432,19 @@ async fn unbind_compensation_flush_fault_marks_the_table_in_doubt() {
 /// guard leaves the store -> manager -> store cycle attached.
 #[tokio::test]
 async fn detach_on_drop_releases_the_fixture_cycle_when_the_test_panics() {
-    let (table, fault, _id, _info) = fixture().await;
-    assert!(fault.is_attached(), "the fixture must start attached");
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _detach = DetachOnDrop(&fault);
-        let _keep_table_alive = &table;
-        panic!("injected test failure");
-    }));
-    assert!(panicked.is_err(), "the injected panic must unwind");
-    assert!(
-        !fault.is_attached(),
-        "a failing test must still break the store -> manager -> store cycle: the guard's Drop is the only release point"
-    );
+    bounded(async {
+        let (table, fault, _id, _info) = fixture().await;
+        assert!(fault.is_attached(), "the fixture must start attached");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _detach = DetachOnDrop(&fault);
+            let _keep_table_alive = &table;
+            panic!("injected test failure");
+        }));
+        assert!(panicked.is_err(), "the injected panic must unwind");
+        assert!(
+            !fault.is_attached(),
+            "a failing test must still break the store -> manager -> store cycle: the guard's Drop is the only release point"
+        );
+    })
+    .await;
 }

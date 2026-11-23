@@ -1,8 +1,8 @@
 //! Integration test of the two per-rule wire schema DDL handlers'
 //! (`handle_add_schema_rule` / `handle_remove_schema_rule`) in-doubt refusal:
-//! both must refuse an IN-DOUBT table BEFORE any state change. Hosted with the
-//! validator end-to-end tests, since the doubt state is raised through the
-//! validator registry.
+//! both must refuse an IN-DOUBT table BEFORE activation, leaving the catalogue
+//! as it was. Hosted with the validator end-to-end tests, since the doubt state
+//! is raised through the validator registry.
 //!
 //! Both handlers persist the new schema to the catalogue and only then call
 //! `compile_table_schema_admitted`, whose FIRST statement is the
@@ -245,7 +245,7 @@ async fn expect_batch_error(db: &ShamirDb, batch: &Batch) -> String {
 /// "in doubt" / "not stale name collision" assertions fail only when the
 /// check is gone.
 #[tokio::test]
-async fn add_schema_rule_refuses_an_in_doubt_table_before_any_state_change() {
+async fn add_schema_rule_refuses_an_in_doubt_table_before_activating_or_replacing_the_artifact() {
     let fx = fixture().await;
     let before = catalogue_snapshot(&fx.db).await;
     assert_eq!(before.schema_version, 1);
@@ -304,7 +304,8 @@ async fn add_schema_rule_refuses_an_in_doubt_table_before_any_state_change() {
 /// name to a different id), that call returns `false`, and the handler
 /// reports "stale name collision" instead.
 #[tokio::test]
-async fn remove_schema_rule_refuses_an_in_doubt_table_before_any_state_change() {
+async fn remove_schema_rule_refuses_an_in_doubt_table_before_activating_or_replacing_the_artifact()
+{
     let fx = fixture().await;
     let before = catalogue_snapshot(&fx.db).await;
     assert_eq!(before.schema_version, 1);
