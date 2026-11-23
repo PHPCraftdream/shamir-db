@@ -42,6 +42,29 @@ pub type BoundaryHook = Box<dyn Fn(BackupStage) + 'static>;
 /// the clock cap mid-copy deterministically (no sleeps): shift the
 /// reported instant past the deadline after the first chunk lands.
 pub type NowHook = Box<dyn FnMut(Instant) -> Instant + 'static>;
+/// Replaces the `symlink_metadata` RESULT `list_files` consumes for a
+/// matching entry path: `Some(result)` supplies it, `None` falls through
+/// to the real metadata read. The injected result flows through the very
+/// match arm that handles a genuine metadata error, so an injected
+/// failure can never take a path the real code does not have. Lets a
+/// test prove a directory-entry failure is never silently dropped from
+/// the snapshot listing.
+pub type MetadataHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<fs::Metadata>> + 'static>;
+/// Substitutes `fs::remove_dir_all` in `RunCleanup::drop` for matching
+/// owned partial directories: `Some(result)` replaces the real removal,
+/// `None` falls through. Lets a test inject a failed partial-tree
+/// cleanup without depending on the OS refusing a removal.
+pub type RemoveDirAllHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<()>> + 'static>;
+/// Substitutes the directory fsync `fsync_dir_fallible` performs for a
+/// matching destination directory: `Some(result)` replaces the real
+/// (platform) fsync, `None` falls through. Lets a test inject a
+/// destination-side fsync failure the platform cannot be made to produce.
+pub type FsyncDirHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<()>> + 'static>;
+/// Substitutes the publication rename `manifest::write_manifest`
+/// performs for a matching destination target: `Some(result)` replaces
+/// the real rename, `None` falls through. Lets a test fail the manifest
+/// publication at its final step.
+pub type ManifestRenameHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<()>> + 'static>;
 
 use crate::sync::durability::backup::online::progress::BackupStage;
 
@@ -53,56 +76,105 @@ thread_local! {
     static HASH_FILE: RefCell<Option<HashHook>> = RefCell::new(None);
     static BEFORE_BOUNDARY: RefCell<Option<BoundaryHook>> = RefCell::new(None);
     static MONOTONIC_NOW: RefCell<Option<NowHook>> = RefCell::new(None);
+    static SYMLINK_METADATA: RefCell<Option<MetadataHook>> = RefCell::new(None);
+    static REMOVE_DIR_ALL: RefCell<Option<RemoveDirAllHook>> = RefCell::new(None);
+    static FSYNC_DIR: RefCell<Option<FsyncDirHook>> = RefCell::new(None);
+    static MANIFEST_RENAME: RefCell<Option<ManifestRenameHook>> = RefCell::new(None);
 }
 
-/// Scoped registration: every hook is cleared when the guard drops.
-pub struct SeamGuard;
+/// The thread-local slot a [`SeamGuard`] owns.
+#[derive(Debug, Clone, Copy)]
+enum SeamSlot {
+    AfterFirstWrite,
+    AfterCopy,
+    AfterCapture,
+    AfterListing,
+    HashFile,
+    BeforeBoundary,
+    MonotonicNow,
+    SymlinkMetadata,
+    RemoveDirAll,
+    FsyncDir,
+    ManifestRename,
+}
+
+/// Scoped registration of exactly ONE hook: dropping the guard clears
+/// ONLY the slot it installed. Guards are therefore INDEPENDENT — a test
+/// can install two faults in one scope and drop them in any order,
+/// because no guard's drop clears another guard's hook.
+pub struct SeamGuard(SeamSlot);
 
 impl Drop for SeamGuard {
     fn drop(&mut self) {
-        AFTER_FIRST_WRITE.with(|slot| *slot.borrow_mut() = None);
-        AFTER_COPY.with(|slot| *slot.borrow_mut() = None);
-        AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = None);
-        AFTER_LISTING.with(|slot| *slot.borrow_mut() = None);
-        HASH_FILE.with(|slot| *slot.borrow_mut() = None);
-        BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = None);
-        MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None);
+        match self.0 {
+            SeamSlot::AfterFirstWrite => AFTER_FIRST_WRITE.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::AfterCopy => AFTER_COPY.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::AfterCapture => AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::AfterListing => AFTER_LISTING.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::HashFile => HASH_FILE.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::BeforeBoundary => BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::MonotonicNow => MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::SymlinkMetadata => SYMLINK_METADATA.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::RemoveDirAll => REMOVE_DIR_ALL.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::FsyncDir => FSYNC_DIR.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::ManifestRename => MANIFEST_RENAME.with(|slot| *slot.borrow_mut() = None),
+        }
     }
 }
 
 pub fn set_after_first_write(hook: IoHook) -> SeamGuard {
     AFTER_FIRST_WRITE.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::AfterFirstWrite)
 }
 
 pub fn set_after_copy(hook: CopyHook) -> SeamGuard {
     AFTER_COPY.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::AfterCopy)
 }
 
 pub fn set_after_capture(hook: CaptureHook) -> SeamGuard {
     AFTER_CAPTURE.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::AfterCapture)
 }
 
 pub fn set_after_listing(hook: ListingHook) -> SeamGuard {
     AFTER_LISTING.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::AfterListing)
 }
 
 pub fn set_hash_file(hook: HashHook) -> SeamGuard {
     HASH_FILE.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::HashFile)
 }
 
 pub fn set_before_boundary(hook: BoundaryHook) -> SeamGuard {
     BEFORE_BOUNDARY.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::BeforeBoundary)
 }
 
 pub fn set_monotonic_now(hook: NowHook) -> SeamGuard {
     MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = Some(hook));
-    SeamGuard
+    SeamGuard(SeamSlot::MonotonicNow)
+}
+
+pub fn set_symlink_metadata(hook: MetadataHook) -> SeamGuard {
+    SYMLINK_METADATA.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::SymlinkMetadata)
+}
+
+pub fn set_remove_dir_all(hook: RemoveDirAllHook) -> SeamGuard {
+    REMOVE_DIR_ALL.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::RemoveDirAll)
+}
+
+pub fn set_fsync_dir(hook: FsyncDirHook) -> SeamGuard {
+    FSYNC_DIR.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::FsyncDir)
+}
+
+pub fn set_manifest_rename(hook: ManifestRenameHook) -> SeamGuard {
+    MANIFEST_RENAME.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::ManifestRename)
 }
 
 /// The gate's clock read: the registered hook's verdict, else the real
@@ -155,6 +227,33 @@ pub fn fire_before_boundary(stage: BackupStage) {
 
 pub fn fire_hash_file(path: &Path) -> Option<std::io::Result<(String, u64)>> {
     HASH_FILE.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
+}
+
+/// The registered metadata hook's substitution for one entry path, else
+/// `None` (the real `symlink_metadata`). Called only from `list_files`.
+pub fn fire_symlink_metadata(path: &Path) -> Option<std::io::Result<fs::Metadata>> {
+    SYMLINK_METADATA.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
+}
+
+/// The registered `remove_dir_all` substitution for one owned partial
+/// directory, else `None` (the real removal). Called only from
+/// `RunCleanup::drop`.
+pub fn fire_remove_dir_all(path: &Path) -> Option<std::io::Result<()>> {
+    REMOVE_DIR_ALL.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
+}
+
+/// The registered directory-fsync substitution for one destination
+/// directory, else `None` (the real platform fsync). Called only from
+/// `fsync_dir_fallible`.
+pub fn fire_fsync_dir(path: &Path) -> Option<std::io::Result<()>> {
+    FSYNC_DIR.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(path)))
+}
+
+/// The registered publication-rename substitution for one destination
+/// target, else `None` (the real rename). Called only from
+/// `manifest::write_manifest`.
+pub fn fire_manifest_rename(target: &Path) -> Option<std::io::Result<()>> {
+    MANIFEST_RENAME.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(target)))
 }
 
 /// Recreate the empty Fjall `lock` artifact in every Fjall store under `root`

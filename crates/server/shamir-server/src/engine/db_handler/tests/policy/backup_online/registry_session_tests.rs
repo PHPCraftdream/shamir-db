@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -357,7 +357,6 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
     let before = backup_metrics_snapshot();
     assert_eq!(before.last_success_timestamp_seconds, 0);
     assert_eq!(before.last_bytes, 0);
-    let started_at = SystemTime::now();
     let (second_id, destination) = registry
         .start(other.clone())
         .expect("restart after failure");
@@ -394,18 +393,25 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         "the second run wrote a manifest"
     );
     let verified = verify_manifest(&dest_dir).expect("second snapshot must verify");
-    // The existing idle wait is a publication handoff: the runner writes
-    // success metrics before publishing running=false under the record lock.
+    // Wall-clock-free stamp invariant. `before.last_success_timestamp_seconds`
+    // is 0 (asserted above: the earlier run FAILED, so only this admin run can
+    // stamp) and `last_bytes` below is this run's verified report, so the
+    // stamp: (1) is nonzero, (2) moved past the value observed BEFORE the run,
+    // i.e. it ADVANCED because of THIS run. A broken `note_success` leaves the
+    // cell at the pre-run zero (nothing else in this isolated process writes
+    // it), so (2) fails; a stamp copied from another run's value also fails
+    // (2) because the observed pre-run value was zero.
     let metrics = backup_metrics_snapshot();
-    let unix_seconds = |time: SystemTime| {
-        time.duration_since(UNIX_EPOCH)
-            .expect("Unix time")
-            .as_secs()
-    };
     assert!(
-        (unix_seconds(started_at)..=unix_seconds(SystemTime::now()))
-            .contains(&metrics.last_success_timestamp_seconds),
-        "latest success must be stamped during the admin run"
+        metrics.last_success_timestamp_seconds > 0,
+        "the successful admin run must stamp a nonzero last-success value"
+    );
+    assert!(
+        metrics.last_success_timestamp_seconds > before.last_success_timestamp_seconds,
+        "the last-success stamp must ADVANCE past the pre-run value (mutant: \
+         `note_success` not stamping): before={} after={}",
+        before.last_success_timestamp_seconds,
+        metrics.last_success_timestamp_seconds
     );
     let repo_bytes: u64 = after
         .progress

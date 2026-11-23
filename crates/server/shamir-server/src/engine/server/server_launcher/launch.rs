@@ -23,6 +23,7 @@ use shamir_db::ShamirDb;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::boot::config::diagnostics::backup_online::metrics::install_backup_meta_store;
 use crate::boot::config::diagnostics::backup_online::{schedule, OnlineBackupRegistry};
 use crate::byte_budget::ByteBudget;
 use crate::config::{Config, ResolvedSchedule};
@@ -290,6 +291,11 @@ impl ServerLauncher {
             tokio::runtime::Handle::current(),
             shutdown_token.clone(),
         ));
+        // Staleness evidence survives restarts: seed the gauge from the durable
+        // rows and arm the schedule clock only when a schedule is configured
+        // (`backup.is_some()`); `metrics::note_success` re-persists the
+        // last-success row at every copy success.
+        install_backup_meta_store(Arc::clone(&meta), backup.is_some());
         shamir.set_online_backup_admin_port(online_backup_registry.clone());
 
         // F-15: opt into the experimental online storage-migration API when

@@ -56,6 +56,11 @@ class BackupRulesTest(unittest.TestCase):
         cls.exported = set(re.findall(
             r'metrics::(?:gauge|counter)!\(\s*"(shamir_backup_\w+)"', source
         ))
+        # The last-value gauges are rendered per scrape from the scrape's own
+        # snapshot (`SCRAPE_RENDERED_GAUGES`), never stored in the recorder.
+        rendered = re.search(r'const SCRAPE_RENDERED_GAUGES[^=]*=\s*\[(.*?)\];', source, re.S)
+        if rendered:
+            cls.exported |= set(re.findall(r'"(shamir_backup_\w+)"', rendered[1]))
         results = re.search(r'const SCHEDULED_RESULTS[^=]*=\s*\[(.*?)\];', source, re.S)
         cls.results = set(re.findall(r'"(\w+)"', results[1])) if results else set()
 

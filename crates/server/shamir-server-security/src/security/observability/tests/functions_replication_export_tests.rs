@@ -17,6 +17,10 @@ use super::super::{
     install_replication_metrics_source, metrics_handler, AppState, ObservabilityState, StreamState,
     STREAM_STATES,
 };
+use crate::security::backup_metrics::{
+    record_backup_metrics, register_backup_metrics, render_backup_scrape_gauges,
+    BackupMetricsSnapshot, SCRAPE_RENDERED_GAUGES,
+};
 
 const DB: &str = "export_test_db";
 const REPO: &str = "replica";
@@ -450,4 +454,149 @@ fn replication_export_sets_lag_seconds_to_zero_without_a_receipt() {
         &["db=\"(other)\"", "repo=\"(other)\""],
     );
     assert!(age.ends_with(" 0"), "no-receipt age is not zero: {age}");
+}
+
+// The two tests below live here, not in a `backup_metrics/tests/` module:
+// `security/` and `security/observability/tests/` are both at the 7-entry
+// folder limit, and this file already owns the recorder/`/metrics` rendering
+// coverage. They pin the R2d-FIX-E contract for
+// `shamir_backup_last_success_timestamp_seconds`,
+// `shamir_backup_scheduled_failure_streak`,
+// `shamir_backup_last_duration_seconds` and
+// `shamir_backup_duration_seconds`.
+
+fn type_line_count(rendered: &str, name: &str) -> usize {
+    let type_line = format!("# TYPE {name} gauge");
+    rendered
+        .lines()
+        .filter(|line| *line == type_line.as_str())
+        .count()
+}
+
+fn sample_line_count(rendered: &str, name: &str) -> usize {
+    let prefix = format!("{name} ");
+    rendered
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .count()
+}
+
+fn populated_backup_snapshot() -> BackupMetricsSnapshot {
+    BackupMetricsSnapshot {
+        last_success_timestamp_seconds: 1_700_000_001,
+        scheduled_failure_streak: 2,
+        last_success_duration_seconds: 3.5,
+        last_duration_seconds: Some(3.5),
+        last_bytes: 42,
+        ..BackupMetricsSnapshot::default()
+    }
+}
+
+/// Each rendering reflects ITS snapshot: two snapshots with different values
+/// produce two different texts and no shared state is involved (the function
+/// is pure). Exactly one `# TYPE` line and one sample line per series, and
+/// `shamir_backup_duration_seconds` is omitted while the snapshot has no
+/// duration (before the first success of the process).
+///
+/// Mutant: rendering from anything but the passed snapshot (e.g. reading the
+/// recorder's last-writer-wins gauge) makes the two texts equal.
+#[test]
+fn backup_scrape_gauges_render_from_their_own_snapshot() {
+    let first = populated_backup_snapshot();
+    let second = BackupMetricsSnapshot {
+        last_success_timestamp_seconds: 1_600_000_000,
+        scheduled_failure_streak: 0,
+        last_success_duration_seconds: 0.0,
+        last_duration_seconds: None,
+        ..BackupMetricsSnapshot::default()
+    };
+
+    let rendered_first = render_backup_scrape_gauges(&first);
+    let rendered_second = render_backup_scrape_gauges(&second);
+    assert_ne!(
+        rendered_first, rendered_second,
+        "each rendering must reflect its own snapshot"
+    );
+
+    for name in SCRAPE_RENDERED_GAUGES {
+        assert_eq!(
+            type_line_count(&rendered_first, name),
+            1,
+            "exactly one TYPE line for {name}\n{rendered_first}"
+        );
+        assert_eq!(
+            sample_line_count(&rendered_first, name),
+            1,
+            "exactly one sample line for {name}\n{rendered_first}"
+        );
+    }
+    assert!(
+        rendered_first.contains("shamir_backup_last_success_timestamp_seconds 1700000001\n"),
+        "wrong last-success stamp: {rendered_first}"
+    );
+    assert!(
+        rendered_first.contains("shamir_backup_scheduled_failure_streak 2\n"),
+        "wrong streak: {rendered_first}"
+    );
+    assert!(
+        rendered_first.contains("shamir_backup_last_duration_seconds 3.5\n"),
+        "wrong last duration: {rendered_first}"
+    );
+    assert!(
+        rendered_first.contains("shamir_backup_duration_seconds 3.5\n"),
+        "wrong duration: {rendered_first}"
+    );
+
+    assert!(
+        rendered_second.contains("shamir_backup_scheduled_failure_streak 0\n"),
+        "wrong streak: {rendered_second}"
+    );
+    for name in [
+        "shamir_backup_last_success_timestamp_seconds",
+        "shamir_backup_scheduled_failure_streak",
+        "shamir_backup_last_duration_seconds",
+    ] {
+        assert_eq!(
+            type_line_count(&rendered_second, name),
+            1,
+            "exactly one TYPE line for {name}\n{rendered_second}"
+        );
+    }
+    assert!(
+        !rendered_second.contains("shamir_backup_duration_seconds"),
+        "the success-only duration must be omitted before the first success\n{rendered_second}"
+    );
+}
+
+/// Registration and the per-scrape recorder update must never put those four
+/// names into the shared recorder: the response body carries them exactly
+/// once, from the snapshot, and a second (last-writer-wins) copy in the
+/// recorder would make the text contain duplicate series.
+///
+/// Mutant killed: restoring `metrics::gauge!(..).set(..)` for any of the four
+/// in `record_schedule_metrics` or in `register_backup_metrics` renders that
+/// name here and fails the first assertion.
+#[test]
+fn backup_last_value_gauges_never_reach_the_shared_recorder() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let snapshot = populated_backup_snapshot();
+
+    metrics::with_local_recorder(&recorder, || {
+        register_backup_metrics();
+        record_backup_metrics(&snapshot);
+    });
+    let rendered = handle.render();
+
+    for name in SCRAPE_RENDERED_GAUGES {
+        assert!(
+            !rendered.contains(name),
+            "the shared recorder must not hold {name} (a second, stale copy)\n{rendered}"
+        );
+    }
+    // Control: the rest of the family still goes through the recorder.
+    assert!(
+        rendered.contains("shamir_backup_last_bytes 42\n"),
+        "the recorder still owns the other backup series: {rendered}"
+    );
 }
