@@ -238,8 +238,10 @@ impl ShamirDbHandler {
     /// `not_cancellable` (its context lock is only ever attempted, never
     /// awaited); a momentary hold by the commit path answers
     /// `already_committing` instead, since that handle is already reserved.
-    /// An idle one has its Level-3 record locks released in the cancel call,
-    /// since dropping the `Arc` frees none of them.
+    /// An idle one has its Level-3 record locks released by a task the cancel
+    /// call awaits (the release survives the abort of the call, but a failed
+    /// release is only logged while the call still awaits it), since dropping
+    /// the `Arc` frees none of them.
     pub(in crate::engine::db_handler) async fn cancel_tx(
         &self,
         session: &Session,
@@ -314,9 +316,10 @@ impl ShamirDbHandler {
         }
     }
 
-    /// The operator-cancel path's own synchronous release of the Level-3
-    /// record locks the cancelled context still holds, kept so the locks are
-    /// gone before the cancel reply returns. Every other end of an interactive
+    /// The operator-cancel path's own release of the Level-3 record locks the
+    /// cancelled context still holds, awaited so that on the ordinary path the
+    /// locks are gone before the cancel reply returns (a failed release is
+    /// logged only while this call still awaits the task). Every other end of an interactive
     /// transaction is covered by the registry's `Drop` release, and a repeated
     /// release of the same transaction is a harmless no-op because
     /// `MvccStore::release_locks` removes only holders whose `tx_version`

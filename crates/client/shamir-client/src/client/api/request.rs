@@ -849,8 +849,9 @@ impl Client {
     /// Cancel an open interactive transaction by its handle.
     ///
     /// An idle transaction can be cancelled on its owning connection: a cancel
-    /// does not occupy a request slot and dispatch is concurrent. Use a separate
-    /// SCRAM connection when the owning connection has all 32 in-flight permits
+    /// does not occupy a handler per-session request slot, but it still needs a
+    /// transport permit, and dispatch is concurrent. Use a separate SCRAM
+    /// connection when the owning connection has all 32 in-flight permits
     /// occupied — the reader cannot admit the cancel until a permit frees. The
     /// outcome describes the cancellation attempt, not the transaction's later
     /// reply.
