@@ -33,6 +33,7 @@ use std::time::Duration;
 use tokio::{sync::Notify, task::JoinHandle};
 
 mod checkpoint;
+mod close_fence;
 mod format;
 mod recovery;
 mod rotation;
@@ -282,6 +283,14 @@ pub struct FjallAuditAppender {
     gate_acquired_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(any(test, feature = "test-hooks"))]
     final_close_attempts: std::sync::atomic::AtomicUsize,
+    /// Public `checkpoint` calls the post-close fence refused (see `close_fence`).
+    refused_checkpoint_attempts: std::sync::atomic::AtomicUsize,
+    /// One-shot hook run at the END of a successful batched `append_entry`.
+    #[cfg(test)]
+    after_append_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// One-shot hook run in `checkpoint` after the cheap pre-gate fence.
+    #[cfg(test)]
+    before_gate_checkpoint_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test seam replacing [`rotation::sync_parent`] at dir sync.
     #[cfg(test)]
     dir_sync_hook: Mutex<Option<DirSyncHook>>,
@@ -379,6 +388,11 @@ impl FjallAuditAppender {
             gate_acquired_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-hooks"))]
             final_close_attempts: std::sync::atomic::AtomicUsize::new(0),
+            refused_checkpoint_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            after_append_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_gate_checkpoint_hook: Mutex::new(None),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
@@ -461,6 +475,11 @@ impl FjallAuditAppender {
             gate_acquired_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-hooks"))]
             final_close_attempts: std::sync::atomic::AtomicUsize::new(0),
+            refused_checkpoint_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            after_append_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_gate_checkpoint_hook: Mutex::new(None),
             #[cfg(test)]
             dir_sync_hook: Mutex::new(None),
             rotation,
@@ -684,7 +703,14 @@ impl FjallAuditAppender {
     pub async fn shutdown(&self) -> AuditShutdownOutcome {
         self.request_flusher_stop();
         let flusher_join_error = self.join_flusher().await.err();
-        let final_flush = blocking_io(|| self.final_flush_blocking());
+        // Strict mode has nothing to flush (`final_flush_blocking` returns
+        // before taking the gate), and `blocking_io` is `block_in_place`,
+        // which PANICS inside a `LocalSet`. Batched mode is unchanged.
+        let final_flush = if matches!(&self.mode, Durab::Strict) {
+            self.final_flush_blocking()
+        } else {
+            blocking_io(|| self.final_flush_blocking())
+        };
         let reason = final_flush
             .flush_error
             .as_ref()
@@ -791,7 +817,8 @@ impl FjallAuditAppender {
                 + bytes_written;
             if new_size >= rot.policy.max_size_bytes {
                 // A rotation failure at or after the rename leaves an
-                // unanchored rotated file behind — latch fail-closed.
+                // unanchored rotated file behind; the error returned here
+                // reaches `append_entry`, which latches it fail-closed.
                 rotation::rotate_locked(self, &mut f, rot.legacy_archive_order.as_deref())?;
             }
         }
@@ -932,6 +959,9 @@ impl AuditAppender for FjallAuditAppender {
                     return Err(std::io::Error::other("audit appender is shut down"));
                 }
                 buffer.push(entry.clone());
+                drop(buffer);
+                #[cfg(test)]
+                self.fire_after_append_hook();
                 Ok(())
             }
         };
@@ -943,11 +973,17 @@ impl AuditAppender for FjallAuditAppender {
     }
 
     fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
+        // Post-close fence, cheap half: gate-free, store-free (Strict: no flag).
+        self.refuse_closed_checkpoint()?;
+        #[cfg(test)]
+        self.fire_before_gate_checkpoint_hook();
         if let Some(message) = self.failed.lock().as_ref() {
             return Err(std::io::Error::other(message.clone()));
         }
-        let result = blocking_io(|| {
+        blocking_io(|| {
             self.persistence_section(|| {
+                // DECISIVE half: same gate as `final_flush_blocking`.
+                self.refuse_closed_checkpoint_under_gate()?;
                 if let Some(message) = self.failed.lock().as_ref() {
                     return Err(AppenderError::Io(std::io::Error::other(message.clone())));
                 }
@@ -958,11 +994,6 @@ impl AuditAppender for FjallAuditAppender {
                 result
             })
         })
-        .map_err(std::io::Error::other);
-        if let Err(error) = result {
-            *self.failed.lock() = Some(error.to_string());
-            return Err(error);
-        }
-        Ok(())
+        .map_err(|error| self.latch_checkpoint_failure(std::io::Error::other(error)))
     }
 }

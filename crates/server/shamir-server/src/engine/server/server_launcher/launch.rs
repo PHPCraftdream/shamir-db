@@ -54,6 +54,13 @@ mod rollback_cleanup;
 
 use rollback_cleanup::log_rollback_cleanup;
 
+// `log_rollback_cleanup` is `pub(super)` inside the private `rollback_cleanup`
+// module, so only a child of THIS module can call it: the shutdown-folder test
+// file is declared here (its `#[path]` keeps the folder layout intact).
+#[cfg(test)]
+#[path = "tests/shutdown/rollback_cleanup_tests.rs"]
+mod rollback_cleanup_tests;
+
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
     pub config: Config,

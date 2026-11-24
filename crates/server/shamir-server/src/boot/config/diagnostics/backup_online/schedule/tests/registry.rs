@@ -27,6 +27,7 @@ use crate::sync::durability::backup::{
 use super::super::super::metrics::backup_metrics_snapshot;
 use super::super::super::registry::arm_scheduled_retention_pause;
 use super::super::super::{OnlineBackupRegistry, StartBackupError};
+use super::super::retention_pass::set_post_publication_panic;
 
 const OWNER: &str = "registry-test-owner";
 const WAIT: Duration = Duration::from_secs(120);
@@ -886,6 +887,112 @@ async fn parked_retention_refuses_admission_and_a_panic_is_one_retention_failure
     assert_eq!(
         after.retention_deleted_total, before.retention_deleted_total,
         "a panicked pass deletes nothing"
+    );
+    drop(db);
+}
+
+/// A PANIC in the window AFTER the copy outcome was published and BEFORE
+/// retention accounts exactly ONE retention failure for a scheduled run: the
+/// already-published copy keeps its single `completed` increment, the failure
+/// streak stays at zero, and the run still publishes `running = false`, the
+/// guard's operator message and its LATE `finished` signal.
+///
+/// Mutant: `RunGuard::Drop` calls `note_finished(true, …)` unconditionally →
+/// the already-published copy is counted a second time as a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_publication_panic_is_one_retention_failure_and_never_a_second_copy_failure() {
+    let guard = FlakeGuard::with_watchdog(
+        "post_publication_panic_is_one_retention_failure_and_never_a_second_copy_failure",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
+    let source = tempfile::tempdir().expect("source tempdir");
+    let dest = tempfile::tempdir().expect("destination tempdir");
+    let to = dest.path().join("private");
+    create_private_dir(&to).expect("private destination");
+    let to = to.canonicalize().expect("canonical destination");
+    let root = source.path();
+    let db = tokio::time::timeout(WAIT, async {
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(root.join("system")))
+            .await
+            .expect("init durable engine");
+        db.create_db("app").await.expect("create database");
+        db.add_repo(
+            "app",
+            RepoConfig::new("main", BoxRepoFactory::fjall_raw(root.join("repos/main")))
+                .add_table(TableConfig::new("rows")),
+        )
+        .await
+        .expect("add durable repo");
+        db.flush_all_waiting().await.expect("flush engine");
+        db
+    })
+    .await
+    .expect("fixture within deadline");
+    guard.mark("durable engine ready");
+    let db = Arc::new(db);
+    let registry = OnlineBackupRegistry::new(
+        Arc::clone(&db),
+        root.to_path_buf(),
+        tokio::runtime::Handle::current(),
+    );
+
+    // Nextest gives this test its own process for the process-wide metrics.
+    let before = backup_metrics_snapshot();
+    assert_eq!(before.completed_total, 0);
+
+    // Runs ON THE RUNNER THREAD, before publication: the copy outcome is
+    // published right after this callback, so the planted panic fires in the
+    // published-but-not-yet-retained window.
+    registry.arm_post_run_callback(Box::new(move |_published: &Path| -> Option<PathBuf> {
+        let hook = set_post_publication_panic(|| {
+            panic!("planted post-publication panic (the guard must not count the copy twice)")
+        });
+        // The panic fires in THIS run's publication point; the zero-sized
+        // guard would only clear an unfired install.
+        std::mem::forget(hook);
+        None
+    }));
+    let signals = registry
+        .start_scheduled(
+            to.clone(),
+            OWNER.to_owned(),
+            BackupRetentionConfig { keep_last: 1 },
+        )
+        .expect("admit scheduled run");
+    guard.mark("scheduled run admitted");
+    let completed = tokio::time::timeout(WAIT, signals.outcome)
+        .await
+        .expect("the copy outcome is published before the panic")
+        .expect("the runner must report the copy outcome");
+    assert!(completed, "the copy itself succeeded");
+    await_finished(signals.finished).await;
+    guard.mark("run finished");
+
+    let status = registry.status();
+    assert!(!status.running, "the unwind still releases admission");
+    assert!(
+        status.last_error.is_some(),
+        "the guard records its panic message for the operator"
+    );
+    let after = backup_metrics_snapshot();
+    assert_eq!(
+        after.completed_total,
+        before.completed_total + 1,
+        "exactly ONE successful copy outcome"
+    );
+    assert_eq!(
+        after.failed_total_by_stage, before.failed_total_by_stage,
+        "the already-published copy must not be counted a second time as a failure"
+    );
+    assert_eq!(
+        after.retention_failed_total,
+        before.retention_failed_total + 1,
+        "exactly ONE retention failure"
+    );
+    assert_eq!(
+        after.scheduled_failure_streak, 0,
+        "the success keeps the failure streak at zero"
     );
     drop(db);
 }

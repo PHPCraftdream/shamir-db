@@ -1,5 +1,5 @@
 //! Durable snapshot sinks that bridge the in-memory lockout and rate-limit
-//! stores to the `ServerMetaStore` redb backend.
+//! stores to the fjall-backed `ServerMetaStore`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::server::server_handle::MetaSnapshotTask;
 use crate::server_meta::ServerMetaStore;
 
 /// Default interval between lockout-snapshot writes. 60s matches the
-/// audit-checkpoint cadence and balances disk pressure (one redb write
+/// audit-checkpoint cadence and balances disk pressure (one fjall store write
 /// per minute) against the loss window for failed-auth bookkeeping
 /// (worst-case ~60s of new failures lost on hard crash). The spec IMPL
 /// §1.3 ceiling is 5s but is not normative for failed-auth state —
@@ -91,8 +91,8 @@ impl RateLimitSnapshotSink for MetaRateLimitSink {
 /// on its next `select!` poll. The task writes one final snapshot of each on
 /// the way out so a clean restart sees the freshest possible state —
 /// important for both the durability story and for integration tests that
-/// boot, do work, shut down, and reboot from the same data dir (the redb file
-/// lock on `server_meta.redb` cannot be re-acquired until this task drops its
+/// boot, do work, shut down, and reboot from the same data dir (the fjall
+/// lock on the `server_meta` store cannot be re-acquired until this task drops its
 /// `Arc<ServerMetaStore>`).
 ///
 /// CancellationToken (not `Notify`) closes the lossy subscribe-window race:
@@ -115,51 +115,86 @@ pub(super) fn spawn_meta_snapshot_task(
                 biased;
                 _ = shutdown.cancelled() => {
                     tracing::debug!("meta_snapshot: shutdown cancelled, writing final snapshots");
-                    if let Err(e) = lockout.persist_snapshot() {
-                        tracing::warn!(error = %e, "final lockout snapshot persist failed");
-                    }
-                    if let Err(e) = rate_limit.persist_snapshot() {
-                        tracing::warn!(error = %e, "final rate-limit snapshot persist failed");
+                    // OFF the runtime worker: a final `persist_snapshot` is a
+                    // synchronous store write (and may `SyncAll`), so writing it
+                    // inline here could starve a shutdown deadline timer on a
+                    // current-thread runtime (finding: synchronous `server_meta`
+                    // write on the teardown path). The handle is still joined by
+                    // the shutdown, so nothing is detached.
+                    let lockout = Arc::clone(&lockout);
+                    let rate_limit = Arc::clone(&rate_limit);
+                    let written = tokio::task::spawn_blocking(move || {
+                        let mut failures = Vec::new();
+                        if let Err(error) = lockout.persist_snapshot() {
+                            failures.push(("final lockout snapshot persist failed", error.to_string()));
+                        }
+                        if let Err(error) = rate_limit.persist_snapshot() {
+                            failures.push(("final rate-limit snapshot persist failed", error.to_string()));
+                        }
+                        failures
+                    })
+                    .await;
+                    match written {
+                        Ok(failures) => {
+                            for (what, error) in failures {
+                                tracing::warn!(what, %error, "final metadata snapshot persist failed");
+                            }
+                        }
+                        Err(join_error) => tracing::warn!(
+                            %join_error,
+                            "final metadata snapshot task did not complete"
+                        ),
                     }
                     break;
                 }
                 _ = interval.tick() => {
-                    // `persist_snapshot` is synchronous (sync redb write
-                    // under the hood). It's short — measured << 1ms for
-                    // typical state sizes — so running it on the runtime
-                    // thread is fine. If it ever grows we can wrap in
-                    // `spawn_blocking`.
-                    match lockout.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                failures = lockout.failure_pair_count(),
-                                lockouts = lockout.active_lockout_count(),
-                                "lockout snapshot persisted",
-                            );
+                    // OFF the runtime worker, exactly like the final write: the
+                    // periodic `persist_snapshot` is a synchronous store write
+                    // (and may `SyncAll`), so a shutdown beginning during it
+                    // must not share a worker with it on a current-thread
+                    // runtime. The await keeps the ordering of successive ticks.
+                    let lockout = Arc::clone(&lockout);
+                    let rate_limit = Arc::clone(&rate_limit);
+                    let written = tokio::task::spawn_blocking(move || {
+                        match lockout.persist_snapshot() {
+                            Ok(true) => {
+                                tracing::trace!(
+                                    failures = lockout.failure_pair_count(),
+                                    lockouts = lockout.active_lockout_count(),
+                                    "lockout snapshot persisted",
+                                );
+                            }
+                            Ok(false) => {
+                                // No sink installed — should not happen in
+                                // production paths since `launch()` always
+                                // wires one.
+                                tracing::trace!("meta snapshot task: no lockout sink installed");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "lockout snapshot persist failed");
+                            }
                         }
-                        Ok(false) => {
-                            // No sink installed — should not happen in
-                            // production paths since `launch()` always
-                            // wires one.
-                            tracing::trace!("meta snapshot task: no lockout sink installed");
+                        match rate_limit.persist_snapshot() {
+                            Ok(true) => {
+                                tracing::trace!(
+                                    subnets = rate_limit.tracked_subnets(),
+                                    "rate-limit snapshot persisted",
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::trace!("meta snapshot task: no rate-limit sink installed");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "rate-limit snapshot persist failed");
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "lockout snapshot persist failed");
-                        }
-                    }
-                    match rate_limit.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                subnets = rate_limit.tracked_subnets(),
-                                "rate-limit snapshot persisted",
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::trace!("meta snapshot task: no rate-limit sink installed");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "rate-limit snapshot persist failed");
-                        }
+                    })
+                    .await;
+                    if let Err(join_error) = written {
+                        tracing::warn!(
+                            %join_error,
+                            "periodic metadata snapshot task did not complete"
+                        );
                     }
                 }
             }

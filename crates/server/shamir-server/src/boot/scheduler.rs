@@ -158,7 +158,12 @@ impl Scheduler {
             let rx = shutdown_tx.subscribe();
             let period = config.counter_gc_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("counter_gc", period, rx, move || {
+                // OFF the runtime worker: counter GC takes the store's own
+                // synchronous lock and can `SyncAll`, and on a current-thread
+                // runtime that would starve the shutdown deadline timer (finding:
+                // synchronous GC of the counters is not preemptible by the
+                // deadline). `join()` still waits for an in-flight tick.
+                run_periodic_off_thread("counter_gc", period, rx, move || {
                     let now_ns = match tick_now_or_skip("counter_gc") {
                         Some(now_ns) => now_ns,
                         None => return,
