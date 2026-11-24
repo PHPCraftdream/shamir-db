@@ -37,6 +37,12 @@ pub struct TokenService {
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     gc_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     gc_shutdown: CancellationToken,
+    /// Set by `start_gc` once a collector task was spawned. `gc_live` counts the
+    /// collector tasks that have not ended yet: each task decrements it itself
+    /// when it ends (also by a panic or an abort), and a restart after an
+    /// abandoned `shutdown_gc` can leave two live at once.
+    gc_spawned: std::sync::atomic::AtomicBool,
+    gc_live: Arc<std::sync::atomic::AtomicUsize>,
     mirror_insert_conflict: Arc<std::sync::atomic::AtomicBool>,
     test_generator: Arc<TokenGenerator>,
 }
@@ -89,6 +95,8 @@ impl TokenService {
             clock,
             gc_task: tokio::sync::Mutex::new(None),
             gc_shutdown: CancellationToken::new(),
+            gc_spawned: std::sync::atomic::AtomicBool::new(false),
+            gc_live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             mirror_insert_conflict: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             test_generator: Arc::new(generate_token_parts),
         };
@@ -626,7 +634,15 @@ impl TokenService {
         }
         let gc = self.clone_for_gc();
         let stop = self.gc_shutdown.child_token();
+        // Counted before the spawn and under the slot lock: a caller that sees
+        // `start_gc` return never reads zero live collectors.
+        self.gc_live
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let live = LiveCollector(Arc::clone(&self.gc_live));
+        self.gc_spawned
+            .store(true, std::sync::atomic::Ordering::Release);
         *task = Some(tokio::spawn(async move {
+            let _live = live;
             let _ = gc.collect().await;
             let mut interval = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(3600),
@@ -638,10 +654,15 @@ impl TokenService {
             }
         }));
     }
+    /// Whether every collector has really ended. After a spawn this reads the
+    /// live-collector count the tasks maintain themselves, not the join-handle
+    /// slot: a `shutdown_gc` abandoned at a deadline detaches the handle while
+    /// the collector may still run, and a restart spawns a new one.
     pub async fn gc_task_finished(&self) -> bool {
-        match self.gc_task.lock().await.as_ref() {
-            Some(task) => task.is_finished(),
-            None => self.gc_shutdown.is_cancelled(),
+        if self.gc_spawned.load(std::sync::atomic::Ordering::Acquire) {
+            self.gc_live.load(std::sync::atomic::Ordering::Acquire) == 0
+        } else {
+            self.gc_shutdown.is_cancelled()
         }
     }
     pub async fn shutdown_gc(&self) {
@@ -658,6 +679,14 @@ impl TokenService {
             Arc::clone(&self.mutation_gates),
             Arc::clone(&self.clock),
         )
+    }
+}
+/// Counts one collector task out when it is dropped: a normal return, a panic
+/// and an abort all end it.
+struct LiveCollector(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for LiveCollector {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 impl Drop for TokenService {
