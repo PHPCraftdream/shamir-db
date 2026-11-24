@@ -46,8 +46,7 @@ struct StoreRoot {
 /// What ONE lock probe saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LockState {
-    /// Nobody holds the directory lock (or the lock file is gone: the store was
-    /// closed and removed).
+    /// Nobody holds the directory lock: the marker was opened and locked.
     Unlocked,
     /// Another handle — in this process or in another — holds the lock.
     Held,
@@ -185,10 +184,12 @@ fn discover(root: &Path) -> Discovery {
     Discovery::Complete(found)
 }
 
-/// Open one lock marker and preserve the distinction between a marker that
-/// vanished and one that still exists but cannot be followed (for example a
-/// dangling symlink). Classification follows metadata; this recheck handles the
-/// race between that classification and opening the marker.
+/// Open one lock marker of a DISCOVERED store. A marker that is gone now, or
+/// that exists but cannot be followed (for example a dangling symlink), is a
+/// discovery gap either way: on Unix an unlinked lock file can still be held
+/// through an open descriptor, so its absence proves nothing. Classification
+/// follows metadata; this recheck handles the race between that classification
+/// and opening the marker.
 fn open_lock(dir: &Path) -> Result<std::fs::File, LockState> {
     match OpenOptions::new()
         .read(true)
@@ -199,10 +200,9 @@ fn open_lock(dir: &Path) -> Result<std::fs::File, LockState> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             match std::fs::symlink_metadata(dir.join(LOCK_FILE)) {
                 Ok(_) => Err(LockState::DiscoveryGap),
+                // The marker itself vanished after discovery: UNKNOWN, not free.
                 Err(marker_error) if marker_error.kind() == std::io::ErrorKind::NotFound => {
-                    // The marker itself is now absent, retaining the previous
-                    // semantics for a store removed after classification.
-                    Err(LockState::Unlocked)
+                    Err(LockState::DiscoveryGap)
                 }
                 Err(_) => Err(LockState::ProbeError),
             }
@@ -313,8 +313,9 @@ pub(crate) enum ReleaseOutcome {
 /// Wait until no fjall store under `root` is locked, bounded end to end.
 ///
 /// Every probe await is bounded by the REMAINING budget, so neither discovery
-/// nor a lock probe can outlive the deadline; the verdict says which of the
-/// three cases happened. An already-spent deadline never turns a known held
+/// nor a lock probe can delay the verdict past the deadline (a job already
+/// running may still finish later); the verdict says which of the three cases
+/// happened. An already-spent deadline never turns a known held
 /// set into `Unverified`: an observed held lock remains `StillLocked`.
 pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOutcome {
     release_stores_until(root, Instant::now() + timeout).await
@@ -403,24 +404,43 @@ pub(crate) async fn release_stores_until(root: &Path, deadline: Instant) -> Rele
 
 /// The blocking job did not complete before its deadline (it may have been
 /// queued or still running), or its result channel closed unexpectedly.
+///
+/// The job stamps its own completion: `timeout_at` polls the receiver before
+/// its timer, so a result that arrives after the deadline but before the async
+/// side polls again would otherwise win. Such a late result is not an in-budget
+/// observation and counts as the pool-starved case.
 async fn bounded_probe<T: Send + 'static>(
     deadline: Instant,
     probe: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, UnverifiedReason> {
     let (tx, rx) = tokio::sync::oneshot::channel();
+    // Stamped on the timer's own clock (tokio's `Instant`, runtime-entered in
+    // the blocking job), so a paused clock cannot make the two disagree.
     let job = tokio::task::spawn_blocking(move || {
-        let _ = tx.send(probe());
+        let value = probe();
+        let _ = tx.send((value, Instant::now() < deadline));
     });
     match tokio::time::timeout_at(deadline, rx).await {
-        Ok(Ok(value)) => Ok(value),
+        Ok(Ok((value, true))) => Ok(value),
+        Ok(Ok((_, false))) => Err(UnverifiedReason::PoolStarved),
         Ok(Err(_)) => Err(UnverifiedReason::ProbeError),
         Err(_) => {
-            // The budget expired with the job still queued (or stuck): abort it
-            // rather than leave an orphan probe running after the verdict.
+            // The budget expired with the job still queued (or stuck): abort it.
+            // That only stops a job that has not started; one already inside a
+            // filesystem call can finish after the verdict.
             job.abort();
             Err(UnverifiedReason::PoolStarved)
         }
     }
+}
+
+/// Test seam for the completion stamp of [`bounded_probe`].
+#[cfg(test)]
+pub(crate) async fn bounded_probe_for_test<T: Send + 'static>(
+    deadline: Instant,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, UnverifiedReason> {
+    bounded_probe(deadline, probe).await
 }
 
 /// Test seam for the Unix lock-open classification: a marker that exists but

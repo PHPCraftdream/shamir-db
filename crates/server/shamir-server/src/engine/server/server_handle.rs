@@ -955,7 +955,7 @@ impl ServerHandle {
                         ),
                         UnverifiedReason::DiscoveryGap => (
                             "store discovery was incomplete",
-                            "the store set could not be fully discovered",
+                            "the store set could not be fully discovered, or a discovered marker could no longer be verified",
                         ),
                         UnverifiedReason::ProbeError => (
                             "the store-release blocking job ended without a result",

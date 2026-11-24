@@ -1,7 +1,9 @@
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -9,7 +11,10 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(unix)]
 use crate::server::open_lock_is_discovery_gap;
-use crate::server::{release_stores, wait_stores_released, ReleaseOutcome};
+use crate::server::{
+    bounded_probe_for_test, release_stores, wait_stores_released, ReleaseOutcome, UnverifiedReason,
+};
+use tokio::time::Instant;
 
 /// A fake fjall store root: `lock` + `version` marker files.
 fn make_store(root: &Path, name: &str) -> PathBuf {
@@ -189,11 +194,15 @@ async fn a_dangling_lock_marker_is_a_discovery_gap() {
     );
 }
 
-/// Opening a `lock` marker that exists (link metadata says so) but cannot be
-/// opened is a discovery gap; true absence is not.
+/// Opening the `lock` marker of a DISCOVERED store is a discovery gap when the
+/// open fails with `NotFound`: the marker exists but cannot be followed (link
+/// metadata says so), or it vanished after discovery. On Unix an unlinked lock
+/// file can still be held through an open descriptor, so absence proves
+/// nothing. (Other open errors, such as `PermissionDenied`, are a probe error.)
 ///
-/// Mutant: mapping the open-time `NotFound` of an existing marker to Unlocked
-/// (the former open result) makes the dangling link report no gap.
+/// Mutant: mapping the open-time `NotFound` to Unlocked (the former result for
+/// a vanished marker) makes the second assertion fail; mapping it for an
+/// existing dangling marker makes the first one fail.
 #[cfg(unix)]
 #[test]
 fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
@@ -207,12 +216,123 @@ fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
         open_lock_is_discovery_gap(&store),
         "an existing but unopenable lock marker must be a discovery gap"
     );
-    let absent = temp.path().join("empty-store");
-    std::fs::create_dir_all(&absent).expect("store without a lock marker");
+    let vanished = temp.path().join("vanished-marker-store");
+    std::fs::create_dir_all(&vanished).expect("store whose lock marker vanished");
     assert!(
-        !open_lock_is_discovery_gap(&absent),
-        "a truly absent lock marker is not a discovery gap"
+        open_lock_is_discovery_gap(&vanished),
+        "a lock marker that vanished after discovery is UNKNOWN, never unlocked"
     );
+}
+
+/// Current-thread runtime with a PAUSED clock and ONE blocking worker: virtual
+/// time moves only through `advance`, so the completion stamp and the deadline
+/// are compared without any real-time race.
+fn paused_runtime_with_one_blocking_worker() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime")
+}
+
+/// Waits on the runtime thread (so no timer can fire meanwhile) until every
+/// blocking job queued before this call has finished: a sentinel queued behind
+/// them signals only after they ran.
+fn drain_blocking_worker() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the sentinel runs after the queued jobs on the one blocking worker");
+}
+
+/// A probe whose blocking job finishes AFTER the absolute deadline is not an
+/// in-budget observation, even when its result is already waiting at the next
+/// poll: `timeout_at` polls the receiver before its timer, so without the
+/// completion stamp the late result would win and a late empty held set would
+/// certify a release.
+///
+/// The job signals that it entered and is then held on a channel; the test waits
+/// for that signal, advances the virtual clock past the deadline, and only then
+/// releases and drains the job: the result and the expired timer are both ready
+/// at the poll that consumes the result (the probe is not polled during the
+/// sentinel wait).
+///
+/// Mutants: sending the bare value (no completion stamp) returns `Ok`; a stamp
+/// taken before the probe call on the worker is ordered before the clock jump by
+/// the entry signal, so it classifies the late job in time and returns `Ok`.
+#[test]
+fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
+    paused_runtime_with_one_blocking_worker().block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, move || {
+            let _ = entered_tx.send(());
+            // Parks until the sender is dropped (an `Err` also returns).
+            let _ = gate_rx.recv();
+            "late empty held set"
+        }));
+        // The first poll queues the job and waits on its receiver; the job cannot
+        // finish before it is released, so the poll is pending.
+        let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the probe must wait for its job");
+        entered_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the probe job must start before the clock moves");
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(gate_tx);
+        drain_blocking_worker();
+
+        let outcome = probe.await;
+
+        assert_eq!(
+            outcome,
+            Err(UnverifiedReason::PoolStarved),
+            "a result completed after the deadline must not be accepted as an observation"
+        );
+    });
+}
+
+/// The complement: a probe that finished BEFORE the deadline keeps its result
+/// even when the poll that consumes it comes after the deadline.
+///
+/// The job is held on a channel until the first poll returned pending, then
+/// released and drained while the virtual clock is still before the deadline;
+/// only then the clock passes the deadline and the probe is polled again.
+///
+/// Mutant: a stamp taken on the receiving side classifies by the time of the
+/// consuming poll and rejects this result as late.
+#[test]
+fn a_probe_finishing_before_the_deadline_is_an_observation_even_when_polled_late() {
+    paused_runtime_with_one_blocking_worker().block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, move || {
+            // Parks until the sender is dropped (an `Err` also returns).
+            let _ = gate_rx.recv();
+            "in-budget held set"
+        }));
+        let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the probe must wait for its job");
+
+        // The job runs and sends while the virtual clock is still before the deadline.
+        drop(gate_tx);
+        drain_blocking_worker();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let outcome = probe.await;
+
+        assert_eq!(
+            outcome,
+            Ok("in-budget held set"),
+            "a result completed in budget must survive a late poll"
+        );
+    });
 }
 
 /// A store whose `lock` entry cannot be opened is UNKNOWN state.
