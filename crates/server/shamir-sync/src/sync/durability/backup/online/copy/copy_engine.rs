@@ -5,8 +5,7 @@
 //! created atomically by the protocol (step A), never here.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
@@ -19,80 +18,26 @@ use super::manifest::{self, BACKUP_META_FILE_NAME};
 use super::progress::CancelFlag;
 use super::protocol::SealRecopyCap;
 use crate::sync::durability::audit_chain_files::{
-    audit_capture_is_stable, is_audit_log_file_name, list_audit_files,
-    remove_uncaptured_active_log, AUDIT_CAPTURE_ROUNDS,
+    audit_capture_is_stable, list_audit_files, AUDIT_CAPTURE_ROUNDS,
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
+use self::audit_rounds::{
+    active_log_reappearance_is_unsafe, destination_archive_names, unlisted_destination_audit_file,
+    UnlistedAudit, ACTIVE_REOPEN_ROUNDS,
+};
+use self::list_files::list_files;
+pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
+
+/// The pre-publication destination guard of the data-directory pass.
+#[path = "audit_rounds.rs"]
+mod audit_rounds;
+/// The deterministic listing of a pass (sibling file).
+#[path = "list_files.rs"]
+mod list_files;
+
 /// Fixed reused buffer for streaming copies and hashes.
 const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
-
-/// Bounded retry knobs for Windows sharing violations (os errors 32/33).
-#[derive(Debug, Clone)]
-pub struct CopyOptions {
-    pub share_retry_attempts: u32,
-    pub share_retry_delay_ms: u64,
-}
-
-impl Default for CopyOptions {
-    fn default() -> Self {
-        Self {
-            share_retry_attempts: 5,
-            share_retry_delay_ms: 100,
-        }
-    }
-}
-
-/// One file of the snapshot: forward-slash path relative to the snapshot
-/// root, lowercase-hex SHA-256, size in bytes.
-#[derive(Debug, Clone)]
-pub struct CopiedFile {
-    pub rel_path: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-/// What one copy pass defined. `files` IS the snapshot: only what the
-/// final hash pass hashed (design 4.2 step D — the manifest never
-/// describes a file set that no longer exists).
-#[derive(Debug, Default)]
-pub struct CopyPassResult {
-    pub files: Vec<CopiedFile>,
-    pub changed_files: u64,
-    pub missing_files: u64,
-}
-
-/// Copy failures. Sharing violations exhausted after the bounded retry
-/// surface as `Io` (source) or `Dest` (destination) carrying the
-/// original error; a tripped seal gate surfaces as typed `RecopyCap`
-/// (the protocol maps it to `OnlineBackupFailure::RecopyCap` at
-/// `Sealing`). The bounded audit chain rounds of the data-directory pass
-/// fail typed when an archive keeps appearing behind the copy.
-#[derive(Debug, thiserror::Error)]
-pub enum CopyError {
-    #[error("backup copy cancelled")]
-    Cancelled,
-    #[error("copy failed for {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    /// The DESTINATION side failed (create, write, fsync, parent
-    /// directory): kept distinct from [`CopyError::Io`] so a destination
-    /// error can never be mistaken for the tolerated vanished-SOURCE
-    /// race that `Io { NotFound }` encodes.
-    #[error("destination write failed for {path}: {source}")]
-    Dest {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("seal re-copy cap exceeded: {0}")]
-    RecopyCap(String),
-    #[error("audit chain files kept changing during the copy pass ({rounds} rounds)")]
-    AuditFilesUnstable { rounds: usize },
-}
 
 /// Cooperative seal-re-copy gate (design Q12): bounds ONE repo's seal
 /// re-copy (WAL dir + store dir) by wall-clock deadline and cumulative
@@ -211,7 +156,11 @@ impl SealGate {
 fn is_sharing_violation(error: &CopyError) -> bool {
     let source = match error {
         CopyError::Io { source, .. } | CopyError::Dest { source, .. } => source,
-        CopyError::Cancelled | CopyError::RecopyCap(_) | CopyError::AuditFilesUnstable { .. } => {
+        CopyError::Cancelled
+        | CopyError::RecopyCap(_)
+        | CopyError::AuditFilesUnstable { .. }
+        | CopyError::AuditListing { .. }
+        | CopyError::AuditArchiveLost => {
             return false;
         }
     };
@@ -233,7 +182,9 @@ fn gate_now() -> Instant {
 /// Every engine I/O failure is typed `CopyError::Io` naming the path it
 /// was operating on — never string-erased through `io::Error::other`.
 /// Destination-side writes use [`dest_at`] instead, so a destination
-/// failure is never read as a vanished source.
+/// failure is never read as a vanished source. The typed `Dest` variant is
+/// used for destination create/write/fsync failures; creating the snapshot
+/// child itself is separately typed by the protocol.
 fn io_at(path: &Path, error: std::io::Error) -> CopyError {
     CopyError::Io {
         path: path.to_path_buf(),
@@ -269,7 +220,7 @@ fn hex_encode(digest: &[u8]) -> String {
 /// protocol runs on the caller's thread, so the hooks observe exactly
 /// the copy/hash calls of the run under test.
 #[cfg(test)]
-#[path = "tests/copy_seams.rs"]
+#[path = "../tests/copy_seams.rs"]
 pub(crate) mod test_seams;
 
 /// Stream-hash a file, returning lowercase-hex SHA-256 and size.
@@ -407,137 +358,13 @@ fn copy_once(
 
 /// Fsync one destination directory; a failure is [`CopyError::Dest`] naming
 /// the DIRECTORY (a destination failure, never a source one) and always
-/// propagates — never swallowed. `manifest::fsync_dest_dir` documents the
-/// tolerated filesystem-capability kinds and is the seam's fallback result.
+/// propagates — never swallowed. [`manifest::fsync_dest_dir`] owns the ONE
+/// tolerated-filesystem-capability rule of the online copy AND the test seam
+/// that substitutes its result, so the copy passes and the two publications
+/// (`manifest::write_manifest`, `manifest::write_backup_meta`) can never
+/// disagree about which directory-fsync failures are tolerated.
 fn fsync_dir_fallible(dir: &Path) -> Result<(), CopyError> {
-    #[cfg(test)]
-    let result = match test_seams::fire_fsync_dir(dir) {
-        Some(injected) => manifest::tolerate_dir_sync_capability(injected),
-        None => manifest::fsync_dest_dir(dir),
-    };
-    #[cfg(not(test))]
-    let result = manifest::fsync_dest_dir(dir);
-    result.map_err(|error| dest_at(dir, error))
-}
-
-fn is_regular_file(meta: &fs::Metadata) -> bool {
-    meta.is_file()
-}
-
-/// File names skipped in every listing pass, on ALL OSes so the
-/// snapshot manifest does not differ across platforms. Both are runtime
-/// lock artifacts, not data (restore recreates them on first open):
-/// `lock` is fjall's active-store lock artifact — the live engine holds
-/// a range lock on it, so on Windows copying it can never succeed while
-/// the server is up; `.shamir.lock` is the data-dir maintenance lock
-/// (`maintenance_lock.rs`, `fs4` exclusive try-lock, PID inside) held
-/// for the whole life of the live server, so the same Windows
-/// sharing-violation applies and the file is process state, not data.
-const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
-
-/// Deterministic listing of every regular file under `source_root`
-/// (sorted per directory), skipping top-level directories named in
-/// `skip_top_level_dirs`, top-level files named in `skip_top_level_files`,
-/// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
-/// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
-/// Top-level audit chain files are skipped when `skip_audit_files` is set
-/// (phase 1 of [`run_data_dir_copy_pass`]). With a gate, cancel and the
-/// clock are checked at every directory iteration — the listing is inside
-/// the re-copy budget. Every directory-entry and metadata failure is a
-/// typed [`CopyError::Io`]; only an entry that vanished before its
-/// metadata read (`NotFound`) is skipped as the documented source race.
-fn list_files(
-    source_root: &Path,
-    skip_top_level_dirs: &[&str],
-    skip_top_level_files: &[&str],
-    cancel: &CancelFlag,
-    gate: Option<&SealGate>,
-    skip_audit_files: bool,
-) -> Result<Vec<PathBuf>, CopyError> {
-    let mut out = Vec::new();
-    let mut stack = vec![source_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if let Some(gate) = gate {
-            gate.check(cancel)?;
-        } else if cancel.is_cancelled() {
-            return Err(CopyError::Cancelled);
-        }
-        // EVERY directory-entry error is typed, naming the directory:
-        // a dropped entry would silently omit a file from the listing.
-        let mut entries: Vec<PathBuf> = Vec::new();
-        let read_dir = fs::read_dir(&dir).map_err(|error| CopyError::Io {
-            path: dir.clone(),
-            source: error,
-        })?;
-        for entry in read_dir {
-            match entry {
-                Ok(entry) => entries.push(entry.path()),
-                Err(error) => return Err(io_at(&dir, error)),
-            }
-        }
-        entries.sort();
-        for entry in entries {
-            if let Some(gate) = gate {
-                // Budget checked between individual directory entries.
-                gate.check(cancel)?;
-            } else if cancel.is_cancelled() {
-                return Err(CopyError::Cancelled);
-            }
-            // Test-only seam: an injected metadata RESULT for this entry
-            // REPLACES the result the listing consumes, so the injected
-            // failure travels the same match arm as a genuine one.
-            #[cfg(test)]
-            let meta_result = match test_seams::fire_symlink_metadata(&entry) {
-                Some(result) => result,
-                None => fs::symlink_metadata(&entry),
-            };
-            #[cfg(not(test))]
-            let meta_result = fs::symlink_metadata(&entry);
-            // Only an entry that VANISHED between the listing and this
-            // metadata read is tolerated; every other failure is typed.
-            let meta = match meta_result {
-                Ok(meta) => meta,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(io_at(&entry, error)),
-            };
-            if meta.is_dir() {
-                let at_top = entry.parent() == Some(source_root);
-                let name = entry
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if at_top && skip_top_level_dirs.contains(&name.as_str()) {
-                    continue;
-                }
-                stack.push(entry);
-            } else if is_regular_file(&meta) {
-                let Some(name) = entry.file_name() else {
-                    continue;
-                };
-                if SKIP_FILE_NAMES
-                    .iter()
-                    .any(|candidate| name == OsStr::new(candidate))
-                {
-                    continue;
-                }
-                if skip_audit_files && dir.as_path() == source_root && is_audit_log_file_name(name)
-                {
-                    continue;
-                }
-                if !skip_top_level_files.is_empty()
-                    && dir.as_path() == source_root
-                    && skip_top_level_files
-                        .iter()
-                        .any(|candidate| name == OsStr::new(candidate))
-                {
-                    continue;
-                }
-                out.push(entry);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
+    manifest::fsync_dest_dir(dir).map_err(|error| dest_at(dir, error))
 }
 
 /// One copy pass `source_root` -> `dest_root` (design 4.2 steps C/D/E):
@@ -546,7 +373,7 @@ fn list_files(
 /// snapshot. A source file changed between copy and hash is re-copied up
 /// to twice more; one still mismatching fails the pass. A source file
 /// deleted mid-copy is excluded from the result. Files named in
-/// [`SKIP_FILE_NAMES`] (`.shamir.lock`, `lock`) and files under any of
+/// [`list_files`]'s skip rules (`.shamir.lock`, `lock`) and files under any of
 /// `exclude_dirs` (absolute source paths) are left out entirely.
 pub fn run_copy_pass(
     source_root: &Path,
@@ -573,46 +400,57 @@ pub fn run_copy_pass(
 }
 
 /// Data-dir pass: everything outside `exclude_dirs`, skipping the private
-/// `cache` subtree and the manifest's own files, in TWO phases.
+/// `cache` subtree and manifest files, in TWO phases.
 ///
-/// Phase 1 captures every other file of the pass — including both audit
-/// anchor stores (`audit_checkpoint/`, `server_meta/`) — and leaves the
-/// audit chain files (the active `audit.log` and its rotation archives)
-/// out. Phase 2 begins only after phase 1 has finished, lists the audit
-/// chain files freshly and captures them, archives first and the active
-/// log last.
+/// Phase 1 captures every other pass file, including `audit_checkpoint/` and
+/// `server_meta/`, but not `audit.log` or its rotation archives. Phase 2 lists
+/// and captures the audit chain only after phase 1, archives in ascending name
+/// order before the active log. This ordering ensures anchors only name bytes
+/// already durable and present before phase 2's listing: checkpoint flushes
+/// before writing its row; rotation fsyncs, renames, reopens, dir-syncs, then
+/// persists both anchors. The log is append-only and rotation only adds an
+/// archive. Thus phase 2 sees bytes covered by captured anchors, including an
+/// archive created between phase 1 listing and anchor capture. A single early
+/// listing could miss that archive.
 ///
-/// That order is what makes the copy audit-consistent: an anchor can only
-/// name log positions that were already durable, and therefore already
-/// present in the audit files, before the audit listing of phase 2.
-/// `checkpoint_locked` flushes the log before it writes the
-/// `audit_checkpoint` row, and `rotate_locked` fsyncs, renames, reopens,
-/// dir-syncs and only then persists both anchors; the log is append-only
-/// and a rotation only ADDS an archive, never rewrites one. So every byte
-/// a captured anchor covers is in the files phase 2 lists — including a
-/// rotation that lands between phase 1's listing and its anchor capture,
-/// whose new archive phase 2 lists afterwards. A single pass that lists
-/// once cannot close that window: its listing predates the anchor capture,
-/// so a rotation in between hides the archive holding exactly the bytes
-/// the captured anchor names.
+/// Phase 2 re-lists after each capture and repeats if an archive appeared;
+/// each round recopies every listed file because rotation can move active-log
+/// bytes into a new archive. There are at most four unstable rounds plus three
+/// confirmed active-log reopen attempts: seven capture rounds per pass, a
+/// count bound, not a time bound. A stable round completes only if the
+/// destination has no unlisted audit file, except an eligible active-log-only
+/// leftover can trigger reopen. Exhausting unstable rounds fails with typed
+/// [`CopyError::AuditFilesUnstable`]. The manifest describes the accepted
+/// round; counters include work across all rounds, including retries.
+/// NOTHING is deleted from the destination. An uncaptured reserved audit file
+/// from an earlier round or pass yields typed, path-free
+/// [`CopyError::AuditArchiveLost`] before manifest write. An unlisted archive
+/// always refuses, even with an active-log leftover. That leftover is
+/// retryable only if the accepted round proves a new archive since the prior
+/// stable listing; same-name replacement alone is insufficient. A new archive
+/// name does not prove chain continuity. Phase-1 anchors may name those bytes,
+/// and inventory self-verification would also refuse. Cleanup only attempts
+/// to remove the whole run directory; removal can fail and leave it behind.
+/// A later eligible scheduler tick may start a fresh run; same-run retry is
+/// not guaranteed. A source vanishing during corrective re-copy or re-hash is
+/// MISSING for that round: rotation moved the active log to a new archive,
+/// which stability checking re-lists for the next round. Other passes still
+/// fail with typed I/O errors for vanished sources.
 ///
-/// Phase 2 re-lists the audit directory after each capture round and runs
-/// another round when the fresh listing names an archive the round did not
-/// copy; every round copies every listed file again (a rotation can move the
-/// active log's bytes into a new archive). A stable round, up to the
-/// [`AUDIT_CAPTURE_ROUNDS`]-th, ends the pass; no stable round within the
-/// bound fails it with a typed [`CopyError::AuditFilesUnstable`] — never a
-/// silently inconsistent copy. The manifest describes exactly the bytes of
-/// the last round, and an active log an earlier pass left in the destination
-/// that the last round did not capture is removed (the source has none while a
-/// rotation reopens it). A source file that vanishes during a corrective
-/// re-copy still fails the pass with its I/O error, as in every other pass.
+/// Retention may delete an archive between listing and copy; a vanished file
+/// is excluded like any deleted source. Retention never removes the newest
+/// archive, which alone can hold the tail of a just-persisted anchor. A needed
+/// prefix already gone before capture remains the documented limit; boot
+/// validates the saved anchor against the copied chain.
 ///
-/// Not covered, by design: retention may DELETE an archive between the
-/// listing and its copy — a vanished file is excluded exactly as any other
-/// deleted source file — and retention never removes the newest archive,
-/// the only one that can hold the tail an anchor persisted just before
-/// names.
+/// KNOWN LIMIT: live `server_meta` is copied file by file in phase 1, outside
+/// every seal, and is not a consistent-point snapshot. Hash, size, and
+/// inventory self-verification never opens the store, so a mixed image can
+/// pass: if flush switches `current` to `vN+1` after listing but before copying
+/// `current`, the new pointer and old version coexist without an extra file or
+/// hash mismatch, and the restored store cannot open its named version. The
+/// copier does not repair, validate, or delete this image; failure surfaces at
+/// boot. [`CopyError::AuditArchiveLost`] guards audit files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -632,8 +470,28 @@ pub(super) fn run_data_dir_copy_pass(
     };
     // Phase 1: every other file, both anchor stores included.
     let mut result = run_copy_pass_inner(source_root, dest_root, &rules)?;
-    // Phase 2: the audit chain files, listed only now.
-    for _ in 0..AUDIT_CAPTURE_ROUNDS {
+    // Phase 2: the audit chain files, listed only now. Two BOUNDED budgets
+    // drive the loop: unstable rounds (an archive keeps appearing) and the
+    // rotation window's reopen attempts (the active name is absent between the
+    // appender's rename and its immediate reopen).
+    let mut unstable_rounds = 0usize;
+    let mut reopen_attempts = 0usize;
+    // Preserve the pass-entry destination archive set: pass D may have copied
+    // archives that pass E's first stable round must compare against when
+    // proving a genuine rotation behind a stale destination active log.
+    let mut previous_stable_archives = Some(destination_archive_names(dest_root, cancel)?);
+    // Retain rotation evidence across the rename-to-reopen window: the archive
+    // may be observed in the stable round that still omits audit.log, while the
+    // active log reappears only in the following stable round.
+    let mut reopen_archive_evidence = false;
+    // Track the active-log presence of each stable source listing separately
+    // from the destination archive baseline: a same-name active file can
+    // reappear with replacement bytes and no archive evidence.
+    let mut previous_stable_active_present: Option<bool> = None;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
         let audit = run_copy_pass_inner(
             source_root,
             dest_root,
@@ -642,17 +500,89 @@ pub(super) fn run_data_dir_copy_pass(
                 ..rules
             },
         )?;
+        // The audit phase's counters include work from every capture round,
+        // including unstable rounds and rounds followed by a retry: a source
+        // that vanishes inside one round's corrective re-copy is counted
+        // missing in that round, even when a later accepted round defines the
+        // snapshot.
+        let round_archives: BTreeSet<String> = audit
+            .files
+            .iter()
+            .filter(|file| file.rel_path != "audit.log")
+            .map(|file| file.rel_path.clone())
+            .collect();
+        result.changed_files += audit.changed_files;
+        result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
-            remove_uncaptured_active_log(dest_root, &audit)?;
-            result.files.extend(audit.files);
-            result.changed_files += audit.changed_files;
-            result.missing_files += audit.missing_files;
-            return Ok(result);
+            let current_active_present =
+                audit.files.iter().any(|file| file.rel_path == "audit.log");
+            let saw_new_archive = previous_stable_archives.as_ref().is_some_and(|previous| {
+                round_archives
+                    .iter()
+                    .any(|archive| !previous.contains(archive))
+            });
+            if active_log_reappearance_is_unsafe(
+                previous_stable_active_present,
+                current_active_present,
+                reopen_archive_evidence,
+            ) {
+                if cancel.is_cancelled() {
+                    return Err(CopyError::Cancelled);
+                }
+                return Err(CopyError::AuditArchiveLost);
+            }
+            previous_stable_archives = Some(round_archives);
+            previous_stable_active_present = Some(current_active_present);
+            // Nothing is deleted from the destination: a reserved audit name
+            // this round did not capture — copied by pass D or by an earlier
+            // unstable round — refuses the pass before the manifest exists.
+            if cancel.is_cancelled() {
+                return Err(CopyError::Cancelled);
+            }
+            match unlisted_destination_audit_file(dest_root, &audit.files, cancel)? {
+                None => {
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
+                    }
+                    result.files.extend(audit.files);
+                    return Ok(result);
+                }
+                Some(UnlistedAudit::Archive) => {
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
+                    }
+                    return Err(CopyError::AuditArchiveLost);
+                }
+                Some(UnlistedAudit::ActiveLog) => {
+                    // Give the active name a bounded chance to reopen, even
+                    // without archive evidence. Evidence is accumulated only
+                    // from rounds in which the active name remains missing;
+                    // the transition guard rejects an unsupported reappearance.
+                    reopen_archive_evidence |= saw_new_archive;
+                    reopen_attempts += 1;
+                    if reopen_attempts > ACTIVE_REOPEN_ROUNDS {
+                        if cancel.is_cancelled() {
+                            return Err(CopyError::Cancelled);
+                        }
+                        return Err(CopyError::AuditArchiveLost);
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
+                    }
+                    continue;
+                }
+            }
+        }
+        unstable_rounds += 1;
+        if unstable_rounds >= AUDIT_CAPTURE_ROUNDS {
+            if cancel.is_cancelled() {
+                return Err(CopyError::Cancelled);
+            }
+            return Err(CopyError::AuditFilesUnstable {
+                rounds: AUDIT_CAPTURE_ROUNDS,
+            });
         }
     }
-    Err(CopyError::AuditFilesUnstable {
-        rounds: AUDIT_CAPTURE_ROUNDS,
-    })
 }
 
 /// How one pass treats the audit chain files of its source root.
@@ -949,36 +879,28 @@ fn run_copy_pass_inner(
             if pass_hash == copy_hash && pass_size == copy_size {
                 (pass_hash, pass_size)
             } else {
-                // Changed between copy and hash: re-copy, bounded (design
-                // 4.2 D).
+                // Corrective re-copy, bounded (design 4.2 D).
                 changed_files += 1;
-                let mut hash = pass_hash;
-                let mut size = pass_size;
-                for _ in 0..2 {
-                    let recopy = copy_with_retry(&source_path, &dest_path, cancel, options, gate)?;
-                    let rehash = match hash_file_inner(&source_path, cancel, gate) {
-                        Ok(result) => result,
-                        Err(CopyError::Io { source, .. })
-                            if source.kind() == std::io::ErrorKind::NotFound =>
-                        {
-                            return Err(CopyError::Io {
-                                path: source_path,
-                                source: std::io::Error::new(
-                                    std::io::ErrorKind::NotFound,
-                                    "source vanished during re-copy",
-                                ),
-                            });
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    let matches_copy = rehash.0 == recopy.0 && rehash.1 == recopy.1;
-                    hash = rehash.0;
-                    size = rehash.1;
-                    if matches_copy {
-                        break;
-                    }
-                }
-                (hash, size)
+                let recopied = recopy_until_stable(
+                    &source_path,
+                    &dest_path,
+                    cancel,
+                    options,
+                    gate,
+                    rules.audit_files == AuditFiles::Only,
+                    (pass_hash, pass_size),
+                )?;
+                let Some(settled) = recopied else {
+                    // The source vanished between its copy and this
+                    // corrective copy: in the audit chain phase that
+                    // rotation renamed the active log into a NEW archive,
+                    // which the pass's stability check re-lists and the
+                    // next round captures, so the file is MISSING from
+                    // this round, not a failure.
+                    missing_files += 1;
+                    continue;
+                };
+                settled
             }
         };
         #[cfg(test)]
@@ -994,4 +916,63 @@ fn run_copy_pass_inner(
         changed_files,
         missing_files,
     })
+}
+
+/// Bounded corrective re-copy of one file whose snapshot hash differed from
+/// the hash of its copy: copy it again and hash the source again, at most
+/// twice, accepting the copy once the two agree. Returns the LAST pair —
+/// exactly what the inline loop returned before, so a persistent mismatch
+/// still surfaces at the run's self-verification, never here.
+///
+/// `tolerate_vanished` is set ONLY for the audit chain phase
+/// (`AuditFiles::Only`): there a source that vanished before the corrective
+/// copy or its re-hash is the rotation that renamed the active log into a new
+/// archive, and `Ok(None)` reports it MISSING so the pass's stability check
+/// re-lists. Every other pass keeps the old behaviour: a vanished source
+/// fails the pass with its typed `NotFound`.
+fn recopy_until_stable(
+    source_path: &Path,
+    dest_path: &Path,
+    cancel: &CancelFlag,
+    options: &CopyOptions,
+    gate: Option<&SealGate>,
+    tolerate_vanished: bool,
+    mismatched: (String, u64),
+) -> Result<Option<(String, u64)>, CopyError> {
+    let mut hash = mismatched.0;
+    let mut size = mismatched.1;
+    for _ in 0..2 {
+        let recopy = match copy_with_retry(source_path, dest_path, cancel, options, gate) {
+            Ok(copy) => copy,
+            Err(CopyError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound && tolerate_vanished =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let rehash = match hash_file_inner(source_path, cancel, gate) {
+            Ok(result) => result,
+            Err(CopyError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                if tolerate_vanished {
+                    return Ok(None);
+                }
+                return Err(CopyError::Io {
+                    path: source_path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "source vanished during re-copy",
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let matches_copy = rehash.0 == recopy.0 && rehash.1 == recopy.1;
+        hash = rehash.0;
+        size = rehash.1;
+        if matches_copy {
+            break;
+        }
+    }
+    Ok(Some((hash, size)))
 }

@@ -198,7 +198,7 @@ pub fn write_backup_meta(dest_dir: &Path) -> std::io::Result<()> {
     tmp.sync_all()?;
     drop(tmp);
     fs::rename(&tmp_path, &target_path)?;
-    fsync_dir(dest_dir)
+    fsync_dest_dir(dest_dir)
 }
 
 /// Write an encoded manifest into the snapshot root atomically (tmp file,
@@ -220,40 +220,50 @@ pub fn write_manifest(dest_dir: &Path, encoded: &str) -> std::io::Result<()> {
     #[cfg(not(test))]
     let renamed = fs::rename(&tmp, &target);
     renamed?;
-    fsync_dir(dest_dir)
+    fsync_dest_dir(dest_dir)
 }
 
 #[cfg(unix)]
-fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+fn fsync_dir_raw(dir: &Path) -> std::io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
+/// Windows cannot open a directory handle for fsync, so this is a documented
+/// NO-OP — not a discarded error: there is no directory fsync to attempt, and
+/// the files published into `dir` were synced individually before their
+/// rename. Returning `Ok` here therefore states the platform's ceiling
+/// instead of swallowing a failure that "every other failure propagates"
+/// would promise to report.
 #[cfg(not(unix))]
-fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    if let Ok(file) = fs::File::open(dir.join(BACKUP_META_FILE_NAME)) {
-        let _ = file.sync_all();
-    }
+fn fsync_dir_raw(dir: &Path) -> std::io::Result<()> {
+    let _ = dir;
     Ok(())
 }
 
 /// Fsync a destination directory so the entries created inside it are
-/// durable across a crash. Two kinds stay tolerated by design:
-/// `Unsupported` (the platform cannot fsync a directory at all) and
-/// `InvalidInput` (some filesystems, e.g. network/FUSE mounts, reject an
-/// fsync of a directory handle): failing the backup for them would make
-/// it impossible on such a filesystem while the published bytes are as
-/// durable as that filesystem offers. Every other failure propagates to
-/// the caller, which types it as a destination failure naming the
-/// DIRECTORY it could not sync.
+/// durable across a crash. This is the ONE directory-fsync rule of the online
+/// copy: the copy passes (`copy_engine::fsync_dir_fallible`), [`write_manifest`]
+/// and [`write_backup_meta`] all go through it and through
+/// [`tolerate_dir_sync_capability`], so a filesystem that cannot fsync a
+/// directory can never pass the copy and then fail the publication. Two kinds
+/// stay tolerated by design: `Unsupported` (the platform cannot fsync a
+/// directory at all) and `InvalidInput` (some filesystems, e.g. network/FUSE
+/// mounts, reject an fsync of a directory handle): failing the backup for them
+/// would make it impossible on such a filesystem while the published bytes are
+/// as durable as that filesystem offers. Every other failure propagates to the
+/// caller, which types it as a destination failure naming the DIRECTORY it
+/// could not sync. Under `cfg(test)` the seam `test_seams::fire_fsync_dir`
+/// substitutes the result, and the substituted result is processed by
+/// [`tolerate_dir_sync_capability`] — the very same rule a genuine result
+/// takes.
 pub(crate) fn fsync_dest_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    let result = fs::File::open(dir).and_then(|file| file.sync_all());
-    #[cfg(not(unix))]
-    let result: std::io::Result<()> = {
-        // Windows cannot open a directory handle for fsync.
-        let _ = dir;
-        Ok(())
+    #[cfg(test)]
+    let result = match test_seams::fire_fsync_dir(dir) {
+        Some(injected) => injected,
+        None => fsync_dir_raw(dir),
     };
+    #[cfg(not(test))]
+    let result = fsync_dir_raw(dir);
     tolerate_dir_sync_capability(result)
 }
 
