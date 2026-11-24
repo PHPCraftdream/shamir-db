@@ -15,6 +15,8 @@
 mod harness;
 #[path = "core/output.rs"]
 mod output;
+#[path = "core/runtime.rs"]
+mod runtime;
 // `secure/` holds the transport-policy refusal scenarios; `#[path]` keeps
 // the Rust module tree (and every `super::` path inside the file) exactly
 // as before the move. The secure-listener fixture moved to the same folder
@@ -44,10 +46,18 @@ mod state_data_token_subset;
 mod access_activity_access;
 #[path = "access_activity/activity.rs"]
 mod access_activity_activity;
+#[path = "access_activity/manage_root_holder.rs"]
+mod access_activity_manage_root_holder;
 #[path = "access_activity/mutations.rs"]
 mod access_activity_mutations;
 #[path = "access_activity/rights_gaps.rs"]
 mod access_activity_rights_gaps;
+// R5 tail: a genuinely parked request cancelled through the real shell.
+// Same one-entry `#[path]` convention as the sibling access/activity files.
+#[path = "access_activity/parked_cancel.rs"]
+mod access_activity_parked_cancel;
+#[path = "access_activity/raw_scram.rs"]
+mod access_activity_raw_scram;
 #[path = "maintenance/backup.rs"]
 mod maintenance_backup;
 #[path = "maintenance/diag.rs"]

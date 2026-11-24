@@ -53,7 +53,7 @@
 //!    `store_id: None`. Three outcomes, in this order: (a) registration
 //!    unchanged — read normally (a legacy table with no store id is
 //!    readable: its cell exists, so it always pins); (b) registration
-//!    replaced, or no identity could be pinned for it — the typed
+//!    replaced (a different identity or `store_id`) — the typed
 //!    `access_denied` with the fixed [`changed_registration_response`]
 //!    text (never a payload, never an identity); (c) the NAME is gone with
 //!    no replacement — `unknown_table` ([`table_unavailable_response`]):
@@ -173,10 +173,10 @@ pub(super) fn table_unavailable_error() -> BatchError {
 }
 
 /// Fixed-text refusal for a table whose REGISTRATION is no longer the one the
-/// ACL approved, and for a registration that cannot be pinned at all. Same
-/// typed code the DATABASE-level ACL refusal uses (a TABLE-level ACL refusal
-/// is `unknown_table`, so this fixed post-auth race refusal keeps the
-/// distinct `access_denied`); the message never names the identity.
+/// ACL approved (a different identity or a different `store_id`). A missing
+/// registration is NOT this refusal: `table_registration` answers `None` only
+/// when the name is not configured, which is `unknown_table`. Same typed code
+/// the ACL refusals use; the message never names the identity.
 fn changed_registration_response() -> DbResponse {
     DbResponse::Error {
         code: "access_denied".to_string(),
@@ -361,7 +361,7 @@ impl ShamirDbHandler {
         // equal; the token is the catalogue cell this registration reserved
         // and is held until the response is built.
         let Some(authorized_registration) = repo.table_registration(table_name) else {
-            return changed_registration_response();
+            return table_unavailable_response();
         };
 
         // 3. Per-session in-flight slot (AFTER the availability decision,
@@ -403,6 +403,12 @@ impl ShamirDbHandler {
         //    paths, and the re-run only narrows the park→resolve window — it
         //    does NOT close a DDL racing between this re-check and the handle
         //    acquisition below. No new ACL seam may be invented here.
+        //
+        //    Like step 5 this re-probe is an OBSERVATION, not a lock:
+        //    absence HERE answers `unknown_table`, but a DROP→CREATE landing
+        //    after the comparison below, or a parent that vanishes and
+        //    returns before `final_lookup_error_response` re-probes, are
+        //    pre-existing windows, not new behaviour.
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await
         {
@@ -424,7 +430,7 @@ impl ShamirDbHandler {
             return table_unavailable_response();
         };
         let Some(current_registration) = repo.table_registration(table_name) else {
-            return changed_registration_response();
+            return table_unavailable_response();
         };
         if current_config.store_id != authorized_store_id
             || !authorized_registration.same_registration(&current_registration)

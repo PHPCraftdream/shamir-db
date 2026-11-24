@@ -31,6 +31,7 @@ use shamir_query_types::admin::activity::{
 };
 
 use shamir_connect::common::types::limits::USERNAME_MAX_BYTES;
+use shamir_connect::common::username::NormalizedUsername;
 
 use super::super::output::{self, ShellError};
 use crate::shell::connect::SessionClient;
@@ -312,7 +313,7 @@ fn project_session(row: &ActivityRow) -> Result<Value, ShellError> {
         } => Ok(json!({
             "kind": "session",
             "session_handle": session_handle.to_string(),
-            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
+            "user": output::sanitize(&user_field(user, MAX_USER_NAME_BYTES)),
             "transport": output::sanitize(&transport_field(transport)),
             "created_at_ns": created_at_ns.to_string(),
             "idle_ns": idle_ns.to_string(),
@@ -338,7 +339,7 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
             "kind": "request",
             "request_exec_id": request_exec_id.0.to_string(),
             "session_handle": (*session_handle).map(|handle| handle.to_string()),
-            "user": output::sanitize(&name_field(user, MAX_USER_NAME_BYTES)),
+            "user": output::sanitize(&user_field(user, MAX_USER_NAME_BYTES)),
             "db": output::sanitize(&name_field(db, MAX_DB_NAME_BYTES)),
             "op_kind": output::sanitize(&op_kind_field(op_kind)),
             "state": request_state_name(*state),
@@ -348,11 +349,13 @@ fn project_request(row: &ActivityRow) -> Result<Value, ShellError> {
     }
 }
 
-/// One free-text principal or database name, projected ONLY when it matches
-/// the engine's own component rule (`[A-Za-z0-9_-]`) and fits `cap` bytes;
-/// anything else becomes the fixed [`INVALID_FIELD`] placeholder. The charset
-/// is the engine's (`validate_name_component`), so a non-ASCII PRECIS login
-/// name the server accepts still renders as the placeholder.
+/// One database name, projected ONLY when it matches the engine's own
+/// component rule (`[A-Za-z0-9_-]`) and fits `cap` bytes; anything else
+/// becomes the fixed [`INVALID_FIELD`] placeholder. The charset is the
+/// engine's (`validate_name_component`), which is ASCII-only on purpose: a
+/// name outside that alphabet — including a non-ASCII login, which is not a
+/// database name — renders as the placeholder. Principal names do NOT use
+/// this rule; they go through [`user_field`].
 fn name_field(raw: &str, cap: usize) -> String {
     let allowed = !raw.is_empty()
         && raw.len() <= cap
@@ -364,6 +367,71 @@ fn name_field(raw: &str, cap: usize) -> String {
     } else {
         INVALID_FIELD.to_owned()
     }
+}
+
+/// The `shk1.` prefix of the shell's own API-token wire shape, mirrored from
+/// the credential check in `crate::shell::connect::token`
+/// (`check_catalogue_output`, whose comment names the canonical
+/// `shk1.<id>.<secret>` format that this shell refuses to echo). A `user`
+/// cell carrying that prefix ANYWHERE is redacted even though the login rule
+/// itself would accept the text: over-redacting a token-shaped name is the
+/// owner's accepted choice.
+const API_TOKEN_PREFIX: &str = "shk1.";
+
+/// One principal name, projected ONLY when the SERVER would accept it as a
+/// login: [`NormalizedUsername::from_raw`]
+/// (`crates/net/shamir-connect/src/common/user/username.rs`), the RFC 8265
+/// PRECIS `UsernameCaseMapped` validator, must return `Ok(normalized)` with
+/// `normalized.as_str() == raw` — the canonical wire text — and `raw` must
+/// fit `cap` bytes, carry no display control, and not be shaped like an API
+/// token ([`API_TOKEN_PREFIX`]). Anything else becomes the fixed
+/// [`INVALID_FIELD`] placeholder.
+///
+/// This delegates to the server's own validator and does NOT re-implement
+/// PRECIS: no width mapping, case mapping, NFC normalisation or Bidi rule
+/// lives here, so a name the server normalises away (decomposed NFC, a
+/// private-use code point, a soft hyphen, an uppercase letter) is rejected
+/// because it is not the text the server would store, and a name the server
+/// rejects is never admitted. The token check on top of the login rule is
+/// deliberate over-redaction. Terminal safety still comes from
+/// `output::sanitize` downstream, which escapes control, display-control and
+/// backslash characters.
+fn user_field(raw: &str, cap: usize) -> String {
+    let canonical =
+        NormalizedUsername::from_raw(raw).is_ok_and(|normalized| normalized.as_str() == raw);
+    // Belt and braces: the validator already rejects these, but the
+    // terminal-safety rule stays explicit here.
+    let display_safe = raw
+        .chars()
+        .all(|character| !character.is_control() && !is_display_control(character));
+    let allowed = canonical && raw.len() <= cap && display_safe && !raw.contains(API_TOKEN_PREFIX);
+    if allowed {
+        raw.to_owned()
+    } else {
+        INVALID_FIELD.to_owned()
+    }
+}
+
+/// The display-control characters `output::sanitize` escapes: the bidi
+/// controls U+061C, U+200E, U+200F, U+202A–202E and U+2066–2069, the
+/// zero-width/format characters U+200B–200D, U+2060–2064 and U+FEFF, and the
+/// line/paragraph separators U+2028 and U+2029.
+///
+/// A private mirror of `is_display_control` in `crate::shell::output`, which
+/// is private to that module (reaching it would mean widening its
+/// visibility); keep the two tables in sync.
+fn is_display_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200D}'
+            | '\u{200E}' | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{2028}' | '\u{2029}'
+            | '\u{FEFF}'
+    )
 }
 
 /// One free-text session transport, projected ONLY from the closed set the

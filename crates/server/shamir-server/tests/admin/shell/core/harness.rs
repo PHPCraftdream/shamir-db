@@ -13,7 +13,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use futures_util::future::BoxFuture;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -107,75 +106,7 @@ const FIXTURE_ARGON2_CONCURRENT_MAX: u32 = 64;
 
 // ── TestRuntime ──────────────────────────────────────────────────────
 
-/// One current-thread Tokio runtime on a roomy (64 MiB stack) std thread;
-/// jobs travel a BOUNDED channel and drop ends the pump loop.
-pub struct TestRuntime {
-    job_tx: Option<tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TestRuntime {
-    /// Spawn the runtime thread.
-    pub fn new() -> Self {
-        let (job_tx, mut job_rx) = tokio::sync::mpsc::channel::<BoxFuture<'static, ()>>(64);
-        let thread = std::thread::Builder::new()
-            .name("shell-test-runtime".into())
-            .stack_size(64 * 1024 * 1024)
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("test runtime");
-                runtime.block_on(async {
-                    while let Some(job) = job_rx.recv().await {
-                        tokio::spawn(job);
-                    }
-                });
-            })
-            .expect("spawn shell-test runtime thread");
-        Self {
-            job_tx: Some(job_tx),
-            thread: Some(thread),
-        }
-    }
-
-    /// The retained sender, retained until drop.
-    fn sender(&self) -> tokio::sync::mpsc::Sender<BoxFuture<'static, ()>> {
-        self.job_tx
-            .as_ref()
-            .expect("TestRuntime sender retained until drop")
-            .clone()
-    }
-
-    /// Drive `future` to completion on the runtime, blocking the caller.
-    pub fn run<F>(&self, future: F) -> F::Output
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<F::Output>();
-        self.sender()
-            .blocking_send(Box::pin(async move {
-                let value = future.await;
-                let _ = done_tx.send(value);
-            }))
-            .expect("runtime thread alive and accepting jobs");
-        done_rx
-            .blocking_recv()
-            .expect("runtime job completes and reports")
-    }
-}
-
-impl Drop for TestRuntime {
-    fn drop(&mut self) {
-        // Dropping the retained sender ends the recv loop; the runtime
-        // shuts down and the thread joins.
-        drop(self.job_tx.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
+pub use super::runtime::TestRuntime;
 
 // ── Canary secret ────────────────────────────────────────────────────
 
@@ -231,6 +162,16 @@ impl ShellFixture {
     pub fn pin_hex(&self) -> String {
         hex::encode(self.pin)
     }
+
+    pub fn shutdown_with_timeout(&mut self, timeout: Duration) {
+        if let Some(server) = self.server.take() {
+            self.rt.run(async move {
+                let _ = tokio::time::timeout(timeout, server.shutdown())
+                    .await
+                    .expect("server shutdown deadline");
+            });
+        }
+    }
 }
 
 impl Drop for ShellFixture {
@@ -250,27 +191,44 @@ impl Drop for ShellFixture {
 /// Boot the full fixture; the returned fixture owns everything and shuts
 /// down gracefully on drop.
 pub fn boot(name: &str) -> ShellFixture {
-    boot_with(name, false, Default::default(), |_| {}).0
+    boot_with(name, false, Default::default(), |_| {}, |_| None).0
 }
 
 /// Boot the same fixture on a READ-ONLY node (a follower).
 pub fn boot_follower(name: &str) -> ShellFixture {
-    boot_with(name, false, NodeMode::ReadOnly, |_| {}).0
+    boot_with(name, false, NodeMode::ReadOnly, |_| {}, |_| None).0
 }
 
 /// Extend the PR1 listener configuration and return the actual bind slots
 /// (in configuration order) and the generated public certificate path.
+///
+/// `seed_root_owner` runs on THIS thread after the empty-directory stamp
+/// and before the offline Root ACL write. It may mint principals in the
+/// user directory and return the principal64 that must own
+/// `ResourcePath::Root`: Root is not addressable by any wire ACL op, so a
+/// non-bootstrap owner has to be in place before the launcher takes the
+/// store lock.
 fn boot_with(
     name: &str,
     root_list: bool,
     node_mode: NodeMode,
     extend: impl FnOnce(&mut Config) + Send + 'static,
+    seed_root_owner: impl FnOnce(&Path) -> Option<u64> + Send + 'static,
 ) -> (ShellFixture, Vec<Option<SocketAddr>>, PathBuf) {
     let guard = FlakeGuard::with_watchdog(name, WATCHDOG_AFTER);
     let data_dir = TempDir::new().expect("fixture tempdir");
     if root_list {
+        guard.mark("seed: stamp empty data dir");
+        secure_fixture::stamp_data_dir(data_dir.path());
+    }
+    let root_owner = seed_root_owner(data_dir.path());
+    assert!(
+        root_owner.is_none() || root_list,
+        "a pre-launch Root owner needs the offline Root ACL seed"
+    );
+    if root_list {
         guard.mark("seed: offline Root List ACL");
-        secure_fixture::seed_root_list(data_dir.path());
+        secure_fixture::seed_root_acl(data_dir.path(), root_owner);
     }
     let rt = TestRuntime::new();
     let canary = unique_canary();
@@ -771,11 +729,16 @@ async fn seed_expect(
 /// validated via [`seed_expect`]; indexes carry an EXPLICIT
 /// `.repo(REPO_NAME)` (create_index defaults to repo `"main"`).
 pub fn seed_catalogue(fixture: &ShellFixture) {
+    seed_catalogue_timeout(fixture, BOOT_BOUND)
+}
+
+/// Seed the catalogue with a caller-provided hang bound.
+pub fn seed_catalogue_timeout(fixture: &ShellFixture, timeout: Duration) {
     fixture.guard.mark("seed: catalogue");
     let tls_addr = fixture.tls_addr;
     let pin = fixture.pin;
     let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
-    fixture.rt.run(bound(BOOT_BOUND, async move {
+    fixture.rt.run(bound(timeout, async move {
         let client = connect_tls_owned(tls_addr, pin, password)
             .await
             .expect("seed: fixture verified TLS connect");
@@ -903,18 +866,33 @@ fn echo_wasm_b64() -> String {
 /// yields canonical bytes equal to the real op's; the wire op carries the
 /// real session-keyed tag.
 pub fn seed_shell_user(fixture: &ShellFixture) -> Zeroizing<String> {
+    seed_shell_user_named_timeout(fixture, SHELL_USER, BOOT_BOUND)
+}
+
+/// Seed the standard shell user with a caller-provided hang bound.
+pub fn seed_shell_user_timeout(fixture: &ShellFixture, timeout: Duration) -> Zeroizing<String> {
+    seed_shell_user_named_timeout(fixture, SHELL_USER, timeout)
+}
+
+/// Seed a named no-role account with a caller-provided hang bound.
+pub fn seed_shell_user_named_timeout(
+    fixture: &ShellFixture,
+    username: &str,
+    timeout: Duration,
+) -> Zeroizing<String> {
     fixture.guard.mark("seed: shell user");
     let tls_addr = fixture.tls_addr;
     let pin = fixture.pin;
+    let username = username.to_owned();
     let admin_password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
     let user_password = Zeroizing::new(format!("{}u", unique_canary().as_str()));
-    fixture.rt.run(bound(BOOT_BOUND, async move {
+    fixture.rt.run(bound(timeout, async move {
         let client = connect_tls_owned(tls_addr, pin, admin_password)
             .await
             .expect("seed: fixture verified TLS connect (shell user)");
 
         let placeholder = "0".repeat(64);
-        let unsigned = ddl::create_user(SHELL_USER, user_password.as_str())
+        let unsigned = ddl::create_user(username.as_str(), user_password.as_str())
             .hmac(&placeholder)
             .build()
             .expect("typed create-user builder (placeholder tag)");
@@ -922,7 +900,7 @@ pub fn seed_shell_user(fixture: &ShellFixture) -> Zeroizing<String> {
         let canonical = canon::canonical_batch_op(ROUTING_DB, &unsigned)
             .expect("canonical form of the create-user op");
         let tag = canon::compute_tag_hex(&key, &canonical);
-        let op = ddl::create_user(SHELL_USER, user_password.as_str())
+        let op = ddl::create_user(username.as_str(), user_password.as_str())
             .hmac(&tag)
             .build()
             .expect("typed create-user builder");
@@ -935,7 +913,7 @@ pub fn seed_shell_user(fixture: &ShellFixture) -> Zeroizing<String> {
             "mkuser",
             b.build(),
             "created_user",
-            SHELL_USER,
+            username.as_str(),
         )
         .await;
 

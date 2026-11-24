@@ -9,7 +9,7 @@ use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 
 use super::harness::{
     overwrite_profile, run_shell, seed_catalogue, seed_shell_user, ShellFixture, DB_NAME,
-    SHELL_USER,
+    PLAIN_TABLE, SHELL_USER,
 };
 use super::secure_fixture::{
     boot_secure, provision_token, run_token_shell, run_with_secret, write_secure_profile,
@@ -307,6 +307,77 @@ fn rights_show_root_is_a_local_selector() {
     assert!(
         envelope["data"].is_null(),
         "a usage refusal must carry no data leaf"
+    );
+}
+
+/// The DOCUMENTED contract of `rights show root` (`07-operations.md`
+/// ~3306-3316; `commands/rights/access.rs:197-205`) pinned end to end: the
+/// request IS sent — exactly ONE downstream connection for the whole run,
+/// which the counting relay observes — and only the SELECTED node is
+/// projected, carrying the root's own server-side leaves plus `path` and
+/// never a seeded descendant.
+///
+/// Mutants caught: a local "optimisation" answering the root without the
+/// wire (relay count `0`) or with synthesized ACL data (missing server
+/// `owner`/`mode`), and a projection that walks descendants into the payload
+/// (`children`, or a seeded `DB_NAME`/`PLAIN_TABLE` name, appears).
+#[test]
+fn rights_show_root_sends_one_tree_fetch_and_projects_only_the_root() {
+    let secure = boot_secure("rights_show_root_sends_one_tree_fetch_and_projects_only_the_root");
+    let fixture = &secure.shell;
+    seed_catalogue(fixture);
+    seed_shell_user(fixture);
+    let relay = Relay::start(fixture, fixture.tls_addr);
+    let text = scram_profile(fixture, "tls-tcp", &relay.addr.to_string());
+    overwrite_profile(fixture, &text);
+
+    fixture
+        .guard
+        .mark("rights: show root through the counting relay");
+    let root = data(&run_shell(fixture, &["rights", "show", "root"]), "rights");
+
+    // (ii) Exactly the root's own leaves plus the normalized path — the
+    // field set alone rejects a subtree projection (`children` would be an
+    // extra key).
+    keys_exact(
+        &root,
+        &[
+            "path",
+            "name",
+            "kind",
+            "owner",
+            "owner_name",
+            "group",
+            "group_name",
+            "mode",
+            "setuid",
+        ],
+        "rights show root",
+    );
+    assert_eq!(root["path"], "/", "`root` must normalize to `/`");
+    assert_eq!(
+        root["kind"], "root",
+        "`rights show root` must select the root"
+    );
+    assert!(
+        leaf_u64(&root["owner"]).is_some(),
+        "the root `owner` must be the server's principal id, never synthesized"
+    );
+    assert_mode(&root["mode"], "rights show root");
+
+    let payload = root.to_string();
+    for descendant in [DB_NAME, PLAIN_TABLE] {
+        assert!(
+            !payload.contains(descendant),
+            "the root projection must not carry seeded descendant `{descendant}`"
+        );
+    }
+
+    // (i) The selector is local, but the TREE FETCH is real: one dial.
+    assert_eq!(
+        relay.finish(fixture),
+        1,
+        "`rights show root` must send exactly one AccessTree fetch"
     );
 }
 

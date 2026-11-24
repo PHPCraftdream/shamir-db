@@ -198,7 +198,9 @@ pub(super) fn insert_rows(fixture: &ShellFixture, rows: usize) -> Vec<String> {
             })
             .collect();
         assert_eq!(ids.len(), rows, "insert echoes one id per row");
-        client.close().await;
+        timeout(BOUND, client.close())
+            .await
+            .expect("seed close hang bound");
         ids
     })
 }
@@ -252,7 +254,9 @@ pub(super) fn insert_distinct_pair(fixture: &ShellFixture) -> (String, String) {
             })
             .collect();
         assert_eq!(ids.len(), 2, "insert echoes one id per inserted row");
-        client.close().await;
+        timeout(BOUND, client.close())
+            .await
+            .expect("distinct-pair close hang bound");
         let [first, second] = ids.as_slice() else {
             panic!("distinct-pair insert did not echo exactly two ids");
         };
@@ -303,7 +307,9 @@ pub(super) fn insert_doc(fixture: &ShellFixture, field: &str, value: &str) -> St
             .get_value_str("_id")
             .expect("server-minted `_id` on inserted row")
             .to_owned();
-        client.close().await;
+        timeout(BOUND, client.close())
+            .await
+            .expect("hostile-doc close hang bound");
         id
     })
 }

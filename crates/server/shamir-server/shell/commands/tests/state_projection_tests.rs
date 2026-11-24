@@ -16,7 +16,8 @@ use shamir_query_types::read::{PaginationInfo, QueryRecord, QueryResult, QuerySt
 use shamir_types::types::value::QueryValue;
 
 use super::super::state::{
-    head_error, head_tail, project_count, project_head, project_subscriptions,
+    head_error, head_tail, head_tail_with_now, is_optional_version, project_count, project_head,
+    project_subscriptions,
 };
 use crate::shell::output::ShellError;
 
@@ -161,27 +162,55 @@ fn head_tail_checks_the_deadline_after_the_credential_scan() {
     );
 }
 
-/// The oracle for the ORDERING: a deadline that expires DURING the
-/// synchronous credential scan must be the typed `head_wall_time` refusal.
-/// The old ordering (deadline consulted before the scan) returned the
-/// payload for this case, so this test fails against it — unlike the
-/// already-elapsed cases above, which both orderings refuse.
+/// The oracle for the ORDERING, driven by an INJECTED clock instead of a
+/// sleep. The clock is a `Cell` that only the SCAN flips: before the scan
+/// `now()` returns `t0` (live 10 ms budget), after it `t0 + 40ms` (past the
+/// budget), so a clean scan must still refuse with the typed
+/// `head_wall_time`. Kills two mutations: "post-scan check removed" — the
+/// refusal is gone and the payload comes back; and "check moved before the
+/// scan" — the only read happens pre-scan, sees a live budget, and the
+/// payload comes back. The negative control below (a scan that does NOT
+/// flip the cell must return the payload) keeps the seam honest, so the
+/// test cannot pass by refusing unconditionally.
 #[test]
-fn head_tail_deadline_crossed_by_the_credential_scan_is_head_wall_time() {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+fn head_tail_rechecks_the_deadline_after_the_scan() {
+    let t0 = tokio::time::Instant::now();
+    let deadline = t0 + Duration::from_millis(10);
     let payload = serde_json::json!({ "rows": [] });
-    // A real sleep, NOT synchronisation: it only has to guarantee that the
-    // deadline has PASSED when the scan returns, and it overshoots it by
-    // design (no upper-bound timing assumption is made).
-    let out = head_tail(deadline, Ok(payload), |_| {
-        std::thread::sleep(Duration::from_millis(40));
-        Ok(())
-    });
+    let expired = std::cell::Cell::new(false);
+    let now = || {
+        if expired.get() {
+            t0 + Duration::from_millis(40)
+        } else {
+            t0
+        }
+    };
+    let out = head_tail_with_now(
+        deadline,
+        Ok(payload.clone()),
+        |_| {
+            expired.set(true);
+            Ok(())
+        },
+        &now,
+    );
     assert_eq!(
         out,
         Err(ShellError::HeadWallTime),
         "an expiry crossed by the scan must beat a clean scan result"
     );
+    // Negative control: same seam, but the scan never flips the cell, so
+    // the budget stays live and the payload must come back.
+    let expired = std::cell::Cell::new(false);
+    let now = || {
+        if expired.get() {
+            t0 + Duration::from_millis(40)
+        } else {
+            t0
+        }
+    };
+    let out = head_tail_with_now(deadline, Ok(payload.clone()), |_| Ok(()), &now);
+    assert_eq!(out, Ok(payload), "a live budget must return the payload");
 }
 
 /// A deadline far in the future (deterministic seam) lets a normal small
@@ -387,13 +416,25 @@ fn subscriptions_render_a_present_but_empty_identity() {
 /// must keep it projectable and exact (no float, no wraparound).
 #[test]
 fn subscriptions_project_a_large_unsigned_identity_through_the_wire_codec() {
-    let mut recorded_identity = identity(lineage(16));
-    let QueryValue::Map(identity_fields) = &mut recorded_identity else {
+    // The SAME two calls the engine's `to_qv` runs
+    // (`execute/core/helpers.rs`): a REAL `RepoIdentity` named-msgpack
+    // encode, then a `QueryValue` decode. The epoch leaf is never
+    // hand-built: `u64::MAX` sits above `i64::MAX`, so the decode must
+    // promote it to `Big` instead of wrapping it to `Int(-1)`.
+    let real_identity = shamir_db::engine::meta::repo_identity::RepoIdentity {
+        lineage_id: [0x5A; 16],
+        history_epoch: u64::MAX,
+    };
+    let identity_bytes = rmp_serde::to_vec_named(&real_identity).expect("encode identity");
+    let recorded_identity: QueryValue =
+        rmp_serde::from_slice(&identity_bytes).expect("decode identity");
+    let QueryValue::Map(identity_fields) = &recorded_identity else {
         panic!("identity is a map");
     };
-    identity_fields.insert(
-        String::from("history_epoch"),
-        QueryValue::Big(BigInt::from(u64::MAX)),
+    assert_eq!(
+        identity_fields.get("history_epoch"),
+        Some(&QueryValue::Big(BigInt::from(u64::MAX))),
+        "the decoded epoch leaf must be Big, not a wrapped Int"
     );
     let result = subscriptions_result(recorded_identity);
 
@@ -461,5 +502,67 @@ fn subscriptions_refuse_an_impossible_lineage_byte_and_non_canonical_text() {
     assert_eq!(
         out["subscriptions"][0]["upstream_bookmark"].as_str(),
         Some("18446744073709551615")
+    );
+}
+
+/// A version / epoch / bookmark is a `u64`, so only the shapes the engine
+/// can emit are accepted: small non-negative values as `Int`, the
+/// in-process engine shape as a `Big` that fits in a `u64`, and canonical
+/// decimal text ONLY above `i64::MAX` (the encoder emits anything smaller
+/// as `Int`). `Str("7")` and a `Big` above `u64::MAX` are not that shape.
+#[test]
+fn optional_version_accepts_only_encoder_shapes() {
+    assert!(
+        is_optional_version(&QueryValue::Int(7)),
+        "the engine emits a small non-negative value as Int"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Int(-1)),
+        "a negative Int is not a u64 version"
+    );
+
+    assert!(
+        is_optional_version(&QueryValue::Big(BigInt::from(7))),
+        "a Big that fits in a u64 is the in-process shape"
+    );
+    assert!(
+        is_optional_version(&QueryValue::Big(BigInt::from(u64::MAX))),
+        "u64::MAX is the largest version"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Big(BigInt::from(u64::MAX) + BigInt::from(1))),
+        "a Big above u64::MAX can never be a version"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Big(BigInt::from(-1))),
+        "a negative Big is not a version"
+    );
+
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("7"))),
+        "the encoder emits a small u64 as Int, never as text"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("007"))),
+        "non-canonical decimal text is refused"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("-1"))),
+        "negative text is not a u64"
+    );
+
+    let above_i64 = (i64::MAX as u64 + 1).to_string();
+    assert!(
+        is_optional_version(&QueryValue::Str(above_i64)),
+        "the encoder emits a u64 above i64::MAX as canonical decimal text"
+    );
+    let max = u64::MAX.to_string();
+    assert!(
+        is_optional_version(&QueryValue::Str(max)),
+        "u64::MAX text is the largest wire encoding"
+    );
+    assert!(
+        !is_optional_version(&QueryValue::Str(String::from("18446744073709551616"))),
+        "text above u64::MAX is not a version"
     );
 }

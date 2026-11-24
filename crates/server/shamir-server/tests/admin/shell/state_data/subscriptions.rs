@@ -79,7 +79,11 @@ fn seed_subscription(fixture: &ShellFixture) {
                 "subscription seed op `{alias}` was skipped"
             );
         }
-        client.close().await;
+        // Bounded teardown: `close` awaits a write lock and the transport
+        // shutdown, so it carries the same hang bound as every other step.
+        timeout(BOUND, async move { client.close().await })
+            .await
+            .expect("subscription seed close hang bound");
     })
 }
 
