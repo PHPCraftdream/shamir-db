@@ -9,11 +9,13 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
 use super::super::failure_injection_tests::{run as run_online, write_file, InjectPort};
+use super::audit_fixtures;
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
 use crate::sync::durability::backup::online::copy_engine::{run_copy_pass, CopyError, CopyOptions};
 use crate::sync::durability::backup::online::manifest;
@@ -402,10 +404,15 @@ fn manifest_publication_failure_is_a_destination_error() {
     };
     assert_eq!(*stage, BackupStage::Verifying);
     assert_eq!(*cleanup, None, "the owned directory was removed normally");
-    let OnlineBackupFailure::Dest { source: io } = primary else {
-        panic!("the manifest publication failure must be a DESTINATION failure, got {primary:?}");
+    let OnlineBackupFailure::Publication { dir, source: io } = primary else {
+        panic!("the manifest publication failure must be a publication failure, got {primary:?}");
     };
     assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        dir.parent(),
+        Some(to.path()),
+        "the typed failure must name the snapshot directory it could not publish into"
+    );
     let rendered = error.stage_and_reason();
     assert_eq!(
         rendered, "verifying: destination-io-permission-denied",
@@ -569,4 +576,166 @@ fn stage_and_reason_is_stage_and_kind_without_paths() {
         stage_and_io_reason(BackupStage::Preparing, ErrorKind::PermissionDenied),
         "preparing: io-permission-denied"
     );
+}
+
+/// The publication's directory fsync obeys the SAME tolerance rule as the
+/// copy passes: an injected `Unsupported` on the snapshot root, armed only
+/// after the Verifying boundary (i.e. exactly at the two publications), is
+/// tolerated; an injected `PermissionDenied` at the same point is a typed
+/// destination failure.
+///
+/// The seam substitutes the fsync RESULT and `manifest::fsync_dest_dir` then
+/// runs it through `tolerate_dir_sync_capability`, the very rule a real
+/// result takes, so an injected result can never take a path the production
+/// code does not have.
+///
+/// Mutant caught: the parent's private, non-tolerant and UNSEAMED
+/// `fsync_dir` in `write_manifest` / `write_backup_meta`. On the parent
+/// commit the publication never consults the seam, so the tolerated phase
+/// observes zero firings and the strict phase returns `Ok` instead of the
+/// typed refusal.
+#[test]
+fn publication_directory_fsync_obeys_the_one_tolerance_rule() {
+    // Phase 1: a filesystem that cannot fsync a directory at all.
+    let source = TempDir::new().expect("source temp dir");
+    InjectPort::source_with_data(source.path());
+    let to = TempDir::new().expect("destination temp dir");
+    let armed = Arc::new(AtomicBool::new(false));
+    let fired = Arc::new(AtomicUsize::new(0));
+    let armed_for_boundary = armed.clone();
+    let boundary: SeamGuard =
+        test_seams::set_before_boundary(Box::new(move |stage: BackupStage| {
+            if stage == BackupStage::Verifying {
+                armed_for_boundary.store(true, Ordering::SeqCst);
+            }
+        }));
+    let armed_for_hook = armed.clone();
+    let fired_for_hook = fired.clone();
+    let snapshot_root = to.path().to_path_buf();
+    let fsync: SeamGuard = test_seams::set_fsync_dir(Box::new(move |path: &Path| {
+        if !armed_for_hook.load(Ordering::SeqCst) || path.parent() != Some(snapshot_root.as_path())
+        {
+            return None;
+        }
+        fired_for_hook.fetch_add(1, Ordering::SeqCst);
+        Some(Err(std::io::Error::from(ErrorKind::Unsupported)))
+    }));
+    let port = InjectPort::single_repo(source.path());
+    let (result, _progress) = run_online(&port, source.path(), to.path(), &CancelFlag::default());
+    drop(fsync);
+    drop(boundary);
+    let report = result.expect("an unsupported publication fsync must stay tolerated");
+    assert!(
+        report.dest_dir.join("manifest.json").is_file(),
+        "the tolerated fsync must not prevent publishing the manifest"
+    );
+    assert!(
+        fired.load(Ordering::SeqCst) >= 2,
+        "both publications must consult the one rule, observed {} firing(s)",
+        fired.load(Ordering::SeqCst)
+    );
+
+    // Phase 2: any other kind propagates as a destination failure.
+    let source = TempDir::new().expect("source temp dir");
+    InjectPort::source_with_data(source.path());
+    let to = TempDir::new().expect("destination temp dir");
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_boundary = armed.clone();
+    let boundary: SeamGuard =
+        test_seams::set_before_boundary(Box::new(move |stage: BackupStage| {
+            if stage == BackupStage::Verifying {
+                armed_for_boundary.store(true, Ordering::SeqCst);
+            }
+        }));
+    let armed_for_hook = armed.clone();
+    let snapshot_root = to.path().to_path_buf();
+    let fsync: SeamGuard = test_seams::set_fsync_dir(Box::new(move |path: &Path| {
+        if !armed_for_hook.load(Ordering::SeqCst) || path.parent() != Some(snapshot_root.as_path())
+        {
+            return None;
+        }
+        Some(Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "injected publication fsync failure",
+        )))
+    }));
+    let port = InjectPort::single_repo(source.path());
+    let (result, _progress) = run_online(&port, source.path(), to.path(), &CancelFlag::default());
+    drop(fsync);
+    drop(boundary);
+    let error = result.expect_err("a non-tolerated publication fsync must fail the run");
+    let OnlineBackupError::Failed { stage, source, .. } = &error else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Verifying);
+    let OnlineBackupFailure::Publication { dir, source: io } = source else {
+        panic!("the publication fsync failure must be a publication failure, got {source:?}");
+    };
+    assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        dir.parent(),
+        Some(to.path()),
+        "the typed failure must name the snapshot directory it could not publish into"
+    );
+    assert_eq!(
+        error.stage_and_reason(),
+        "verifying: destination-io-permission-denied",
+        "the scheduled reason must be the destination vocabulary token"
+    );
+    assert_eq!(
+        fs::read_dir(to.path()).expect("destination root").count(),
+        0,
+        "the failed run must remove its owned snapshot directory"
+    );
+    assert_eq!(port.pins_currently_held(), 0);
+    assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
+}
+
+/// A file that merely happens to be named `audit.log` under a WAL root is an ordinary WAL file: its metadata failure keeps the path-bearing `CopyError::Io`.
+///
+/// The audit classification is scoped to phase 1 of the DATA-directory pass (`skip_audit_files`). Every other listing — the WAL directory here — is an `AuditFiles::InOrder` pass whose root
+/// is not the audit root, so a reserved name in it is not an audit chain file and its unreadable metadata must name the path the operator has to fix.
+///
+/// Mutant caught: classifying by name at EVERY pass root (the ungated `dir == source_root && is_audit_log_file_name` condition) — the failure becomes the path-free `CopyError::AuditListing`
+/// and the typed `Io` naming the WAL file fails.
+#[test]
+fn a_wal_root_file_named_audit_log_stays_a_plain_io_refusal() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let wal_audit_log = source.join("repos/alpha.shamirwal/audit.log");
+    write_file(&wal_audit_log, b"not-an-audit-chain-file\n");
+    let failing = wal_audit_log.clone();
+    let seam = test_seams::set_symlink_metadata(Box::new(move |path: &Path| {
+        if path == failing {
+            Some(Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "listing denied",
+            )))
+        } else {
+            None
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    let error = result.expect_err("an unreadable WAL file must fail the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Copying);
+    let OnlineBackupFailure::Copy(CopyError::Io { path, source }) = primary else {
+        panic!("a WAL file named audit.log must stay a plain io failure, got {primary:?}");
+    };
+    assert_eq!(
+        path, &wal_audit_log,
+        "the ordinary listing failure must name the exact unreadable file"
+    );
+    assert_eq!(source.kind(), ErrorKind::PermissionDenied);
 }
