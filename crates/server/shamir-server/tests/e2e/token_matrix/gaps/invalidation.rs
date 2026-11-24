@@ -14,6 +14,7 @@ use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use shamir_query_types::wire::{ChangePasswordSecrets, DbRequest, DbResponse};
 use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use zeroize::Zeroizing;
 
@@ -177,13 +178,26 @@ async fn owner_role_change_over_wss_closes_token_session() {
     stop(harness).await;
 }
 
-async fn ping_status(harness: &Harness, tls: bool, token: &str) -> u16 {
+/// One REST ping, with a guard mark at each phase (connected, written, response
+/// read): a failing run then shows in which phase the time went, not only the
+/// status. Marks carry no token.
+async fn ping_status(harness: &Harness, tls: bool, token: &str, guard: &FlakeGuard) -> u16 {
     let head = format!(
         "GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
-    let (response, _) = tokio::time::timeout(DEADLINE, support::send_http(harness, tls, &head))
+    let mut stream = tokio::time::timeout(DEADLINE, support::connect(harness, tls))
         .await
-        .expect("REST request timed out");
+        .expect("REST connect timed out");
+    guard.mark("ping: connected");
+    tokio::time::timeout(DEADLINE, stream.write_all(head.as_bytes()))
+        .await
+        .expect("REST request write timed out")
+        .expect("REST request write");
+    guard.mark("ping: request written");
+    let (response, _) = tokio::time::timeout(DEADLINE, support::read_response(&mut stream))
+        .await
+        .expect("REST response timed out");
+    guard.mark("ping: response read");
     support::status(&response)
 }
 
@@ -201,9 +215,10 @@ async fn password_change_invalidation(tls: bool) {
         "127.0.0.1:0",
         shamir_server::config::HttpListenerSettings {
             tls: Some(tls),
-            // The subject here is the invalidation, not the HTTP deadline: a
-            // starved runner can run the server's connection task later than the
-            // 5 s default head deadline and get a 408 for a timely request.
+            // The subject here is the invalidation, not the HTTP deadline. A 408
+            // was seen on a loaded runner; a head timeout armed and then observed
+            // late is the leading but unproven explanation, so the head budget is
+            // not what this test measures.
             head_timeout_ms: Some(30_000),
             ..Default::default()
         },
@@ -273,7 +288,7 @@ async fn password_change_invalidation(tls: bool) {
     let ws_id = token_id(&ws_token);
     let mut ws = open_ws(&harness, tls, &ws_token).await;
     guard.mark("WS opened");
-    let status = ping_status(&harness, tls, &rest_token).await;
+    let status = ping_status(&harness, tls, &rest_token, &guard).await;
     guard.note("ping_before_change_status", status.to_string());
     assert_eq!(status, 200);
 
@@ -335,7 +350,7 @@ async fn password_change_invalidation(tls: bool) {
     assert!(matches!(changed, DbResponse::ChangePasswordOk));
     guard.mark("password changed");
 
-    let status = ping_status(&harness, tls, &rest_token).await;
+    let status = ping_status(&harness, tls, &rest_token, &guard).await;
     guard.note("ping_after_change_status", status.to_string());
     assert_eq!(status, 401);
     wait_for_close_4011(&mut ws, "password-change WebSocket close timed out").await;
