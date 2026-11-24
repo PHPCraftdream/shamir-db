@@ -195,6 +195,11 @@ fn corrupt_journal_record_during_open_rebuild_is_typed() {
                 let Err(error) = reopen(dir.path()).await else {
                     panic!("a corrupt journal record must prevent startup");
                 };
+                assert_eq!(
+                    error.code(),
+                    Some("schema_migration_durability_unavailable"),
+                    "unexpected startup error: {error:?}"
+                );
                 assert!(
                     matches!(&error, DbError::SchemaMigrationJournalUnreadable(text)
                         if text == "the schema migration journal could not be decoded on open"),
