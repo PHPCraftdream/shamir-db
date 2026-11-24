@@ -51,11 +51,13 @@
 //!    `store_id: None`. Three outcomes, in this order: (a) registration
 //!    unchanged — read normally (a legacy table with no store id is
 //!    readable: its cell exists, so it always pins); (b) registration
-//!    replaced, or no identity could be pinned for it — the typed
-//!    `access_denied` with the fixed [`changed_registration_response`]
-//!    text (never a payload, never an identity); (c) the NAME is gone with
-//!    no replacement — `unknown_table` ([`unknown_table_response`]):
-//!    absence is reported as absence.
+//!    replaced (a DIFFERENT identity, or a different `store_id`) — the
+//!    typed `access_denied` with the fixed
+//!    [`changed_registration_response`] text (never a payload, never an
+//!    identity); (c) the NAME is not configured with no replacement —
+//!    `unknown_table` ([`unknown_table_response`]): absence is reported
+//!    as absence, and `table_registration`'s `None` is exactly this case
+//!    (it inserts nothing, so it can never mean a changed registration).
 //!    Then acquire the table through `ShamirDb::get_table`, which
 //!    rechecks the repository quarantine at acquisition; the table's own
 //!    `get` rechecks its reopen fence. That last call is inside the
@@ -152,8 +154,10 @@ fn unknown_table_response() -> DbResponse {
 }
 
 /// Fixed-text refusal for a table whose REGISTRATION is no longer the one the
-/// ACL approved, and for a registration that cannot be pinned at all. Same
-/// typed code the ACL refusals use; the message never names the identity.
+/// ACL approved (a different identity or a different `store_id`). A missing
+/// registration is NOT this refusal: `table_registration` answers `None` only
+/// when the name is not configured, which is `unknown_table`. Same typed code
+/// the ACL refusals use; the message never names the identity.
 fn changed_registration_response() -> DbResponse {
     DbResponse::Error {
         code: "access_denied".to_string(),
@@ -298,7 +302,17 @@ impl ShamirDbHandler {
         //    refused here because the cold table resolver would insert a
         //    catalogue cell for it (see `unknown_table_response`). The
         //    captured `store_id` is the incarnation identity of the table the
-        //    ACL just approved — re-read after the parking point below.
+        //    ACL just approved — re-read after the parking point below. The
+        //    registration capture has the SAME meaning: `table_registration`
+        //    answers `None` exactly when the name is not configured (it
+        //    inserts no cell), so a missing token is `unknown_table`, not a
+        //    changed registration.
+        //
+        //    This is ONE observation: absence HERE answers `unknown_table`.
+        //    It does not pin the rest of the request — a DROP→CREATE after
+        //    the last comparison at step 7, or a parent that vanishes and
+        //    returns before `final_lookup_error_response` re-probes, are
+        //    pre-existing windows, not new behaviour.
         let repo = match resolve_repo(&self.db, db_name, repo_name) {
             Ok(repo) => repo,
             Err(parent) => return error_response(&parent),
@@ -310,13 +324,15 @@ impl ShamirDbHandler {
             return unknown_table_response();
         };
         let authorized_store_id = authorized_config.store_id;
-        // Fail closed: a registration that cannot be pinned is never read
-        // after a park. `store_id` alone is NOT an identity — a legacy table
-        // has `store_id: None`, so two distinct legacy registrations compare
+        // Fail closed: a table that is not configured is never read after a
+        // park. `store_id` alone is NOT an identity — a legacy table has
+        // `store_id: None`, so two distinct legacy registrations compare
         // equal; the token is the catalogue cell this registration reserved
-        // and is held until the response is built.
+        // and is held until the response is built. `None` here means exactly
+        // "not configured" (the accessor reserves no cell for such a name),
+        // so it is reported as absence.
         let Some(authorized_registration) = repo.table_registration(table_name) else {
-            return changed_registration_response();
+            return unknown_table_response();
         };
 
         // 6. Upfront RI-15 slice (both gates active only — see above),
@@ -330,6 +346,12 @@ impl ShamirDbHandler {
         //    paths, and the re-run only narrows the park→resolve window — it
         //    does NOT close a DDL racing between this re-check and the handle
         //    acquisition below. No new ACL seam may be invented here.
+        //
+        //    Like step 5 this re-probe is an OBSERVATION, not a lock:
+        //    absence HERE answers `unknown_table`, but a DROP→CREATE landing
+        //    after the comparison below, or a parent that vanishes and
+        //    returns before `final_lookup_error_response` re-probes, are
+        //    pre-existing windows, not new behaviour.
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, db_name, repo_name, table_name).await
         {
@@ -341,7 +363,10 @@ impl ShamirDbHandler {
         };
         // Absence is reported as absence: a table that disappeared with no
         // replacement stays `unknown_table`; only a replacement is the
-        // changed-registration refusal.
+        // changed-registration refusal. `table_registration` answering `None`
+        // is the same absence — `None` ⇔ the name is not configured at THIS
+        // single observation; it is not a guarantee the table stays absent
+        // after the last comparison.
         if !repo.has_table(table_name) {
             return unknown_table_response();
         }
@@ -349,7 +374,7 @@ impl ShamirDbHandler {
             return unknown_table_response();
         };
         let Some(current_registration) = repo.table_registration(table_name) else {
-            return changed_registration_response();
+            return unknown_table_response();
         };
         if current_config.store_id != authorized_store_id
             || !authorized_registration.same_registration(&current_registration)

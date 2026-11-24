@@ -33,14 +33,17 @@
 use serde_json::{json, Value};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{access_tree, list_users};
-use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::BatchResponse;
 use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_types::types::value::QueryValue;
 
+use self::mutate::Mutation;
 use super::super::output::{self, value, ShellError};
 use super::selector::{normalized_path, parse_selector, Selector, RESOURCE_KINDS};
 use crate::shell::connect::{request_error, SessionClient};
+
+#[path = "mutate.rs"]
+mod mutate;
 
 /// Response alias of the `user list` batch entry.
 const USER_ALIAS: &str = "users";
@@ -56,9 +59,6 @@ const MAX_NODE_LEVELS: usize = 8;
 /// show` projects ONE selected node and is therefore unaffected by a large
 /// catalogue.
 const MAX_NODES: usize = 2000;
-
-/// Longest accepted owner / group NAME token, in bytes.
-const MAX_PRINCIPAL_BYTES: usize = 256;
 
 /// R5 step 4 rights commands.
 #[derive(Debug, Clone)]
@@ -133,23 +133,13 @@ impl AccessCommand {
             | AccessCommand::GroupMembers => Ok(()),
             AccessCommand::RightsShow { path } => parse_selector(path).map(|_| ()),
             AccessCommand::Chmod { path, mode } => {
-                let selector = parse_selector(path)?;
-                mutation_resource(&selector)?;
-                parse_mode(mode).map(|_| ())
+                mutate::validate(&Mutation::Chmod { path, mode })
             }
             AccessCommand::Chown { path, owner } => {
-                let selector = parse_selector(path)?;
-                mutation_resource(&selector)?;
-                valid_principal(owner)
-                    .then_some(())
-                    .ok_or(ShellError::Usage)
+                mutate::validate(&Mutation::Chown { path, owner })
             }
             AccessCommand::Chgrp { path, group } => {
-                let selector = parse_selector(path)?;
-                mutation_resource(&selector)?;
-                valid_principal(group)
-                    .then_some(())
-                    .ok_or(ShellError::Usage)
+                mutate::validate(&Mutation::Chgrp { path, group })
             }
         }
     }
@@ -204,48 +194,13 @@ impl AccessCommand {
                 .await
             }
             AccessCommand::Chmod { path, mode } => {
-                async {
-                    let selector = parse_selector(path)?;
-                    let resource = mutation_resource(&selector)?;
-                    let mode = parse_mode(mode)?;
-                    client.chmod(db, resource, mode).await?;
-                    Ok(json!({
-                        "path": output::sanitize(&normalized_path(&selector)),
-                        "mode": format!("{mode:04o}"),
-                    }))
-                }
-                .await
+                async { mutate::execute(client, db, &Mutation::Chmod { path, mode }).await }.await
             }
             AccessCommand::Chown { path, owner } => {
-                async {
-                    let selector = parse_selector(path)?;
-                    let resource = mutation_resource(&selector)?;
-                    let users = run_users(client, db).await?;
-                    let owner_id = user_id(&users, owner)?;
-                    client.chown(db, resource, owner_id).await?;
-                    Ok(json!({
-                        "path": output::sanitize(&normalized_path(&selector)),
-                        "owner": output::sanitize(owner),
-                        "owner_id": owner_id.to_string(),
-                    }))
-                }
-                .await
+                async { mutate::execute(client, db, &Mutation::Chown { path, owner }).await }.await
             }
             AccessCommand::Chgrp { path, group } => {
-                async {
-                    let selector = parse_selector(path)?;
-                    let resource = mutation_resource(&selector)?;
-                    let result = run_tree(client, db, None).await?;
-                    let qv = tree_value(single_direct_value(&result)?)?;
-                    let group_id = group_id(qv, group)?;
-                    client.chgrp(db, resource, Some(group_id)).await?;
-                    Ok(json!({
-                        "path": output::sanitize(&normalized_path(&selector)),
-                        "group": output::sanitize(group),
-                        "group_id": group_id.to_string(),
-                    }))
-                }
-                .await
+                async { mutate::execute(client, db, &Mutation::Chgrp { path, group }).await }.await
             }
         };
         output::finish_command(started, payload, |payload| {
@@ -695,104 +650,6 @@ fn select_node<'a>(qv: &'a QueryValue, selector: &Selector) -> Result<&'a QueryV
             Ok(current)
         }
     }
-}
-
-/// The `ResourceRef` addressed by an already-parsed mutation selector. The
-/// root is the fixed `RootMutation` refusal; a function is `Function`; one,
-/// two or three segments are `Database`, `Store` and `Table`. Any other
-/// selector shape is the fixed `Usage` refusal.
-fn mutation_resource(selector: &Selector) -> Result<ResourceRef, ShellError> {
-    match selector {
-        Selector::Root => Err(ShellError::RootMutation),
-        Selector::Database(database) => Ok(ResourceRef::Database {
-            database: database.clone(),
-        }),
-        Selector::Function(function) => Ok(ResourceRef::Function {
-            function: function.clone(),
-        }),
-        Selector::Resource(segments) => match segments.as_slice() {
-            [database] => Ok(ResourceRef::Database {
-                database: database.clone(),
-            }),
-            [database, store] => Ok(ResourceRef::Store {
-                store: [database.clone(), store.clone()],
-            }),
-            [database, store, table] => Ok(ResourceRef::Table {
-                table: [database.clone(), store.clone(), table.clone()],
-            }),
-            _ => Err(ShellError::Usage),
-        },
-    }
-}
-
-/// Parse one `chmod` MODE strictly: one to four ASCII octal digits, value at
-/// most `0o7777`. Anything else is the fixed `InvalidMode` refusal.
-fn parse_mode(text: &str) -> Result<u16, ShellError> {
-    let digits = text.as_bytes();
-    if digits.is_empty() || digits.len() > 4 {
-        return Err(ShellError::InvalidMode);
-    }
-    if !digits.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
-        return Err(ShellError::InvalidMode);
-    }
-    let mode = u16::from_str_radix(text, 8).map_err(|_| ShellError::InvalidMode)?;
-    if mode > 0o7777 {
-        return Err(ShellError::InvalidMode);
-    }
-    Ok(mode)
-}
-
-/// Whether one owner / group NAME token is acceptable: non-empty, at most
-/// [`MAX_PRINCIPAL_BYTES`] bytes, and free of control bytes.
-fn valid_principal(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= MAX_PRINCIPAL_BYTES
-        && !text.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-}
-
-/// Resolve one exact principal NAME to its numeric `principal64` id from the
-/// `user list` result. An unknown name is `UnknownPrincipal`; a malformed
-/// result is the typed `Server` refusal.
-fn user_id(result: &QueryResult, name: &str) -> Result<u64, ShellError> {
-    let QueryValue::Map(fields) = single_direct_value(result)? else {
-        return Err(ShellError::Server);
-    };
-    if fields.len() != 1 {
-        return Err(ShellError::Server);
-    }
-    let QueryValue::List(entries) = fields.get("users").ok_or(ShellError::Server)? else {
-        return Err(ShellError::Server);
-    };
-    for entry in entries {
-        if raw_name(entry) != Some(name) {
-            continue;
-        }
-        return match field(entry, "principal64")? {
-            QueryValue::Int(id) if *id >= 0 => u64::try_from(*id).map_err(|_| ShellError::Server),
-            _ => Err(ShellError::Server),
-        };
-    }
-    Err(ShellError::UnknownPrincipal)
-}
-
-/// Resolve one exact group NAME to its numeric id from `principals.groups`
-/// of an access-tree result. An unknown name is `UnknownPrincipal`; a
-/// malformed result is the typed `Server` refusal.
-fn group_id(qv: &QueryValue, name: &str) -> Result<u64, ShellError> {
-    let (_, groups) = principal_lists(qv)?;
-    let QueryValue::List(entries) = groups else {
-        return Err(ShellError::Server);
-    };
-    for entry in entries {
-        if raw_name(entry) != Some(name) {
-            continue;
-        }
-        return match field(entry, "id")? {
-            QueryValue::Int(id) if *id >= 0 => u64::try_from(*id).map_err(|_| ShellError::Server),
-            _ => Err(ShellError::Server),
-        };
-    }
-    Err(ShellError::UnknownPrincipal)
 }
 
 /// Project the `rights show` result: the SELECTED node's own leaves (its

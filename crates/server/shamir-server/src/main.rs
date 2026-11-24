@@ -28,6 +28,9 @@ static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(AL
 mod bootstrap_cli_tests;
 #[path = "../../shamir-server-security/src/security/service/bootstrap_stdin.rs"]
 mod bootstrap_stdin;
+#[cfg(test)]
+#[path = "tests/security/cli_inline_subcommands.rs"]
+mod cli_inline_subcommands;
 #[path = "../shell/mod.rs"]
 mod shell;
 

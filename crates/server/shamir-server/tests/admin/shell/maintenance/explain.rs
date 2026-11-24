@@ -38,19 +38,22 @@
 //!   The flags those manuals advertise BEYOND their command line
 //!   (`--repo`, `--table`, `--schema-only`, `--as-db`,
 //!   `--max-backup-age-hours`) are declared only on those same structs and
-//!   are pinned the same way.
-//! * **source pin** — `backup-verify`, `backup`, `restore` and `doctor` are
-//!   declared INLINE in `src/main.rs` as `Subcmd` variants, not as reusable
-//!   `clap::Args` types, so no test can instantiate them. Their tokens are
-//!   pinned against the text of `src/main.rs` (read once): the `Subcmd`
-//!   variant that declares the subcommand and the field declaration that
-//!   makes clap derive each long flag (`--config`/`--from`/`--to`/`--db`/
-//!   `--repo`/`--table`/`--apply`/`--pretty`/`--json`). For those flags the
-//!   field declaration (`from: PathBuf`, `json: bool`) is the needle, since
-//!   the literal `--flag` text never appears in derive-based source.
-//!   `--max-backup-age-hours`, `--schema-only` and `--as-db` are NOT
-//!   declared in `src/main.rs` at all — they live on the `Args` structs
-//!   covered by the real-parser half, which is why they are pinned there.
+//!   are pinned the same way. The last three are NOT declared in
+//!   `src/main.rs` at all — they live on the `Args` structs covered by this
+//!   half, which is why they are pinned here rather than below.
+//! * **inline-variant pin** — `backup-verify`, `backup`, `restore` and
+//!   `doctor` are declared INLINE in `src/main.rs` as `Subcmd` variants,
+//!   and `Cli`/`Subcmd` are private to the binary, so no test in this
+//!   crate can even name them. That half of the pin therefore lives in the
+//!   binary's own unit test (`src/tests/cli_inline_subcommands.rs`, wired
+//!   into `main.rs` as a `#[path]` child): it parses each advertised token
+//!   list through `Cli::try_parse_from` and matches the resulting variant
+//!   and its fields, so the real parser — not the source text — decides.
+//!   The tokens it pins are exactly the lines below:
+//!   `backup-verify SNAPSHOT`, `backup --to DIR`, `restore --from SNAPSHOT`
+//!   and `doctor --db DB --repo REPO --table TABLE --apply --pretty --json`.
+//!   This file keeps asserting what remains truthful here without the
+//!   parser: the EXACT printed manual lines.
 
 // ── Fixtures (hard-coded goldens; see the module doc) ────────────────
 
@@ -166,13 +169,6 @@ fn collect_hashes(
     }
 }
 
-/// The server argument-parser source, read once: the inline `Subcmd`
-/// declarations of `backup-verify`, `backup`, `restore` and `doctor`.
-fn server_main_source() -> String {
-    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
-        .expect("read the server argument parser source")
-}
-
 // ── The real-parser wrappers (one real `clap::Args` struct each) ─────
 
 /// `logical-export`'s REAL argument struct, behind a one-field parser.
@@ -195,25 +191,6 @@ struct FormatMigrateParser {
     #[command(flatten)]
     args: shamir_server::migrate::FormatMigrateArgs,
 }
-
-/// Tokens printed by the four INLINE manuals and the `src/main.rs`
-/// declaration that makes them parse: the `Subcmd` variant for a
-/// subcommand, the field for a flag (clap derives the long form from it).
-const MAIN_PARSER_DECLARATIONS: &[(&str, &str)] = &[
-    ("backup-verify", "BackupVerify {"),
-    ("backup", "Backup {"),
-    ("restore", "Restore {"),
-    ("doctor", "Doctor {"),
-    ("--config", "config: PathBuf"),
-    ("--from", "from: PathBuf"),
-    ("--to", "to: PathBuf"),
-    ("--db", "db: Option<String>"),
-    ("--repo", "repo: Option<String>"),
-    ("--table", "table: Option<String>"),
-    ("--apply", "apply: bool"),
-    ("--pretty", "pretty: bool"),
-    ("--json", "json: bool"),
-];
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -365,10 +342,15 @@ fn explained_command_options_are_refused() {
 /// manuals advertise beyond their command line (declared only on those
 /// structs) are pinned by parsing them too.
 ///
-/// Source half: `backup-verify`, `backup`, `restore`, `doctor` and the
-/// `--config`/`--from`/`--to`/`--db`/`--repo`/`--table`/`--apply`/
-/// `--pretty`/`--json` flags are declared inline in `src/main.rs`, read
-/// once; each declaration the manual relies on must be present.
+/// Inline half: `backup-verify`, `backup`, `restore` and `doctor` are
+/// `Subcmd` variants declared inline in `src/main.rs`, and `Cli`/`Subcmd`
+/// are private to the binary — nothing in this crate can parse them. That
+/// half is pinned by the binary's own unit test
+/// (`src/tests/cli_inline_subcommands.rs`), which feeds each advertised
+/// token list to `Cli::try_parse_from` and matches the parsed variant and
+/// its fields. This test therefore asserts the real-parser half only; the
+/// four inline manuals keep their exact printed lines pinned by
+/// `explained_commands_print_the_documented_sections`.
 #[test]
 fn printed_flags_exist_in_the_server_argument_parser() {
     // Real-parser pin: the three manuals whose parser is an `Args` struct.
@@ -449,12 +431,20 @@ fn printed_flags_exist_in_the_server_argument_parser() {
     ])
     .expect("the flag `format-migrate` advertises must exist on its real args");
 
-    // Source pin: the inline `Subcmd` declarations, read once.
-    let source = server_main_source();
-    for &(token, declaration) in MAIN_PARSER_DECLARATIONS {
-        assert!(
-            source.contains(declaration),
-            "a manual prints `{token}` but `{declaration}` is absent from src/main.rs"
-        );
-    }
+    // Inline-half pointer: `backup-verify`, `backup`, `restore` and
+    // `doctor` are `Subcmd` variants declared in `src/main.rs`, and both
+    // `Cli` and `Subcmd` are private to the binary, so this crate cannot
+    // name them and no parse can happen here. Their half of the pin lives
+    // in the binary's own unit test, `src/tests/cli_inline_subcommands.rs`
+    // (a `#[path]` child of `main.rs`), which runs
+    // `Cli::try_parse_from` over each advertised token list — the exact
+    // `backup-verify SNAPSHOT`, `backup --to DIR`, `restore --from DIR` and
+    // `doctor --db/--repo/--table/--apply/--pretty/--json` lines printed
+    // above — and matches the resulting `Subcmd` fields. A source scan here
+    // could only match text: it passed on `// formerly to: PathBuf` in a
+    // renamed `Backup` variant, passed when `#[arg(long)]` was renamed to
+    // `#[arg(long = "database")]` (the field declaration survives), and
+    // broke on harmless formatting such as a trailing comment on `Doctor {`.
+    // The real parser is the oracle; the printed lines are pinned
+    // separately by `explained_commands_print_the_documented_sections`.
 }

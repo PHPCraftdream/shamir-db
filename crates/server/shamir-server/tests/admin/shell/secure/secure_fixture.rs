@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use shamir_db::access::{Actor, ResourceMeta, ResourcePath};
+use shamir_connect::common::kdf_params::KdfParams;
+use shamir_db::access::{principal64, Actor, ResourceMeta, ResourcePath};
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -15,6 +16,7 @@ use shamir_server::config::HttpListenerSettings;
 use shamir_server::config::ListenerConfig;
 use shamir_server::config::ListenerKind;
 use shamir_server::config::ProfileKind;
+use shamir_server::user_directory::{derive_scram_record, FjallUserDirectory};
 use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
@@ -27,6 +29,7 @@ use super::overwrite_profile;
 use super::profile_env;
 use super::profile_home_path;
 use super::server_command;
+use super::unique_canary;
 use super::ShellFixture;
 use super::ShellRun;
 use super::TestRuntime;
@@ -57,16 +60,50 @@ pub(in crate::shell_tests) fn data_dir(fixture: &ShellFixture) -> &std::path::Pa
 }
 
 pub(in crate::shell_tests) fn boot_secure(name: &str) -> SecureFixture {
-    boot_secure_with(name, false)
+    boot_secure_with(name, false, |_| None)
 }
 
 pub(in crate::shell_tests) fn boot_secure_root_list(name: &str) -> SecureFixture {
-    boot_secure_with(name, true)
+    boot_secure_with(name, true, |_| None)
 }
 
-fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
-    let (shell, bound_addrs, cert_path) =
-        boot_with(name, root_list, Default::default(), |config| {
+/// Boot with the two named principals minted OFFLINE into this fixture's
+/// private user directory, `owner` owning `ResourcePath::Root` (mode 0755).
+/// Returns the fixture plus each principal's per-run zeroizing secret.
+///
+/// The wire cannot seed any of this: `ResourceRef` has no `Root` variant, so
+/// `Manage(Root)` (ownership-only) is unreachable except through the offline
+/// seam — and the owner's `principal64` is minted by the directory, hence
+/// the principals have to be created before the Root ACL is written.
+pub(in crate::shell_tests) fn boot_secure_root_owner(
+    name: &str,
+    owner: &'static str,
+    other: &'static str,
+) -> (SecureFixture, Zeroizing<String>, Zeroizing<String>) {
+    let owner_secret = unique_canary();
+    let other_secret = unique_canary();
+    let owner_seed = owner_secret.clone();
+    let other_seed = other_secret.clone();
+    let secure = boot_secure_with(name, true, move |data_dir| {
+        Some(seed_probe_principals(
+            data_dir,
+            (owner, owner_seed.as_str()),
+            (other, other_seed.as_str()),
+        ))
+    });
+    (secure, owner_secret, other_secret)
+}
+
+fn boot_secure_with(
+    name: &str,
+    root_list: bool,
+    seed_root_owner: impl FnOnce(&Path) -> Option<u64> + Send + 'static,
+) -> SecureFixture {
+    let (shell, bound_addrs, cert_path) = boot_with(
+        name,
+        root_list,
+        Default::default(),
+        |config| {
             config.listeners.extend([
                 ListenerConfig {
                     kind: ListenerKind::Ws,
@@ -99,7 +136,9 @@ fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
                     http: Default::default(),
                 },
             ]);
-        });
+        },
+        seed_root_owner,
+    );
     let [.., Some(wss_addr), Some(http_addr), Some(decoy_wss_addr)] = bound_addrs.as_slice() else {
         panic!("secure fixture listeners did not bind");
     };
@@ -121,9 +160,11 @@ fn boot_secure_with(name: &str, root_list: bool) -> SecureFixture {
     }
 }
 
-/// Root cannot be addressed by wire ACL operations. Seed it before launch
-/// in this fixture's private directory, using the launcher's system path.
-pub(super) fn seed_root_list(data_dir: &Path) {
+/// Stamp the fixture directory while it is still EMPTY: the stamp has to be
+/// its first file, so this runs before any offline store is created. Split
+/// from [`seed_root_acl`] because the pre-launch hook mints the Root owner
+/// BETWEEN the two.
+pub(super) fn stamp_data_dir(data_dir: &Path) {
     check_data_dir(
         data_dir,
         StampMode::Writer,
@@ -131,6 +172,14 @@ pub(super) fn seed_root_list(data_dir: &Path) {
         &EpochPolicy::compiled(),
     )
     .expect("stamp empty Root List fixture directory");
+}
+
+/// Root cannot be addressed by wire ACL operations. Seed it before launch
+/// in this fixture's private directory, using the launcher's system path.
+/// `owner` replaces the shipped `Actor::System` owner with a
+/// directory-minted principal64 (the shipped owner stays for `None`); `mode`
+/// remains 0755 so non-owner `Execute` traversal still works.
+pub(super) fn seed_root_acl(data_dir: &Path, owner: Option<u64>) {
     let system_path = data_dir.join("shamir_db_meta.redb");
     // Join the offline runtime before starting the launcher.
     TestRuntime::new().run(bound(BOOT_BOUND, async move {
@@ -140,7 +189,7 @@ pub(super) fn seed_root_list(data_dir: &Path) {
         db.set_resource_meta(
             &ResourcePath::Root,
             &ResourceMeta {
-                owner: Actor::System,
+                owner: owner.map_or(Actor::System, Actor::User),
                 group: None,
                 mode: 0o755,
             },
@@ -149,6 +198,45 @@ pub(super) fn seed_root_list(data_dir: &Path) {
         .expect("seed Root List ACL");
         db.flush_all_waiting().await.expect("flush Root List ACL");
     }));
+}
+
+/// KDF cost of the offline-seeded probe principals: the spec floor, so the
+/// two Argon2id derivations stay cheap while remaining real SCRAM records.
+const PROBE_KDF: KdfParams = KdfParams {
+    memory_kb: 19_456,
+    time: 2,
+    parallelism: 1,
+    argon2_version: 0x13,
+};
+
+/// Mint `owner` and `other` OFFLINE into the fixture's private user
+/// directory and return `principal64` of the first (the Root owner) — Root
+/// stores `principal64(user_id)` as its owner, and the directory mints
+/// `user_id`, so the principal must exist before the Root ACL is written.
+/// Both records start with no roles and `superuser = false` (neither the
+/// wire nor this seam grants either).
+fn seed_probe_principals(data_dir: &Path, owner: (&str, &str), other: (&str, &str)) -> u64 {
+    let users_path = data_dir.join("users");
+    let owner = (owner.0.to_string(), owner.1.to_string());
+    let other = (other.0.to_string(), other.1.to_string());
+    TestRuntime::new().run(bound(BOOT_BOUND, async move {
+        let directory = FjallUserDirectory::open(&users_path).expect("open fixture user directory");
+        let mut owner_id = None;
+        for (name, password) in [owner, other] {
+            let record = derive_scram_record(password, PROBE_KDF)
+                .await
+                .expect("derive probe SCRAM record");
+            let user_id = directory
+                .insert_with_scope(name, record, None)
+                .expect("seed probe principal");
+            if owner_id.is_none() {
+                owner_id = Some(user_id);
+            }
+        }
+        // The launcher re-opens this store: release it before returning.
+        drop(directory);
+        principal64(owner_id.expect("the owner principal is seeded first"))
+    }))
 }
 
 #[derive(serde::Serialize)]
@@ -238,11 +326,20 @@ pub(in crate::shell_tests) fn set_acl_mode(
     resource: ResourceRef,
     mode: u16,
 ) {
+    set_acl_mode_timeout(fixture, resource, mode, BOOT_BOUND)
+}
+
+pub(in crate::shell_tests) fn set_acl_mode_timeout(
+    fixture: &ShellFixture,
+    resource: ResourceRef,
+    mode: u16,
+    timeout: std::time::Duration,
+) {
     fixture.guard.mark("seed: token catalogue ACL");
     let addr = fixture.tls_addr;
     let pin = fixture.pin;
     let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
-    fixture.rt.run(bound(BOOT_BOUND, async move {
+    fixture.rt.run(bound(timeout, async move {
         let client = connect_tls_owned(addr, pin, password)
             .await
             .expect("verified admin connection for ACL setup");
@@ -363,6 +460,49 @@ pub(in crate::shell_tests) fn run_secret_process(
     extra_env: &[(&'static str, String)],
     args: &[&str],
 ) -> ShellRun {
+    run_secret_process_timeout(
+        fixture,
+        secret,
+        token_auth,
+        current_dir,
+        extra_env,
+        args,
+        SHELL_BOUND,
+    )
+}
+
+/// Narrow timeout override for shell tests that share one absolute deadline.
+pub(in crate::shell_tests) fn run_secret_process_timeout(
+    fixture: &ShellFixture,
+    secret: Option<Zeroizing<String>>,
+    token_auth: bool,
+    current_dir: Option<&Path>,
+    extra_env: &[(&'static str, String)],
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> ShellRun {
+    run_secret_process_timeout_scanned(
+        fixture,
+        secret,
+        token_auth,
+        current_dir,
+        args,
+        timeout,
+        (extra_env, &[]),
+    )
+}
+
+/// Timeout-bounded shell process with caller-provided additional scan needles.
+pub(in crate::shell_tests) fn run_secret_process_timeout_scanned(
+    fixture: &ShellFixture,
+    secret: Option<Zeroizing<String>>,
+    token_auth: bool,
+    current_dir: Option<&Path>,
+    args: &[&str],
+    timeout: std::time::Duration,
+    checks: (&[(&'static str, String)], &[&str]),
+) -> ShellRun {
+    let (extra_env, scan_needles) = checks;
     fixture.guard.mark("shell: spawn");
     let (env_key, env_value) = profile_env(fixture);
     let mut argv: Vec<String> = vec!["shell".into(), "--profile".into(), PROFILE_NAME.into()];
@@ -389,6 +529,7 @@ pub(in crate::shell_tests) fn run_secret_process(
             secret.as_deref().is_some_and(|value| arg.contains(value))
                 || extra_env.iter().any(|(_, value)| arg.contains(value))
                 || arg.contains(fixture.canary.as_str())
+                || scan_needles.iter().any(|needle| arg.contains(needle))
         }),
         "fixture secret leaked into the assembled argv",
     );
@@ -398,52 +539,51 @@ pub(in crate::shell_tests) fn run_secret_process(
     let current_dir = current_dir.map(Path::to_path_buf);
     let extra_env = extra_env.to_vec();
 
-    let outcome = fixture.rt.run(bound(SHELL_BOUND, async move {
-        let mut command = server_command();
-        command
-            .args(&argv)
-            .env(env_key, env_value)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.env("HOME", &home_dir);
-        #[cfg(windows)]
-        command.env("USERPROFILE", &home_dir);
-        command.current_dir(&home_dir);
-        if let Some(dir) = &current_dir {
-            command.current_dir(dir);
-        }
-        for (key, value) in &extra_env {
-            command.env(key, value);
-        }
-        let mut child = command.spawn().expect("spawn shell child");
-        // stdin-only; close the pipe for EOF. An early-exit refusal closes
-        // the pipe first, so only `BrokenPipe` is tolerated downstream.
-        if let Some(mut stdin) = child.stdin.take() {
-            match &secret {
-                Some(secret) => {
-                    write_secret_stdin(&mut stdin, secret.as_bytes()).await;
-                }
-                None => {
-                    // No secret on stdin: close the pipe so an empty read
-                    // is EOF, not a hang. Early-exit refusals tolerate the
-                    // resulting `BrokenPipe` exactly as above.
-                    drop(stdin);
+    let outcome = fixture.rt.run(async move {
+        tokio::time::timeout(timeout, async move {
+            let mut command = server_command();
+            command
+                .args(&argv)
+                .env(env_key, env_value)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            command.env("HOME", &home_dir);
+            #[cfg(windows)]
+            command.env("USERPROFILE", &home_dir);
+            command.current_dir(&home_dir);
+            if let Some(dir) = &current_dir {
+                command.current_dir(dir);
+            }
+            for (key, value) in &extra_env {
+                command.env(key, value);
+            }
+            let mut child = command.spawn().expect("spawn shell child");
+            // stdin-only; close the pipe for EOF. An early-exit refusal closes
+            // the pipe first, so only `BrokenPipe` is tolerated downstream.
+            if let Some(mut stdin) = child.stdin.take() {
+                match &secret {
+                    Some(secret) => {
+                        write_secret_stdin(&mut stdin, secret.as_bytes()).await;
+                    }
+                    None => drop(stdin),
                 }
             }
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .expect("shell child waits with output");
-        (
-            output.status.code().unwrap_or(-1),
-            output.stdout,
-            output.stderr,
-        )
-    }));
+            let output = child
+                .wait_with_output()
+                .await
+                .expect("shell child waits with output");
+            (
+                output.status.code().unwrap_or(-1),
+                output.stdout,
+                output.stderr,
+            )
+        })
+        .await
+        .expect("shell child exceeded its deadline")
+    });
     fixture.guard.note("shell exit", outcome.0.to_string());
     ShellRun {
         exit_code: outcome.0,

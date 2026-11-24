@@ -5,7 +5,9 @@
 //! → typed `not_found`, ACL denial BEFORE any table lookup (Database
 //! Read denied; Database-allowed-but-Table-Read denied), the repository
 //! read-quarantine (`resync_required`, same fixture as
-//! `cursor_quarantine_tests`), cursor-registry isolation (a `data get`
+//! `cursor_quarantine_tests`, where the LATE-quarantine-while-parked case
+//! lives — the acquisition-time gate is the only one that can refuse it
+//! there), cursor-registry isolation (a `data get`
 //! creates and consumes no cursor — with a positive control), the
 //! `max_result_size_bytes` rejection, the per-session in-flight slot
 //! positive control (store-minted handle), the fixed 16-byte wire key
@@ -47,6 +49,7 @@ use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 
 use shamir_types::types::record_id::RecordId;
 
+use crate::byte_budget::ByteBudget;
 use crate::db_handler::config::{CursorLimitsCap, QueryLimitsCap};
 use crate::db_handler::handler::ShamirDbHandler;
 
@@ -109,18 +112,31 @@ fn superuser_alice_session() -> Session {
 /// non-replicated-repo assertions. The enforced 0o700 default keeps
 /// bob out of everything until a test chmod's levels open.
 async fn build_handler(query_limits: QueryLimitsCap) -> ShamirDbHandler {
-    let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal64([0xAB; 16]));
-    shamir
-        .create_db_as("app", owner.clone())
+    build_handler_with_budget(ByteBudget::unbounded(), query_limits).await
+}
+
+/// Same fixture with an EXPLICIT byte budget: the park test hands in the
+/// budget it holds for the whole parked window, so the point read's upfront
+/// reservation (step 6 of `get_record`) cannot fit and the read parks.
+async fn build_handler_with_budget(
+    byte_budget: ByteBudget,
+    query_limits: QueryLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
         .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
         .expect("create_db");
     for repo in ["main", "side"] {
         let cfg =
             RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
-        shamir
-            .add_repo_as("app", cfg, owner.clone())
+        tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner.clone()))
             .await
+            .expect("add repo must complete within the 120s bound")
             .expect("add repo");
     }
 
@@ -130,14 +146,15 @@ async fn build_handler(query_limits: QueryLimitsCap) -> ShamirDbHandler {
         "seed_k000",
         insert("items").row(doc! { "id" => "k000", "v" => 0_i64 }),
     );
-    shamir
-        .execute_as(owner, "app", &b.build())
+    tokio::time::timeout(CALL_TIMEOUT, shamir.execute_as(owner, "app", &b.build()))
         .await
+        .expect("seed row must complete within the 120s bound")
         .expect("seed row");
 
     ShamirDbHandler::new(Arc::new(shamir))
         .with_cursor_limits(CursorLimitsCap::UNLIMITED)
         .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
 }
 
 /// Send a wire request through the REAL `RequestHandler::handle`,
@@ -170,11 +187,13 @@ async fn insert_row_and_get_storage_id(handler: &ShamirDbHandler, payload_id: &s
         "row",
         insert("items").row(doc! { "id" => payload_id, "v" => 1_i64 }),
     );
-    let response = handler
-        .db()
-        .execute_as(Actor::System, "app", &b.build())
-        .await
-        .expect("engine insert must succeed");
+    let response = tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler.db().execute_as(Actor::System, "app", &b.build()),
+    )
+    .await
+    .expect("engine insert must complete within the 120s bound")
+    .expect("engine insert must succeed");
     let result = response.results.get("row").expect("insert alias returned");
     match result.records.first() {
         Some(QueryRecord::Inserted(record)) => {
@@ -237,11 +256,15 @@ async fn open_all_levels(handler: &ShamirDbHandler, mode: u16) {
         .build()
         .expect("build chmod table"),
     );
-    handler
-        .db()
-        .execute_as(Actor::System, "app", &batch.build())
-        .await
-        .expect("admin chmod must succeed");
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("admin chmod must complete within the 120s bound")
+    .expect("admin chmod must succeed");
 }
 
 /// Open ONLY the database and store ancestors to `mode`, leaving the
@@ -273,11 +296,15 @@ async fn open_db_and_store_only(handler: &ShamirDbHandler, mode: u16) {
         .build()
         .expect("build chmod store"),
     );
-    handler
-        .db()
-        .execute_as(Actor::System, "app", &batch.build())
-        .await
-        .expect("admin chmod must succeed");
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("admin chmod must complete within the 120s bound")
+    .expect("admin chmod must succeed");
 }
 
 /// Same persisted quarantine fixture as `cursor_quarantine_tests`:
@@ -297,16 +324,20 @@ async fn quarantine(handler: &ShamirDbHandler, sub: &str, profile: &str, repo: &
         ),
     );
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
-    handler
-        .db()
-        .execute_as(Actor::System, "app", &b.build())
-        .await
-        .expect("admin replication batch must succeed");
-    handler
-        .db()
-        .mark_subscription_resync_required(sub, 7, 3)
-        .await
-        .expect("mark resync_required must succeed");
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler.db().execute_as(Actor::System, "app", &b.build()),
+    )
+    .await
+    .expect("admin replication batch must complete within the 120s bound")
+    .expect("admin replication batch must succeed");
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler.db().mark_subscription_resync_required(sub, 7, 3),
+    )
+    .await
+    .expect("mark resync_required must complete within the 120s bound")
+    .expect("mark resync_required must succeed");
 }
 
 // ---------------------------------------------------------------------------
