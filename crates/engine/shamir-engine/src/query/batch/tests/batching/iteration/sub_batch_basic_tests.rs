@@ -17,6 +17,7 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::batch::batch_execute::TEST_FAIL_SYNCED_FLUSH_DB;
 use crate::query::batch::execute_in_open_tx_unchecked as execute_in_open_tx;
 use crate::query::batch::open_interactive_tx;
 use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchResolver, TableResolver};
@@ -142,11 +143,8 @@ pub(super) async fn setup_with_scalars() -> TestResolverWithScalars {
         scalars: resolver_with_user_scalar(),
     }
 }
-// ============================================================================
-// Test 1: sub_batch_runs_and_outer_reads_result
-//
-// Outer: a sub-batch inserts a row; an outer read sees it via $query @sub.
-// ============================================================================
+// A committed transactional child whose post-commit synced flush fails keeps
+// its committed disposition and carries the flush error in the nested receipt.
 #[tokio::test]
 async fn transactional_child_sync_warning_is_in_nested_receipt() {
     let factory = BoxRepoFactory::in_memory();
@@ -164,10 +162,20 @@ async fn transactional_child_sync_warning_is_in_nested_receipt() {
     let mut outer = Batch::new();
     outer.sub_batch_no_bind("child", child.build());
 
-    repo.repo_wal().await.unwrap().arm_fail_next_sync_for_test();
-    let response = execute_batch(&outer.build(), &resolver, None, None, Actor::System, "test")
-        .await
+    // Keyed by a database name no other test uses, so no other test can hit it.
+    TEST_FAIL_SYNCED_FLUSH_DB
+        .set("child_flush_fault_db".to_owned())
         .unwrap();
+    let response = execute_batch(
+        &outer.build(),
+        &resolver,
+        None,
+        None,
+        Actor::System,
+        "child_flush_fault_db",
+    )
+    .await
+    .unwrap();
     let child_result = &response.results["child"];
     assert!(child_result.receipt.is_none());
     let inner = child_result.value.as_ref().unwrap();
@@ -181,12 +189,19 @@ async fn transactional_child_sync_warning_is_in_nested_receipt() {
             .unwrap()
             > 0
     );
-    assert!(matches!(
-        &inner["written"]["receipt"]["error"],
-        QueryValue::Str(error) if !error.is_empty()
-    ));
+    assert_eq!(
+        inner["written"]["receipt"]["error"],
+        QueryValue::Str(
+            "Query '' failed: synced flush child_flush_fault_db: injected failure".into()
+        )
+    );
 }
 
+// ============================================================================
+// Test 1: sub_batch_runs_and_outer_reads_result
+//
+// Outer: a sub-batch inserts a row; an outer read sees it via $query @sub.
+// ============================================================================
 #[tokio::test]
 async fn sub_batch_runs_and_outer_reads_result() {
     let resolver = setup().await;

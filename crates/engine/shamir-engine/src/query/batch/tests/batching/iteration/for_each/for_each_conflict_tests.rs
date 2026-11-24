@@ -5,7 +5,9 @@ use shamir_query_types::batch::{BatchError, BatchRequest, ForEachOp};
 use shamir_query_types::filter::FilterValue;
 use shamir_types::access::Actor;
 
-use super::super::support::{insert_order_body, wrap_for_each, TxTestResolver};
+#[cfg(feature = "fjall")]
+use super::super::support::insert_order_body;
+use super::super::support::{wrap_for_each, TxTestResolver};
 use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;

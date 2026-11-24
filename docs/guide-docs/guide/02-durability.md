@@ -153,19 +153,27 @@ commit-time классификации: `tx_conflict`, `unique_violation`,
 явно по `status`
 (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`):
 
-* `aborted` — итерация падает с кодом из `abort_code` (или
-  `transaction_aborted`, если кода нет): коммита не было, поэтому пустой
-  результат не выдаётся за вычисленное значение
-  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:493-501`);
-* `indeterminate` — итерация падает с кодом `wal_requires_reopen` и текстом
-  из `reason`/`error`: коммит МОГ пройти (WAL-кадр, возможно, записан), поэтому
-  цикл останавливается — иначе результирующий список имел бы неизвестный
-  префикс. Клиент обязан сначала согласовать исход (reopen и WAL replay), а не
-  повторять слепо (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:515-523`);
-* `committed` — результаты итерации добавляются в список
-  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:526`);
+* `aborted` на первой итерации — итерация падает с кодом из `abort_code`
+  (или `transaction_aborted`, если кода нет): коммита не было, поэтому пустой
+  результат не выдаётся за вычисленное значение. После уже закоммиченного
+  префикса запрос получает НЕ повторяемый `tx_conflict`, а
+  `transaction_aborted`: код причины остаётся в тексте
+  (`abort code tx_conflict`) вместе с числом закоммиченных итераций, потому что
+  повтор внешнего батча повторил бы закоммиченный префикс
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:509-538`);
+* `indeterminate` — итерация падает с кодом `wal_requires_reopen`: коммит МОГ
+  пройти (WAL-кадр, возможно, записан), поэтому цикл останавливается — иначе
+  результирующий список имел бы неизвестный префикс. Если известна
+  предпринятая версия коммита, ошибка типизирована (`WalOutcomeUnknown`, версия
+  в тексте); без версии текст берётся из `reason`/`error`. Клиент обязан сначала
+  согласовать исход (reopen и WAL replay), а не повторять слепо
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:552-566`);
+* `committed` — результаты итерации добавляются в список; если же обязательный
+  синхронный flush после коммита не удался, цикл останавливается с кодом
+  `wal_durability` (коммит состоялся, код не похож на отмену)
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:567-580`);
 * любой другой статус — отказ с фиксированным кодом `internal`
-  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:529-538`).
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:581-592`).
 
 Уже закоммиченный префикс при этом НЕ откатывается: каждая итерация коммитит
 свою собственную транзакцию, поэтому ошибка на поздней итерации означает

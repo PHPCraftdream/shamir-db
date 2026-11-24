@@ -206,6 +206,13 @@ async fn plan_and_validate_with_metadata(
     Ok(plan)
 }
 
+/// Test seam: the synced flush of requests run under this database name
+/// reports an injected failure. An in-memory repo has no file WAL to fault, so
+/// the post-commit flush boundary cannot be failed through the WAL seams.
+#[cfg(test)]
+pub(in crate::query::batch) static TEST_FAIL_SYNCED_FLUSH_DB: std::sync::OnceLock<String> =
+    std::sync::OnceLock::new();
+
 /// Durability step shared by [`execute_batch_impl`] and
 /// [`execute_planned_batch_impl`]: if `request.durability == Some(RequestDurability::Synced)`,
 /// flush every distinct repo the batch touched so the write survives an
@@ -219,6 +226,17 @@ async fn flush_if_synced_durability(
 ) -> Result<(), BatchError> {
     if !matches!(request.durability, Some(RequestDurability::Synced)) {
         return Ok(());
+    }
+    #[cfg(test)]
+    if TEST_FAIL_SYNCED_FLUSH_DB
+        .get()
+        .is_some_and(|name| name == db_name)
+    {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: format!("synced flush {db_name}: injected failure"),
+            code: None,
+        });
     }
     let repos = if depth == 0 {
         scope.root_metadata().map(|m| m.repos.clone())
