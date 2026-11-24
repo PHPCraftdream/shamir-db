@@ -326,11 +326,20 @@ pub(in crate::shell_tests) fn set_acl_mode(
     resource: ResourceRef,
     mode: u16,
 ) {
+    set_acl_mode_timeout(fixture, resource, mode, BOOT_BOUND)
+}
+
+pub(in crate::shell_tests) fn set_acl_mode_timeout(
+    fixture: &ShellFixture,
+    resource: ResourceRef,
+    mode: u16,
+    timeout: std::time::Duration,
+) {
     fixture.guard.mark("seed: token catalogue ACL");
     let addr = fixture.tls_addr;
     let pin = fixture.pin;
     let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
-    fixture.rt.run(bound(BOOT_BOUND, async move {
+    fixture.rt.run(bound(timeout, async move {
         let client = connect_tls_owned(addr, pin, password)
             .await
             .expect("verified admin connection for ACL setup");
@@ -451,6 +460,49 @@ pub(in crate::shell_tests) fn run_secret_process(
     extra_env: &[(&'static str, String)],
     args: &[&str],
 ) -> ShellRun {
+    run_secret_process_timeout(
+        fixture,
+        secret,
+        token_auth,
+        current_dir,
+        extra_env,
+        args,
+        SHELL_BOUND,
+    )
+}
+
+/// Narrow timeout override for shell tests that share one absolute deadline.
+pub(in crate::shell_tests) fn run_secret_process_timeout(
+    fixture: &ShellFixture,
+    secret: Option<Zeroizing<String>>,
+    token_auth: bool,
+    current_dir: Option<&Path>,
+    extra_env: &[(&'static str, String)],
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> ShellRun {
+    run_secret_process_timeout_scanned(
+        fixture,
+        secret,
+        token_auth,
+        current_dir,
+        args,
+        timeout,
+        (extra_env, &[]),
+    )
+}
+
+/// Timeout-bounded shell process with caller-provided additional scan needles.
+pub(in crate::shell_tests) fn run_secret_process_timeout_scanned(
+    fixture: &ShellFixture,
+    secret: Option<Zeroizing<String>>,
+    token_auth: bool,
+    current_dir: Option<&Path>,
+    args: &[&str],
+    timeout: std::time::Duration,
+    checks: (&[(&'static str, String)], &[&str]),
+) -> ShellRun {
+    let (extra_env, scan_needles) = checks;
     fixture.guard.mark("shell: spawn");
     let (env_key, env_value) = profile_env(fixture);
     let mut argv: Vec<String> = vec!["shell".into(), "--profile".into(), PROFILE_NAME.into()];
@@ -477,6 +529,7 @@ pub(in crate::shell_tests) fn run_secret_process(
             secret.as_deref().is_some_and(|value| arg.contains(value))
                 || extra_env.iter().any(|(_, value)| arg.contains(value))
                 || arg.contains(fixture.canary.as_str())
+                || scan_needles.iter().any(|needle| arg.contains(needle))
         }),
         "fixture secret leaked into the assembled argv",
     );
@@ -486,52 +539,51 @@ pub(in crate::shell_tests) fn run_secret_process(
     let current_dir = current_dir.map(Path::to_path_buf);
     let extra_env = extra_env.to_vec();
 
-    let outcome = fixture.rt.run(bound(SHELL_BOUND, async move {
-        let mut command = server_command();
-        command
-            .args(&argv)
-            .env(env_key, env_value)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.env("HOME", &home_dir);
-        #[cfg(windows)]
-        command.env("USERPROFILE", &home_dir);
-        command.current_dir(&home_dir);
-        if let Some(dir) = &current_dir {
-            command.current_dir(dir);
-        }
-        for (key, value) in &extra_env {
-            command.env(key, value);
-        }
-        let mut child = command.spawn().expect("spawn shell child");
-        // stdin-only; close the pipe for EOF. An early-exit refusal closes
-        // the pipe first, so only `BrokenPipe` is tolerated downstream.
-        if let Some(mut stdin) = child.stdin.take() {
-            match &secret {
-                Some(secret) => {
-                    write_secret_stdin(&mut stdin, secret.as_bytes()).await;
-                }
-                None => {
-                    // No secret on stdin: close the pipe so an empty read
-                    // is EOF, not a hang. Early-exit refusals tolerate the
-                    // resulting `BrokenPipe` exactly as above.
-                    drop(stdin);
+    let outcome = fixture.rt.run(async move {
+        tokio::time::timeout(timeout, async move {
+            let mut command = server_command();
+            command
+                .args(&argv)
+                .env(env_key, env_value)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            command.env("HOME", &home_dir);
+            #[cfg(windows)]
+            command.env("USERPROFILE", &home_dir);
+            command.current_dir(&home_dir);
+            if let Some(dir) = &current_dir {
+                command.current_dir(dir);
+            }
+            for (key, value) in &extra_env {
+                command.env(key, value);
+            }
+            let mut child = command.spawn().expect("spawn shell child");
+            // stdin-only; close the pipe for EOF. An early-exit refusal closes
+            // the pipe first, so only `BrokenPipe` is tolerated downstream.
+            if let Some(mut stdin) = child.stdin.take() {
+                match &secret {
+                    Some(secret) => {
+                        write_secret_stdin(&mut stdin, secret.as_bytes()).await;
+                    }
+                    None => drop(stdin),
                 }
             }
-        }
-        let output = child
-            .wait_with_output()
-            .await
-            .expect("shell child waits with output");
-        (
-            output.status.code().unwrap_or(-1),
-            output.stdout,
-            output.stderr,
-        )
-    }));
+            let output = child
+                .wait_with_output()
+                .await
+                .expect("shell child waits with output");
+            (
+                output.status.code().unwrap_or(-1),
+                output.stdout,
+                output.stderr,
+            )
+        })
+        .await
+        .expect("shell child exceeded its deadline")
+    });
     fixture.guard.note("shell exit", outcome.0.to_string());
     ShellRun {
         exit_code: outcome.0,
