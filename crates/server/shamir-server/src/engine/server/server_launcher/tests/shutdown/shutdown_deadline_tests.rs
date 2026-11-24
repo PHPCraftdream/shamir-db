@@ -23,7 +23,7 @@
 //! variable, and every await is bounded by [`BOUND`]. The deadline case also
 //! deliberately observes a fixed pending window after the early cutoff.
 //!
-//! [`late_teardown_stages_report_the_remaining_shutdown_budget`] covers the
+//! `late_budget::late_teardown_stages_report_the_remaining_shutdown_budget` covers the
 //! OTHER half of the same deadline: the two stages that run after the audit and
 //! repository teardown (the meta-snapshot join and the store-release barrier).
 //! It parks the runtime's ONLY blocking thread — the pool both stages submit
