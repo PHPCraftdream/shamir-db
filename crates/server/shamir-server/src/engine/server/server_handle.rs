@@ -583,7 +583,8 @@ impl ServerHandle {
                 Err(_) => {
                     abort.abort();
                     let joined = tokio::time::timeout_at(
-                        early_cutoff.unwrap_or(listener_deadline),
+                        early_cutoff
+                            .unwrap_or_else(|| tokio::time::Instant::now() + CONN_ABORT_TIMEOUT),
                         &mut task,
                     )
                     .await
@@ -597,7 +598,8 @@ impl ServerHandle {
         }
         // One drain budget for listeners and accepted connections together, so
         // the stage stays inside the runtime shutdown deadline.
-        let cutoff = early_cutoff.unwrap_or(listener_deadline);
+        let cutoff =
+            early_cutoff.unwrap_or_else(|| tokio::time::Instant::now() + CONN_DRAIN_TIMEOUT);
         let remaining = cutoff.saturating_duration_since(tokio::time::Instant::now());
         let abort_remaining = cutoff
             .saturating_duration_since(tokio::time::Instant::now())
@@ -606,6 +608,9 @@ impl ServerHandle {
         match tokio::time::timeout_at(cutoff, drain).await {
             Ok(drained) => quiesced &= drained,
             Err(_) => {
+                // The drain future was dropped before it could signal the
+                // forced abort: signal it here (idempotent).
+                self.conn_tasks.abort_all();
                 report.add_error(
                     "connection drain and abort exceeded shared early shutdown cutoff".to_string(),
                 );
@@ -673,11 +678,11 @@ impl ServerHandle {
         //    continues to the repository flush either way; a timeout does not
         //    cancel an in-flight fsync.
         if early_cutoff.is_some() {
-            // Ensure cancellation of the bounded teardown still leaves its
-            // owned workers signalled: teardown_audit may be dropped at cutoff.
+            // Stop admitting new refusal audits and signal the scheduler. The
+            // appender is fenced by `teardown_audit` AFTER it drained the work
+            // already accepted (a stop flag now would reject those appends).
             self.cancel_refusal_audit.close();
             self.scheduler.signal_shutdown();
-            self.audit_appender.request_flusher_stop();
         }
         let audit = teardown_audit(
             AuditTeardown {
@@ -698,6 +703,9 @@ impl ServerHandle {
                 .await
                 .is_err()
             {
+                // The abandoned teardown may not have reached its own stop
+                // request: signal the flusher here (idempotent).
+                self.audit_appender.request_flusher_stop();
                 report.add_error(format!(
                     "audit teardown exceeded shutdown budget {audit_budget:?}"
                 ));
