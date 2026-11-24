@@ -56,6 +56,10 @@ pub type MetadataHook = Box<dyn FnMut(&Path) -> Option<std::io::Result<fs::Metad
 /// (a result the test cannot build otherwise), `None` falls through to the real
 /// iteration. The injected error travels the very arm a genuine one takes.
 pub type ReadDirEntryHook = Box<dyn FnMut(&Path) -> Option<std::io::Error> + 'static>;
+/// Reorders destination audit entry paths for a matching directory. Test-only
+/// control makes scan-priority cases independent of filesystem iteration order.
+pub type DestinationAuditOrderHook =
+    Box<dyn FnMut(&Path, Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> + 'static>;
 /// Substitutes `fs::remove_dir_all` in `RunCleanup::drop` for matching
 /// owned partial directories: `Some(result)` replaces the real removal,
 /// `None` falls through. Lets a test inject a failed partial-tree
@@ -88,6 +92,7 @@ thread_local! {
     static MONOTONIC_NOW: RefCell<Option<NowHook>> = RefCell::new(None);
     static SYMLINK_METADATA: RefCell<Option<MetadataHook>> = RefCell::new(None);
     static READ_DIR_ENTRY: RefCell<Option<ReadDirEntryHook>> = RefCell::new(None);
+    static DESTINATION_AUDIT_ORDER: RefCell<Option<DestinationAuditOrderHook>> = RefCell::new(None);
     static REMOVE_DIR_ALL: RefCell<Option<RemoveDirAllHook>> = RefCell::new(None);
     static FSYNC_DIR: RefCell<Option<FsyncDirHook>> = RefCell::new(None);
     static MANIFEST_RENAME: RefCell<Option<ManifestRenameHook>> = RefCell::new(None);
@@ -105,6 +110,7 @@ enum SeamSlot {
     MonotonicNow,
     SymlinkMetadata,
     ReadDirEntry,
+    DestinationAuditOrder,
     RemoveDirAll,
     FsyncDir,
     ManifestRename,
@@ -128,6 +134,9 @@ impl Drop for SeamGuard {
             SeamSlot::MonotonicNow => MONOTONIC_NOW.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::SymlinkMetadata => SYMLINK_METADATA.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::ReadDirEntry => READ_DIR_ENTRY.with(|slot| *slot.borrow_mut() = None),
+            SeamSlot::DestinationAuditOrder => {
+                DESTINATION_AUDIT_ORDER.with(|slot| *slot.borrow_mut() = None)
+            }
             SeamSlot::RemoveDirAll => REMOVE_DIR_ALL.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::FsyncDir => FSYNC_DIR.with(|slot| *slot.borrow_mut() = None),
             SeamSlot::ManifestRename => MANIFEST_RENAME.with(|slot| *slot.borrow_mut() = None),
@@ -178,6 +187,11 @@ pub fn set_symlink_metadata(hook: MetadataHook) -> SeamGuard {
 pub fn set_read_dir_entry(hook: ReadDirEntryHook) -> SeamGuard {
     READ_DIR_ENTRY.with(|slot| *slot.borrow_mut() = Some(hook));
     SeamGuard(SeamSlot::ReadDirEntry)
+}
+
+pub fn set_destination_audit_order(hook: DestinationAuditOrderHook) -> SeamGuard {
+    DESTINATION_AUDIT_ORDER.with(|slot| *slot.borrow_mut() = Some(hook));
+    SeamGuard(SeamSlot::DestinationAuditOrder)
 }
 
 pub fn set_remove_dir_all(hook: RemoveDirAllHook) -> SeamGuard {
@@ -259,7 +273,18 @@ pub fn fire_read_dir_entry(dir: &Path) -> Option<std::io::Error> {
     READ_DIR_ENTRY.with(|slot| slot.borrow_mut().as_mut().and_then(|hook| hook(dir)))
 }
 
-/// The registered `remove_dir_all` substitution for one owned partial
+/// The registered destination-audit ordering override, else the actual paths.
+/// Called only by the destination audit leftover scan under `cfg(test)`.
+pub fn fire_destination_audit_order(
+    dir: &Path,
+    paths: Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    DESTINATION_AUDIT_ORDER.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(hook) => hook(dir, paths),
+        None => paths,
+    })
+}
+
 /// directory, else `None` (the real removal). Called only from
 /// `RunCleanup::drop`.
 pub fn fire_remove_dir_all(path: &Path) -> Option<std::io::Result<()>> {

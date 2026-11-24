@@ -2,8 +2,8 @@
 //! the port, WAL copied before stores, a second pass at the seal barrier,
 //! the manifest written last with fsync, self-verification before
 //! success. Cancellation is checked at every stage boundary and between
-//! files; a failed or cancelled run removes the destination directory
-//! and releases the pins — on the error return AND on an unwind, via the
+//! files; a failed or cancelled run attempts to remove its destination
+//! directory and releases the pins — on the error return AND on an unwind, via the
 //! RAII run cleanup armed right after the atomic destination create.
 //! The server publishes the real phase through
 //! the port's `begin_copy` (before the first WAL pass) and
@@ -68,21 +68,22 @@ pub enum OnlineBackupFailure {
     Manifest(#[from] manifest::ManifestError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// The DESTINATION side could not be prepared or published: the atomic
-    /// create of the snapshot child and the manifest / backup-metadata
-    /// publication. Kept apart from [`OnlineBackupFailure::Io`] so the
-    /// scheduled reason names a DESTINATION failure
-    /// (`destination-io-<kind>`) instead of looking like a generic io
-    /// error; it carries no path, so the rendering stays path-free.
+    /// The DESTINATION side could not be prepared: specifically, atomic
+    /// creation of the snapshot child directory failed. Manifest and
+    /// backup-metadata publication failures use
+    /// [`OnlineBackupFailure::Publication`]. Kept apart from
+    /// [`OnlineBackupFailure::Io`] so the scheduled reason names a
+    /// DESTINATION failure (`destination-io-<kind>`) instead of looking like a
+    /// generic io error; it carries no path, so the rendering stays path-free.
     #[error("destination io error: {source}")]
     Dest {
         #[source]
         source: std::io::Error,
     },
-    /// The snapshot's PUBLICATION into an existing destination directory
-    /// (the manifest and the backup-metadata file) failed: unlike
-    /// [`OnlineBackupFailure::Dest`], which covers the snapshot child's
-    /// creation, the directory is part of the typed error. The scheduled
+    /// The snapshot's PUBLICATION into the already-created snapshot child
+    /// directory (the manifest and the backup-metadata file) failed: unlike
+    /// [`OnlineBackupFailure::Dest`], which covers only atomic creation of
+    /// that child, this variant includes the directory path. The scheduled
     /// vocabulary is unchanged (`destination-io-<kind>`).
     #[error("destination publication failed for {dir}: {source}")]
     Publication {
@@ -131,8 +132,10 @@ pub struct SealRecopyCap {
 }
 
 /// A failed run's partial-tree cleanup failure, reported SEPARATELY
-/// from the primary error: bounded and path-free by construction — it
-/// carries only the `io::ErrorKind` of the failed removal.
+/// from the primary error: cleanup attempts to remove the whole destination
+/// run directory but can fail and leave it behind. This value is bounded and
+/// path-free by construction — it carries only the `io::ErrorKind` of the
+/// failed removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupFailure {
     pub kind: ErrorKind,
@@ -146,8 +149,9 @@ pub enum OnlineBackupError {
     #[error("backup cancelled at stage {stage:?}")]
     Cancelled {
         stage: BackupStage,
-        /// Failure of removing the owned partial destination, if any;
-        /// the cancellation stays the PRIMARY outcome.
+        /// Failure of the best-effort removal attempt for the owned partial
+        /// destination, if any; cleanup can fail and leave the directory.
+        /// The cancellation stays the PRIMARY outcome.
         cleanup: Option<CleanupFailure>,
     },
     #[error("backup failed at stage {stage:?}")]
@@ -155,7 +159,8 @@ pub enum OnlineBackupError {
         stage: BackupStage,
         #[source]
         source: OnlineBackupFailure,
-        /// Failure of removing the owned partial destination, if any;
+        /// Failure of the best-effort removal attempt for the owned partial
+        /// destination, if any; cleanup can fail and leave the directory.
         /// `source` stays the PRIMARY error.
         cleanup: Option<CleanupFailure>,
     },

@@ -228,7 +228,7 @@ fn audit_log_is_captured_after_its_anchor_store() {
 /// anchor, so BOTH trusted anchors are exercised: the appender's
 /// `audit_checkpoint` row and the server's metadata anchor the copy carries.
 fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
-    let source_dir = TempDir::new().expect("source temp dir");
+    let source_dir = Arc::new(TempDir::new().expect("source temp dir"));
     let to_dir = TempDir::new().expect("destination temp dir");
     let restored_dir = TempDir::new().expect("restored temp dir");
     let source = source_dir.path().to_path_buf();
@@ -256,6 +256,7 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
     // rendezvous receives and the teardown join draw on it, so a wedged helper
     // can never spend a budget per waiting step.
     let deadline = helper_deadline();
+    let source_dir_for_helper = source_dir.clone();
     let pause: Box<dyn FnMut(&Path)> = Box::new(move |path| {
         if path != audit_log_path {
             return;
@@ -279,6 +280,8 @@ fn paused_audit_copy_restores_and_boots(pause_after_capture: bool) {
             .name("audit-activity".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                // Keep the source tree alive even if the caller detaches this helper.
+                let _source_dir = source_dir_for_helper;
                 if paused_rx.recv_timeout(budget_left(deadline)).is_ok() {
                     append_cycles(&writer, 3, 2);
                 }

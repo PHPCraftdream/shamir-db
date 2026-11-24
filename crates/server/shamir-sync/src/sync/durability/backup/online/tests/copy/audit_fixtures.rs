@@ -258,6 +258,26 @@ pub(super) fn budget_left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+pub(super) fn recv_timeout_until<T>(
+    receiver: &mpsc::Receiver<T>,
+    deadline: Instant,
+) -> (Result<T, mpsc::RecvTimeoutError>, Duration) {
+    let timeout = budget_left(deadline);
+    #[cfg(test)]
+    LAST_RECV_TIMEOUT.with(|observed| observed.set(Some(timeout)));
+    (receiver.recv_timeout(timeout), timeout)
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_RECV_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn take_last_recv_timeout() -> Option<Duration> {
+    LAST_RECV_TIMEOUT.with(std::cell::Cell::take)
+}
+
 /// Recorded outcome of the bounded join, readable AFTER the guard is gone.
 pub(super) const OUTCOME_PENDING: u8 = 0;
 pub(super) const OUTCOME_JOINED: u8 = 1;
@@ -272,7 +292,25 @@ pub(super) const OUTCOME_PANICKED: u8 = 3;
 enum JoinOutcome {
     Joined,
     TimedOut,
+    Disconnected,
+    SpawnFailed,
     Panicked(Box<dyn std::any::Any + Send>),
+}
+
+fn send_join_result(
+    done_tx: mpsc::Sender<std::mem::ManuallyDrop<std::thread::Result<()>>>,
+    result: std::thread::Result<()>,
+) {
+    // A timed-out receiver may be torn down while this send is racing. Keep
+    // the panic payload behind a non-dropping wrapper until delivery is known.
+    if let Err(unsent) = done_tx.send(std::mem::ManuallyDrop::new(result)) {
+        // Nobody can receive this result; never run its arbitrary payload
+        // destructor on the detached joiner thread.
+        let result = std::mem::ManuallyDrop::into_inner(unsent.0);
+        if let Err(payload) = result {
+            let _raw = Box::into_raw(payload);
+        }
+    }
 }
 
 /// Joins `handle` within the ABSOLUTE `deadline`: `std::thread` has no timed
@@ -282,22 +320,17 @@ fn join_within(handle: std::thread::JoinHandle<()>, deadline: Instant) -> JoinOu
     let (done_tx, done_rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("join-within".to_string())
-        .spawn(move || {
-            if let Err(unsent) = done_tx.send(handle.join()) {
-                // The guard already stopped waiting, so nobody can receive
-                // this result and its `Err` carries the helper's panic payload.
-                // Dropping it HERE would run an arbitrary payload destructor on
-                // a detached joiner thread; leak it instead.
-                std::mem::forget(unsent);
-            }
-        });
+        .spawn(move || send_join_result(done_tx, handle.join()));
     if spawned.is_err() {
-        return JoinOutcome::TimedOut;
+        return JoinOutcome::SpawnFailed;
     }
-    match done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(Ok(())) => JoinOutcome::Joined,
-        Ok(Err(payload)) => JoinOutcome::Panicked(payload),
-        Err(_) => JoinOutcome::TimedOut,
+    match recv_timeout_until(&done_rx, deadline).0 {
+        Ok(wrapped) => match std::mem::ManuallyDrop::into_inner(wrapped) {
+            Ok(()) => JoinOutcome::Joined,
+            Err(payload) => JoinOutcome::Panicked(payload),
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => JoinOutcome::TimedOut,
+        Err(mpsc::RecvTimeoutError::Disconnected) => JoinOutcome::Disconnected,
     }
 }
 
@@ -357,6 +390,9 @@ impl JoinOnDrop {
                     "the helper thread must finish within {JOIN_BUDGET:?} of the shared deadline"
                 )
             }
+            JoinOutcome::Disconnected | JoinOutcome::SpawnFailed => {
+                panic!("the bounded join helper failed before reporting its result")
+            }
         }
     }
 }
@@ -373,6 +409,10 @@ impl Drop for JoinOnDrop {
                 }
                 JoinOutcome::TimedOut => {
                     self.outcome.store(OUTCOME_TIMED_OUT, Ordering::SeqCst);
+                }
+                JoinOutcome::Disconnected | JoinOutcome::SpawnFailed => {
+                    // A failed joiner is not evidence that the helper timed out.
+                    self.outcome.store(OUTCOME_PANICKED, Ordering::SeqCst);
                 }
                 JoinOutcome::Panicked(payload) => {
                     self.outcome.store(OUTCOME_PANICKED, Ordering::SeqCst);
@@ -410,6 +450,21 @@ fn a_timed_out_helper_reports_not_joined_and_its_drop_never_panics() {
     /// Bounded fixture wait: the wedged helper must exit on its own.
     const FIXTURE_WAIT: Duration = Duration::from_secs(5);
     let deadline = Instant::now();
+    // Clear any prior observation: the next recorded receive must be the
+    // bounded join's actual result-channel receive.
+    assert!(take_last_recv_timeout().is_none());
+
+    let (_preflight_tx, preflight_rx) = mpsc::channel::<()>();
+    assert!(matches!(
+        recv_timeout_until(&preflight_rx, deadline).0,
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        take_last_recv_timeout(),
+        Some(Duration::ZERO),
+        "the expired-deadline preflight must record its zero timeout"
+    );
+
     let handle = std::thread::Builder::new()
         .name("wedged-helper".to_string())
         .spawn(move || {
@@ -418,7 +473,10 @@ fn a_timed_out_helper_reports_not_joined_and_its_drop_never_panics() {
             // owns nothing the caller must reclaim (a real fixture's helper
             // owns its Fjall handle the same way — inside the thread).
             let (_never_sent, waiting) = mpsc::channel::<()>();
-            let _ = waiting.recv_timeout(FIXTURE_WAIT);
+            let timeout_passed = FIXTURE_WAIT;
+            let result = waiting.recv_timeout(timeout_passed);
+            assert!(matches!(result, Err(mpsc::RecvTimeoutError::Timeout)));
+            assert_eq!(timeout_passed, FIXTURE_WAIT);
         })
         .expect("spawn the wedged helper");
     let guard = JoinOnDrop::with_deadline(handle, deadline);
@@ -430,9 +488,34 @@ fn a_timed_out_helper_reports_not_joined_and_its_drop_never_panics() {
     );
     drop(guard);
     assert_eq!(
+        take_last_recv_timeout(),
+        Some(Duration::ZERO),
+        "the actual join-result receive must get the remaining shared deadline"
+    );
+    assert_eq!(
         outcome.load(Ordering::SeqCst),
         OUTCOME_TIMED_OUT,
         "a helper still running at the deadline must be reported as NOT joined"
+    );
+}
+
+#[test]
+fn an_unreceived_join_result_does_not_drop_its_panic_payload() {
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    send_join_result(tx, Err(Box::new(DropFlag(dropped.clone()))));
+    // The result is queued but never received; receiver teardown discards it.
+    drop(rx);
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "discarding an unreceived join result must not run its panic payload destructor"
     );
 }
 

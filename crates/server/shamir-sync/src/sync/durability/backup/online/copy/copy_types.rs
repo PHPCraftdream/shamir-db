@@ -81,21 +81,22 @@ pub enum CopyError {
     AuditFilesUnstable { rounds: usize },
     /// The destination run directory holds a reserved audit chain file
     /// (`audit.log` or an `audit.log.` archive) that the accepted
-    /// (manifest-defining) round did not capture. An earlier pass or an earlier
-    /// unstable round copied it and a rotation, or a retention sweep, then
-    /// removed it from the source. Publishing either drops bytes a captured
-    /// anchor may name or describes a file set the destination contradicts, so
-    /// the pass fails closed BEFORE the manifest is written; nothing is deleted,
-    /// the cleanup guard removes the whole run directory and the next scheduled
-    /// run retries. No path and no archive name in the text.
+    /// (manifest-defining) round did not capture. This indicates a leftover
+    /// from an earlier pass or round after rotation or retention. Publishing
+    /// fails closed before writing the manifest. Cleanup attempts to remove
+    /// the whole run directory but may fail and leave it behind; a later
+    /// eligible tick may start a fresh run, with no guaranteed scheduler retry.
+    /// No path and no archive name in the text.
     #[error("the destination holds an audit chain file the accepted round did not capture")]
     AuditArchiveLost,
     /// One entry of the audit chain directory could not be enumerated or
-    /// examined: an entry of its listing, or that entry's metadata, failed
-    /// with an error other than `NotFound`. Deliberately carries NO path —
-    /// the audit listing reports a per-entry failure in the copy's
-    /// path-free vocabulary (`copy-io-<kind>`), never with a filesystem
-    /// path.
+    /// examined: an iterator error (including `NotFound`), or metadata for an
+    /// enumerated entry failed with an error other than `NotFound`. Only a
+    /// per-entry metadata `NotFound` is skipped. Iterator failures are reported
+    /// as `AuditListing`, including `NotFound`; they do not name the directory.
+    /// Deliberately carries NO path — the audit listing reports a per-entry
+    /// failure in the copy's path-free vocabulary (`copy-io-<kind>`), never
+    /// with a filesystem path.
     #[error("audit chain directory entry could not be read: {source}")]
     AuditListing {
         #[source]

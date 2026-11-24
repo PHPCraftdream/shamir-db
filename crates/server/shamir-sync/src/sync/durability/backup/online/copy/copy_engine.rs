@@ -5,7 +5,7 @@
 //! created atomically by the protocol (step A), never here.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read, Write};
@@ -22,7 +22,10 @@ use crate::sync::durability::audit_chain_files::{
 };
 use crate::sync::durability::backup::MANIFEST_FILE_NAME;
 
-use self::audit_rounds::{unlisted_destination_audit_file, UnlistedAudit, ACTIVE_REOPEN_ROUNDS};
+use self::audit_rounds::{
+    active_log_reappearance_is_unsafe, destination_archive_names, unlisted_destination_audit_file,
+    UnlistedAudit, ACTIVE_REOPEN_ROUNDS,
+};
 use self::list_files::list_files;
 pub use super::copy_types::{CopiedFile, CopyError, CopyOptions, CopyPassResult};
 
@@ -179,7 +182,9 @@ fn gate_now() -> Instant {
 /// Every engine I/O failure is typed `CopyError::Io` naming the path it
 /// was operating on — never string-erased through `io::Error::other`.
 /// Destination-side writes use [`dest_at`] instead, so a destination
-/// failure is never read as a vanished source.
+/// failure is never read as a vanished source. The typed `Dest` variant is
+/// used for destination create/write/fsync failures; creating the snapshot
+/// child itself is separately typed by the protocol.
 fn io_at(path: &Path, error: std::io::Error) -> CopyError {
     CopyError::Io {
         path: path.to_path_buf(),
@@ -395,72 +400,57 @@ pub fn run_copy_pass(
 }
 
 /// Data-dir pass: everything outside `exclude_dirs`, skipping the private
-/// `cache` subtree and the manifest's own files, in TWO phases.
+/// `cache` subtree and manifest files, in TWO phases.
 ///
-/// Phase 1 captures every other file of the pass — including both audit
-/// anchor stores (`audit_checkpoint/`, `server_meta/`) — and leaves the
-/// audit chain files (the active `audit.log` and its rotation archives)
-/// out. Phase 2 begins only after phase 1 has finished, lists the audit
-/// chain files freshly and captures them, archives first and the active
-/// log last.
+/// Phase 1 captures every other pass file, including `audit_checkpoint/` and
+/// `server_meta/`, but not `audit.log` or its rotation archives. Phase 2 lists
+/// and captures the audit chain only after phase 1, archives in ascending name
+/// order before the active log. This ordering ensures anchors only name bytes
+/// already durable and present before phase 2's listing: checkpoint flushes
+/// before writing its row; rotation fsyncs, renames, reopens, dir-syncs, then
+/// persists both anchors. The log is append-only and rotation only adds an
+/// archive. Thus phase 2 sees bytes covered by captured anchors, including an
+/// archive created between phase 1 listing and anchor capture. A single early
+/// listing could miss that archive.
 ///
-/// That order is what makes the copy audit-consistent: an anchor can only
-/// name log positions that were already durable, and therefore already
-/// present in the audit files, before the audit listing of phase 2.
-/// `checkpoint_locked` flushes the log before it writes the
-/// `audit_checkpoint` row, and `rotate_locked` fsyncs, renames, reopens,
-/// dir-syncs and only then persists both anchors; the log is append-only
-/// and a rotation only ADDS an archive, never rewrites one. So every byte
-/// a captured anchor covers is in the files phase 2 lists — including a
-/// rotation that lands between phase 1's listing and its anchor capture,
-/// whose new archive phase 2 lists afterwards. A single pass that lists
-/// once cannot close that window: its listing predates the anchor capture,
-/// so a rotation in between hides the archive holding exactly the bytes
-/// the captured anchor names.
+/// Phase 2 re-lists after each capture and repeats if an archive appeared;
+/// each round recopies every listed file because rotation can move active-log
+/// bytes into a new archive. There are at most four unstable rounds plus three
+/// confirmed active-log reopen attempts: seven capture rounds per pass, a
+/// count bound, not a time bound. A stable round completes only if the
+/// destination has no unlisted audit file, except an eligible active-log-only
+/// leftover can trigger reopen. Exhausting unstable rounds fails with typed
+/// [`CopyError::AuditFilesUnstable`]. The manifest describes the accepted
+/// round; counters include work across all rounds, including retries.
+/// NOTHING is deleted from the destination. An uncaptured reserved audit file
+/// from an earlier round or pass yields typed, path-free
+/// [`CopyError::AuditArchiveLost`] before manifest write. An unlisted archive
+/// always refuses, even with an active-log leftover. That leftover is
+/// retryable only if the accepted round proves a new archive since the prior
+/// stable listing; same-name replacement alone is insufficient. A new archive
+/// name does not prove chain continuity. Phase-1 anchors may name those bytes,
+/// and inventory self-verification would also refuse. Cleanup only attempts
+/// to remove the whole run directory; removal can fail and leave it behind.
+/// A later eligible scheduler tick may start a fresh run; same-run retry is
+/// not guaranteed. A source vanishing during corrective re-copy or re-hash is
+/// MISSING for that round: rotation moved the active log to a new archive,
+/// which stability checking re-lists for the next round. Other passes still
+/// fail with typed I/O errors for vanished sources.
 ///
-/// Phase 2 re-lists the audit directory after each capture round and runs
-/// another round when the fresh listing names an archive the round did not
-/// copy; every round copies every listed file again (a rotation can move the
-/// active log's bytes into a new archive). A stable round, up to the
-/// [`AUDIT_CAPTURE_ROUNDS`]-th, ends the pass; no stable round within the
-/// bound fails it with a typed [`CopyError::AuditFilesUnstable`] — never a
-/// silently inconsistent copy. The manifest describes exactly the bytes of
-/// the last round. NOTHING is deleted from the destination: a reserved audit
-/// chain file (`audit.log` or an archive) that the accepted round did not
-/// capture — copied by this pass's earlier unstable round, or by an earlier
-/// pass entirely — is a typed, path-free refusal
-/// ([`CopyError::AuditArchiveLost`]) raised BEFORE the manifest is written. The
-/// anchors phase 1 captured may name those bytes, and the run's own inventory
-/// self-verification would refuse the snapshot anyway; refusing first keeps the
-/// failure typed and path-free, and the cleanup guard removes the whole run
-/// directory so the scheduler retries. A source file that vanishes during a
-/// corrective
-/// re-copy, or its follow-up re-hash, is counted MISSING for that round: a
-/// rotation renamed the active log into a new archive, which the stability
-/// check re-lists and the next round captures, so the snapshot still carries
-/// every byte the rotation moved. Every other pass (`run_copy_pass`,
-/// `run_copy_pass_gated`) still fails with its typed I/O error there,
-/// because in those a vanished source means a lost file.
-///
-/// Not covered, by design: retention may DELETE an archive between the
-/// listing and its copy — a vanished file is excluded exactly as any other
-/// deleted source file — and retention never removes the newest archive,
-/// the only one that can hold the tail an anchor persisted just before
-/// names. A needed prefix that was gone BEFORE any pass captured it stays the
-/// documented pre-existing limit: the copy holds no bytes for it and boot
+/// Retention may delete an archive between listing and copy; a vanished file
+/// is excluded like any deleted source. Retention never removes the newest
+/// archive, which alone can hold the tail of a just-persisted anchor. A needed
+/// prefix already gone before capture remains the documented limit; boot
 /// validates the saved anchor against the copied chain.
 ///
-/// KNOWN LIMIT, not closed by this copy: `server_meta` is a LIVE Fjall store
-/// the running server keeps writing (its anchor row at every rotation
-/// boundary), and phase 1 copies it file by file outside every seal, so it is
-/// NOT captured at one consistent point. Self-verification checks hashes, sizes
-/// and the file inventory and never opens the store, so a MIXED image can pass
-/// verification: a flush that switches `current` to `vN+1` after the listing
-/// but before `current` is copied leaves the new pointer and the old version,
-/// with no extra file and no hash mismatch — and the restored store then cannot
-/// open the version the pointer names. Nothing in this copier repairs,
-/// validates or deletes such an image; the failure surfaces at boot. Compare
-/// [`CopyError::AuditArchiveLost`], which guards AUDIT files only.
+/// KNOWN LIMIT: live `server_meta` is copied file by file in phase 1, outside
+/// every seal, and is not a consistent-point snapshot. Hash, size, and
+/// inventory self-verification never opens the store, so a mixed image can
+/// pass: if flush switches `current` to `vN+1` after listing but before copying
+/// `current`, the new pointer and old version coexist without an extra file or
+/// hash mismatch, and the restored store cannot open its named version. The
+/// copier does not repair, validate, or delete this image; failure surfaces at
+/// boot. [`CopyError::AuditArchiveLost`] guards audit files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,
@@ -486,7 +476,22 @@ pub(super) fn run_data_dir_copy_pass(
     // appender's rename and its immediate reopen).
     let mut unstable_rounds = 0usize;
     let mut reopen_attempts = 0usize;
+    // Preserve the pass-entry destination archive set: pass D may have copied
+    // archives that pass E's first stable round must compare against when
+    // proving a genuine rotation behind a stale destination active log.
+    let mut previous_stable_archives = Some(destination_archive_names(dest_root, cancel)?);
+    // Retain rotation evidence across the rename-to-reopen window: the archive
+    // may be observed in the stable round that still omits audit.log, while the
+    // active log reappears only in the following stable round.
+    let mut reopen_archive_evidence = false;
+    // Track the active-log presence of each stable source listing separately
+    // from the destination archive baseline: a same-name active file can
+    // reappear with replacement bytes and no archive evidence.
+    let mut previous_stable_active_present: Option<bool> = None;
     loop {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
         let audit = run_copy_pass_inner(
             source_root,
             dest_root,
@@ -495,33 +500,74 @@ pub(super) fn run_data_dir_copy_pass(
                 ..rules
             },
         )?;
-        // Every round's counters describe work this pass really did: a
-        // source that vanished inside one round's corrective re-copy is
-        // counted missing there, even when a LATER round is the stable one
-        // that defines the snapshot.
+        // The audit phase's counters include work from every capture round,
+        // including unstable rounds and rounds followed by a retry: a source
+        // that vanishes inside one round's corrective re-copy is counted
+        // missing in that round, even when a later accepted round defines the
+        // snapshot.
+        let round_archives: BTreeSet<String> = audit
+            .files
+            .iter()
+            .filter(|file| file.rel_path != "audit.log")
+            .map(|file| file.rel_path.clone())
+            .collect();
         result.changed_files += audit.changed_files;
         result.missing_files += audit.missing_files;
         if audit_capture_is_stable(source_root, &audit, cancel)? {
+            let current_active_present =
+                audit.files.iter().any(|file| file.rel_path == "audit.log");
+            let saw_new_archive = previous_stable_archives.as_ref().is_some_and(|previous| {
+                round_archives
+                    .iter()
+                    .any(|archive| !previous.contains(archive))
+            });
+            if active_log_reappearance_is_unsafe(
+                previous_stable_active_present,
+                current_active_present,
+                reopen_archive_evidence,
+            ) {
+                if cancel.is_cancelled() {
+                    return Err(CopyError::Cancelled);
+                }
+                return Err(CopyError::AuditArchiveLost);
+            }
+            previous_stable_archives = Some(round_archives);
+            previous_stable_active_present = Some(current_active_present);
             // Nothing is deleted from the destination: a reserved audit name
             // this round did not capture — copied by pass D or by an earlier
             // unstable round — refuses the pass before the manifest exists.
-            match unlisted_destination_audit_file(dest_root, &audit.files)? {
+            if cancel.is_cancelled() {
+                return Err(CopyError::Cancelled);
+            }
+            match unlisted_destination_audit_file(dest_root, &audit.files, cancel)? {
                 None => {
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
+                    }
                     result.files.extend(audit.files);
                     return Ok(result);
                 }
-                Some(UnlistedAudit::Archive) => return Err(CopyError::AuditArchiveLost),
+                Some(UnlistedAudit::Archive) => {
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
+                    }
+                    return Err(CopyError::AuditArchiveLost);
+                }
                 Some(UnlistedAudit::ActiveLog) => {
-                    // `rotate_locked` renames the active log and reopens it a
-                    // moment later. A listing inside that window leaves the
-                    // destination with an earlier active-log copy this round
-                    // cannot list; give the reopen a bounded chance to close
-                    // the window before refusing (`ACTIVE_REOPEN_ROUNDS`).
-                    // Each attempt re-lists through `list_audit_files`, which
-                    // observes cancellation, so the wait stays interruptible.
+                    // Give the active name a bounded chance to reopen, even
+                    // without archive evidence. Evidence is accumulated only
+                    // from rounds in which the active name remains missing;
+                    // the transition guard rejects an unsupported reappearance.
+                    reopen_archive_evidence |= saw_new_archive;
                     reopen_attempts += 1;
                     if reopen_attempts > ACTIVE_REOPEN_ROUNDS {
+                        if cancel.is_cancelled() {
+                            return Err(CopyError::Cancelled);
+                        }
                         return Err(CopyError::AuditArchiveLost);
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(CopyError::Cancelled);
                     }
                     continue;
                 }

@@ -34,21 +34,23 @@ const SKIP_FILE_NAMES: &[&str] = &["lock", ".shamir.lock"];
 /// any non-regular entry, and files named in [`SKIP_FILE_NAMES`]
 /// (`.shamir.lock` and `lock` — runtime lock artifacts, see above).
 /// Top-level audit chain files are skipped when `skip_audit_files` is set
-/// (phase 1 of the data-directory pass, run by `copy_engine`). With a gate,
-/// cancel and the clock are checked at every directory iteration — the listing
-/// is inside the re-copy budget. A directory-entry or metadata failure is a
-/// typed error: [`CopyError::Io`] naming the entry, EXCEPT the one audit
-/// classification below (path-free [`CopyError::AuditListing`]); only an entry
-/// that vanished before its metadata read (`NotFound`) is skipped as the
-/// documented source race.
+/// (phase 1 of the data-directory pass, run by `copy_engine`). Raw directory
+/// entries are enumerated and sorted before per-entry metadata checks. With a
+/// gate, cancel and the clock are checked at every directory iteration — the
+/// listing is inside the re-copy budget. Directory-iterator errors are typed
+/// [`super::super::copy_types::CopyError::Io`] naming the directory, EXCEPT
+/// the audit-classification exception below (path-free
+/// [`super::super::copy_types::CopyError::AuditListing`]); only `NotFound`
+/// from per-entry metadata after enumeration is skipped as the documented
+/// source race.
 ///
 /// `skip_audit_files` also scopes the AUDIT CLASSIFICATION: only phase 1 of
 /// the data-directory pass lists the root whose audit chain files are its own,
 /// so only there may an unreadable reserved name take the path-free
-/// [`CopyError::AuditListing`] arm. In every other pass (`AuditFiles::InOrder`:
+/// [`super::super::copy_types::CopyError::AuditListing`] arm. In every other pass (`AuditFiles::InOrder`:
 /// WAL directories, store directories, gated re-copies) a file that merely
 /// happens to be called `audit.log` is an ordinary file and its failure keeps
-/// the path-bearing [`CopyError::Io`] the operator needs.
+/// the path-bearing [`super::super::copy_types::CopyError::Io`] the operator needs.
 pub(super) fn list_files(
     source_root: &Path,
     skip_top_level_dirs: &[&str],

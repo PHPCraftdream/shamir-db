@@ -73,7 +73,7 @@ fn append_rotation_event(writer: &AuditChainWriter, expect: &str) {
 /// anchor — `read_server_meta_anchor` or the anchor-pair equality fails.
 #[test]
 fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots() {
-    let source_dir = TempDir::new().expect("source temp dir");
+    let source_dir = Arc::new(TempDir::new().expect("source temp dir"));
     let to_dir = TempDir::new().expect("destination temp dir");
     let restored_dir = TempDir::new().expect("restored temp dir");
     let source = source_dir.path().to_path_buf();
@@ -111,11 +111,14 @@ fn rotation_between_the_pass_listing_and_the_anchor_capture_restores_and_boots()
     // rendezvous receives and the teardown join draw on it, so a wedged helper
     // can never spend a budget per waiting step.
     let deadline = helper_deadline();
+    let source_dir_for_helper = source_dir.clone();
     let activity = JoinOnDrop::with_deadline(
         std::thread::Builder::new()
             .name("audit-rotation".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                // Keep the source tree alive even if the caller detaches this helper.
+                let _source_dir = source_dir_for_helper;
                 if paused_rx.recv_timeout(budget_left(deadline)).is_ok() {
                     append_rotation_event(&writer, "append the rotating event");
                     writer.checkpoint_now().expect("persist the rotated anchor");
@@ -441,6 +444,75 @@ fn rotation_between_the_corrective_copy_and_its_re_hash_refuses_the_run() {
     );
 }
 
+#[test]
+fn cancellation_during_active_log_reopen_check_wins_over_audit_archive_lost() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let log_path = source.join(ROTATION_AUDIT_LOG);
+    write_file(&log_path, b"active-before-rotation\n");
+    let archive_path = source.join(audit_fixtures::archive_name(1));
+    let log_for_hook = log_path.clone();
+    let archive_for_hook = archive_path.clone();
+    let armed = Arc::new(AtomicBool::new(false));
+    let armed_for_listing = armed.clone();
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let arm = test_seams::set_after_listing(Box::new(move |_root| {
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            armed_for_listing.store(true, Ordering::SeqCst);
+        }
+    }));
+    let armed_for_hash = armed.clone();
+    let rotated = Arc::new(AtomicBool::new(false));
+    let rotated_for_hash = rotated.clone();
+    let hash = test_seams::set_hash_file(Box::new(move |path| {
+        if path == log_for_hook.as_path()
+            && armed_for_hash.load(Ordering::SeqCst)
+            && !rotated_for_hash.swap(true, Ordering::SeqCst)
+        {
+            fs::rename(&log_for_hook, &archive_for_hook).expect("rotate the active audit log");
+            Some(Ok(("0".repeat(64), 0)))
+        } else {
+            None
+        }
+    }));
+    let cancel = CancelFlag::default();
+    let cancel_for_scan = cancel.clone();
+    let scans = Arc::new(AtomicUsize::new(0));
+    let scans_for_hook = scans.clone();
+    let destination_scan =
+        test_seams::set_destination_audit_order(Box::new(move |_root, paths| {
+            let saw_active_log = paths.iter().any(|path| {
+                path.file_name().and_then(|name| name.to_str()) == Some(ROTATION_AUDIT_LOG)
+            });
+            if saw_active_log && scans_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Cancellation arrives during an active-log leftover scan, on a
+                // bounded reopen retry after the rotation has been observed.
+                cancel_for_scan.cancel();
+            }
+            paths
+        }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run(&port, source, to, &cancel);
+    drop(destination_scan);
+    drop(hash);
+    drop(arm);
+    assert!(rotated.load(Ordering::SeqCst), "the rotation hook must run");
+    let error = result.expect_err("cancellation must win over the stale active-log refusal");
+    assert!(
+        matches!(
+            error,
+            OnlineBackupError::Cancelled {
+                stage: BackupStage::Sealing,
+                ..
+            }
+        ),
+        "expected cancellation at Sealing, got {error:?}"
+    );
+}
+
 /// The corrective-open miss is TOLERATED and the backup still publishes when
 /// the appender's reopen closes the rotation window.
 ///
@@ -555,7 +627,95 @@ fn a_corrective_open_miss_publishes_when_the_rotation_reopens_the_active_log() {
     );
 }
 
-/// The corrective RE-HASH miss is tolerated and the backup still publishes when
+#[test]
+fn an_active_file_lost_before_the_accepted_listing_without_a_new_archive_is_lost() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+
+    // Current guard contract is name-based: an accepted replacement named
+    // `audit.log` is captured over D's file, so it cannot detect continuity
+    // loss from differing bytes alone. Exercise its supported refusal case: the
+    // captured D active file disappears before E's accepted audit listing.
+    let log_path = source.join(ROTATION_AUDIT_LOG);
+    let key = audit_fixtures::audit_key(ROTATION_KEY_SEED);
+    let appender = FjallAuditAppender::open_strict(source).expect("open the real audit appender");
+    let writer = AuditChainWriter::new(AuditChain::new(key), appender.clone());
+    append_rotation_event(&writer, "append anchored audit history");
+    writer
+        .checkpoint_now()
+        .expect("persist the audit checkpoint");
+    audit_fixtures::persist_server_meta_anchor(source, writer.chain().checkpoint());
+    let stale_active = fs::read(&log_path).expect("read the anchored active audit history");
+    let archive_path = source.join(audit_fixtures::archive_name(1));
+    assert!(!archive_path.exists(), "the source must have no archive");
+    // Release the live writer and store lock before the protocol's source-file
+    // mutation; the persisted checkpoint and server_meta anchors remain real.
+    drop(writer);
+    drop(appender);
+
+    let listings = Arc::new(AtomicUsize::new(0));
+    let listings_for_hook = listings.clone();
+    let log_for_listing = log_path.clone();
+    let remove_before_accepted_listing = test_seams::set_after_listing(Box::new(move |_root| {
+        // Phase 1 of pass D, then phase 1 of residual pass E. Remove the
+        // active source after E's phase-1 listing and before its audit listing.
+        if listings_for_hook.fetch_add(1, Ordering::SeqCst) == 1 {
+            fs::remove_file(&log_for_listing).expect("lose active source before E audit listing");
+        }
+    }));
+
+    let stale_destination_preserved = Arc::new(AtomicBool::new(false));
+    let stale_destination_preserved_for_scan = stale_destination_preserved.clone();
+    let log_for_scan = log_path.clone();
+    let replaced = Arc::new(AtomicBool::new(false));
+    let replaced_for_scan = replaced.clone();
+    let observe_destination =
+        test_seams::set_destination_audit_order(Box::new(move |root, paths| {
+            if !log_for_scan.exists() && !replaced_for_scan.swap(true, Ordering::SeqCst) {
+                // E's guard scan sees the missing source after its phase-1
+                // listing. Reappear under the same name without an archive.
+                write_file(&log_for_scan, b"");
+            }
+            let destination_bytes =
+                fs::read(root.join(ROTATION_AUDIT_LOG)).expect("D's destination active file");
+            stale_destination_preserved_for_scan
+                .store(destination_bytes == stale_active, Ordering::SeqCst);
+            paths
+        }));
+
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run(&port, source, to, &CancelFlag::default());
+    drop(observe_destination);
+    drop(remove_before_accepted_listing);
+
+    assert_eq!(
+        listings.load(Ordering::SeqCst),
+        2,
+        "pass D and residual pass E"
+    );
+    assert!(
+        stale_destination_preserved.load(Ordering::SeqCst),
+        "the guard must observe D's real stale active bytes, without synthesizing an entry"
+    );
+    assert!(
+        replaced.load(Ordering::SeqCst),
+        "the E guard scan must re-create the active name without an archive"
+    );
+    let error = result.expect_err("the uncaptured D active file must refuse the run");
+    assert!(
+        matches!(
+            &error,
+            OnlineBackupError::Failed {
+                stage: BackupStage::Sealing,
+                source: OnlineBackupFailure::Copy(CopyError::AuditArchiveLost),
+                ..
+            }
+        ),
+        "an unlisted stale active destination file with no archive evidence must refuse: {error:?}"
+    );
+}
 /// the reopen lands before the next listing.
 ///
 /// The corrective copy itself succeeds; its follow-up hash is where the
@@ -620,8 +780,8 @@ fn a_corrective_re_hash_miss_publishes_when_the_rotation_reopens_the_active_log(
     let report = result.expect("the reopened active log must let the backup finish");
     assert_eq!(
         readings.load(Ordering::SeqCst),
-        2,
-        "the residual pass must reach the copy hash and the corrective re-hash"
+        3,
+        "the residual pass must reach its two injected copy/re-hash hits and hash the reopened log in round 2"
     );
     assert_eq!(
         listings.load(Ordering::SeqCst),
@@ -642,5 +802,10 @@ fn a_corrective_re_hash_miss_publishes_when_the_rotation_reopens_the_active_log(
             log_bytes.len() as u64
         ),
         "the manifest must describe the archived bytes exactly"
+    );
+    assert_eq!(
+        fs::read(report.dest_dir.join(ROTATION_AUDIT_LOG)).expect("reopened log copy"),
+        b"reopened-active\n",
+        "the destination must carry the reopened active log, not the stale copy"
     );
 }

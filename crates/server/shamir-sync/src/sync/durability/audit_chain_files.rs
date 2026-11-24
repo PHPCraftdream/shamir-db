@@ -28,12 +28,13 @@ const AUDIT_LOG_FILE_NAME: &str = "audit.log";
 const AUDIT_ARCHIVE_PREFIX: &str = "audit.log.";
 const AUDIT_ARCHIVE_DIGITS: usize = 20;
 
-/// Upper bound on the audit chain rounds of one data-directory pass. Each
-/// round lists the audit files, copies every file it listed and lists them
-/// again; a round whose fresh listing names a rotation archive that round did
-/// not copy repeats. The bound counts rounds: a stable round, the last one
-/// included, succeeds; no stable round within the bound fails the pass typed
-/// (never a silently inconsistent copy).
+/// Upper bound on audit chain capture rounds of one data-directory pass. Each
+/// round lists audit files, copies every listed file, and lists again. The
+/// unstable-round budget is four rounds; up to three additional active-reopen
+/// attempts may follow, for at most seven capture rounds per pass. This bounds
+/// the count of work rounds, not an elapsed interval or deadline. A stable
+/// round is a candidate subject to the destination-leftover check; without a
+/// stable round the pass fails typed.
 pub(super) const AUDIT_CAPTURE_ROUNDS: usize = 4;
 
 /// True for the top-level audit chain file names: the active log and its
@@ -62,28 +63,40 @@ pub(super) fn is_audit_active_log_name(name: &OsStr) -> bool {
 /// stays deterministic). Only exact archive names, only regular files;
 /// cancellation and the gate are checked per entry.
 ///
-/// Every enumeration and metadata failure is a typed
-/// [`CopyError::AuditListing`] — which carries no path, the copy's error
-/// vocabulary being path-free — except an entry that VANISHED between the
-/// listing and the metadata read (`NotFound`), which is the
-/// retention/rotation race and is skipped. Never a silent omission: an
-/// unreadable entry could be a possibly-new rotation archive.
+/// Every iterator enumeration error is typed as [`CopyError::AuditListing`],
+/// including `NotFound`, because it is not evidence that an already-listed
+/// entry vanished. Only `NotFound` from per-entry metadata after enumeration
+/// is skipped; other metadata failures are typed `AuditListing`. Never a silent
+/// omission: an unreadable entry could be a possibly-new rotation archive.
 pub(super) fn list_audit_files(
     source_root: &Path,
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
 ) -> Result<Vec<PathBuf>, CopyError> {
+    if cancel.is_cancelled() {
+        return Err(CopyError::Cancelled);
+    }
     let mut archives = Vec::new();
     let mut active = None;
     let entries = fs::read_dir(source_root).map_err(|source| CopyError::Io {
         path: source_root.to_path_buf(),
         source,
     })?;
-    // EVERY enumeration error is typed: a dropped entry would silently omit
-    // an audit chain file from this listing — and this is the ONE listing
-    // both the capture round and the stability check use.
+    if cancel.is_cancelled() {
+        return Err(CopyError::Cancelled);
+    }
+    // Enumerate raw paths and sort first, then classify names and perform
+    // metadata checks entry by entry. Iterator failures, including NotFound,
+    // remain typed AuditListing errors.
     let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in entries {
+    let mut entries = entries.into_iter();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
+        let Some(entry) = entries.next() else {
+            break;
+        };
         // Test-only seam: an injected ITERATOR failure for this root takes the
         // very arm a genuine one takes (the pass listing has the same seam).
         #[cfg(test)]
@@ -98,6 +111,9 @@ pub(super) fn list_audit_files(
     }
     paths.sort();
     for entry in paths {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
         if let Some(gate) = gate {
             gate.check(cancel)?;
         } else if cancel.is_cancelled() {
