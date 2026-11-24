@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::poll;
@@ -241,4 +242,47 @@ async fn multi_target_exit_refcount_last_exit_removes() {
             .map(|l| l.valid.load(Ordering::Acquire)),
         None
     );
+}
+
+/// `begin_stop` cancels every running follower WITHOUT the lifecycle lock and
+/// without awaiting anything, and latches the stop admission: a later pass
+/// starts nothing although the subscription row is still active.
+///
+/// Mutants: a `begin_stop` that only latches the flag leaves the loops running
+/// (the teardown never signals and the bounded wait fails); one that only
+/// signals lets the next `reconcile` restart the row.
+#[tokio::test]
+async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
+        })
+    };
+    let sup =
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_poll_wait_ms(100);
+    let teardown = sup.teardown_signal();
+    sup.reconcile().await;
+    assert!(sup.is_running("sub_a"), "the follower must be running");
+
+    // No `stop_all`, no lifecycle lock: only the fence signals the loops.
+    sup.begin_stop();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("every follower loop must exit after begin_stop alone");
+    assert_eq!(sup.teardown_count(), 1);
+    assert!(!sup.is_running("sub_a"));
+
+    // The row is still ACTIVE: without the latch this pass restarts it.
+    sup.reconcile().await;
+    assert!(
+        !sup.is_running("sub_a"),
+        "a stopping supervisor must start no follower"
+    );
+    assert_eq!(sup.active_count(), 0);
 }

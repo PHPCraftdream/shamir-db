@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{fence, AtomicBool, Ordering};
 use std::sync::Arc;
 
 use shamir_collections::{TFxSet, THasher};
@@ -43,6 +43,10 @@ pub struct SubscriptionSupervisor {
     pub(super) validate_replicated_payload: bool,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
+    /// Persistent stop admission, set by [`Self::begin_stop`]: no pass starts
+    /// a follower once it is set, and a follower registered after it is
+    /// cancelled at once.
+    pub(super) stopping: AtomicBool,
     /// Test seam for replacing the row between lease-take and spawn.
     #[cfg(test)]
     pub(super) start_race_hook: Option<StartRaceHook>,
@@ -76,6 +80,7 @@ impl SubscriptionSupervisor {
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
             reconcile_lock: tokio::sync::Mutex::new(()),
+            stopping: AtomicBool::new(false),
             #[cfg(test)]
             start_race_hook: None,
             #[cfg(test)]
@@ -209,6 +214,9 @@ impl SubscriptionSupervisor {
     ///   replacement.
     pub async fn reconcile(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
+        if self.stopping.load(Ordering::SeqCst) {
+            return;
+        }
         // Lock only the catalogue read; release before task stop/start callbacks.
         let control = self.local.lock_replication_control().await;
         let subs = match self.read_subscriptions().await {
@@ -296,6 +304,27 @@ impl SubscriptionSupervisor {
                 }
             }
         }
+    }
+
+    /// Shutdown, first step: latch the stop admission and cancel EVERY running
+    /// follower, without the lifecycle lock and without awaiting anything.
+    ///
+    /// A reconcile pass in flight holds [`Self::reconcile_lock`] across its
+    /// catalogue read, so a caller that abandons [`Self::stop_all`] while it
+    /// waits for the lock (a shutdown budget) would otherwise leave every
+    /// follower running. After this call no pass starts a follower, and one
+    /// that registers concurrently is cancelled by the start path itself.
+    /// Followers exit gracefully at their next await; [`Self::stop_all`] then
+    /// joins them.
+    pub fn begin_stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        // Pairs with the fence after the registry insert in `start_subscription`:
+        // either this walk sees the new handle or that path sees the flag.
+        fence(Ordering::SeqCst);
+        self.registry.iter_sync(|_, handle| {
+            handle.stop();
+            true
+        });
     }
 
     /// Stop every running loop and clear the registry (shutdown).
