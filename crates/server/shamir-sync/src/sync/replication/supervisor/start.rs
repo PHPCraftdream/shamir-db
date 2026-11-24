@@ -306,6 +306,10 @@ impl SubscriptionSupervisor {
         // One live-count reference per target; only the final exit may
         // invalidate the shared lease after every apply guard is gone.
         let live_targets = Arc::new(AtomicUsize::new(pull_targets.len()));
+        // Set by the LAST exiting wrapper once the lease is invalidated: the
+        // handle is dead and fully torn down (a done flag alone is set before
+        // the wrapper waits for the control lock).
+        let torn_down = Arc::new(AtomicBool::new(false));
         // Last exit tears down the shared lease.
         lease_guard.defuse();
 
@@ -342,6 +346,7 @@ impl SubscriptionSupervisor {
             let done = Arc::clone(&done_flag);
             let lease_for_exit = Arc::clone(&lease);
             let live = Arc::clone(&live_targets);
+            let torn_down_exit = Arc::clone(&torn_down);
             #[cfg(test)]
             let teardown_count = Arc::clone(&self.teardown_count);
             #[cfg(test)]
@@ -581,6 +586,9 @@ impl SubscriptionSupervisor {
                     let control = local.lock_replication_control().await;
                     local.invalidate_subscription_lease(&sub_name, &lease_for_exit, &control);
                     drop(control);
+                    // Before the removal attempt: a registration that lands after
+                    // that attempt finds nothing to remove and sweeps on this flag.
+                    torn_down_exit.store(true, Ordering::Release);
                     let lease_check = Arc::clone(&lease_for_exit);
                     let _ =
                         registry.remove_if_sync(&sub_name, |h| Arc::ptr_eq(&h.lease, &lease_check));
@@ -605,6 +613,7 @@ impl SubscriptionSupervisor {
             cancel,
             joins,
             dones,
+            torn_down,
             lease,
             profile: sub.profile.clone(),
             generation: sub.binding_generation,
@@ -617,16 +626,17 @@ impl SubscriptionSupervisor {
         } else {
             // The last exit may have run before this insert (a follower born
             // cancelled exits at its first cancellation checkpoint): it
-            // invalidates the lease first and then deregisters, so its removal
-            // found nothing and the dead handle is swept here. Either that removal
-            // sees the handle or this check sees the invalid lease (the registry's
-            // bucket lock orders the two). An invalid lease alone is NOT an exit:
-            // DROP, PAUSE and terminal marking clear it while followers still run,
-            // so every target must also have reached its exit housekeeping.
+            // invalidates the lease, publishes `torn_down` and only then tries
+            // to deregister, so its removal found nothing and the dead handle is
+            // swept here. Either that removal sees the handle or this check sees
+            // the flag (the registry's bucket lock orders the two). Neither an
+            // invalid lease (DROP, PAUSE and terminal marking clear it while
+            // followers still run) nor the done flags (set before the last wrapper
+            // waits for the control lock) prove the teardown finished, so only the
+            // flag does: a handle that is not fully torn down stays registered and
+            // `stop_all` still joins it.
             let _ = self.registry.remove_if_sync(&sub.name, |h| {
-                Arc::ptr_eq(&h.lease, &registered_lease)
-                    && !h.lease.valid.load(Ordering::Acquire)
-                    && h.dones.iter().all(|done| done.load(Ordering::Acquire))
+                Arc::ptr_eq(&h.lease, &registered_lease) && h.torn_down.load(Ordering::Acquire)
             });
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");
         }
