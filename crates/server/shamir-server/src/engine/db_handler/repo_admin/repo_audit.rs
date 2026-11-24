@@ -188,18 +188,14 @@ pub(crate) struct CancelRefusalAudit {
     dropped: AtomicUsize,
     idle: Notify,
     /// Queued + running jobs per principal NAME. A name's entry is inserted
-    /// with its first refusal and removed when its count returns to zero. The
-    /// global slot is reserved inside the SAME bucket-locked decision that
-    /// increments the count, and only when the share still has room (see
-    /// [`CancelRefusalAudit::reserve_share_and_global`]), so every non-zero
-    /// entry implies a held slot: at most `CANCEL_AUDIT_CAPACITY` entries with a
-    /// non-zero count, plus zero entries whose removal raced a reservation
-    /// (retired by that name's next release).
+    /// with its first admitted slot and removed when its count returns to zero.
+    /// The global slot is reserved while holding the same scc bucket entry,
+    /// before inserting a vacant entry, so every published entry has a live slot.
     ///
-    /// Contention: one `update_sync`/`insert_sync` per refusal and one per
-    /// release on the scc bucket of that name — the map's own bucket lock for
-    /// the increment/decrement only, never across an `.await`, never inside the
-    /// audit append. No `std` mutex is added to the reply path.
+    /// Contention: the response path uses scc 3.8's `try_entry`, which returns
+    /// immediately when the bucket is busy; bounded retries refuse admission.
+    /// Release uses one short decrement/removal critical section under the
+    /// entry guard, never across an `.await` or audit append.
     principals: scc::HashMap<String, PrincipalHeld, THasher>,
     /// Live `Observability` jobs (queued + running) across every principal.
     /// Bounded by [`CANCEL_AUDIT_OBSERVABILITY_CAPACITY`]; `Security` jobs
@@ -239,14 +235,19 @@ impl CancelRefusalAudit {
     /// before the removal (the removal then sees a non-zero count and keeps the
     /// entry) or inserts a fresh entry afterwards.
     fn release_share(&self, principal: &str, class: AuditEventClass) {
-        self.principals.update_sync(principal, |_, held| {
-            held.total = held.total.saturating_sub(1);
-            if class == AuditEventClass::Observability {
-                held.observability = held.observability.saturating_sub(1);
+        match self.principals.entry_sync(principal.to_owned()) {
+            scc::hash_map::Entry::Occupied(mut entry) => {
+                let held = entry.get_mut();
+                held.total = held.total.saturating_sub(1);
+                if class == AuditEventClass::Observability {
+                    held.observability = held.observability.saturating_sub(1);
+                }
+                if held.total == 0 {
+                    let _ = entry.remove();
+                }
             }
-        });
-        self.principals
-            .remove_if_sync(principal, |held| held.total == 0);
+            scc::hash_map::Entry::Vacant(_) => {}
+        }
     }
 
     /// Release one global observability slot; a no-op for `Security` jobs,
@@ -363,9 +364,11 @@ impl CancelRefusalAudit {
     /// spawn, never after it. A refused spawn drops `job`, whose slot counts
     /// the refusal as a dropped event exactly like a refused reservation.
     fn spawn_tracked(&self, job: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>> {
-        let mut handles = match self.unfinished.lock() {
+        let mut handles = match self.unfinished.try_lock() {
             Ok(handles) => handles,
-            Err(_) => return None,
+            Err(std::sync::TryLockError::WouldBlock | std::sync::TryLockError::Poisoned(_)) => {
+                return None;
+            }
         };
         if self.state.load(Ordering::Acquire) & CLOSED != 0 {
             return None;
@@ -412,7 +415,6 @@ impl CancelRefusalAudit {
             .unwrap_or(0)
     }
 
-    /// Test-only: ONE real reservation through the production admission path.
     #[cfg(test)]
     pub(crate) fn try_reserve_for_test(
         self: &Arc<Self>,

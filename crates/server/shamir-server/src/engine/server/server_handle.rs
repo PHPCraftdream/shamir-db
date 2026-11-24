@@ -21,11 +21,10 @@ use crate::server::store_release_barrier::{
     release_stores_until, ReleaseOutcome, UnverifiedReason,
 };
 
-/// One reserve shared by all earlier teardown stages. The early cutoff is the
-/// fixed instant `outer_deadline - LATE_RESERVE`; individual stage caps may
-/// shorten a wait, but never move that cutoff forward. The late metadata join
-/// may use at most 500 ms of it; store release then keeps 250 ms for its
-/// verdict/report. The remainder is scheduling and report slack.
+/// One reserve shared by all earlier teardown stages. The early cutoff is
+/// `outer_deadline - LATE_RESERVE`; individual stage caps may shorten a wait
+/// but never move it. The metadata join stops 500 ms and store release 250 ms
+/// before the outer deadline; the remaining reserve is scheduling/report slack.
 const LATE_RESERVE: Duration = Duration::from_secs(1);
 
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);

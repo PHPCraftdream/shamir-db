@@ -18,11 +18,11 @@ use crate::server::{BootstrapMode, ServerHandle, ServerLauncher};
 /// Maximum time to wait for in-flight connections to drain after receiving
 /// a shutdown signal. If the deadline expires, we return an unclean report.
 ///
-/// A single 1 s reserve is kept for late diagnostics: metadata gets at most
-/// 500 ms, store release at most 250 ms, and 250 ms remains for report
-/// propagation. Thus a 3 s outer budget gives early stages one shared cutoff
-/// at 2 s after shutdown starts, followed by up to 500 ms metadata, 250 ms
-/// release-probe, and 250 ms report slack.
+/// A single 1 s reserve is kept for late diagnostics: the metadata join is
+/// bounded to stop 500 ms before the outer deadline; store release is bounded
+/// to stop 250 ms before it, leaving 250 ms for report propagation. Thus a 3 s
+/// outer budget gives early stages a shared cutoff at 2 s after shutdown starts,
+/// followed by the metadata join, store-release probe, and report slack.
 /// The scheduled-backup worker and data-directory lock remain owned outside
 /// the bounded future and are awaited before `serve` returns. There is no forced
 /// exit and nothing calls `std::process::exit`.
@@ -92,8 +92,9 @@ pub async fn serve(
 /// by `ShutdownOwner::drain`.
 ///
 /// One absolute instant is shared by the bounded teardown and its stages.
-/// Earlier stages stop at `deadline_at - 1 s`; metadata may consume at most
-/// 500 ms, release at most 250 ms, and the remaining 250 ms is report slack.
+/// Earlier stages stop at `deadline_at - 1 s`; the metadata join is bounded to
+/// stop 500 ms before the outer deadline, store release to stop 250 ms before
+/// it, leaving 250 ms for the report.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,

@@ -15,14 +15,6 @@ use super::{
     SATURATED,
 };
 
-/// Outcome of the single bucket-locked admission decision. Refusal accounting
-/// and logging are performed only after the bucket callback returns.
-enum ShareAdmission {
-    Reserved,
-    ShareFull,
-    GlobalRefused(GlobalRefusal),
-}
-
 #[derive(Clone, Copy)]
 enum GlobalRefusal {
     Closed,
@@ -81,63 +73,58 @@ impl CancelRefusalAudit {
 
     /// Read-only share test: creates no entry and takes no slot.
     fn share_is_full(&self, principal: &str, class: AuditEventClass) -> bool {
-        self.principals
-            .read_sync(principal, |_, held| held.is_full(class))
-            .unwrap_or(false)
+        match self.principals.try_entry(principal.to_owned()) {
+            Some(scc::hash_map::Entry::Occupied(entry)) => entry.get().is_full(class),
+            Some(scc::hash_map::Entry::Vacant(_)) | None => false,
+        }
     }
 
     /// Take one slot of `principal`'s share AND one global slot in ONE
-    /// bucket-locked decision, or refuse without waiting.
-    ///
-    /// The share tests, the global CAS and the increment run inside the same
-    /// `update_sync`, so no global slot is ever held by a request that the
-    /// share check then refuses. Exact per NAME: two principals never share a
-    /// counter and the count cannot drift from the live slots.
+    /// bucket-locked decision, or refuse without waiting. `try_entry` returns
+    /// immediately when the scc 3.8 bucket is busy; each occupied/vacant
+    /// decision is one bounded entry operation.
     fn reserve_share_and_global(&self, principal: &str, class: AuditEventClass) -> bool {
         for _ in 0..ADMISSION_RETRY_LIMIT {
-            match self.principals.update_sync(principal, |_, held| {
-                if held.is_full(class) {
-                    return ShareAdmission::ShareFull;
-                }
-                match self.reserve_global_slot(class) {
-                    Ok(()) => {
-                        held.total += 1;
-                        if class == AuditEventClass::Observability {
-                            held.observability += 1;
-                        }
-                        ShareAdmission::Reserved
+            match self.principals.try_entry(principal.to_owned()) {
+                Some(scc::hash_map::Entry::Occupied(mut entry)) => {
+                    let held = entry.get_mut();
+                    if held.is_full(class) {
+                        self.refuse_share_full(class);
+                        return false;
                     }
-                    Err(reason) => ShareAdmission::GlobalRefused(reason),
+                    match self.reserve_global_slot(class) {
+                        Ok(()) => {
+                            held.total += 1;
+                            if class == AuditEventClass::Observability {
+                                held.observability += 1;
+                            }
+                            return true;
+                        }
+                        Err(reason) => {
+                            self.refuse_global(reason, class);
+                            return false;
+                        }
+                    }
                 }
-            }) {
-                Some(ShareAdmission::Reserved) => return true,
-                Some(ShareAdmission::ShareFull) => {
-                    self.refuse_share_full(class);
-                    return false;
+                Some(scc::hash_map::Entry::Vacant(entry)) => {
+                    let mut held = PrincipalHeld {
+                        total: 0,
+                        observability: 0,
+                    };
+                    if let Err(reason) = self.reserve_global_slot(class) {
+                        self.refuse_global(reason, class);
+                        return false;
+                    }
+                    held.total = 1;
+                    if class == AuditEventClass::Observability {
+                        held.observability = 1;
+                    }
+                    entry.insert_entry(held);
+                    return true;
                 }
-                Some(ShareAdmission::GlobalRefused(reason)) => {
-                    // First-touch failures leave a zero-count placeholder. Retire
-                    // it only if no concurrent admission has made it live.
-                    self.principals
-                        .remove_if_sync(principal, |held| held.total == 0);
-                    self.refuse_global(reason, class);
-                    return false;
-                }
-                None => {
-                    // Publish an empty entry first. The subsequent bucket-locked
-                    // update is the sole admission decision for both paths.
-                    let _ = self.principals.insert_sync(
-                        principal.to_owned(),
-                        PrincipalHeld {
-                            total: 0,
-                            observability: 0,
-                        },
-                    );
-                }
+                None => std::hint::spin_loop(),
             }
         }
-        self.principals
-            .remove_if_sync(principal, |held| held.total == 0);
         self.refuse_retry_limit(class);
         false
     }

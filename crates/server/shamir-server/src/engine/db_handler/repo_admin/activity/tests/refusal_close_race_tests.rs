@@ -260,6 +260,78 @@ async fn close_waits_for_an_in_flight_spawn_decision() {
     }
 }
 
+/// A response-path admission must refuse promptly when another spawn decision
+/// owns the registry lock, and the reservation must be counted/released once.
+///
+/// Mutant killed: replacing `unfinished.try_lock()` with `unfinished.lock()`;
+/// the contender blocks until the parked decision is released instead of
+/// reporting its counted refusal through the bounded rendezvous.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contended_spawn_registry_is_a_counted_nonblocking_refusal() {
+    let appender = Arc::new(CountingAppender::default());
+    let writer = Arc::new(AuditChainWriter::new(AuditChain::new([8u8; 32]), appender));
+    let gate = Arc::new((Mutex::new(SpawnWindowState::default()), Condvar::new()));
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let owner = tokio::task::spawn_blocking({
+        let queue = Arc::clone(&queue);
+        let writer = Arc::clone(&writer);
+        let gate = Arc::clone(&gate);
+        move || {
+            let probe = queue_arm_spawn_window_probe(gate.clone());
+            let result = enqueue_cancel_refusal_audit(
+                &queue,
+                &writer,
+                &session("registry-owner"),
+                RequestExecId(1),
+                &CancelOutcome::NotCancellable,
+            );
+            std::mem::forget(probe);
+            result
+        }
+    });
+    let _release = ReleaseSpawnWindow(Arc::clone(&gate));
+    wait_for_spawn_window(&gate, "owner spawn decision", |state| state.entered);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let contender = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let writer = Arc::clone(&writer);
+        move || {
+            let result = enqueue_cancel_refusal_audit(
+                &queue,
+                &writer,
+                &session("registry-owner"),
+                RequestExecId(2),
+                &CancelOutcome::NotCancellable,
+            );
+            let _ = tx.send(result.is_none());
+        }
+    });
+    let refused = rx
+        .recv_timeout(TIMEOUT)
+        .expect("contended admission is nonblocking");
+    contender.join().expect("contender thread");
+    assert!(refused, "registry contention must refuse this spawn");
+    assert_eq!(queue.dropped_count(), 1, "refusal counted exactly once");
+    assert_eq!(queue.global_held_for_test(), 1, "contender slot released");
+    assert_eq!(
+        queue.principal_held_for_test("registry-owner"),
+        1,
+        "owner share reservation remains"
+    );
+
+    open_spawn_window(&gate);
+    let owner = tokio::time::timeout(TIMEOUT, owner)
+        .await
+        .expect("owner enqueue bounded")
+        .expect("owner task");
+    assert!(owner.is_some(), "owner spawn decision remains admitted");
+    queue.discard_queued();
+    if let Some(owner) = owner {
+        let _ = tokio::time::timeout(TIMEOUT, owner).await;
+    }
+}
+
 fn queue_arm_spawn_window_probe(
     gate: Arc<(Mutex<SpawnWindowState>, Condvar)>,
 ) -> SpawnWindowProbeGuard {
@@ -501,9 +573,6 @@ fn open_share_decision(gate: &(Mutex<ShareDecisionState>, Condvar)) {
 
 /// Two absent principal entries race for the last global slot. The loser must
 /// not retain a transient reservation after its first-touch attempt fails.
-///
-/// Mutant killed: reserve-global-before-`insert_sync` on first touch, which lets
-/// the losing insert temporarily keep a slot and deny the third principal.
 #[test]
 fn losing_first_touch_reservation_never_denies_a_third_principal() {
     let queue = Arc::new(CancelRefusalAudit::default());

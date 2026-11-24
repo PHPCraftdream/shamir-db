@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use shamir_collections::{TFxSet, THasher};
 use shamir_db::ShamirDb;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 use super::handle::StartRaceHook;
@@ -303,7 +303,13 @@ impl SubscriptionSupervisor {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
                 for join in handle.joins {
-                    let _ = join.await;
+                    if let Err(join_error) = join.await {
+                        error!(
+                            subscription = %name,
+                            error = %join_error,
+                            "supervisor: follower wrapper join failed during reconcile"
+                        );
+                    }
                 }
                 info!(subscription = %name, "supervisor: stopped follower loop");
             }
@@ -362,12 +368,18 @@ impl SubscriptionSupervisor {
         for name in names {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
-                stopped.push(handle);
+                stopped.push((name, handle));
             }
         }
-        for handle in stopped {
+        for (name, handle) in stopped {
             for join in handle.joins {
-                let _ = join.await;
+                if let Err(join_error) = join.await {
+                    error!(
+                        subscription = %name,
+                        error = %join_error,
+                        "supervisor: follower wrapper join failed during stop_all"
+                    );
+                }
             }
         }
     }
@@ -381,7 +393,13 @@ impl SubscriptionSupervisor {
             return;
         };
         for join in handle.joins {
-            join.await.expect("subscription task panicked");
+            if let Err(join_error) = join.await {
+                error!(
+                    subscription = %name,
+                    error = %join_error,
+                    "supervisor: follower wrapper join failed while waiting for subscription"
+                );
+            }
         }
     }
 }
