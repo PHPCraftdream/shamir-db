@@ -529,8 +529,10 @@ impl ServerHandle {
     /// borrowed, not taken: dropping this future must never drop the
     /// scheduled worker or the instance lock.
     ///
-    /// The outer-deadline-less entry: the late stages spend their own constants
-    /// ([`META_SNAPSHOT_JOIN_TIMEOUT`], [`STORE_RELEASE_TIMEOUT`]). Callers that
+    /// The outer-deadline-less entry: every stage that depends on the blocking
+    /// pool spends its own constant ([`CONN_DRAIN_TIMEOUT`] for the token GC and
+    /// replication joins, [`META_SNAPSHOT_JOIN_TIMEOUT`],
+    /// [`STORE_RELEASE_TIMEOUT`]), so a starved pool cannot hang it. Callers that
     /// wrap this future in a deadline use [`Self::shutdown_with_budget`]
     /// instead, so the late stages can report what they could not settle
     /// BEFORE that deadline erases them.
@@ -568,6 +570,7 @@ impl ServerHandle {
                 .checked_sub(LATE_RESERVE)
                 .unwrap_or_else(tokio::time::Instant::now)
         });
+        tracing::debug!(stage = "listeners", "shutdown stage");
         let (listener_deadline, listener_budget) =
             early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
         // One fixed early cutoff shared by each bounded wait.
@@ -633,42 +636,37 @@ impl ServerHandle {
             }
         }
         drop(self.http_gates);
-        if early_cutoff.is_some() {
-            let (gc_deadline, gc_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
-            if tokio::time::timeout_at(gc_deadline, self.token_service.shutdown_gc())
-                .await
-                .is_err()
-            {
-                report.add_error(format!("token GC shutdown exceeded {gc_budget:?}"));
-            }
-        } else {
-            self.token_service.shutdown_gc().await;
+        // BOUNDED with or without an outer deadline: the GC pass is a blocking
+        // job, so a starved pool would keep this join pending forever.
+        tracing::debug!(stage = "token_gc", "shutdown stage");
+        let (gc_deadline, gc_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+        if tokio::time::timeout_at(gc_deadline, self.token_service.shutdown_gc())
+            .await
+            .is_err()
+        {
+            report.add_error(format!("token GC shutdown exceeded {gc_budget:?}"));
         }
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
         //     to stop by the root `shutdown_token.cancel()` above) so it drops
         //     its supervisor reference. Done after the accept loops stop (no
         //     new subscription rows can arrive) and before flush.
-        if early_cutoff.is_some() {
-            let (repl_deadline, repl_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
-            if tokio::time::timeout_at(repl_deadline, async {
-                self.repl_supervisor.stop_all().await;
-                if let Some(task) = &mut self.repl_supervisor_task {
-                    let _ = (&mut task.handle).await;
-                }
-            })
-            .await
-            .is_err()
-            {
-                report.add_error(format!(
-                    "replication supervisor shutdown exceeded {repl_budget:?}"
-                ));
-            }
-        } else {
+        //     BOUNDED with or without an outer deadline (a reconcile pass in
+        //     flight reads the catalogue through the blocking pool).
+        tracing::debug!(stage = "replication", "shutdown stage");
+        let (repl_deadline, repl_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+        if tokio::time::timeout_at(repl_deadline, async {
             self.repl_supervisor.stop_all().await;
             if let Some(task) = &mut self.repl_supervisor_task {
                 let _ = (&mut task.handle).await;
             }
+        })
+        .await
+        .is_err()
+        {
+            report.add_error(format!(
+                "replication supervisor shutdown exceeded {repl_budget:?}"
+            ));
         }
         // 3. Drain the refusal-audit queue and the audit chain under ONE
         //    shared deadline: the scheduler is signalled before it is joined,
@@ -684,6 +682,7 @@ impl ServerHandle {
             self.cancel_refusal_audit.close();
             self.scheduler.signal_shutdown();
         }
+        tracing::debug!(stage = "audit", "shutdown stage");
         let audit = teardown_audit(
             AuditTeardown {
                 cancel_refusal_audit: &self.cancel_refusal_audit,
@@ -721,6 +720,7 @@ impl ServerHandle {
         if let Some(obs) = &self.observability {
             obs.cancel();
         }
+        tracing::debug!(stage = "schedule_join", "shutdown stage");
         // Do not abort: an in-flight copy or retention operation must finish
         // cleanup. This is the ORIGINAL position — before the repository flush
         // — and it borrows the owner, so a deadline can abandon this teardown
@@ -749,6 +749,7 @@ impl ServerHandle {
             fire_scheduled_join_probe();
             owner.join_schedule(report).await;
         }
+        tracing::debug!(stage = "repo_flush", "shutdown stage");
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
@@ -789,6 +790,7 @@ impl ServerHandle {
         //    private cancel-on-drop field), so the tasks stop on their own at
         //    their next cancellation point.
         if let Some(obs) = self.observability {
+            tracing::debug!(stage = "observability", "shutdown stage");
             let (obs_deadline, _) = early_stage_bound(early_cutoff, OBS_SHUTDOWN_TIMEOUT);
             match tokio::time::timeout_at(obs_deadline, obs.shutdown()).await {
                 // The call returned: name exactly the side(s) that missed their
@@ -831,6 +833,7 @@ impl ServerHandle {
         //    applies without a reserve. Join errors stay ignored exactly as
         //    before: only an EXPIRY means the store may still be locked.
         if let Some(snap) = self.meta_snapshot_task {
+            tracing::debug!(stage = "meta_snapshot", "shutdown stage");
             let reserve_after = if deadline_at.is_some() {
                 Duration::from_millis(500)
             } else {
@@ -855,6 +858,7 @@ impl ServerHandle {
             }
         }
         // 7. Join the interactive-tx reaper; dropping it aborts lingering txs.
+        tracing::debug!(stage = "reapers", "shutdown stage");
         if let Some(reaper) = self.interactive_tx_reaper {
             if deadline_at.is_some() {
                 let (reaper_deadline, budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
@@ -885,6 +889,7 @@ impl ServerHandle {
             }
         }
         // 9. Drop this handle's store references, then probe directory-lock release.
+        tracing::debug!(stage = "store_release", "shutdown stage");
         let data_dir = self.data_dir;
         // The test seam holds `Arc<ShamirDbHandler>` (and the handler holds the
         // DB), so a fixture that never takes it would keep its OWN stores

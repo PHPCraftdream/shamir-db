@@ -41,6 +41,7 @@ use shamir_private_dir::create_private_dir;
 use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::boot::config::diagnostics::backup_online::schedule::runner::spawn_for_test;
 use crate::boot::config::HttpListenerSettings;
@@ -55,6 +56,7 @@ use crate::server::server_launcher::audit_teardown::arm_teardown_probe;
 use crate::server::{release_stores, BootstrapMode, ReleaseOutcome, ServerLauncher};
 
 const TEST_NAME: &str = "shutdown_deadline_does_not_abandon_the_scheduled_worker";
+const PUBLIC_TEST: &str = "public_shutdown_bounds_meta_snapshot_join_without_outer_deadline";
 const EXAMPLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../deploy/server.example.ktav"
@@ -439,11 +441,10 @@ async fn run_normal_order() {
 /// The LATE teardown stages must spend the ACTUAL remaining shutdown budget and
 /// report what they could not settle.
 ///
-/// The runtime has ONE blocking thread and this test parks it before the
-/// 3 s outer budget is too short to rely on earlier teardown reaching those
-/// stages. Once reached, the meta-snapshot wait reserves time for release and
-/// reporting, while the release wait reserves final report slack, so each
-/// actual stage verdict is appended before outer expiry.
+/// The runtime has ONE blocking thread and this test parks it; the 3 s outer
+/// budget is too short to rely on earlier teardown. The meta-snapshot wait
+/// reserves time for release and reporting, the release wait reserves final
+/// report slack, so each stage verdict is appended before outer expiry.
 ///
 /// * the meta-snapshot verdict (step 6): the snapshot did not settle, so the
 ///   `server_meta` store may still be locked;
@@ -485,13 +486,16 @@ fn zero_budget_store_release_reports_unknown_without_claiming_a_probe_ran() {
     assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
 }
 
-/// Public `ServerHandle::shutdown()` has no outer deadline, but step 6 must
-/// still bound its meta-snapshot join by `META_SNAPSHOT_JOIN_TIMEOUT`.
-/// The existing one-thread parked-pool fixture exercises that path without
-/// adding a production seam.
+/// Public `ServerHandle::shutdown()` has no outer deadline, yet the stages that
+/// wait on the blocking pool (token-GC join, meta-snapshot join) must stay
+/// bounded. A GC pass is restarted with no await before the pool is parked, so
+/// its blocking job is queued behind the parked one on every run (the
+/// launcher's own first pass races the park).
 #[test]
 fn public_shutdown_bounds_meta_snapshot_join_without_outer_deadline() {
     on_single_blocking_thread(|| async {
+        let guard = FlakeGuard::with_watchdog(PUBLIC_TEST, Duration::from_secs(150));
+        try_install_global_tracing_ring();
         let temp = tempfile::tempdir().expect("test root");
         let data_dir = temp.path().join("data");
         create_private_dir(&data_dir).expect("private data directory");
@@ -503,16 +507,28 @@ fn public_shutdown_bounds_meta_snapshot_join_without_outer_deadline() {
         .launch()
         .await
         .expect("launch real server");
+        guard.mark("launched");
 
+        let stop = CancellationToken::new();
+        handle.token_service.shutdown_gc().await;
+        handle.token_service.start_gc(stop).await;
         let occupant = BlockingPoolOccupant::park();
         occupant.await_started();
+        guard.mark("token GC pass spawned, blocking pool occupied");
         let report = timeout(BOUND, handle.shutdown())
             .await
             .expect("public shutdown must settle with the blocking pool parked");
+        guard.mark("shutdown returned");
         let pool_still_occupied = !occupant.finished();
         drop(occupant);
 
         let errors = report.errors();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("token GC shutdown exceeded 10s")),
+            "public shutdown must report the capped token-GC join expiry: {report:?}"
+        );
         assert!(
             errors
                 .iter()
