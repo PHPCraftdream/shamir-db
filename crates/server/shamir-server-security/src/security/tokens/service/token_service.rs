@@ -37,7 +37,7 @@ pub struct TokenService {
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     gc_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     gc_shutdown: CancellationToken,
-    /// Set by `start_gc` once a collector task was spawned. `gc_live` counts the
+    /// Set by `start_gc` after a collector task was spawned. `gc_live` counts the
     /// collector tasks that have not ended yet: each task decrements it itself
     /// when it ends (also by a panic or an abort), and a restart after an
     /// abandoned `shutdown_gc` can leave two live at once.
@@ -634,13 +634,11 @@ impl TokenService {
         }
         let gc = self.clone_for_gc();
         let stop = self.gc_shutdown.child_token();
-        // Counted before the spawn and under the slot lock: a caller that sees
-        // `start_gc` return never reads zero live collectors.
+        // Counted before the spawn, under the slot lock; the guard travels into
+        // the task, so a spawn that fails drops it and restores the count.
         self.gc_live
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let live = LiveCollector(Arc::clone(&self.gc_live));
-        self.gc_spawned
-            .store(true, std::sync::atomic::Ordering::Release);
         *task = Some(tokio::spawn(async move {
             let _live = live;
             let _ = gc.collect().await;
@@ -653,12 +651,19 @@ impl TokenService {
                 tokio::select! { biased; _ = stop.cancelled() => break, _ = shutdown.cancelled() => break, _ = interval.tick() => { let _ = gc.collect().await; } }
             }
         }));
+        // Only after the spawn succeeded: a spawn that panicked leaves the
+        // "never started" answer intact.
+        self.gc_spawned
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     /// Whether every collector has really ended. After a spawn this reads the
     /// live-collector count the tasks maintain themselves, not the join-handle
     /// slot: a `shutdown_gc` abandoned at a deadline detaches the handle while
-    /// the collector may still run, and a restart spawns a new one.
+    /// the collector may still run, and a restart spawns a new one. The slot
+    /// lock makes the answer one snapshot against `start_gc`: a first start can
+    /// not land between the started flag and the stop-token reads.
     pub async fn gc_task_finished(&self) -> bool {
+        let _slot = self.gc_task.lock().await;
         if self.gc_spawned.load(std::sync::atomic::Ordering::Acquire) {
             self.gc_live.load(std::sync::atomic::Ordering::Acquire) == 0
         } else {
