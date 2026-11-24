@@ -255,24 +255,34 @@ fn drain_blocking_worker() {
 /// completion stamp the late result would win and a late empty held set would
 /// certify a release.
 ///
-/// The job is held on a channel, the virtual clock is advanced past the
-/// deadline, and only then the job is released and drained: the result and the
-/// expired timer are both ready at the next poll.
+/// The job signals that it entered and is then held on a channel; the test waits
+/// for that signal, advances the virtual clock past the deadline, and only then
+/// releases and drains the job: the result and the expired timer are both ready
+/// at the poll that consumes the result (the probe is not polled during the
+/// sentinel wait).
 ///
-/// Mutant: sending the bare value (no completion stamp) returns `Ok`.
+/// Mutants: sending the bare value (no completion stamp) returns `Ok`; a stamp
+/// taken before the probe call on the worker is ordered before the clock jump by
+/// the entry signal, so it classifies the late job in time and returns `Ok`.
 #[test]
 fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
     paused_runtime_with_one_blocking_worker().block_on(async {
         let deadline = Instant::now() + Duration::from_millis(100);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
         let mut probe = Box::pin(bounded_probe_for_test(deadline, move || {
+            let _ = entered_tx.send(());
             // Parks until the sender is dropped (an `Err` also returns).
             let _ = gate_rx.recv();
             "late empty held set"
         }));
-        // One poll runs the future up to its receiver await: the job is queued.
+        // The first poll queues the job and waits on its receiver; the job cannot
+        // finish before it is released, so the poll is pending.
         let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
         assert!(first.is_pending(), "the probe must wait for its job");
+        entered_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the probe job must start before the clock moves");
 
         tokio::time::advance(Duration::from_millis(500)).await;
         drop(gate_tx);
@@ -289,19 +299,29 @@ fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
 }
 
 /// The complement: a probe that finished BEFORE the deadline keeps its result
-/// even when the receiver is first polled after the deadline.
+/// even when the poll that consumes it comes after the deadline.
+///
+/// The job is held on a channel until the first poll returned pending, then
+/// released and drained while the virtual clock is still before the deadline;
+/// only then the clock passes the deadline and the probe is polled again.
 ///
 /// Mutant: a stamp taken on the receiving side classifies by the time of the
-/// poll and rejects this result as late.
+/// consuming poll and rejects this result as late.
 #[test]
 fn a_probe_finishing_before_the_deadline_is_an_observation_even_when_polled_late() {
     paused_runtime_with_one_blocking_worker().block_on(async {
         let deadline = Instant::now() + Duration::from_millis(100);
-        let mut probe = Box::pin(bounded_probe_for_test(deadline, || "in-budget held set"));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, move || {
+            // Parks until the sender is dropped (an `Err` also returns).
+            let _ = gate_rx.recv();
+            "in-budget held set"
+        }));
         let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
         assert!(first.is_pending(), "the probe must wait for its job");
 
         // The job runs and sends while the virtual clock is still before the deadline.
+        drop(gate_tx);
         drain_blocking_worker();
         tokio::time::advance(Duration::from_millis(500)).await;
 
