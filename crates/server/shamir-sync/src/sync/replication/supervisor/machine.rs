@@ -51,6 +51,10 @@ pub struct SubscriptionSupervisor {
     /// Test seam for replacing the row between lease-take and spawn.
     #[cfg(test)]
     pub(super) start_race_hook: Option<StartRaceHook>,
+    /// Test seam awaited after the follower tasks were spawned and before the
+    /// handle is registered: the window in which a follower can already exit.
+    #[cfg(test)]
+    pub(super) registration_hook: Option<StartRaceHook>,
     #[cfg(test)]
     pub(super) apply_park: Option<Arc<ApplyParkHook>>,
     #[cfg(test)]
@@ -85,6 +89,8 @@ impl SubscriptionSupervisor {
             #[cfg(test)]
             start_race_hook: None,
             #[cfg(test)]
+            registration_hook: None,
+            #[cfg(test)]
             apply_park: None,
             #[cfg(test)]
             exit_hook: None,
@@ -101,6 +107,15 @@ impl SubscriptionSupervisor {
     #[cfg(test)]
     pub fn with_start_race_hook(mut self, hook: StartRaceHook) -> Self {
         self.start_race_hook = Some(hook);
+        self
+    }
+
+    /// Install a hook awaited after the follower tasks were spawned and before
+    /// their handle is registered (tests only): a follower can exit in that
+    /// window, before the exit path has anything to deregister.
+    #[cfg(test)]
+    pub fn with_registration_hook(mut self, hook: StartRaceHook) -> Self {
+        self.registration_hook = Some(hook);
         self
     }
 

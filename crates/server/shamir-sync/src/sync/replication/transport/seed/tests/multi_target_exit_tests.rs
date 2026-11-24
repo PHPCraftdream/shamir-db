@@ -335,11 +335,61 @@ async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts()
     assert_eq!(sup.active_count(), 0);
 }
 
+/// The supervisor's start seams take this hook shape (its alias is private to
+/// the supervisor module).
+type ParkHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Parks a spawned `reconcile` at a supervisor seam: `entered` is notified when
+/// the hook is reached and the hook then waits for `release`.
+struct ParkedStart {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ParkedStart {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    fn hook(&self) -> ParkHook {
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        Arc::new(move || {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+            })
+        })
+    }
+
+    /// Waits until the start is parked; a reconcile that returns first fails
+    /// at once instead of after a budget.
+    async fn parked(&self, reconcile: &mut tokio::task::JoinHandle<()>) {
+        tokio::select! {
+            parked = tokio::time::timeout(Duration::from_secs(60), self.entered.notified()) => {
+                parked.expect("the start must park at the seam");
+            }
+            done = &mut *reconcile => panic!("reconcile returned before the start parked: {done:?}"),
+        }
+    }
+}
+
+fn spawn_reconcile(sup: &Arc<SubscriptionSupervisor>) -> tokio::task::JoinHandle<()> {
+    let sup = Arc::clone(sup);
+    tokio::spawn(async move { sup.reconcile().await })
+}
+
 /// A follower that registers AFTER `begin_stop` was called is born cancelled:
 /// an admitted reconcile is parked before its spawn (by the start race hook,
 /// which runs under the lifecycle lock), `begin_stop` runs meanwhile, and the
-/// released start must still end up with no running follower, without
-/// `stop_all`.
+/// released start must still end up with no running follower and no lease,
+/// without `stop_all`.
 ///
 /// Mutant: a start that builds its token without the stop token as parent
 /// leaves the late follower running (the bounded teardown wait fails).
@@ -350,47 +400,184 @@ async fn a_follower_started_after_begin_stop_is_born_cancelled() {
     write_other_rows(&leader, 0, 2).await;
     let follower = build_db().await;
     create_two_target_subscription(&follower).await;
-    let entered = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(Notify::new());
-    let (entered_h, release_h) = (Arc::clone(&entered), Arc::clone(&release));
-    let sup = SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
-        .with_poll_wait_ms(100)
-        .with_start_race_hook(Arc::new(move || {
-            let entered = Arc::clone(&entered_h);
-            let release = Arc::clone(&release_h);
-            Box::pin(async move {
-                entered.fetch_add(1, Ordering::SeqCst);
-                release.notified().await;
-            })
-        }));
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+            .with_poll_wait_ms(100)
+            .with_start_race_hook(parked.hook()),
+    );
     let teardown = sup.teardown_signal();
 
-    let mut reconcile = Box::pin(sup.reconcile());
-    // `poll!` expands to code containing `.await`: poll the future here until
-    // the hook is entered (the start is admitted and parked before its spawn).
-    for _ in 0..10_000 {
-        if entered.load(Ordering::SeqCst) > 0 {
-            break;
-        }
-        let _ = poll!(reconcile.as_mut());
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        entered.load(Ordering::SeqCst),
-        1,
-        "the start must be parked"
-    );
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
     assert!(!sup.is_running("sub_a"), "nothing is registered yet");
 
     sup.begin_stop();
-    release.notify_one();
-    reconcile.await;
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
 
     tokio::time::timeout(Duration::from_secs(60), teardown.notified())
         .await
         .expect("the late follower must exit without stop_all");
     assert_eq!(sup.teardown_count(), 1);
     assert!(!sup.is_running("sub_a"));
+    assert_eq!(sup.active_count(), 0);
+    assert!(
+        follower.subscription_lease("sub_a").is_none(),
+        "the late follower's lease must be gone"
+    );
+}
+
+/// Every follower of a start can exit BEFORE the handle is registered (a stop
+/// signalled between the spawn and the registration): the last exit then finds
+/// nothing to deregister, and the dead handle must not stay registered.
+///
+/// The registration hook parks the start between the spawn and the insert, so
+/// the followers run and exit while it waits.
+///
+/// Mutant: no sweep after the insert leaves `sub_a` registered with a dead
+/// handle and an invalidated lease.
+#[tokio::test]
+async fn a_follower_that_exits_before_registration_leaves_no_handle() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+            .with_poll_wait_ms(100)
+            .with_registration_hook(parked.hook()),
+    );
+    let teardown = sup.teardown_signal();
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    assert!(!sup.is_running("sub_a"), "the handle is not registered yet");
+
+    sup.begin_stop();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("both followers must exit before the handle is registered");
+    assert_eq!(sup.teardown_count(), 1);
+
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+    assert!(
+        !sup.is_running("sub_a"),
+        "a handle whose followers all exited must not stay registered"
+    );
+    assert_eq!(sup.active_count(), 0);
+    assert!(follower.subscription_lease("sub_a").is_none());
+}
+
+/// A source that announces every produced pull reply before the follower
+/// moves on to apply it.
+struct PullNotifySource {
+    inner: InProcessReplSource,
+    pulled: Arc<Notify>,
+}
+#[async_trait]
+impl ReplSource for PullNotifySource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        let reply = self
+            .inner
+            .pull(db, repo, from_version, limit, wait_ms)
+            .await;
+        self.pulled.notify_one();
+        reply
+    }
+}
+
+/// A stop that arrives while a received batch waits for the apply gate admits
+/// no apply: the test holds the subscription's apply gate (taken in the start
+/// race hook, before any follower exists), lets the followers pull and park
+/// on the gate, stops, and releases the gate; nothing may be applied.
+///
+/// The pause after the first pull reply only gives the followers time to
+/// reach the gate: a slow runner can weaken the check, never fail it.
+///
+/// Mutant: no cancellation check after the gate applies the batch once the
+/// gate opens (the bookmarks advance).
+#[tokio::test]
+async fn a_stop_seen_while_parked_on_the_apply_gate_applies_nothing() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let pulled = Arc::new(Notify::new());
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let pulled = Arc::clone(&pulled);
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(PullNotifySource {
+                inner: InProcessReplSource::new((*leader).clone()),
+                pulled: Arc::clone(&pulled),
+            }) as Arc<dyn ReplSource>
+        })
+    };
+    let release_gate = Arc::new(Notify::new());
+    let hook_db = follower.clone();
+    let release_h = Arc::clone(&release_gate);
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(100)
+        .with_start_race_hook(Arc::new(move || {
+            let lease = hook_db
+                .subscription_lease("sub_a")
+                .expect("the lease is issued before the hook");
+            let release = Arc::clone(&release_h);
+            Box::pin(async move {
+                let taken = Arc::new(Notify::new());
+                let taken_in_task = Arc::clone(&taken);
+                tokio::spawn(async move {
+                    let gate = lease.apply_gate.write().await;
+                    taken_in_task.notify_one();
+                    release.notified().await;
+                    drop(gate);
+                });
+                taken.notified().await;
+            })
+        }));
+    let teardown = sup.teardown_signal();
+
+    sup.reconcile().await;
+    tokio::time::timeout(Duration::from_secs(60), pulled.notified())
+        .await
+        .expect("a follower must receive a pull reply");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    sup.begin_stop();
+    release_gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("both followers must exit");
+
+    for repo in ["main", "other"] {
+        let bookmark = follower
+            .get_db("app")
+            .and_then(|db| db.get_repo(repo))
+            .expect("follower repo")
+            .replication_bookmark()
+            .await
+            .expect("bookmark");
+        assert_eq!(
+            bookmark, 0,
+            "app/{repo}: a stopped follower applied a batch"
+        );
+    }
 }
 
 /// A follower that waits for a silent upstream (Hello or Pull never answers)

@@ -676,6 +676,12 @@ pub(super) async fn run_follower_loop_internal(
             }
             None => None,
         };
+        // The reply may have waited on the identity fence or on the gate while a
+        // stop arrived: admit no apply that has not started. Once the apply below
+        // is entered it always finishes.
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
 
         #[cfg(test)]
         if let Some(hook) = apply_park.as_deref() {

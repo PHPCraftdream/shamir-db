@@ -647,12 +647,15 @@ impl ServerHandle {
             report.add_error(format!("token GC shutdown exceeded {gc_budget:?}"));
         }
         // 2b. Stop the follower-replication supervisor: latch the stop admission
-        //     and cancel every follower first (no lock, no await), then join the
-        //     followers and the reconcile-tick task (already told to stop by the
-        //     root `shutdown_token.cancel()` above). Done after the accept loops
-        //     stop and before flush. Bounded with or without an outer deadline;
-        //     an expiry leaves followers that may still apply (they were already
-        //     signalled), so the repository flush is skipped.
+        //     and signal every follower first (no lifecycle or registry lock, no
+        //     await; delivering the signal is synchronous and is not what the cap
+        //     below bounds), then join the followers and the reconcile-tick task
+        //     (already told to stop by the root `shutdown_token.cancel()` above).
+        //     Done after the accept loops stop and before flush. The asynchronous
+        //     join is bounded with or without an outer deadline; an expiry leaves
+        //     followers that may still apply (they were already signalled and exit
+        //     at their next cancellation checkpoint), so the repository flush is
+        //     skipped.
         tracing::debug!(stage = "replication", "shutdown stage");
         self.repl_supervisor.begin_stop();
         let (repl_deadline, repl_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);

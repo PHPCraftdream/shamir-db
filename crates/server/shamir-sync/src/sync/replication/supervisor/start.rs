@@ -595,6 +595,12 @@ impl SubscriptionSupervisor {
             dones.push(done_flag);
         }
 
+        // T5 seam: the spawned followers may exit before the handle is registered.
+        #[cfg(test)]
+        if let Some(hook) = &self.registration_hook {
+            hook().await;
+        }
+        let registered_lease = Arc::clone(&lease);
         let handle = SubHandle {
             cancel,
             joins,
@@ -609,6 +615,14 @@ impl SubscriptionSupervisor {
         if let Err((_, handle)) = self.registry.insert_sync(sub.name.clone(), handle) {
             handle.stop();
         } else {
+            // The last exit may have run before this insert (a follower born
+            // cancelled exits at once): it invalidates the lease first and then
+            // deregisters, so its removal found nothing and the dead handle is
+            // swept here. Either that removal sees the handle or this check sees
+            // the invalid lease (the registry's bucket lock orders the two).
+            let _ = self.registry.remove_if_sync(&sub.name, |h| {
+                Arc::ptr_eq(&h.lease, &registered_lease) && !h.lease.valid.load(Ordering::Acquire)
+            });
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");
         }
         Ok(true)
