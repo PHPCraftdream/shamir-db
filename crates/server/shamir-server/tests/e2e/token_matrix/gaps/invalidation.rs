@@ -12,7 +12,9 @@ use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex, derive_session_hmac_key};
 use shamir_query_types::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use shamir_query_types::wire::{ChangePasswordSecrets, DbRequest, DbResponse};
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use zeroize::Zeroizing;
 
@@ -176,26 +178,54 @@ async fn owner_role_change_over_wss_closes_token_session() {
     stop(harness).await;
 }
 
-async fn ping_status(harness: &Harness, tls: bool, token: &str) -> u16 {
+/// One REST ping, with a guard mark at each phase (connected, written, response
+/// read): a failing run then shows in which phase the time went, not only the
+/// status. Marks carry no token.
+async fn ping_status(harness: &Harness, tls: bool, token: &str, guard: &FlakeGuard) -> u16 {
     let head = format!(
         "GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
-    let (response, _) = tokio::time::timeout(DEADLINE, support::send_http(harness, tls, &head))
+    let mut stream = tokio::time::timeout(DEADLINE, support::connect(harness, tls))
         .await
-        .expect("REST request timed out");
+        .expect("REST connect timed out");
+    guard.mark("ping: connected");
+    tokio::time::timeout(DEADLINE, stream.write_all(head.as_bytes()))
+        .await
+        .expect("REST request write timed out")
+        .expect("REST request write");
+    guard.mark("ping: request written");
+    let (response, _) = tokio::time::timeout(DEADLINE, support::read_response(&mut stream))
+        .await
+        .expect("REST response timed out");
+    guard.mark("ping: response read");
     support::status(&response)
 }
 
 async fn password_change_invalidation(tls: bool) {
+    let guard = FlakeGuard::with_watchdog(
+        if tls {
+            "ordinary_user_password_change_revokes_https_wss_tokens"
+        } else {
+            "ordinary_user_password_change_revokes_http_ws_tokens"
+        },
+        Duration::from_secs(150),
+    );
+    let _ = try_install_global_tracing_ring();
     let harness = Harness::launch_with_native_seed_hook(
         "127.0.0.1:0",
         shamir_server::config::HttpListenerSettings {
             tls: Some(tls),
+            // The subject here is the invalidation, not the HTTP deadline. A 408
+            // was seen on a loaded runner; a head timeout armed and then observed
+            // late is the leading but unproven explanation, so the head budget is
+            // not what this test measures.
+            head_timeout_ms: Some(30_000),
             ..Default::default()
         },
         |_| {},
     )
     .await;
+    guard.mark("harness launched");
     let admin = Client::connect(ConnectOptions {
         addr: harness.native_addr(),
         server_name: "localhost".into(),
@@ -218,6 +248,7 @@ async fn password_change_invalidation(tls: bool) {
         .await
         .expect("create ordinary owner");
     drop(admin);
+    guard.mark("admin session created the ordinary owner");
 
     let (rest_token, ws_token) = {
         let owner = Client::connect(ConnectOptions {
@@ -253,11 +284,16 @@ async fn password_change_invalidation(tls: bool) {
             .expect("create WS token");
         (rest.token.reveal().to_owned(), ws.token.reveal().to_owned())
     };
+    guard.mark("REST and WS tokens created");
     let ws_id = token_id(&ws_token);
     let mut ws = open_ws(&harness, tls, &ws_token).await;
-    assert_eq!(ping_status(&harness, tls, &rest_token).await, 200);
+    guard.mark("WS opened");
+    let status = ping_status(&harness, tls, &rest_token, &guard).await;
+    guard.note("ping_before_change_status", status.to_string());
+    assert_eq!(status, 200);
 
     let mut owner = RawScram::connect(&harness, "password-owner", b"old-password").await;
+    guard.mark("raw SCRAM session opened");
     let client_nonce = try_build_challenge_request().expect("change-password nonce");
     let raw = owner
         .request_raw(&DbRequest::ChangePasswordChallenge {
@@ -312,8 +348,11 @@ async fn password_change_invalidation(tls: bool) {
         .await;
     let changed: DbResponse = rmp_serde::from_slice(&raw).expect("decode password-change result");
     assert!(matches!(changed, DbResponse::ChangePasswordOk));
+    guard.mark("password changed");
 
-    assert_eq!(ping_status(&harness, tls, &rest_token).await, 401);
+    let status = ping_status(&harness, tls, &rest_token, &guard).await;
+    guard.note("ping_after_change_status", status.to_string());
+    assert_eq!(status, 401);
     wait_for_close_4011(&mut ws, "password-change WebSocket close timed out").await;
     assert_eq!(
         harness

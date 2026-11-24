@@ -223,6 +223,11 @@ fn service_main_inner() -> anyhow::Result<()> {
         tracing::info!("shamir-server service stopped cleanly");
     }
 
+    if result.is_err() {
+        // A failed run can leave a detached blocking job: dropping the runtime
+        // would wait for it without a bound and keep the process alive.
+        rt.shutdown_timeout(Duration::from_secs(5));
+    }
     result.map(|_| ())
 }
 

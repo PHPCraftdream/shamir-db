@@ -52,7 +52,7 @@ mod durable_stores;
 #[path = "support/rollback_cleanup.rs"]
 mod rollback_cleanup;
 
-use rollback_cleanup::log_rollback_cleanup;
+use rollback_cleanup::{join_meta_snapshot, log_rollback_cleanup};
 
 // `log_rollback_cleanup` is `pub(super)` inside the private `rollback_cleanup`
 // module, so only a child of THIS module can call it: the shutdown-folder test
@@ -613,9 +613,7 @@ impl ServerLauncher {
                 // The boot error wins: cleanup failures are logged, never
                 // returned in its place.
                 log_rollback_cleanup("listener bind", &cleanup);
-                if let Some(snap) = meta_snapshot_task {
-                    let _ = snap.handle.await;
-                }
+                join_meta_snapshot("listener bind", meta_snapshot_task).await;
                 if let Some(reaper) = interactive_tx_reaper {
                     let _ = reaper.handle.await;
                 }
@@ -760,9 +758,7 @@ impl ServerLauncher {
                 )
                 .await;
                 log_rollback_cleanup("observability bind", &cleanup);
-                if let Some(snap) = meta_snapshot_task {
-                    let _ = snap.handle.await;
-                }
+                join_meta_snapshot("observability bind", meta_snapshot_task).await;
                 if let Some(reaper) = interactive_tx_reaper {
                     let _ = reaper.handle.await;
                 }

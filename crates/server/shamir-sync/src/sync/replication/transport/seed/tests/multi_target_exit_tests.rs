@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::poll;
@@ -241,4 +242,538 @@ async fn multi_target_exit_refcount_last_exit_removes() {
             .map(|l| l.valid.load(Ordering::Acquire)),
         None
     );
+}
+
+/// A source whose Hello or Pull never answers: the cancellation checkpoints of
+/// the loop must not wait for a silent upstream (the production request
+/// timeout is 35 s). `entered` is signalled once the silent call is awaited.
+struct SilentSource {
+    inner: InProcessReplSource,
+    silent_hello: bool,
+    entered: Arc<Notify>,
+}
+#[async_trait]
+impl ReplSource for SilentSource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        if self.silent_hello {
+            self.entered.notify_one();
+            return std::future::pending().await;
+        }
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        if !self.silent_hello {
+            self.entered.notify_one();
+            return std::future::pending().await;
+        }
+        self.inner
+            .pull(db, repo, from_version, limit, wait_ms)
+            .await
+    }
+}
+
+fn honest_factory(leader: &Arc<ShamirDb>) -> ReplSourceFactory {
+    let leader = leader.clone();
+    Arc::new(move |_sub: &Subscription| {
+        Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
+    })
+}
+
+/// The row is still ACTIVE in the catalogue (so a pass that ignored the stop
+/// would start it again).
+async fn assert_row_active(sup: &SubscriptionSupervisor) {
+    let rows = sup.read_subscriptions().await.expect("catalogue read");
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "sub_a" && row.is_active()),
+        "sub_a must still be an active row: {rows:?}"
+    );
+}
+
+/// `begin_stop` cancels every running follower WITHOUT the lifecycle lock and
+/// without awaiting anything, and a later pass starts nothing although the
+/// subscription row is still active.
+///
+/// Mutants: a `begin_stop` that cancels nothing leaves the loops running (the
+/// bounded teardown wait fails); a reconcile that ignores the stop token
+/// restarts the row.
+#[tokio::test]
+async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let sup = SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+        .with_poll_wait_ms(100);
+    let teardown = sup.teardown_signal();
+    sup.reconcile().await;
+    assert!(sup.is_running("sub_a"), "the follower must be running");
+
+    // No `stop_all`, no lifecycle lock: only the stop token signals the loops.
+    sup.begin_stop();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("every follower loop must exit after begin_stop alone");
+    assert_eq!(sup.teardown_count(), 1);
+    assert!(!sup.is_running("sub_a"));
+
+    assert_row_active(&sup).await;
+    sup.reconcile().await;
+    assert!(
+        !sup.is_running("sub_a"),
+        "a stopping supervisor must start no follower"
+    );
+    assert_eq!(sup.active_count(), 0);
+}
+
+/// The supervisor's start seams take this hook shape (its alias is private to
+/// the supervisor module).
+type ParkHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Parks a spawned `reconcile` at a supervisor seam: `entered` is notified when
+/// the hook is reached and the hook then waits for `release`.
+struct ParkedStart {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ParkedStart {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    fn hook(&self) -> ParkHook {
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        Arc::new(move || {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+            })
+        })
+    }
+
+    /// Waits until the start is parked; a reconcile that returns first fails
+    /// at once instead of after a budget.
+    async fn parked(&self, reconcile: &mut tokio::task::JoinHandle<()>) {
+        tokio::select! {
+            parked = tokio::time::timeout(Duration::from_secs(60), self.entered.notified()) => {
+                parked.expect("the start must park at the seam");
+            }
+            done = &mut *reconcile => panic!("reconcile returned before the start parked: {done:?}"),
+        }
+    }
+}
+
+fn spawn_reconcile(sup: &Arc<SubscriptionSupervisor>) -> tokio::task::JoinHandle<()> {
+    let sup = Arc::clone(sup);
+    tokio::spawn(async move { sup.reconcile().await })
+}
+
+/// A follower that registers AFTER `begin_stop` was called is born cancelled:
+/// an admitted reconcile is parked before its spawn (by the start race hook,
+/// which runs under the lifecycle lock), `begin_stop` runs meanwhile, and the
+/// released start must still end up with no running follower and no lease,
+/// without `stop_all`.
+///
+/// Mutant: a start that builds its token without the stop token as parent
+/// leaves the late follower running (the bounded teardown wait fails).
+#[tokio::test]
+async fn a_follower_started_after_begin_stop_is_born_cancelled() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+            .with_poll_wait_ms(100)
+            .with_start_race_hook(parked.hook()),
+    );
+    let teardown = sup.teardown_signal();
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    assert!(!sup.is_running("sub_a"), "nothing is registered yet");
+
+    sup.begin_stop();
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("the late follower must exit without stop_all");
+    assert_eq!(sup.teardown_count(), 1);
+    assert!(!sup.is_running("sub_a"));
+    assert_eq!(sup.active_count(), 0);
+    assert!(
+        follower.subscription_lease("sub_a").is_none(),
+        "the late follower's lease must be gone"
+    );
+}
+
+/// Every follower of a start can exit BEFORE the handle is registered (a stop
+/// signalled between the spawn and the registration): the last exit then finds
+/// nothing to deregister, and the dead handle must not stay registered.
+///
+/// The registration hook parks the start between the spawn and the insert, so
+/// the followers run and exit while it waits.
+///
+/// Mutant: no sweep after the insert leaves `sub_a` registered with a dead
+/// handle and an invalidated lease.
+#[tokio::test]
+async fn a_follower_that_exits_before_registration_leaves_no_handle() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+            .with_poll_wait_ms(100)
+            .with_registration_hook(parked.hook()),
+    );
+    let teardown = sup.teardown_signal();
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    assert!(!sup.is_running("sub_a"), "the handle is not registered yet");
+
+    sup.begin_stop();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("both followers must exit before the handle is registered");
+    assert_eq!(sup.teardown_count(), 1);
+
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+    assert!(
+        !sup.is_running("sub_a"),
+        "a handle whose followers all exited must not stay registered"
+    );
+    assert_eq!(sup.active_count(), 0);
+    assert!(follower.subscription_lease("sub_a").is_none());
+}
+
+/// An invalid lease is not an exit: DROP, PAUSE and terminal marking clear it
+/// while the followers still run, so a start that registers its handle after
+/// that must keep the handle (reconcile and shutdown still have to cancel and
+/// join the live followers). Negative control of the post-insert sweep.
+///
+/// The followers wait on a silent Hello, so they are alive when the lease is
+/// invalidated inside the registration hook, before the insert.
+///
+/// Mutant: a sweep on the invalid lease alone removes the handle and detaches
+/// the live followers (`is_running` turns false).
+#[tokio::test]
+async fn an_invalid_lease_with_live_followers_keeps_the_handle_registered() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let entered = Arc::new(Notify::new());
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let entered = Arc::clone(&entered);
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(SilentSource {
+                inner: InProcessReplSource::new((*leader).clone()),
+                silent_hello: true,
+                entered: Arc::clone(&entered),
+            }) as Arc<dyn ReplSource>
+        })
+    };
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+            .with_registration_hook(parked.hook()),
+    );
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    tokio::time::timeout(Duration::from_secs(60), entered.notified())
+        .await
+        .expect("a follower must be waiting on its Hello");
+    follower
+        .subscription_lease("sub_a")
+        .expect("the lease is issued")
+        .valid
+        .store(false, Ordering::Release);
+
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+    assert!(
+        sup.is_running("sub_a"),
+        "an invalid lease with live followers must not be swept"
+    );
+
+    sup.begin_stop();
+    sup.stop_all().await;
+    assert!(!sup.is_running("sub_a"));
+}
+
+/// The done flags are set BEFORE the last wrapper waits for the replication
+/// control lock, so they do not prove the teardown finished: a handle whose
+/// loops all returned and whose lease is invalid (a PAUSE) but whose last
+/// wrapper still waits for the control lock must stay registered, so that
+/// `stop_all` still joins that wrapper (it owns the database until it is done).
+///
+/// The test holds the control lock, stops the followers (at least one waits on
+/// a silent Hello, both exit on the stop), invalidates the lease, waits for the signal the
+/// last wrapper gives right before it waits for the held lock (every loop
+/// returned, every done flag is set), releases the parked start so it registers,
+/// and only then lets the wrapper finish. No pause is involved.
+///
+/// Mutant: a sweep on the invalid lease plus the done flags removes the handle
+/// and `stop_all` would find nothing to join (`is_running` turns false early).
+#[tokio::test]
+async fn a_handle_whose_last_wrapper_is_still_tearing_down_stays_registered() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let entered = Arc::new(Notify::new());
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let entered = Arc::clone(&entered);
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(SilentSource {
+                inner: InProcessReplSource::new((*leader).clone()),
+                silent_hello: true,
+                entered: Arc::clone(&entered),
+            }) as Arc<dyn ReplSource>
+        })
+    };
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+            .with_registration_hook(parked.hook()),
+    );
+    let teardown = sup.teardown_signal();
+    let teardown_entered = sup.teardown_entered_signal();
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    tokio::time::timeout(Duration::from_secs(60), entered.notified())
+        .await
+        .expect("a follower must be waiting on its Hello");
+
+    // Hold the control lock: the last wrapper will wait for it after its loop returned.
+    let holder_db = follower.clone();
+    let hold = Arc::new(Notify::new());
+    let holding = Arc::new(Notify::new());
+    let holder = {
+        let (hold, holding) = (Arc::clone(&hold), Arc::clone(&holding));
+        tokio::spawn(async move {
+            let control = holder_db.lock_replication_control().await;
+            holding.notify_one();
+            hold.notified().await;
+            drop(control);
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(60), holding.notified())
+        .await
+        .expect("the control lock must be taken");
+
+    sup.begin_stop();
+    follower
+        .subscription_lease("sub_a")
+        .expect("the lease is issued")
+        .valid
+        .store(false, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(60), teardown_entered.notified())
+        .await
+        .expect("the last wrapper must reach the wait for the control lock");
+
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+    assert!(
+        sup.is_running("sub_a"),
+        "a handle whose last wrapper has not finished its teardown must stay registered"
+    );
+
+    hold.notify_one();
+    holder.await.expect("holder task");
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("the last wrapper must finish once the control lock is free");
+    assert!(
+        !sup.is_running("sub_a"),
+        "the last wrapper deregisters its own handle"
+    );
+}
+
+/// A source that announces every non-empty pull reply before the follower
+/// moves on to apply it.
+struct PullNotifySource {
+    inner: InProcessReplSource,
+    pulled: Arc<Notify>,
+}
+#[async_trait]
+impl ReplSource for PullNotifySource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        let reply = self
+            .inner
+            .pull(db, repo, from_version, limit, wait_ms)
+            .await;
+        // Announced only for a NON-EMPTY batch (an empty one encodes as the one-byte
+        // msgpack array 0x90, an error carries no batch): only then does the
+        // follower go on to the identity fence and the apply gate.
+        if matches!(&reply, Ok(ReplResponse::Pull { events, .. }) if events.len() > 1) {
+            self.pulled.notify_one();
+        }
+        reply
+    }
+}
+
+/// A stop that arrives while a received batch waits for the apply gate admits
+/// no apply: the test holds the subscription's apply gate (taken in the start
+/// race hook, before any follower exists), lets the followers pull and park
+/// on the gate, stops, and releases the gate; nothing may be applied.
+///
+/// The pause after the first pull reply only gives the followers time to
+/// reach the gate: a slow runner can weaken the check, never fail it.
+///
+/// Mutant: no cancellation check after the gate applies the batch once the
+/// gate opens (the bookmarks advance).
+#[tokio::test]
+async fn a_stop_seen_while_parked_on_the_apply_gate_applies_nothing() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let pulled = Arc::new(Notify::new());
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let pulled = Arc::clone(&pulled);
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(PullNotifySource {
+                inner: InProcessReplSource::new((*leader).clone()),
+                pulled: Arc::clone(&pulled),
+            }) as Arc<dyn ReplSource>
+        })
+    };
+    let release_gate = Arc::new(Notify::new());
+    let hook_db = follower.clone();
+    let release_h = Arc::clone(&release_gate);
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(100)
+        .with_start_race_hook(Arc::new(move || {
+            let lease = hook_db
+                .subscription_lease("sub_a")
+                .expect("the lease is issued before the hook");
+            let release = Arc::clone(&release_h);
+            Box::pin(async move {
+                let taken = Arc::new(Notify::new());
+                let taken_in_task = Arc::clone(&taken);
+                tokio::spawn(async move {
+                    let gate = lease.apply_gate.write().await;
+                    taken_in_task.notify_one();
+                    release.notified().await;
+                    drop(gate);
+                });
+                taken.notified().await;
+            })
+        }));
+    let teardown = sup.teardown_signal();
+
+    sup.reconcile().await;
+    tokio::time::timeout(Duration::from_secs(60), pulled.notified())
+        .await
+        .expect("a follower must receive a pull reply");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    sup.begin_stop();
+    release_gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("both followers must exit");
+
+    for repo in ["main", "other"] {
+        let bookmark = follower
+            .get_db("app")
+            .and_then(|db| db.get_repo(repo))
+            .expect("follower repo")
+            .replication_bookmark()
+            .await
+            .expect("bookmark");
+        assert_eq!(
+            bookmark, 0,
+            "app/{repo}: a stopped follower applied a batch"
+        );
+    }
+}
+
+/// A follower that waits for a silent upstream (Hello or Pull never answers)
+/// exits on `begin_stop` at once instead of after the request timeout.
+///
+/// Mutant: a Hello or Pull awaited without a cancellation select leaves the
+/// loop waiting (the bounded teardown wait fails).
+#[tokio::test]
+async fn begin_stop_does_not_wait_for_a_silent_upstream() {
+    for silent_hello in [true, false] {
+        let leader = build_db().await;
+        write_rows(&leader, 0, 3).await;
+        write_other_rows(&leader, 0, 2).await;
+        let follower = build_db().await;
+        create_two_target_subscription(&follower).await;
+        let entered = Arc::new(Notify::new());
+        let factory: ReplSourceFactory = {
+            let leader = leader.clone();
+            let entered = Arc::clone(&entered);
+            Arc::new(move |_sub: &Subscription| {
+                Arc::new(SilentSource {
+                    inner: InProcessReplSource::new((*leader).clone()),
+                    silent_hello,
+                    entered: Arc::clone(&entered),
+                }) as Arc<dyn ReplSource>
+            })
+        };
+        let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1");
+        let teardown = sup.teardown_signal();
+        sup.reconcile().await;
+        tokio::time::timeout(Duration::from_secs(60), entered.notified())
+            .await
+            .expect("a loop must reach the silent call");
+
+        sup.begin_stop();
+
+        tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("silent_hello={silent_hello}: the loops must exit on begin_stop")
+            });
+        assert!(!sup.is_running("sub_a"));
+    }
 }
