@@ -12,5 +12,5 @@ pub(crate) mod schedule;
 
 mod admin_port;
 
-pub use adapter::{EngineBackupPort, PortRunState};
+pub use adapter::{stage_hint, EngineBackupPort, PortRunState};
 pub use registry::{BackupStatusSnapshot, OnlineBackupRegistry, StartBackupError};

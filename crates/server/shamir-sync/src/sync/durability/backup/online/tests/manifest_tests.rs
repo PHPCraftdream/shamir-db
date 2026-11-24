@@ -88,6 +88,77 @@ fn sample_wal() -> WalSection {
 }
 
 #[test]
+fn v2_verify_rejects_disk_spelling_mismatch_portably() {
+    let dir = temp_dir("verify_case_spelling");
+    let actual = dir.join("audit.log.1");
+    write_file(&actual, b"audit");
+    let (sha256, size_bytes) = hash_file(&actual).expect("hash actual spelling");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "{manifest_path}", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#,
+        manifest_path = "AUDIT.LOG.1"
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+    let error = verify_manifest(&dir).expect_err("different on-disk spelling must refuse");
+    assert!(matches!(error, BackupError::UnmanifestedFile(_)));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn v2_case_folded_aliases_are_rejected_by_receiver_model() {
+    let spellings = ["audit.log.1", "AUDIT.LOG.1"];
+    let sensitive_listing = spellings.to_vec();
+    let insensitive_listing = vec![spellings[0]];
+    assert_eq!(sensitive_listing, ["audit.log.1", "AUDIT.LOG.1"]);
+    assert_eq!(
+        sensitive_listing[0].to_lowercase(),
+        sensitive_listing[1].to_lowercase(),
+        "the virtual sensitive listing contains distinct case-fold aliases"
+    );
+    assert_eq!(
+        insensitive_listing,
+        ["audit.log.1"],
+        "modeled insensitive receiver coalesces aliases to the first listed spelling"
+    );
+
+    let dir = temp_dir("verify_case_alias");
+    write_file(&dir.join(spellings[0]), b"audit");
+    let (sha256, size_bytes) = hash_file(&dir.join(spellings[0])).expect("hash alias fixture");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "audit.log.1", "sha256": "{sha256}", "size_bytes": {size_bytes} }},
+    {{ "path": "AUDIT.LOG.1", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+
+    // On a sensitive receiver, both names may exist; the manifest's folded
+    // duplicate check must still reject before filesystem lookup.
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::DuplicateManifestEntry(path)) if path == spellings[1]
+    ));
+    // On an insensitive receiver, both manifest entries resolve to the first
+    // spelling and have valid bytes; only alias rejection prevents acceptance.
+    assert_eq!(
+        hash_file(&dir.join(insensitive_listing[0])).expect("modeled insensitive file"),
+        (sha256, size_bytes)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn v1_manifest_decodes_with_offline_kind() {
     let raw = r#"{
   "format_version": 1,

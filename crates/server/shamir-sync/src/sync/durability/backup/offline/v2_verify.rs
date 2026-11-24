@@ -2,7 +2,7 @@
 //! verify"): child module of `offline.rs`, one primary item
 //! ([`verify_manifest_v2`]). Pure file inspection — no engine open.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -114,12 +114,30 @@ pub(super) fn verify_decoded_manifest_v2(
     {
         return Err(BackupError::CacheManifestPath(entry.path.clone()));
     }
+    let mut on_disk = Vec::new();
+    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    let mut disk_spellings = BTreeMap::new();
+    for rel in &on_disk {
+        if rel != MANIFEST_FILE_NAME && rel != online_manifest::BACKUP_META_FILE_NAME {
+            disk_spellings.insert(rel.to_lowercase(), rel.clone());
+        }
+    }
+
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
+    let mut folded_paths = BTreeSet::new();
     let mut total_bytes = 0u64;
     for entry in &decoded.files {
         reject_canonical_v2_manifest_path(&entry.path)?;
         if accounted.contains(&entry.path) {
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
+        }
+        if !folded_paths.insert(entry.path.to_lowercase()) {
+            return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
+        }
+        if let Some(actual) = disk_spellings.get(&entry.path.to_lowercase()) {
+            if actual != &entry.path {
+                return Err(BackupError::UnmanifestedFile(snapshot_dir.join(actual)));
+            }
         }
         let file_path = confined_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, cancel).map_err(|e| {
@@ -286,8 +304,6 @@ pub(super) fn verify_decoded_manifest_v2(
 
     // Every file physically present under snapshot_dir (except the
     // manifest itself and the backup-meta sidecar) must be accounted for.
-    let mut on_disk = Vec::new();
-    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
     for rel in &on_disk {
         if rel == MANIFEST_FILE_NAME || rel == online_manifest::BACKUP_META_FILE_NAME {
             continue;

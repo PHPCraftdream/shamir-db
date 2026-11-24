@@ -843,6 +843,8 @@ fn run_steps(
         });
     }
     port.begin_verify();
+    port.validate_copied_data_dir(dest_dir)
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
     let per_repo: BTreeMap<String, _> = recopy
         .points
         .iter()

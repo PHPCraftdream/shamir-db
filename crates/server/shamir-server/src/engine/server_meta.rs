@@ -238,7 +238,9 @@ impl core::fmt::Debug for ServerMetaStore {
             .finish()
     }
 }
-
+#[path = "../boot/config/diagnostics/backup_online/adapter/open_existing.rs"]
+mod existing_open;
+pub(crate) use existing_open::open_existing;
 impl ServerMetaStore {
     /// Open existing store at `path`, or create-and-init with FRESH random
     /// material when the keyspace does not yet exist (or has no data yet).
@@ -983,11 +985,9 @@ impl ServerMetaStore {
             .expect("corrupt_bootstrap_blob_for_test: keyspace insert must succeed");
     }
 }
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
 fn missing(key: &str) -> MetaError {
     MetaError::Encoding(format!("server_meta key missing: {key}"))
 }
