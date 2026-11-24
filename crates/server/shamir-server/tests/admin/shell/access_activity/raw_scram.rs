@@ -157,6 +157,14 @@ struct AuthOkWire {
     resumption_ticket: Vec<u8>,
     #[serde(default)]
     resumption_expires_at_ns: u64,
+    // The wire frame is a positional array: the trailing fields must be
+    // declared even when unused, or the decode fails with `LengthMismatch`.
+    #[serde(default)]
+    _server_query_version: u8,
+    #[serde(default)]
+    _rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    _kdf_upgrade_required: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
