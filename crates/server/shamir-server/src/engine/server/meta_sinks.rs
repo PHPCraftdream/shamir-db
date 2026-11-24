@@ -119,8 +119,9 @@ pub(super) fn spawn_meta_snapshot_task(
                     // synchronous store write (and may `SyncAll`), so writing it
                     // inline here could starve a shutdown deadline timer on a
                     // current-thread runtime (finding: synchronous `server_meta`
-                    // write on the teardown path). The shutdown joins the handle
-                    // under a bound, so nothing is detached unless that expires.
+                    // write on the teardown path). Graceful shutdown and the failed
+                    // launch rollback join the handle under a bound and detach it
+                    // only when that bound expires.
                     let lockout = Arc::clone(&lockout);
                     let rate_limit = Arc::clone(&rate_limit);
                     let written = tokio::task::spawn_blocking(move || {

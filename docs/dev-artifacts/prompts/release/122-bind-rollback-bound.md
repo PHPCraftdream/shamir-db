@@ -19,6 +19,12 @@ Found by the landing review of BACKUP-TAILS-SERVER and deliberately left out of 
 * P2: the log asserted a cause it cannot observe (queued behind a saturated pool): reworded to the observed facts. P2: the test did not prove the bound or the submission of the final job: replaced by the explicit-clock test above (a mutant bound fails the middle or the last poll; the task runs to its queued job before the first poll).
 * Left as it is, with the reason: no test drives either real bind-failure branch of `launch_inner` with a saturated pool (it needs a seam that parks the pool between the bind failure and the rollback; the helper both branches call is covered, and the call sites are two one-line calls read in the review).
 
+## Review result, round 2 (verdict FAIL, no P0 or P1: two P2 and one P3)
+
+* P2, fixed: the test did not prove that the final snapshot job was submitted. The lockout store now has a counting sink: after the occupant is released, the queued final job must run and save (a task that never submitted the job fails the bounded wait), while the explicit clock still brackets the 5 s bound.
+* P2, re-scoped: nothing catches a revert of the executable's `shutdown_timeout` call (foreground and Windows service). Covering it needs the executable itself or a new public shutdown helper in the library for two five-line call sites; the mechanism is Tokio's `Runtime::shutdown_timeout` and the call sites were read twice in review. Left as a known gap, written into the PR description.
+* P3, fixed: the `meta_sinks.rs` comment says graceful shutdown and the failed-launch rollback join the handle under a bound and detach it only when that bound expires; an earlier launch error (database initialisation) can still drop the handle without any join, and executable shutdown can discard a queued, not-yet-started blocking job, so the "left to finish on its own" wording above holds only while the runtime lives.
+
 ## Non-goals
 
 The two reaper joins in the rollbacks (their ticks are in-memory and do not touch the pool), the GC join (`shutdown_gc` before `start_gc` has nothing to join at the observability stage), `gate.shutdown()` and `teardown_audit` (both have their own bounds), the graceful shutdown path, and the "real failed launch" cleanup test (item 4 of the task, a separate seam).

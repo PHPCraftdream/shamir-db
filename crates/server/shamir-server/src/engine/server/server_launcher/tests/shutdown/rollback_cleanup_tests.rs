@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
-use shamir_connect::server::lockout::InMemoryLockoutStore;
+use shamir_connect::server::lockout::{
+    InMemoryLockoutStore, LockoutSnapshot, LockoutSnapshotError, LockoutSnapshotSink,
+};
 use shamir_connect::server::rate_limit::InMemoryRateLimiter;
 use shamir_db::ShutdownReport;
 use shamir_test_diag::{ring::shared_ring, try_install_global_tracing_ring};
@@ -63,6 +65,22 @@ fn launch_rollback_cleanup_logs_errors_and_repository_failures() {
     );
 }
 
+/// A lockout snapshot sink that only reports each save: the final snapshot job
+/// calls it, so a save after the occupant was released proves the job had been
+/// submitted to the blocking pool and queued behind the occupant.
+struct SaveSignal(std::sync::Mutex<std::sync::mpsc::Sender<()>>);
+
+impl LockoutSnapshotSink for SaveSignal {
+    fn save(&self, _snapshot: &LockoutSnapshot) -> Result<(), LockoutSnapshotError> {
+        let _ = self.0.lock().expect("save signal sender").send(());
+        Ok(())
+    }
+
+    fn load(&self) -> Result<Option<LockoutSnapshot>, LockoutSnapshotError> {
+        Ok(None)
+    }
+}
+
 /// Polls a future exactly once without waiting for it.
 async fn poll_once<F: Future<Output = ()> + Unpin>(future: &mut F) -> Poll<()> {
     std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
@@ -108,8 +126,12 @@ fn rollback_meta_snapshot_join_is_bounded_with_a_saturated_blocking_pool() {
             .expect("the occupying job must start on the only blocking thread");
 
         let shutdown = CancellationToken::new();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
         let task = spawn_meta_snapshot_task(
-            Arc::new(InMemoryLockoutStore::new()),
+            Arc::new(InMemoryLockoutStore::with_snapshot_sink_and_observer(
+                Arc::new(SaveSignal(std::sync::Mutex::new(saved_tx))),
+                None,
+            )),
             Arc::new(InMemoryRateLimiter::new(0)),
             shutdown.clone(),
         );
@@ -142,6 +164,12 @@ fn rollback_meta_snapshot_join_is_bounded_with_a_saturated_blocking_pool() {
             still_occupied,
             "the join must return while the pool is still occupied"
         );
+        // The occupant is released: the final snapshot job queued behind it must
+        // now run and save. A task that never submitted the job (or submitted
+        // something else) leaves this wait to its bound.
+        saved_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the final snapshot job must have been queued behind the occupant");
 
         let records = shared_ring().snapshot();
         assert!(
