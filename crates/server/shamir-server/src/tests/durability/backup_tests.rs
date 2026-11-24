@@ -275,20 +275,24 @@ fn verify_manifest_rejects_absolute_path() {
 }
 
 /// A v1 entry with a shape the per-component walk cannot confine refuses
-/// before any file access, on every platform: a drive piece (`C:`) after a
-/// normal directory name would reset the Windows `PathBuf::push` walk, and a
-/// backslash would bundle several hops into one metadata check.
+/// before the entry is opened. An empty or `.` component refuses on every
+/// platform; on Windows a drive piece (`C:`) after a normal directory name
+/// would reset the `PathBuf::push` walk and a backslash would bundle several
+/// hops into one metadata check, so those refuse there (on Unix they are
+/// literal name characters, see the round-trip test below).
 #[test]
 fn verify_manifest_refuses_noncanonical_entry_shapes() {
-    for entry_path in [
-        "sub/C:/x",
-        "sub/file.txt:stream",
-        "sub\\inner.txt",
-        "dir./x",
-        "dir /x",
-        "./a.txt",
-        "a//b",
-    ] {
+    let mut shapes = vec!["./a.txt", "a//b"];
+    if cfg!(windows) {
+        shapes.extend([
+            "sub/C:/x",
+            "sub/file.txt:stream",
+            "sub\\inner.txt",
+            "dir./x",
+            "dir /x",
+        ]);
+    }
+    for entry_path in shapes {
         let dir = TempDir::new().unwrap();
         write_hand_crafted_manifest(
             dir.path(),
@@ -308,8 +312,32 @@ fn verify_manifest_refuses_noncanonical_entry_shapes() {
     }
 }
 
+/// A v1 backup carries file names the v2 naming rules refuse (`:`, `\` and a
+/// trailing dot or space are literal characters on Unix; a configured TLS file
+/// can be named like that) and its own snapshot must still verify.
+#[cfg(unix)]
+#[test]
+fn backup_with_nonportable_unix_names_verifies() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let names = [
+        "tls:cert.pem",
+        "tls-key.pem ",
+        "tls-cert.pem.",
+        "back\\slash.txt",
+    ];
+    for name in names {
+        fs::write(src.path().join(name), name.as_bytes()).unwrap();
+    }
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    let verified = verify_manifest(&report.dest_dir).unwrap();
+    assert_eq!(verified.files_checked, names.len() as u64);
+}
+
 /// A v1 manifest entry reaching a file outside the snapshot through a symlink
-/// (final or intermediate component) refuses BEFORE any open: the dangling link
+/// (final or intermediate component) refuses before the entry is opened for
+/// content reads: the dangling link
 /// proves no open was attempted (an open would fail as plain `Io`), and the
 /// links to existing outside files carry the matching size and digest, so a
 /// verifier that follows them would report `verified`.

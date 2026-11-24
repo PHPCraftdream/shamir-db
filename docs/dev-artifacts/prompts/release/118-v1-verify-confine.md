@@ -17,9 +17,17 @@ No new error class in the `backup-verify` report (a variant the CLI does not nam
 
 `fmt`, clippy `-D warnings` for `shamir-sync` and `shamir-server`, the layout gate and the visibility check exit 0; the full CI tier is green on the head, with the new unix test passing on Ubuntu.
 
-## Review result (independent review, verdict FAIL, fixed or re-scoped)
+## Review results (two independent reviews, both verdict FAIL; fixed or re-scoped)
 
-* FIXED (P1, introduced by the first version): on Windows an interior piece such as `C:` after a normal directory name resets the `PathBuf::push` walk of `confined_snapshot_path`, and a backslash bundles several hops into one metadata check; the v1 loop only had the whole-path `reject_unsafe_manifest_path`. The strict lexical check (`reject_canonical_v2_manifest_path`: no backslash or colon, no empty, `.` or `..` component, no trailing dot or space) now runs INSIDE `confined_snapshot_path`, so every caller gets it (the v2 callers already ran it). Platform-independent test `verify_manifest_refuses_noncanonical_entry_shapes`.
-* FIXED (P2): the remaining wording ("byte-identical", "(v2)" labels, "before any open") now matches the code; a dangling v1 entry link now returns `UnconfinedManifestPath`, not `Io(NotFound)`.
+Round 1:
+
+* FIXED (P1, introduced by the first version): on Windows an interior piece such as `C:` after a normal directory name resets the `PathBuf::push` walk of `confined_snapshot_path`, and a backslash bundles several hops into one metadata check; the v1 loop only had the whole-path `reject_unsafe_manifest_path`. A lexical shape check now runs before the walk (see round 2 for its final form).
+* FIXED (P2): the remaining wording ("byte-identical", "(v2)" labels, "before any open") now matches the code: a path is refused by a lexical or metadata check before the entry is opened for content reads; a dangling v1 entry link returns `UnconfinedManifestPath`, not `Io(NotFound)`; v1 `..` stays `UnsafeManifestPath`.
 * RE-SCOPED to #2010 (pre-existing, outside the manifest-entry fix): the fixed-name control files `manifest.json` and `format.stamp` are read through static links (attacker condition: write access to the snapshot directory, so the same class, not an escalation); the check-then-open window between the path check and the hash or copy (restore enumeration, `staged_listing` checks presence and type only) also exists for v2.
-* Confirmed by the reviewer: Windows classifies junctions and mount points as symlinks in the toolchain used; the unix test is registered, non-vacuous and has no Windows unused import; retention is v2-online only; the v1 writer produces canonical names.
+* Confirmed: Windows classifies junctions and mount points as symlinks in the toolchain used; the unix test is registered, non-vacuous and has no Windows unused import; retention is v2-online only.
+
+Round 2 (narrow review of the round-1 fix):
+
+* FIXED (P1, a regression of the round-1 fix): applying the strict v2 naming rules to v1 entries on Unix refused snapshots a real v1 backup produces (a TLS file named `tls:cert.pem`, `key.pem ` with a trailing space or `cert.pem.`: the server writes to the configured path and the v1 writer records the name without the v2 rules). The shape rule is now host-OS: on Unix only the component structure is checked (no empty, `.` or `..` component; `:`, `\`, trailing dot or space are literal), on Windows the strict v2 rule applies (`confined_v1_snapshot_path`; the v2 callers keep `confined_snapshot_path`). Unix writer-to-verifier round-trip test `backup_with_nonportable_unix_names_verifies`; the Windows-only shapes in `verify_manifest_refuses_noncanonical_entry_shapes` run under `cfg!(windows)`.
+* FIXED (P2): wording no longer equates lexical refusal with resolving outside the snapshot, qualifies containment to an unchanged snapshot, and does not claim that the v1 writer emits only canonical names.
+* Not done (said by the reviewer): no direct test of `ManifestPathNotRegularFile`.

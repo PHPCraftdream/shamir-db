@@ -459,13 +459,52 @@ fn wal_dir_scan_components(snapshot_dir: &Path, dir: &str) -> Result<bool, Backu
     Ok(true)
 }
 
-/// Resolve a manifest-controlled path under `snapshot_dir` (v1 entries and
-/// v2 paths alike), refusing anything that could read outside it BEFORE any
-/// byte of the target is opened. The strict lexical check
-/// ([`reject_canonical_v2_manifest_path`]) runs first, so a piece like `C:`
-/// or a backslash can never reset or bundle the `PathBuf::push` walk on
-/// Windows. Every path component is walked with
-/// `fs::symlink_metadata` on the fixed snapshot:
+/// Resolve a v2 manifest-controlled path under `snapshot_dir`: the strict
+/// lexical check ([`reject_canonical_v2_manifest_path`], every platform) and
+/// then [`walk_confined`].
+pub(super) fn confined_snapshot_path(
+    snapshot_dir: &Path,
+    entry_path: &str,
+) -> Result<PathBuf, BackupError> {
+    reject_canonical_v2_manifest_path(entry_path)?;
+    walk_confined(snapshot_dir, entry_path)
+}
+
+/// Resolve a v1 manifest entry under `snapshot_dir`: the host-OS shape rule
+/// ([`reject_v1_entry_shape`]) and then [`walk_confined`].
+pub(super) fn confined_v1_snapshot_path(
+    snapshot_dir: &Path,
+    entry_path: &str,
+) -> Result<PathBuf, BackupError> {
+    reject_v1_entry_shape(entry_path)?;
+    walk_confined(snapshot_dir, entry_path)
+}
+
+/// Lexical shape rule for a v1 entry, which a v1 backup writes WITHOUT the v2
+/// naming rules. On Windows it is the strict v2 rule: a piece like `C:` would
+/// reset, and a backslash bundle, the `PathBuf::push` walk. On Unix `:`, `\`
+/// and trailing dots or spaces are literal name characters (a TLS file may be
+/// named `tls:cert.pem` or `key.pem `), so only the component structure is
+/// checked: no empty, `.` or `..` component.
+fn reject_v1_entry_shape(entry_path: &str) -> Result<(), BackupError> {
+    if cfg!(windows) {
+        return reject_canonical_v2_manifest_path(entry_path);
+    }
+    for component in entry_path.split('/') {
+        if component == ".." {
+            return Err(BackupError::UnsafeManifestPath(entry_path.to_string()));
+        }
+        if component.is_empty() || component == "." {
+            return Err(BackupError::UnconfinedManifestPath(entry_path.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Walk an already shape-checked manifest path under `snapshot_dir`, refusing
+/// a symlink or a non-regular entry BEFORE the entry is opened for content
+/// reads (check, then open: the window is not closed here). Every path
+/// component is walked with `fs::symlink_metadata` on the fixed snapshot:
 /// * a missing component is a plain io error (NotFound propagates);
 /// * a SYMLINK component refuses ([`BackupError::UnconfinedManifestPath`]) —
 ///   a symlink planted inside the snapshot cannot retarget a later open;
@@ -473,15 +512,11 @@ fn wal_dir_scan_components(snapshot_dir: &Path, dir: &str) -> Result<bool, Backu
 /// * the final component must be a REGULAR file (devices, FIFOs, sockets
 ///   refuse).
 ///
-/// Containment is then guaranteed lexically: every component is a normal
-/// name (no `..`, no separators, no drive/ADS tricks), every intermediate
-/// hop was verified to be a real directory under the snapshot — there is no
-/// escape left, so no per-file root canonicalize is needed.
-pub(super) fn confined_snapshot_path(
-    snapshot_dir: &Path,
-    entry_path: &str,
-) -> Result<PathBuf, BackupError> {
-    reject_canonical_v2_manifest_path(entry_path)?;
+/// For an unchanged snapshot, containment follows lexically: every component
+/// is a normal name (no `..`, no separators; no drive or ADS pieces on
+/// Windows), and every intermediate hop was verified to be a real directory
+/// under the snapshot, so no per-file root canonicalize is needed.
+fn walk_confined(snapshot_dir: &Path, entry_path: &str) -> Result<PathBuf, BackupError> {
     let mut current = snapshot_dir.to_path_buf();
     let components: Vec<&str> = entry_path.split('/').collect();
     let last = components.len().saturating_sub(1);

@@ -212,11 +212,11 @@ pub enum BackupError {
     /// refused (fail closed, independent of the restore-side gate).
     #[error("snapshot format stamp is invalid")]
     InvalidSnapshotStamp(#[source] StampError),
-    /// `verify_manifest` (v1 and v2): a manifest-controlled path resolves outside
-    /// the snapshot directory (Windows drive / device prefix, NTFS
-    /// alternate-data-stream `:` component, backslash or `..` component, or
-    /// a symlink / non-directory component on the fixed snapshot). No byte
-    /// of such a target is opened for content reads.
+    /// `verify_manifest` (v1 and v2): a manifest-controlled path is refused by a
+    /// lexical or metadata check (empty or `.` component, Windows drive / device
+    /// prefix, NTFS alternate-data-stream `:` component, backslash, or a symlink
+    /// / non-directory component on the fixed snapshot) before the entry is
+    /// opened for content reads. (`..` is `UnsafeManifestPath`.)
     #[error("manifest-controlled path is not confined to the snapshot directory: {0}")]
     UnconfinedManifestPath(String),
     /// `verify_manifest` (v1 and v2): a manifest-controlled path names something
@@ -792,8 +792,8 @@ fn verify_manifest_raw(
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
 
-        // Strict shape, then per-component walk: a symlink refuses before the content read.
-        let file_path = v2_verify::confined_snapshot_path(snapshot_dir, &entry.path)?;
+        // Shape rule, then per-component walk: a symlink refuses before the content read.
+        let file_path = v2_verify::confined_v1_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, &|| false).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
