@@ -5,7 +5,7 @@
 
 use shamir_funclib::registry::{FnEntry, ScalarResult};
 use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
-use shamir_query_builder::batch::Batch;
+use shamir_query_builder::batch::{Batch, Durability};
 use shamir_query_builder::write::{self, doc};
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
@@ -147,6 +147,46 @@ pub(super) async fn setup_with_scalars() -> TestResolverWithScalars {
 //
 // Outer: a sub-batch inserts a row; an outer read sees it via $query @sub.
 // ============================================================================
+#[tokio::test]
+async fn transactional_child_sync_warning_is_in_nested_receipt() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory("test".into(), factory, vec![TableConfig::new("users")])
+        .await
+        .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let mut child = Batch::new();
+    child.transactional().durability(Durability::Synced);
+    child.insert(
+        "written",
+        write::insert("users").row(doc().set("name", "sync_warning").unwrap()),
+    );
+    let mut outer = Batch::new();
+    outer.sub_batch_no_bind("child", child.build());
+
+    repo.repo_wal().await.unwrap().arm_fail_next_sync_for_test();
+    let response = execute_batch(&outer.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    let child_result = &response.results["child"];
+    assert!(child_result.receipt.is_none());
+    let inner = child_result.value.as_ref().unwrap();
+    assert_eq!(
+        inner["written"]["receipt"]["status"],
+        QueryValue::Str("committed".into())
+    );
+    assert!(
+        inner["written"]["receipt"]["commit_version"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert!(matches!(
+        &inner["written"]["receipt"]["error"],
+        QueryValue::Str(error) if !error.is_empty()
+    ));
+}
+
 #[tokio::test]
 async fn sub_batch_runs_and_outer_reads_result() {
     let resolver = setup().await;

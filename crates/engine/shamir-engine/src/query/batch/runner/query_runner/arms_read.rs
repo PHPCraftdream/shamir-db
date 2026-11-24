@@ -550,6 +550,12 @@ impl<'a> QueryRunner<'a> {
                                 // disposition); a blind retry could duplicate
                                 // the write.
                                 "indeterminate" => {
+                                    if let Some(commit_version) = info.commit_version {
+                                        return Err(BatchError::WalOutcomeUnknown {
+                                            alias: alias.to_string(),
+                                            commit_version,
+                                        });
+                                    }
                                     return Err(BatchError::query_coded(
                                         alias.to_string(),
                                         "wal_requires_reopen",

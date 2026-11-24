@@ -310,7 +310,7 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
         let mut plan = plan_and_validate_with_metadata(request, resolver, scope, metadata).await?;
 
         // 3. Execute — branch on transactional.
-        let (all_results, mut tx_info) = if request.transactional {
+        let (mut all_results, mut tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
                 &mut plan,
@@ -363,7 +363,10 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
             }
         }
 
-        // 4. Filter results for response
+        if let Some(info) = tx_info.as_ref() {
+            all_results =
+                crate::query::batch::receipts::stamp(all_results, &request.queries, info, depth);
+        }
         let results = crate::query::batch::receipts::filter(all_results, request);
 
         let elapsed = start.elapsed();
@@ -437,7 +440,7 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
         scope.check()?;
 
         // 3. Execute — branch on transactional.
-        let (all_results, mut tx_info) = if request.transactional {
+        let (mut all_results, mut tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
                 plan,
@@ -494,13 +497,12 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
             }
         }
 
-        // 4. Filter results. The transaction outcome is returned
-        // alongside them so the caller can fail an aborted iteration instead
-        // of presenting the empty result set the body never produced.
-        Ok((
-            crate::query::batch::receipts::filter(all_results, request),
-            tx_info,
-        ))
+        if let Some(info) = tx_info.as_ref() {
+            all_results =
+                crate::query::batch::receipts::stamp(all_results, &request.queries, info, depth);
+        }
+        let results = crate::query::batch::receipts::filter(all_results, request);
+        Ok((results, tx_info))
     }) // end Box::pin
 }
 
