@@ -373,9 +373,9 @@ fn name_field(raw: &str, cap: usize) -> String {
 /// the credential check in `crate::shell::connect::token`
 /// (`check_catalogue_output`, whose comment names the canonical
 /// `shk1.<id>.<secret>` format that this shell refuses to echo). A `user`
-/// cell carrying that prefix is redacted even though the login rule itself
-/// would accept the text: over-redacting a token-shaped name is the owner's
-/// accepted choice.
+/// cell carrying that prefix ANYWHERE is redacted even though the login rule
+/// itself would accept the text: over-redacting a token-shaped name is the
+/// owner's accepted choice.
 const API_TOKEN_PREFIX: &str = "shk1.";
 
 /// One principal name, projected ONLY when the SERVER would accept it as a
@@ -404,8 +404,7 @@ fn user_field(raw: &str, cap: usize) -> String {
     let display_safe = raw
         .chars()
         .all(|character| !character.is_control() && !is_display_control(character));
-    let allowed =
-        canonical && raw.len() <= cap && display_safe && !raw.starts_with(API_TOKEN_PREFIX);
+    let allowed = canonical && raw.len() <= cap && display_safe && !raw.contains(API_TOKEN_PREFIX);
     if allowed {
         raw.to_owned()
     } else {

@@ -387,6 +387,18 @@ fn user_field_rejects_token_shaped_names() {
     assert_eq!(session["user"], INVALID, "a token-shaped session user");
     let request = project_request(&request_row(TOKEN_SHAPE, "shelldb", "write")).expect("projects");
     assert_eq!(request["user"], INVALID, "a token-shaped request user");
+    // The shape is redacted anywhere in the cell, not only at its start.
+    let embedded = format!("bob.{TOKEN_SHAPE}");
+    let session = project_session(&session_row(&embedded, "tcp")).expect("projects");
+    assert_eq!(
+        session["user"], INVALID,
+        "an embedded token in a session user"
+    );
+    let request = project_request(&request_row(&embedded, "shelldb", "write")).expect("projects");
+    assert_eq!(
+        request["user"], INVALID,
+        "an embedded token in a request user"
+    );
 }
 
 /// A `user` value that is not terminal-safe is still the placeholder, even
