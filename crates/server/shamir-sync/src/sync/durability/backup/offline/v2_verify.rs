@@ -2,7 +2,7 @@
 //! verify"): child module of `offline.rs`, one primary item
 //! ([`verify_manifest_v2`]). Pure file inspection — no engine open.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -114,14 +114,6 @@ pub(super) fn verify_decoded_manifest_v2(
     {
         return Err(BackupError::CacheManifestPath(entry.path.clone()));
     }
-    let mut on_disk = Vec::new();
-    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
-    let exact_paths: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
-    let actual_by_folded: BTreeMap<String, &str> = on_disk
-        .iter()
-        .map(|path| (path.to_lowercase(), path.as_str()))
-        .collect();
-
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
     let mut folded_paths = BTreeSet::new();
     let mut total_bytes = 0u64;
@@ -159,18 +151,23 @@ pub(super) fn verify_decoded_manifest_v2(
                 actual_size_bytes: actual_size,
             });
         }
-        if !exact_paths.contains(entry.path.as_str()) {
-            let actual = actual_by_folded
-                .get(&entry.path.to_lowercase())
-                .copied()
-                .unwrap_or(entry.path.as_str());
-            return Err(BackupError::ManifestInvalid(format!(
-                "manifest entry \"{}\" does not match its exact on-disk spelling \"{}\"",
-                entry.path, actual
-            )));
-        }
         total_bytes += actual_size;
         accounted.insert(entry.path.clone());
+    }
+
+    let mut on_disk = Vec::new();
+    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    let mut disk_identities = BTreeSet::new();
+    for path in &on_disk {
+        let folded = path.to_lowercase();
+        if !disk_identities.insert(folded.clone()) {
+            return Err(BackupError::DuplicateManifestEntry(folded));
+        }
+    }
+    for entry in &decoded.files {
+        if let Some(message) = exact_spelling_mismatch(&entry.path, &on_disk) {
+            return Err(BackupError::ManifestInvalid(message));
+        }
     }
 
     // WAL listing: canonical segment/sidecar names per repo, contiguity
@@ -574,6 +571,22 @@ fn walk_confined(snapshot_dir: &Path, entry_path: &str) -> Result<PathBuf, Backu
     Ok(current)
 }
 
+/// Return a spelling diagnostic only when a case-folded disk identity exists.
+pub(crate) fn exact_spelling_mismatch(entry_path: &str, on_disk: &[String]) -> Option<String> {
+    if on_disk.iter().any(|path| path == entry_path) {
+        return None;
+    }
+    on_disk
+        .iter()
+        .find(|path| path.to_lowercase() == entry_path.to_lowercase())
+        .map(|actual| {
+            format!(
+                "manifest entry \"{}\" does not match its exact on-disk spelling \"{}\"",
+                entry_path, actual
+            )
+        })
+}
+
 /// Recursively collect every regular file under `dir` (rooted at `root`) as
 /// a `root`-relative, forward-slash path. THE shared walker: the parent
 /// `offline.rs` v1 path reuses this instead of keeping its own duplicate.
@@ -589,14 +602,15 @@ pub(super) fn collect_relative_file_paths(
         if ft.is_dir() {
             collect_relative_file_paths(root, &path, out)?;
         } else if ft.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            out.push(rel);
+            let mut rel = Vec::new();
+            for component in path.strip_prefix(root).unwrap_or(&path).components() {
+                let Some(name) = component.as_os_str().to_str() else {
+                    // A JSON manifest cannot name this physically present file; refuse it as unmanifested.
+                    return Err(BackupError::UnmanifestedFile(path.to_path_buf()));
+                };
+                rel.push(name.to_string());
+            }
+            out.push(rel.join("/"));
         }
     }
     Ok(())

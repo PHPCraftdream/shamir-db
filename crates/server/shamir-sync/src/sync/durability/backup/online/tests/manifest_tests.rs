@@ -5,6 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
+use crate::sync::durability::backup::offline::exact_spelling_mismatch;
 use crate::sync::durability::backup::online::copy_engine::hash_file;
 use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, ConsistencySection, ManifestV2, RepoConsistency, WalDirEntry, WalSection,
@@ -245,6 +249,34 @@ fn v1_manifest_decodes_with_offline_kind() {
     assert!(matches!(decoded.kind, BackupKind::Offline));
     assert!(decoded.consistency.is_none());
     assert!(decoded.wal.is_none());
+}
+
+#[test]
+fn exact_spelling_mismatch_matches_production_membership_logic() {
+    let listing = vec!["audit.log.1".to_string()];
+    let mismatch = exact_spelling_mismatch("AUDIT.LOG.1", &listing).expect("folded match");
+    assert!(mismatch.contains("AUDIT.LOG.1"));
+    assert!(mismatch.contains("audit.log.1"));
+    assert_eq!(
+        exact_spelling_mismatch("AUDIT.LOG.1", &["AUDIT.LOG.1".to_string()]),
+        None
+    );
+    assert_eq!(exact_spelling_mismatch("AUDIT.LOG.1", &[]), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn v2_verify_refuses_non_utf8_disk_name() {
+    let dir = temp_dir("verify_non_utf8_name");
+    build_snapshot(&dir);
+    let mut junk = dir.clone();
+    junk.push(std::ffi::OsStr::from_bytes(b"\xff"));
+    write_file(&junk, b"unnameable");
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::UnmanifestedFile(path)) if path == junk
+    ));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

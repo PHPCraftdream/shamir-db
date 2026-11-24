@@ -438,7 +438,10 @@ pub fn run_copy_pass(
 /// fail with typed I/O errors for vanished sources.
 ///
 /// Retention may delete an archive between listing and copy; a vanished file
-/// is excluded like any deleted source. Retention never removes the newest
+/// is excluded like any deleted source. A retained archive captured by the
+/// accepted round does not trigger `AuditArchiveLost`. Unsupported active-log
+/// reappearance can trigger it without a leftover copy: the reappearance guard
+/// runs before the leftover scan. Retention never removes the newest
 /// archive, which alone can hold the tail of a just-persisted anchor. A needed
 /// prefix already gone before capture remains the documented limit; boot
 /// validates the saved anchor against the copied chain.

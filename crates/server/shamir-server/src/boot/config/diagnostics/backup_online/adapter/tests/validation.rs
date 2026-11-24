@@ -251,10 +251,10 @@ fn copied_server_meta_validator_refuses_conflicting_checkpoint_anchor() {
 /// marker file proves nothing was removed.
 #[test]
 fn validation_allocator_never_adopts_or_deletes_a_preexisting_directory() {
-    let fixture = TestDir::new();
-    let planted = std::env::temp_dir().join("shamir-validation-adoption-probe");
-    let _ = fs::remove_dir_all(&planted);
-    fs::create_dir_all(&planted).expect("plant pre-existing validation root");
+    let fixture = tempfile::tempdir().expect("create RAII validation fixture");
+    let planted = fixture.path().join("occupant");
+    shamir_private_dir::create_exclusive_private_dir(&planted)
+        .unwrap_or_else(|error| panic!("create verified-private occupant: {error}"));
     fs::write(planted.join("marker.txt"), b"pre-existing").expect("write marker file");
 
     let source = fixture.path().join("source");
@@ -262,7 +262,7 @@ fn validation_allocator_never_adopts_or_deletes_a_preexisting_directory() {
     fs::create_dir_all(&source).expect("create empty source root");
     fs::create_dir_all(&copied).expect("create empty copied root");
 
-    set_validation_root_candidate(Some("shamir-validation-adoption-probe".to_string()));
+    set_validation_root_candidate(Some(planted.to_string_lossy().into_owned()));
     let result = validate_copied_data_dir(&source, &copied);
     set_validation_root_candidate(None);
 
@@ -278,7 +278,50 @@ fn validation_allocator_never_adopts_or_deletes_a_preexisting_directory() {
         planted.join("marker.txt").is_file(),
         "the marker file inside the pre-existing directory must survive"
     );
-    let _ = fs::remove_dir_all(&planted);
+}
+
+#[test]
+fn copied_server_meta_validator_refuses_destination_only_server_meta() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(&source).expect("create source without server_meta");
+    fs::create_dir_all(copied.join("server_meta"))
+        .expect("create destination-only empty server_meta");
+
+    let error = expect_system_store(
+        validate_copied_data_dir(&source, &copied)
+            .expect_err("destination-only server_meta must be opened and refused"),
+        "destination-only server_meta",
+    );
+    assert!(
+        inner_contains(&error, "copied server_meta cannot open"),
+        "expected the copied server_meta open refusal, got {error}"
+    );
+}
+
+#[test]
+fn copied_server_meta_validator_refuses_case_variant_reserved_name() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(&source).expect("create empty source root");
+    fs::create_dir_all(&copied).expect("create copied root");
+    fs::write(copied.join("AUDIT.LOG"), b"reserved case variant")
+        .expect("write case-variant reserved file");
+
+    let error = expect_system_store(
+        validate_copied_data_dir(&source, &copied)
+            .expect_err("case-variant reserved name must be refused"),
+        "case-variant reserved name",
+    );
+    assert!(
+        inner_contains(
+            &error,
+            "reserved store name \"AUDIT.LOG\" differs from \"audit.log\" only by case"
+        ),
+        "expected the reserved-name case refusal, got {error}"
+    );
 }
 
 #[test]
@@ -292,56 +335,85 @@ fn copied_server_meta_validator_refuses_real_current_switch_after_listing() {
         .store_audit_checkpoint(2, [0xA5; 32])
         .expect("give the active memtable a durable write to seal");
 
-    // Fjall layout: the keyspace tree lives at `<db>/keyspaces/<id>`, and
-    // `current` + `vN` version files live INSIDE the tree folder.
     let keyspaces_dir = meta_path.join("keyspaces");
-    let mut keyspace_dirs: Vec<PathBuf> = fs::read_dir(&keyspaces_dir)
-        .expect("list fjall keyspaces")
-        .filter_map(|entry| {
-            let entry = entry.expect("read keyspace entry");
-            entry
-                .file_type()
-                .ok()
-                .filter(|t| t.is_dir())
-                .map(|_| entry.path())
-        })
-        .collect();
-    assert!(
-        keyspace_dirs.len() == 1,
-        "unmet fixture assumption: expected exactly one fjall keyspace directory, found {}",
-        keyspace_dirs.len()
-    );
-    let tree_root = keyspace_dirs.remove(0);
-    let current = tree_root.join("current");
-
     let listed = tree_paths(&meta_path);
-    let old_current_bytes = fs::read(&current).expect("read current pointer before rotation");
-    let old_id = u64::from_le_bytes(
-        old_current_bytes[..8]
-            .try_into()
-            .expect("current version id"),
-    );
+    let mut pointers: Vec<(PathBuf, Vec<u8>, Vec<String>)> = Vec::new();
+    for relative in &listed {
+        if relative.file_name().is_some_and(|name| name == "current")
+            && relative.starts_with("keyspaces")
+        {
+            let dir_relative = relative
+                .parent()
+                .expect("current parent directory")
+                .to_path_buf();
+            let dir_path = meta_path.join(&dir_relative);
+            let version_names = fs::read_dir(&dir_path)
+                .expect("list keyspace tree versions")
+                .filter_map(|entry| {
+                    let entry = entry.expect("read keyspace tree entry");
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let metadata = entry.file_type().expect("stat keyspace tree entry");
+                    (metadata.is_file() && name.starts_with('v')).then_some(name)
+                })
+                .collect();
+            pointers.push((
+                dir_path,
+                fs::read(meta_path.join(relative)).expect("read current pointer before rotation"),
+                version_names,
+            ));
+        }
+    }
     assert!(
-        tree_root.join(format!("v{old_id}")).is_file(),
-        "the pre-rotation version file v{old_id} exists"
+        !pointers.is_empty(),
+        "unmet fixture assumption: no keyspace current pointers found under {}",
+        keyspaces_dir.display()
     );
 
     crate::server_meta::rotate_meta_memtable_for_test(&store)
         .expect("force a persisted Fjall version rotation through the store's own handle");
 
-    let new_current_bytes = fs::read(&current).expect("read rotated current pointer");
+    let mut changed = Vec::new();
+    for (dir_path, old_bytes, version_names) in &pointers {
+        let new_bytes =
+            fs::read(dir_path.join("current")).expect("read current pointer after rotation");
+        if new_bytes != *old_bytes {
+            changed.push((
+                dir_path.clone(),
+                old_bytes.clone(),
+                new_bytes,
+                version_names.clone(),
+            ));
+        }
+    }
+    assert!(
+        changed.len() == 1,
+        "unmet fixture assumption: expected exactly one fjall keyspace pointer to switch after rotation, observed {} changed of {}",
+        changed.len(), pointers.len()
+    );
+    let (tree_root, old_current_bytes, new_current_bytes, old_version_names) = changed.remove(0);
+    let old_id = u64::from_le_bytes(
+        old_current_bytes[..8]
+            .try_into()
+            .expect("current version id"),
+    );
     let new_id = u64::from_le_bytes(
         new_current_bytes[..8]
             .try_into()
             .expect("current version id"),
     );
     assert!(
-        new_id != old_id,
-        "unmet fixture assumption: rotate_memtable_and_wait did not switch the version pointer"
+        old_version_names
+            .iter()
+            .any(|name| name == &format!("v{old_id}")),
+        "pre-rotation v{old_id} existed in the changed tree"
     );
     assert!(
         tree_root.join(format!("v{new_id}")).is_file(),
-        "the rotated version file v{new_id} exists in the source"
+        "post-rotation v{new_id} exists in the changed tree"
+    );
+    assert!(
+        tree_root.join(format!("v{old_id}")).is_file(),
+        "old v{old_id} is retained after rotation"
     );
     let new_version_relative = tree_root
         .join(format!("v{new_id}"))
@@ -351,10 +423,6 @@ fn copied_server_meta_validator_refuses_real_current_switch_after_listing() {
     assert!(
         !listed.contains(&new_version_relative),
         "the rotated target is absent from the pre-listing copy set"
-    );
-    assert!(
-        tree_root.join(format!("v{old_id}")).is_file(),
-        "the old version file v{old_id} is retained after the rotation"
     );
     assert_ne!(
         old_current_bytes, new_current_bytes,

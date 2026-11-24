@@ -249,10 +249,13 @@ impl ValidationTempDir {
         for _ in 0..128 {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
-            let name = validation_root_candidate().unwrap_or_else(|| default_candidate_name(id));
+            let candidate = validation_root_candidate();
+            #[cfg(test)]
+            let path = candidate
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join(default_candidate_name(id)));
             #[cfg(not(test))]
-            let name = default_candidate_name(id);
-            let path = std::env::temp_dir().join(name);
+            let path = std::env::temp_dir().join(default_candidate_name(id));
             // Exclusive private create: a pre-existing path (planted or
             // otherwise) is NEVER adopted or deleted — the guard only ever
             // removes a directory this call created.
@@ -304,6 +307,23 @@ fn validation_root_candidate() -> Option<String> {
     VALIDATION_ROOT_CANDIDATE.with(|slot| slot.borrow_mut().take())
 }
 
+fn refuse_case_variant_reserved_names(root: &Path) -> Result<(), PortError> {
+    for entry in fs::read_dir(root).map_err(PortError::SystemStore)? {
+        let entry = entry.map_err(PortError::SystemStore)?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        for exact in ["audit.log", "server_meta", "audit_checkpoint"] {
+            if text != exact && text.to_lowercase() == exact {
+                return Err(PortError::SystemStore(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("reserved store name \"{text}\" differs from \"{exact}\" only by case"),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn is_audit_archive_name(name: &str) -> bool {
     // Mirror shamir-server-security audit_appender/recovery.rs archive_name shape.
     let Some(suffix) = name.strip_prefix("audit.log.") else {
@@ -320,28 +340,35 @@ fn copy_optional_directory(
 ) -> Result<(), PortError> {
     let source = source_root.join(name);
     let copied = copied_root.join(name);
+    refuse_case_variant_reserved_names(source_root)?;
+    refuse_case_variant_reserved_names(copied_root)?;
     let source_meta = match fs::symlink_metadata(&source) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(PortError::SystemStore(error)),
     };
-    if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
-        return Err(PortError::SystemStore(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("source {name} is not a regular directory"),
-        )));
+    if let Some(source_meta) = source_meta.as_ref() {
+        if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
+            return Err(PortError::SystemStore(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("source {name} is not a regular directory"),
+            )));
+        }
     }
     let copied_meta = match fs::symlink_metadata(&copied) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && name == "audit_checkpoint" => {
-            return Err(PortError::SystemStore(io::Error::other(
-                "copied audit chain does not validate: audit checkpoint is missing",
-            )))
-        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(PortError::SystemStore(io::Error::other(format!(
-                "copied {name} is missing or unreadable: {error}"
-            ))))
+            if source_meta.is_some() && name == "audit_checkpoint" {
+                return Err(PortError::SystemStore(io::Error::other(
+                    "copied audit chain does not validate: audit checkpoint is missing",
+                )));
+            }
+            if source_meta.is_some() {
+                return Err(PortError::SystemStore(io::Error::other(format!(
+                    "copied {name} is missing or unreadable: {error}"
+                ))));
+            }
+            return Ok(());
         }
         Err(error) => return Err(PortError::SystemStore(error)),
     };
@@ -386,14 +413,19 @@ fn validate_copied_data_dir(
         if text != "audit.log" && !is_audit_archive_name(&text) {
             continue;
         }
-        source_has_audit_chain = true;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(PortError::SystemStore)?;
+        // Retention may prune an entry between listing and stat; the destination set is what boot scans.
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PortError::SystemStore(error)),
+        };
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(PortError::SystemStore(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported source audit validation entry",
             )));
         }
+        source_has_audit_chain = true;
     }
     // The COMPLETED DESTINATION defines the published audit set: every
     // reserved audit entry (active log + archives) is kind-checked and

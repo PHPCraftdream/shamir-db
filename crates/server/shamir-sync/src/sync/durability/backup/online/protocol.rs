@@ -908,7 +908,7 @@ fn run_steps(
     );
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
-    // Validation errors win via `?`; cancellation after successful validation wins over publication. This check is only observable for cancellation during encoding, which has no deterministic test seam.
+    // A validation error wins via `?`; cancellation observed after successful validation wins over publication. This final check covers manifest preparation and encoding, which have no deterministic test seam.
     if cancel.is_cancelled() {
         return Err(OnlineBackupError::Cancelled {
             stage: BackupStage::Verifying,

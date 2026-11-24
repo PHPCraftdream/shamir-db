@@ -84,7 +84,10 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 /// symlink/junction), and the protected DACL
 /// `D:P(A;OICI;FA;;;<current-user-SID>)` is applied in the SAME syscall,
 /// never "create then fix up". There is no adopt path that could take over
-/// or delete a pre-existing directory.
+/// or delete a pre-existing directory. Post-create verification-failure
+/// cleanup is not practically testable: `CreateDirectoryW` applies the
+/// protected DACL atomically; removing the empty directory preserves the
+/// no-leak invariant regardless.
 pub fn create_exclusive_private_dir(path: &Path) -> io::Result<()> {
     let sec_desc = OwnerOnlySecurityDescriptor::from_sddl(DIRECTORY_SDDL)?;
     let wide = path_to_wide(path)?;
@@ -97,7 +100,11 @@ pub fn create_exclusive_private_dir(path: &Path) -> io::Result<()> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    verify_private_dir(path)
+    if let Err(verify_error) = verify_private_dir(path) {
+        let _ = fs::remove_dir(path);
+        return Err(verify_error);
+    }
+    Ok(())
 }
 
 /// Verifies `path` is a real directory and NOT a reparse point (checked
