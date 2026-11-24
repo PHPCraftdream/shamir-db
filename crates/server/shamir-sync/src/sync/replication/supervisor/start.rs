@@ -1,6 +1,7 @@
 use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
 use shamir_db::{SeedRefusal, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
@@ -340,6 +341,7 @@ impl SubscriptionSupervisor {
             let local = self.local.clone();
             let src = source.clone();
             let tok = cancel.clone();
+            let tok_exit_for_cancel = cancel.clone();
             let sub_name = sub.name.clone();
             // Generation fences stale terminal callbacks from replacements.
             let generation = sub.binding_generation;
@@ -363,30 +365,32 @@ impl SubscriptionSupervisor {
                 .is_some_and(|hook| hook.repo.as_deref() != Some(cfg.repo.as_str()));
 
             let registry = self.registry.clone();
-            // §5.6 — each loop is its own task; never blocks the server.
+            // §5.6 — each loop is its own task; never blocks the server. A wrapper dropped before finishing (for example, a detached handle at runtime shutdown) still leaves lease/registry teardown undone; that pre-existing gap is not fixed here.
             let join = tokio::spawn(async move {
                 // Retry terminal marking after the loop returns.
                 let tok_exit = tok.clone();
-                let loop_result =
-                    match tokio::spawn(run_follower_loop(local.clone(), src, cfg, tok)).await {
-                        Ok(result) => Some(result),
-                        Err(join_error) => {
-                            if join_error.is_panic() {
-                                error!(
-                                    subscription = %sub_name,
-                                    error = %join_error,
-                                    "follower loop panicked"
-                                );
-                            } else {
-                                debug!(
-                                    subscription = %sub_name,
-                                    error = %join_error,
-                                    "follower loop task was cancelled"
-                                );
-                            }
-                            None
-                        }
-                    };
+                let target = format!("{}/{}", cfg.db, cfg.repo);
+                let loop_result = match std::panic::AssertUnwindSafe(run_follower_loop(
+                    local.clone(),
+                    src,
+                    cfg,
+                    tok,
+                ))
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => Some(result),
+                    Err(payload) => {
+                        error!(
+                            subscription = %sub_name,
+                            target = %target,
+                            panic = ?payload,
+                            "follower loop panicked"
+                        );
+                        tok_exit_for_cancel.cancel();
+                        None
+                    }
+                };
                 #[cfg(test)]
                 if signal_other_exit {
                     if let Some(hook) = &exit_signal {

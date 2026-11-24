@@ -7,7 +7,7 @@
 //! which is exactly the window this test parks in.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -330,6 +330,70 @@ async fn contended_spawn_registry_is_a_counted_nonblocking_refusal() {
     if let Some(owner) = owner {
         let _ = tokio::time::timeout(TIMEOUT, owner).await;
     }
+}
+
+/// A busy principal bucket refuses promptly without reserving a slot or blocking
+/// the reply thread while its reservation rollback waits for the bucket.
+/// Mutant killed: reserve-before-gate / blocking reply-path share release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contended_principal_bucket_refuses_promptly_without_waiting() {
+    let appender = Arc::new(CountingAppender::default());
+    let writer = Arc::new(AuditChainWriter::new(AuditChain::new([7u8; 32]), appender));
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let seeded = queue.seed_reservations_for_test("bucket-parked", 1);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let parked = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        move || {
+            queue.park_principal_bucket_for_test(
+                "bucket-parked",
+                Box::new(move || {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv_timeout(TIMEOUT);
+                }),
+            );
+        }
+    });
+    entered_rx.recv_timeout(TIMEOUT).expect("bucket guard held");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let contender = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let writer = Arc::clone(&writer);
+        move || {
+            let result = enqueue_cancel_refusal_audit(
+                &queue,
+                &writer,
+                &session("bucket-parked"),
+                RequestExecId(3),
+                &CancelOutcome::NotCancellable,
+            );
+            let _ = result_tx.send(result.is_none());
+        }
+    });
+    assert!(
+        result_rx
+            .recv_timeout(TIMEOUT)
+            .expect("contended bucket refusal is prompt"),
+        "contended submission must be refused"
+    );
+    contender.join().expect("contender thread");
+    assert_eq!(queue.dropped_count(), 1, "refusal counted exactly once");
+    assert_eq!(
+        queue.global_held_for_test(),
+        1,
+        "only the seed slot remains"
+    );
+    release_tx.send(()).expect("release parked bucket");
+    parked.join().expect("parked thread");
+    drop(seeded);
+    assert_eq!(
+        queue.global_held_for_test(),
+        0,
+        "seed reservation cleaned up"
+    );
+    assert!(queue.drain().await, "queue drained");
 }
 
 fn queue_arm_spawn_window_probe(

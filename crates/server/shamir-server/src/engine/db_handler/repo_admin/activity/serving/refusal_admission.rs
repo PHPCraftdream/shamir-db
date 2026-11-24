@@ -24,6 +24,14 @@ enum GlobalRefusal {
     RetryLimit,
 }
 
+#[derive(Clone, Copy)]
+enum AdmissionDecision {
+    Reserved,
+    ShareFull,
+    Global(GlobalRefusal),
+    RetryLimit,
+}
+
 impl CancelRefusalAudit {
     /// Reserve one slot of `principal`'s share (for `Observability` also of its
     /// observability share) AND one global slot as ONE bounded, non-waiting
@@ -60,15 +68,26 @@ impl CancelRefusalAudit {
         }
         #[cfg(test)]
         fire_share_decision_probe();
-        if !self.reserve_share_and_global(principal, class) {
-            return None;
+        match self.reserve_share_and_global(principal, class) {
+            AdmissionDecision::Reserved => Some(CancelAuditSlot {
+                queue: Arc::clone(self),
+                principal: principal.to_owned(),
+                class,
+                appended: false,
+            }),
+            AdmissionDecision::ShareFull => {
+                self.refuse_share_full(class);
+                None
+            }
+            AdmissionDecision::Global(reason) => {
+                self.refuse_global(reason, class);
+                None
+            }
+            AdmissionDecision::RetryLimit => {
+                self.refuse_retry_limit(class);
+                None
+            }
         }
-        Some(CancelAuditSlot {
-            queue: Arc::clone(self),
-            principal: principal.to_owned(),
-            class,
-            appended: false,
-        })
     }
 
     /// Read-only share test: creates no entry and takes no slot.
@@ -83,14 +102,17 @@ impl CancelRefusalAudit {
     /// bucket-locked decision, or refuse without waiting. `try_entry` returns
     /// immediately when the scc 3.8 bucket is busy; each occupied/vacant
     /// decision is one bounded entry operation.
-    fn reserve_share_and_global(&self, principal: &str, class: AuditEventClass) -> bool {
+    fn reserve_share_and_global(
+        &self,
+        principal: &str,
+        class: AuditEventClass,
+    ) -> AdmissionDecision {
         for _ in 0..ADMISSION_RETRY_LIMIT {
             match self.principals.try_entry(principal.to_owned()) {
                 Some(scc::hash_map::Entry::Occupied(mut entry)) => {
                     let held = entry.get_mut();
                     if held.is_full(class) {
-                        self.refuse_share_full(class);
-                        return false;
+                        return AdmissionDecision::ShareFull;
                     }
                     match self.reserve_global_slot(class) {
                         Ok(()) => {
@@ -98,35 +120,26 @@ impl CancelRefusalAudit {
                             if class == AuditEventClass::Observability {
                                 held.observability += 1;
                             }
-                            return true;
+                            return AdmissionDecision::Reserved;
                         }
-                        Err(reason) => {
-                            self.refuse_global(reason, class);
-                            return false;
-                        }
+                        Err(reason) => return AdmissionDecision::Global(reason),
                     }
                 }
                 Some(scc::hash_map::Entry::Vacant(entry)) => {
-                    let mut held = PrincipalHeld {
-                        total: 0,
-                        observability: 0,
-                    };
                     if let Err(reason) = self.reserve_global_slot(class) {
-                        self.refuse_global(reason, class);
-                        return false;
+                        return AdmissionDecision::Global(reason);
                     }
-                    held.total = 1;
-                    if class == AuditEventClass::Observability {
-                        held.observability = 1;
-                    }
+                    let held = PrincipalHeld {
+                        total: 1,
+                        observability: usize::from(class == AuditEventClass::Observability),
+                    };
                     entry.insert_entry(held);
-                    return true;
+                    return AdmissionDecision::Reserved;
                 }
                 None => std::hint::spin_loop(),
             }
         }
-        self.refuse_retry_limit(class);
-        false
+        AdmissionDecision::RetryLimit
     }
 
     fn refuse_retry_limit(&self, class: AuditEventClass) {

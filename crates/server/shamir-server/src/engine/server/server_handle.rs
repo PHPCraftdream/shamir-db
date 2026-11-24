@@ -21,10 +21,10 @@ use crate::server::store_release_barrier::{
     release_stores_until, ReleaseOutcome, UnverifiedReason,
 };
 
-/// One reserve shared by all earlier teardown stages. The early cutoff is
-/// `outer_deadline - LATE_RESERVE`; individual stage caps may shorten a wait
-/// but never move it. The metadata join stops 500 ms and store release 250 ms
-/// before the outer deadline; the remaining reserve is scheduling/report slack.
+/// One reserve shared by earlier teardown stages. Each late-stage WAIT uses the
+/// earlier of its own cap (5 s metadata / 10 s store release) and the outer
+/// deadline minus its reserve (500 ms / 250 ms). Timeout stops WAITING; the
+/// stage task may continue.
 const LATE_RESERVE: Duration = Duration::from_secs(1);
 
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -927,19 +927,17 @@ impl ServerHandle {
                     tracing::warn!(
                         ?still_locked,
                         timeout = ?release_budget,
-                        "shutdown: stores still held after the release timeout",
+                        "shutdown: stores still held after the release timeout (last observed held)",
                     );
                     report.add_error(format!(
                         "stores still held after the release timeout {release_budget:?}: \
-                         {stores} — a writer outside this teardown still holds the store (a \
-                         detached task or an external process); an immediate relaunch of the \
-                         same data directory can fail with `Locked`"
+                         {stores} — the last completed probe observed these stores held; an immediate \
+                         relaunch of the same data directory can fail with `Locked`"
                     ));
                 }
                 ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired) => {
-                    // The barrier rejected an already-expired absolute
-                    // deadline before submitting a probe; state is unknown,
-                    // not a completed unverified probe outcome.
+                    // State is UNKNOWN if the probe failed, discovery was
+                    // incomplete, or the budget expired before submission.
                     tracing::warn!("shutdown: release probe deadline expired before submission");
                     report_unsubmitted_release_probe(
                         report,
@@ -950,7 +948,7 @@ impl ServerHandle {
                     let (summary, detail) = match reason {
                         UnverifiedReason::PoolStarved => (
                             "the store-release blocking job did not complete before its deadline",
-                            "the blocking job may still have been queued or running",
+                            "the blocking job may still have been queued or running; state is UNKNOWN",
                         ),
                         UnverifiedReason::DiscoveryGap => (
                             "store discovery was incomplete",

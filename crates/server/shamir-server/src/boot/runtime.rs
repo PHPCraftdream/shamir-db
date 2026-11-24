@@ -18,11 +18,10 @@ use crate::server::{BootstrapMode, ServerHandle, ServerLauncher};
 /// Maximum time to wait for in-flight connections to drain after receiving
 /// a shutdown signal. If the deadline expires, we return an unclean report.
 ///
-/// A single 1 s reserve is kept for late diagnostics: the metadata join is
-/// bounded to stop 500 ms before the outer deadline; store release is bounded
-/// to stop 250 ms before it, leaving 250 ms for report propagation. Thus a 3 s
-/// outer budget gives early stages a shared cutoff at 2 s after shutdown starts,
-/// followed by the metadata join, store-release probe, and report slack.
+/// A single 1 s reserve is kept for late-stage WAITs. The metadata join WAIT uses
+/// the earlier of its 5 s cap and the outer deadline minus 500 ms; store release
+/// uses the earlier of its 10 s cap and the deadline minus 250 ms, leaving 250 ms
+/// for report propagation. A timed-out WAIT stops waiting, not the stage's task.
 /// The scheduled-backup worker and data-directory lock remain owned outside
 /// the bounded future and are awaited before `serve` returns. There is no forced
 /// exit and nothing calls `std::process::exit`.
@@ -92,9 +91,9 @@ pub async fn serve(
 /// by `ShutdownOwner::drain`.
 ///
 /// One absolute instant is shared by the bounded teardown and its stages.
-/// Earlier stages stop at `deadline_at - 1 s`; the metadata join is bounded to
-/// stop 500 ms before the outer deadline, store release to stop 250 ms before
-/// it, leaving 250 ms for the report.
+/// Earlier stages stop at `deadline_at - 1 s`; each late-stage WAIT uses the
+/// earlier of its 5 s/10 s cap and the outer deadline minus its 500 ms/250 ms
+/// reserve. A timed-out WAIT stops waiting, not its still-running task.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,
