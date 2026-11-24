@@ -9,7 +9,10 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(unix)]
 use crate::server::open_lock_is_discovery_gap;
-use crate::server::{release_stores, wait_stores_released, ReleaseOutcome};
+use crate::server::{
+    bounded_probe_for_test, release_stores, wait_stores_released, ReleaseOutcome, UnverifiedReason,
+};
+use tokio::time::Instant;
 
 /// A fake fjall store root: `lock` + `version` marker files.
 fn make_store(root: &Path, name: &str) -> PathBuf {
@@ -189,11 +192,14 @@ async fn a_dangling_lock_marker_is_a_discovery_gap() {
     );
 }
 
-/// Opening a `lock` marker that exists (link metadata says so) but cannot be
-/// opened is a discovery gap; true absence is not.
+/// Opening the `lock` marker of a DISCOVERED store is a discovery gap whenever
+/// the marker cannot be opened: it exists but cannot be followed (link
+/// metadata says so), or it vanished after discovery. On Unix an unlinked lock
+/// file can still be held through an open descriptor, so absence proves nothing.
 ///
-/// Mutant: mapping the open-time `NotFound` of an existing marker to Unlocked
-/// (the former open result) makes the dangling link report no gap.
+/// Mutant: mapping the open-time `NotFound` to Unlocked (the former result for
+/// a vanished marker) makes the second assertion fail; mapping it for an
+/// existing dangling marker makes the first one fail.
 #[cfg(unix)]
 #[test]
 fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
@@ -207,11 +213,42 @@ fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
         open_lock_is_discovery_gap(&store),
         "an existing but unopenable lock marker must be a discovery gap"
     );
-    let absent = temp.path().join("empty-store");
-    std::fs::create_dir_all(&absent).expect("store without a lock marker");
+    let vanished = temp.path().join("vanished-marker-store");
+    std::fs::create_dir_all(&vanished).expect("store whose lock marker vanished");
     assert!(
-        !open_lock_is_discovery_gap(&absent),
-        "a truly absent lock marker is not a discovery gap"
+        open_lock_is_discovery_gap(&vanished),
+        "a lock marker that vanished after discovery is UNKNOWN, never unlocked"
+    );
+}
+
+/// A probe whose blocking job finishes AFTER the absolute deadline is not an
+/// in-budget observation, even when its result is already waiting at the next
+/// poll: `timeout_at` polls the receiver before its timer, so without the
+/// completion stamp the late result would win and a late empty held set would
+/// certify a release.
+///
+/// The runtime thread is blocked past the deadline while the job finishes past
+/// it too, so at the next poll both the result and the expired timer are ready.
+///
+/// Mutant: sending the bare value (no completion stamp) returns `Ok`.
+#[tokio::test]
+async fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let probe = tokio::spawn(bounded_probe_for_test(deadline, || {
+        std::thread::sleep(Duration::from_millis(150));
+        "late empty held set"
+    }));
+    // Let the probe task submit its blocking job and park on the receiver.
+    tokio::task::yield_now().await;
+    // Block the runtime's only thread until the job finished past the deadline.
+    std::thread::sleep(Duration::from_millis(600));
+
+    let outcome = probe.await.expect("probe task");
+
+    assert_eq!(
+        outcome,
+        Err(UnverifiedReason::PoolStarved),
+        "a result completed after the deadline must not be accepted as an observation"
     );
 }
 
