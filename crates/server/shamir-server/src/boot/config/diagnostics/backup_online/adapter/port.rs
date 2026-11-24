@@ -22,9 +22,10 @@
 //! fully-captured SYSTEM-repo WAL position, monotonic across catalogue
 //! writes.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,6 +41,10 @@ use crate::sync::durability::backup::online::progress::{BackupStage, CancelFlag}
 use crate::sync::durability::backup::online::wal_capture::{
     CapturedPoint, OnlineBackupPort, PortError, RepoSource,
 };
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
 
 /// Stage hints written by the adapter at port-call boundaries. The protocol
 /// has no progress callback, so the registry derives the live stage from
@@ -194,6 +199,287 @@ impl EngineBackupPort {
             .map(rel_slash)
             .unwrap_or_else(|_| store_dir.to_string_lossy().into_owned())
     }
+}
+
+/// Copy a Fjall directory for validation without exposing the backup tree to recovery writes.
+fn copy_validation_tree(source: &Path, destination: &Path, depth: usize) -> io::Result<()> {
+    const MAX_DEPTH: usize = 64;
+    if depth > MAX_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "server_meta tree is too deep",
+        ));
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported server_meta symlink",
+            ));
+        } else if metadata.is_dir() {
+            copy_validation_tree(&source_path, &destination_path, depth + 1)?;
+        } else if metadata.is_file() {
+            fs::copy(source_path, destination_path)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported server_meta entry",
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct ValidationTempDir {
+    path: PathBuf,
+}
+
+fn default_candidate_name(id: u64) -> String {
+    format!("shamir-backup-validation-{}-{id}", std::process::id())
+}
+
+impl ValidationTempDir {
+    fn new() -> io::Result<Self> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..128 {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
+            let candidate = validation_root_candidate();
+            #[cfg(test)]
+            let path = candidate
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join(default_candidate_name(id)));
+            #[cfg(not(test))]
+            let path = std::env::temp_dir().join(default_candidate_name(id));
+            // Exclusive private create: a pre-existing path (planted or
+            // otherwise) is NEVER adopted or deleted — the guard only ever
+            // removes a directory this call created.
+            match shamir_private_dir::create_exclusive_private_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate validation directory",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ValidationTempDir {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "failed to remove validation directory"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VALIDATION_ROOT_CANDIDATE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only seam: overrides the allocator's FIRST candidate root name.
+#[cfg(test)]
+pub(crate) fn set_validation_root_candidate(candidate: Option<String>) {
+    VALIDATION_ROOT_CANDIDATE.with(|slot| *slot.borrow_mut() = candidate);
+}
+
+#[cfg(test)]
+fn validation_root_candidate() -> Option<String> {
+    VALIDATION_ROOT_CANDIDATE.with(|slot| slot.borrow_mut().take())
+}
+
+fn refuse_case_variant_reserved_names(root: &Path) -> Result<(), PortError> {
+    for entry in fs::read_dir(root).map_err(PortError::SystemStore)? {
+        let entry = entry.map_err(PortError::SystemStore)?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        for exact in ["audit.log", "server_meta", "audit_checkpoint"] {
+            if text != exact && text.to_lowercase() == exact {
+                return Err(PortError::SystemStore(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("reserved store name \"{text}\" differs from \"{exact}\" only by case"),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_audit_archive_name(name: &str) -> bool {
+    // Mirror shamir-server-security audit_appender/recovery.rs archive_name shape.
+    let Some(suffix) = name.strip_prefix("audit.log.") else {
+        return false;
+    };
+    suffix.len() == 20 && suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn copy_optional_directory(
+    source_root: &Path,
+    copied_root: &Path,
+    name: &str,
+    temp: &Path,
+) -> Result<(), PortError> {
+    let source = source_root.join(name);
+    let copied = copied_root.join(name);
+    refuse_case_variant_reserved_names(source_root)?;
+    refuse_case_variant_reserved_names(copied_root)?;
+    let source_meta = match fs::symlink_metadata(&source) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(PortError::SystemStore(error)),
+    };
+    if let Some(source_meta) = source_meta.as_ref() {
+        if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
+            return Err(PortError::SystemStore(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("source {name} is not a regular directory"),
+            )));
+        }
+    }
+    let copied_meta = match fs::symlink_metadata(&copied) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if source_meta.is_some() && name == "audit_checkpoint" {
+                return Err(PortError::SystemStore(io::Error::other(
+                    "copied audit chain does not validate: audit checkpoint is missing",
+                )));
+            }
+            if source_meta.is_some() {
+                return Err(PortError::SystemStore(io::Error::other(format!(
+                    "copied {name} is missing or unreadable: {error}"
+                ))));
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(PortError::SystemStore(error)),
+    };
+    if copied_meta.file_type().is_symlink() || !copied_meta.is_dir() {
+        return Err(PortError::SystemStore(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("copied {name} is not a regular directory"),
+        )));
+    }
+    let validation_copy = temp.join(name);
+    copy_validation_tree(&copied, &validation_copy, 0).map_err(|error| {
+        PortError::SystemStore(io::Error::other(format!(
+            "copied {name} cannot be copied for validation: {error}"
+        )))
+    })?;
+    Ok(())
+}
+
+fn validate_copied_data_dir(
+    source_data_dir: &Path,
+    copied_data_dir: &Path,
+) -> Result<(), PortError> {
+    let temp = ValidationTempDir::new().map_err(PortError::SystemStore)?;
+    copy_optional_directory(source_data_dir, copied_data_dir, "server_meta", temp.path())?;
+    copy_optional_directory(
+        source_data_dir,
+        copied_data_dir,
+        "audit_checkpoint",
+        temp.path(),
+    )?;
+    // The SOURCE decides only store requirement / existence / kind — never
+    // contents. A post-capture rotation or retention prune may change the
+    // live source after the copy; judging the copy's audit FILES against
+    // the live source would either reject a valid copy or (worse) omit a
+    // copied archive that boot then scans.
+    let source_entries = fs::read_dir(source_data_dir).map_err(PortError::SystemStore)?;
+    let mut source_has_audit_chain = false;
+    for entry in source_entries {
+        let entry = entry.map_err(PortError::SystemStore)?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if text != "audit.log" && !is_audit_archive_name(&text) {
+            continue;
+        }
+        // Retention may prune an entry between listing and stat; the destination set is what boot scans.
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PortError::SystemStore(error)),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(PortError::SystemStore(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported source audit validation entry",
+            )));
+        }
+        source_has_audit_chain = true;
+    }
+    // The COMPLETED DESTINATION defines the published audit set: every
+    // reserved audit entry (active log + archives) is kind-checked and
+    // cloned into the validation tree, because boot scans EVERY archive of
+    // the directory it opens.
+    let copied_entries = fs::read_dir(copied_data_dir).map_err(PortError::SystemStore)?;
+    let mut copied_has_chain = false;
+    for entry in copied_entries {
+        let entry = entry.map_err(PortError::SystemStore)?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if text != "audit.log" && !is_audit_archive_name(&text) {
+            continue;
+        }
+        copied_has_chain = true;
+        let copied_path = entry.path();
+        let metadata = fs::symlink_metadata(&copied_path).map_err(PortError::SystemStore)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(PortError::SystemStore(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported copied audit validation entry",
+            )));
+        }
+        fs::copy(&copied_path, temp.path().join(&name)).map_err(PortError::SystemStore)?;
+    }
+    if source_has_audit_chain && !copied_has_chain {
+        return Err(PortError::SystemStore(io::Error::other(
+            "copied audit chain does not validate: the copy lost the whole audit chain",
+        )));
+    }
+    let meta_path = temp.path().join("server_meta");
+    if meta_path.exists() {
+        let store = crate::server_meta::open_existing(&meta_path).map_err(|error| {
+            PortError::SystemStore(io::Error::other(format!(
+                "copied server_meta cannot open: {error}"
+            )))
+        })?;
+        let key = store.audit_chain_key().map_err(|error| {
+            PortError::SystemStore(io::Error::other(format!(
+                "copied audit key cannot be read: {error}"
+            )))
+        })?;
+        // Recovery opens <data_dir>/audit_checkpoint and uses its row as a ChainScan anchor.
+        let (appender, _) = store
+            .open_audit_recovered_strict(temp.path(), &key)
+            .map_err(|error| {
+                PortError::SystemStore(io::Error::other(format!(
+                    "copied audit chain does not validate: {error}"
+                )))
+            })?;
+        drop(appender);
+        drop(store);
+    }
+    Ok(())
 }
 
 /// Forward-slash relative path string.
@@ -391,6 +677,10 @@ impl OnlineBackupPort for EngineBackupPort {
     /// end_seal no longer publishes a misleading Verifying stage early.
     fn begin_verify(&self) {
         self.run.set_stage(stage_hint::VERIFYING);
+    }
+
+    fn validate_copied_data_dir(&self, copied_data_dir: &Path) -> Result<(), PortError> {
+        validate_copied_data_dir(&self.data_dir, copied_data_dir)
     }
 
     fn end_seal(&self, repo: &str) {

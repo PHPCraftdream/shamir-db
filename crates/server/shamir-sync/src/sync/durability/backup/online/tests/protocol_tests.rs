@@ -1,18 +1,4 @@
 //! Protocol state machine tests over a plain-directory port (CI only).
-
-use std::fmt::Write as _;
-use std::fs;
-use std::io::Write as _;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use sha2::{Digest, Sha256};
-use shamir_db::shamir_db::system_store::{SystemStore, SystemStoreConfig};
-use tempfile::TempDir;
-
 use crate::sync::durability::backup::online::copy_engine::{
     test_seams::{self, SeamGuard},
     CopyOptions,
@@ -29,6 +15,17 @@ use crate::sync::durability::backup::online::wal_capture::{
     CapturedPoint, OnlineBackupPort, PortError, RepoSource,
 };
 use crate::sync::durability::backup::{restore_with_probe, verify_manifest, MANIFEST_FILE_NAME};
+use sha2::{Digest, Sha256};
+use shamir_db::shamir_db::system_store::{SystemStore, SystemStoreConfig};
+use std::fmt::Write as _;
+use std::fs;
+use std::io::Write as _;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 /// Unique temp dir per test; cleaned up best-effort.
 fn temp_dir(name: &str) -> PathBuf {
@@ -71,11 +68,9 @@ impl TestPort {
     pub(super) fn single_repo(source: &Path) -> Self {
         Self::with_repos(source, &["alpha"])
     }
-
     fn two_repos(source: &Path) -> Self {
         Self::with_repos(source, &["alpha", "beta"])
     }
-
     fn with_repos(source: &Path, names: &[&str]) -> Self {
         Self {
             repos: names
@@ -94,7 +89,6 @@ impl TestPort {
             events: Mutex::new(Vec::new()),
         }
     }
-
     fn seal_events(&self) -> Vec<String> {
         self.events
             .lock()
@@ -104,22 +98,18 @@ impl TestPort {
             .cloned()
             .collect()
     }
-
     fn with_capture_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_capture.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
     fn with_seal_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_seal.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
     fn with_end_seal_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_end_seal.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
     pub(super) fn source_with_data(source: &Path) {
         for name in ["alpha", "beta"] {
             write_file(
@@ -142,12 +132,10 @@ impl OnlineBackupPort for TestPort {
     fn catalogue(&self) -> Result<Vec<RepoSource>, PortError> {
         Ok(self.repos.clone())
     }
-
     fn acquire_pins(&self) -> Result<(), PortError> {
         self.pins_held.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-
     fn capture_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
         if let Some(hook) = self.on_capture.lock().expect("lock").as_ref() {
             hook();
@@ -158,11 +146,9 @@ impl OnlineBackupPort for TestPort {
             schema_version: 1,
         })
     }
-
     fn capture_system_store(&self) -> Result<u64, PortError> {
         Ok(1)
     }
-
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
         self.events
             .lock()
@@ -177,7 +163,6 @@ impl OnlineBackupPort for TestPort {
             schema_version: 1,
         })
     }
-
     fn end_seal(&self, repo: &str) {
         self.events
             .lock()
@@ -187,7 +172,6 @@ impl OnlineBackupPort for TestPort {
             hook();
         }
     }
-
     fn release_pins(&self) {
         self.pins_released.fetch_add(1, Ordering::SeqCst);
     }
@@ -406,7 +390,6 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
-
     // Hook cancels during the capture barrier.
     let source = temp_dir("cancel_cap_source");
     let to = temp_dir("cancel_cap_to");
@@ -423,7 +406,6 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
-
     // Hook cancels during the seal barrier; the seal re-copy observes it.
     let source = temp_dir("cancel_seal_source");
     let to = temp_dir("cancel_seal_to");
@@ -587,7 +569,6 @@ fn clock_cap_exceeded_fails_closed() {
 // completed chunk write, including the gated seal re-copy). A test-local
 // `SealScope.active` flag scopes observation to the seal re-copy pass:
 // set by the seal hook, cleared by the end_seal hook.
-
 /// Copy-engine chunk size: every `after_first_write` fire is one chunk.
 const CHUNK: u64 = 1024 * 1024;
 
@@ -616,17 +597,14 @@ impl SealScope {
             writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
-
     fn set_active(&self) -> impl Fn() + Send + 'static {
         let active = Arc::clone(&self.active);
         move || active.store(true, Ordering::SeqCst)
     }
-
     fn clear_active(&self) -> impl Fn() + Send + 'static {
         let active = Arc::clone(&self.active);
         move || active.store(false, Ordering::SeqCst)
     }
-
     fn log(&self) -> Vec<String> {
         self.writes.lock().expect("lock").clone()
     }
@@ -711,7 +689,6 @@ fn seal_recopy_of_a_new_big_file_is_capped_during_the_second_chunk() {
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "cap failure must be the source error, got {failure:?}"
     );
-
     // First pass copied the unchanged WAL and store exactly once each.
     assert!(
         first_pass_store_unchanged.load(Ordering::SeqCst),
@@ -735,7 +712,6 @@ fn seal_recopy_of_a_new_big_file_is_capped_during_the_second_chunk() {
         1,
         "exactly the first chunk may be copied before the cap trips, log {log:?}"
     );
-
     // Fail-closed cleanup: no output, pins released, hold ended, and
     // the live source keeps the corrective delta untouched.
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
@@ -805,7 +781,6 @@ fn wal_cut_staged_snapshot_excludes_frames_appended_after_end_seal() {
         });
     let cancel = CancelFlag::default();
     let report = run(&port, &source, &to, &cancel).expect("run must succeed");
-
     // The hold WAS live through the WAL re-copy pass: the staged
     // snapshot holds exactly the seal-barrier frames. If the re-copy
     // were skipped, the staged bytes would still be the first-pass F0.

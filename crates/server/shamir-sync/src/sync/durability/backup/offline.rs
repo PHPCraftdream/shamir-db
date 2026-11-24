@@ -7,7 +7,6 @@
 //! `<dest>/<timestamp>/` so a single `--to` can collect daily snapshots. A `manifest.json`
 //! (file list + sha256 + size per file) is written into the snapshot last, so `restore`
 //! (`restore.rs`) has something durable to verify a snapshot against before trusting it.
-//!
 //! Why stop-and-copy instead of an online backup: fjall exposes no live / online backup API on
 //! `Database` (its public surface is `insert`/`get`/`range`/`persist`/`batch`; the closest
 //! analogue, `Snapshot`, is just a seqno read snapshot, not a file-level backup). Copying the
@@ -20,7 +19,6 @@
 //! that races an in-flight append merely loses the torn tail batch; it does not corrupt earlier
 //! committed batches.) See `shamir-storage`'s `storage_fjall.rs` for how `flush()` maps to
 //! `Database::persist(PersistMode::SyncAll)`.
-//!
 //! Future enhancement (P2): an in-process / online snapshot triggered by an `admin` op, going
 //! through the engine's own repo handles (not this offline CLI, which has no access to any live
 //! handle). Not done here because it requires a wire-protocol change.
@@ -45,6 +43,8 @@ mod source_lock;
 #[cfg(test)]
 mod tests;
 mod v2_verify;
+#[cfg(test)]
+pub(super) use v2_verify::exact_spelling_mismatch;
 
 /// Size of the fixed, reused buffer streaming hash reads are chunked
 /// through — chosen so a large fjall SST/journal file is hashed without

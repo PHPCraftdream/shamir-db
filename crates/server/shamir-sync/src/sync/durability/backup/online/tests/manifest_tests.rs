@@ -5,6 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+
+use crate::sync::durability::backup::offline::exact_spelling_mismatch;
 use crate::sync::durability::backup::online::copy_engine::hash_file;
 use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, ConsistencySection, ManifestV2, RepoConsistency, WalDirEntry, WalSection,
@@ -88,6 +92,153 @@ fn sample_wal() -> WalSection {
 }
 
 #[test]
+fn v2_verify_rejects_disk_spelling_mismatch_portably() {
+    let dir = temp_dir("verify_case_spelling");
+    let probe = dir.join("x");
+    let upper_probe = dir.join("X");
+    write_file(&probe, b"probe");
+    let insensitive = upper_probe.exists();
+    let _ = fs::remove_file(&probe);
+    let _ = fs::remove_file(&upper_probe);
+    let actual = dir.join("audit.log.1");
+    write_file(&actual, b"audit");
+    let (sha256, size_bytes) = hash_file(&actual).expect("hash actual spelling");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "{manifest_path}", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#,
+        manifest_path = "AUDIT.LOG.1"
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+    let error = verify_manifest(&dir).expect_err("different on-disk spelling must refuse");
+    if insensitive {
+        assert!(
+            matches!(error, BackupError::ManifestInvalid(ref message) if message.contains("spelling")),
+            "unexpected error: {error}"
+        );
+    } else {
+        assert!(
+            matches!(error, BackupError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::NotFound),
+            "unexpected error: {error}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+/// The listing-only identity check must reject a differently-cased control
+/// file even on a case-sensitive CI filesystem; on an insensitive receiver
+/// the same spelling would resolve to the real control file.
+fn v2_manifest_control_file_requires_exact_spelling() {
+    let dir = temp_dir("verify_control_spelling");
+    let actual = dir.join("backup.meta.json");
+    write_file(&actual, b"metadata");
+    let (sha256, size_bytes) = hash_file(&actual).expect("hash actual spelling");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "BACKUP.META.JSON", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+    let error = verify_manifest(&dir).expect_err("non-exact control spelling must refuse");
+    assert!(
+        matches!(error, BackupError::ManifestInvalid(ref message) if message.contains("reserves the root control-file name")),
+        "unexpected error: {error}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn v2_case_sensitive_disk_aliases_are_rejected() {
+    let dir = temp_dir("verify_physical_case_alias");
+    let probe = dir.join("x");
+    let upper_probe = dir.join("X");
+    write_file(&probe, b"probe");
+    let insensitive = upper_probe.exists();
+    let _ = fs::remove_file(&probe);
+    let _ = fs::remove_file(&upper_probe);
+    if insensitive {
+        println!("skipping: filesystem is case-insensitive; cannot create distinct case aliases");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+
+    build_snapshot(&dir);
+    let lower = dir.join("audit.log.1");
+    let upper = dir.join("AUDIT.LOG.1");
+    write_file(&lower, b"lower audit");
+    write_file(&upper, b"upper audit");
+    let lower_entry = entry(&lower, &dir);
+    let upper_entry = entry(&upper, &dir);
+    set_manifest_fields(&dir, |decoded| {
+        decoded.files.extend([lower_entry, upper_entry])
+    });
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::DuplicateManifestEntry(_))
+    ));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn v2_case_folded_aliases_are_rejected_by_receiver_model() {
+    let spellings = ["audit.log.1", "AUDIT.LOG.1"];
+    let sensitive_listing = spellings.to_vec();
+    let insensitive_listing = vec![spellings[0]];
+    assert_eq!(sensitive_listing, ["audit.log.1", "AUDIT.LOG.1"]);
+    assert_eq!(
+        sensitive_listing[0].to_lowercase(),
+        sensitive_listing[1].to_lowercase(),
+        "the virtual sensitive listing contains distinct case-fold aliases"
+    );
+    assert_eq!(
+        insensitive_listing,
+        ["audit.log.1"],
+        "modeled insensitive receiver coalesces aliases to the first listed spelling"
+    );
+
+    let dir = temp_dir("verify_case_alias");
+    write_file(&dir.join(spellings[0]), b"audit");
+    let (sha256, size_bytes) = hash_file(&dir.join(spellings[0])).expect("hash alias fixture");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "audit.log.1", "sha256": "{sha256}", "size_bytes": {size_bytes} }},
+    {{ "path": "AUDIT.LOG.1", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+
+    // On a sensitive receiver, both names may exist; the manifest's folded
+    // duplicate check must still reject before filesystem lookup.
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::DuplicateManifestEntry(path)) if path == spellings[1]
+    ));
+    // On an insensitive receiver, both manifest entries resolve to the first
+    // spelling and have valid bytes; only alias rejection prevents acceptance.
+    assert_eq!(
+        hash_file(&dir.join(insensitive_listing[0])).expect("modeled insensitive file"),
+        (sha256, size_bytes)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn v1_manifest_decodes_with_offline_kind() {
     let raw = r#"{
   "format_version": 1,
@@ -98,6 +249,34 @@ fn v1_manifest_decodes_with_offline_kind() {
     assert!(matches!(decoded.kind, BackupKind::Offline));
     assert!(decoded.consistency.is_none());
     assert!(decoded.wal.is_none());
+}
+
+#[test]
+fn exact_spelling_mismatch_matches_production_membership_logic() {
+    let listing = vec!["audit.log.1".to_string()];
+    let mismatch = exact_spelling_mismatch("AUDIT.LOG.1", &listing).expect("folded match");
+    assert!(mismatch.contains("AUDIT.LOG.1"));
+    assert!(mismatch.contains("audit.log.1"));
+    assert_eq!(
+        exact_spelling_mismatch("AUDIT.LOG.1", &["AUDIT.LOG.1".to_string()]),
+        None
+    );
+    assert_eq!(exact_spelling_mismatch("AUDIT.LOG.1", &[]), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn v2_verify_refuses_non_utf8_disk_name() {
+    let dir = temp_dir("verify_non_utf8_name");
+    build_snapshot(&dir);
+    let mut junk = dir.clone();
+    junk.push(std::ffi::OsStr::from_bytes(b"\xff"));
+    write_file(&junk, b"unnameable");
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::UnmanifestedFile(path)) if path == junk
+    ));
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -402,6 +581,40 @@ fn set_manifest_fields(dir: &Path, edit: impl FnOnce(&mut ManifestV2)) {
 
 fn wal_segment_paths() -> [&'static str; 2] {
     ["repos/alpha/store.bin", "backup.meta.json"]
+}
+
+#[test]
+fn v2_verify_keeps_confinement_refusal_categories() {
+    let dir = DirGuard::new("verify_confinement_categories");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        decoded
+            .files
+            .push(crate::sync::durability::backup::ManifestFileEntry {
+                path: "repos/alpha".to_string(),
+                sha256: "00".repeat(32),
+                size_bytes: 1,
+            });
+    });
+    assert!(matches!(
+        verify_manifest(&dir.0),
+        Err(BackupError::ManifestPathNotRegularFile(_))
+    ));
+
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        decoded
+            .files
+            .push(crate::sync::durability::backup::ManifestFileEntry {
+                path: "repos/alpha/absent.bin".to_string(),
+                sha256: "00".repeat(32),
+                size_bytes: 1,
+            });
+    });
+    assert!(matches!(
+        verify_manifest(&dir.0),
+        Err(BackupError::Io(ref io_error)) if io_error.kind() == std::io::ErrorKind::NotFound
+    ));
 }
 
 #[test]
