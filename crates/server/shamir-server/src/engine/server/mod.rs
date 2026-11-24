@@ -31,4 +31,6 @@ pub use server_launcher::ServerLauncher;
 pub(crate) use store_release_barrier::open_lock_is_discovery_gap;
 pub(crate) use store_release_barrier::wait_stores_released;
 #[cfg(test)]
-pub(crate) use store_release_barrier::{release_stores, ReleaseOutcome};
+pub(crate) use store_release_barrier::{
+    bounded_probe_for_test, release_stores, ReleaseOutcome, UnverifiedReason,
+};
