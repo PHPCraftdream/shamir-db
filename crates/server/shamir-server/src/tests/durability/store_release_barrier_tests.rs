@@ -1,7 +1,9 @@
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -192,10 +194,11 @@ async fn a_dangling_lock_marker_is_a_discovery_gap() {
     );
 }
 
-/// Opening the `lock` marker of a DISCOVERED store is a discovery gap whenever
-/// the marker cannot be opened: it exists but cannot be followed (link
+/// Opening the `lock` marker of a DISCOVERED store is a discovery gap when the
+/// open fails with `NotFound`: the marker exists but cannot be followed (link
 /// metadata says so), or it vanished after discovery. On Unix an unlinked lock
-/// file can still be held through an open descriptor, so absence proves nothing.
+/// file can still be held through an open descriptor, so absence proves
+/// nothing. (Other open errors, such as `PermissionDenied`, are a probe error.)
 ///
 /// Mutant: mapping the open-time `NotFound` to Unlocked (the former result for
 /// a vanished marker) makes the second assertion fail; mapping it for an
@@ -227,29 +230,45 @@ fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
 /// completion stamp the late result would win and a late empty held set would
 /// certify a release.
 ///
-/// The runtime thread is blocked past the deadline while the job finishes past
-/// it too, so at the next poll both the result and the expired timer are ready.
+/// Deterministic: one poll submits the job, the runtime has ONE blocking
+/// worker, and a sentinel queued behind the probe signals only after the probe
+/// job finished and sent its result; the runtime thread waits for that signal
+/// (so the timer cannot fire in between) before the probe is polled again.
 ///
 /// Mutant: sending the bare value (no completion stamp) returns `Ok`.
-#[tokio::test]
-async fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
-    let deadline = Instant::now() + Duration::from_millis(100);
-    let probe = tokio::spawn(bounded_probe_for_test(deadline, || {
-        std::thread::sleep(Duration::from_millis(150));
-        "late empty held set"
-    }));
-    // Let the probe task submit its blocking job and park on the receiver.
-    tokio::task::yield_now().await;
-    // Block the runtime's only thread until the job finished past the deadline.
-    std::thread::sleep(Duration::from_millis(600));
+#[test]
+fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, || {
+            std::thread::sleep(Duration::from_millis(150));
+            "late empty held set"
+        }));
+        // One poll runs the future up to its receiver await: the job is queued.
+        let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the probe must wait for its job");
 
-    let outcome = probe.await.expect("probe task");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        tokio::task::spawn_blocking(move || {
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the sentinel runs after the probe job on the one blocking worker");
 
-    assert_eq!(
-        outcome,
-        Err(UnverifiedReason::PoolStarved),
-        "a result completed after the deadline must not be accepted as an observation"
-    );
+        let outcome = probe.await;
+
+        assert_eq!(
+            outcome,
+            Err(UnverifiedReason::PoolStarved),
+            "a result completed after the deadline must not be accepted as an observation"
+        );
+    });
 }
 
 /// A store whose `lock` entry cannot be opened is UNKNOWN state.

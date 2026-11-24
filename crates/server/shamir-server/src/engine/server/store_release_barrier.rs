@@ -313,8 +313,9 @@ pub(crate) enum ReleaseOutcome {
 /// Wait until no fjall store under `root` is locked, bounded end to end.
 ///
 /// Every probe await is bounded by the REMAINING budget, so neither discovery
-/// nor a lock probe can outlive the deadline; the verdict says which of the
-/// three cases happened. An already-spent deadline never turns a known held
+/// nor a lock probe can delay the verdict past the deadline (a job already
+/// running may still finish later); the verdict says which of the three cases
+/// happened. An already-spent deadline never turns a known held
 /// set into `Unverified`: an observed held lock remains `StillLocked`.
 pub(crate) async fn release_stores(root: &Path, timeout: Duration) -> ReleaseOutcome {
     release_stores_until(root, Instant::now() + timeout).await
@@ -413,18 +414,20 @@ async fn bounded_probe<T: Send + 'static>(
     probe: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, UnverifiedReason> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let std_deadline = deadline.into_std();
+    // Stamped on the timer's own clock (tokio's `Instant`, runtime-entered in
+    // the blocking job), so a paused clock cannot make the two disagree.
     let job = tokio::task::spawn_blocking(move || {
         let value = probe();
-        let _ = tx.send((value, std::time::Instant::now() < std_deadline));
+        let _ = tx.send((value, Instant::now() < deadline));
     });
     match tokio::time::timeout_at(deadline, rx).await {
         Ok(Ok((value, true))) => Ok(value),
         Ok(Ok((_, false))) => Err(UnverifiedReason::PoolStarved),
         Ok(Err(_)) => Err(UnverifiedReason::ProbeError),
         Err(_) => {
-            // The budget expired with the job still queued (or stuck): abort it
-            // rather than leave an orphan probe running after the verdict.
+            // The budget expired with the job still queued (or stuck): abort it.
+            // That only stops a job that has not started; one already inside a
+            // filesystem call can finish after the verdict.
             job.abort();
             Err(UnverifiedReason::PoolStarved)
         }
