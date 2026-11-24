@@ -235,6 +235,23 @@ fn copy_validation_tree(source: &Path, destination: &Path, depth: usize) -> io::
     Ok(())
 }
 
+/// The online copy omits Fjall's `lock` artifact and Fjall recovery opens it
+/// without create; restore recreates it, so the private scratch clone must too.
+fn recreate_fjall_lock(store: &Path) -> io::Result<()> {
+    if !store.join("version").is_file() || !store.join("keyspaces").is_dir() {
+        return Ok(());
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(store.join("lock"))
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 struct ValidationTempDir {
     path: PathBuf,
 }
@@ -382,6 +399,11 @@ fn copy_optional_directory(
     copy_validation_tree(&copied, &validation_copy, 0).map_err(|error| {
         PortError::SystemStore(io::Error::other(format!(
             "copied {name} cannot be copied for validation: {error}"
+        )))
+    })?;
+    recreate_fjall_lock(&validation_copy).map_err(|error| {
+        PortError::SystemStore(io::Error::other(format!(
+            "copied {name} cannot be prepared for validation: {error}"
         )))
     })?;
     Ok(())

@@ -551,6 +551,10 @@ fn copy_tree(source: &Path, destination: &Path) {
                 metadata.is_file(),
                 "fixture contains only regular files and directories"
             );
+            // The online copy never carries Fjall's `lock` artifact.
+            if source_path.file_name().is_some_and(|name| name == "lock") {
+                continue;
+            }
             fs::copy(source_path, destination_path).expect("copy fixture file");
         }
     }
@@ -573,6 +577,10 @@ fn tree_paths(root: &Path) -> Vec<PathBuf> {
                 );
                 visit(root, &path, files);
             } else if metadata.is_file() {
+                // The online listing skips Fjall's range-locked `lock` artifact.
+                if path.file_name().is_some_and(|name| name == "lock") {
+                    continue;
+                }
                 files.push(
                     path.strip_prefix(root)
                         .expect("relative listing path")

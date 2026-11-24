@@ -96,21 +96,17 @@ impl ReplSource for PanicTeardownSource {
         }
         if repo == "other" {
             if self.sibling_gap {
+                // The leader's real identity and epoch keep the identity fence
+                // passing, so the loop reaches the gap stop.
+                let mut reply = self
+                    .inner
+                    .pull(db, repo, from_version, limit, Some(0))
+                    .await?;
+                if let ReplResponse::Pull { gap_at, .. } = &mut reply {
+                    *gap_at = Some(from_version);
+                }
                 self.gap_served.notify_one();
-                return Ok(ReplResponse::Pull {
-                    leader_epoch: 0,
-                    events: rmp_serde::to_vec_named(
-                        &Vec::<shamir_db::engine::tx::ReplicatedEvent>::new(),
-                    )
-                    .expect("encode empty pull events"),
-                    gap_at: Some(2),
-                    current_version: 1,
-                    repo_lineage_id: None,
-                    history_epoch: None,
-                    gap_first: None,
-                    gap_through: None,
-                    schema_digest: None,
-                });
+                return Ok(reply);
             }
             self.sibling_parked.notify_one();
             self.release_sibling.notified().await;
