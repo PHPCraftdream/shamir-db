@@ -652,10 +652,10 @@ impl ServerHandle {
         //     below bounds), then join the followers and the reconcile-tick task
         //     (already told to stop by the root `shutdown_token.cancel()` above).
         //     Done after the accept loops stop and before flush. The asynchronous
-        //     join is bounded with or without an outer deadline; an expiry leaves
-        //     followers that may still apply (they were already signalled and exit
-        //     at their next cancellation checkpoint), so the repository flush is
-        //     skipped.
+        //     join is bounded with or without an outer deadline; an expiry means
+        //     follower quiescence was not established (they were already signalled
+        //     and exit at their next cancellation checkpoint), so the repository
+        //     flush is skipped.
         tracing::debug!(stage = "replication", "shutdown stage");
         self.repl_supervisor.begin_stop();
         let (repl_deadline, repl_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);

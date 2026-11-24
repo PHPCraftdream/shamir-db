@@ -27,6 +27,12 @@ Found by the review of the flake branch (FLAKE #2009) and by the landing review 
 * Wording: "no lock" and "at once" now say what is true (no lifecycle or registry lock; signal delivery versus task exit; the cap bounds the asynchronous join).
 * Left as it is, with the reason: no regression isolates the server-side expiry and flush decision (the join expiry needs a follower that ignores its token, which the supervisor cannot be made to host without a new seam in the follower loop; the decision itself is one `quiesced = false` assignment read by the existing flush gate).
 
+## Review result, round 3 (verdict FAIL against the round 2 fixes: two P2 and one P3, all addressed)
+
+* The post-insert sweep treated an invalid lease alone as proof of exit, but DROP, PAUSE and terminal marking clear the lease while followers still run, so the sweep could detach live followers (and `stop_all` would then find nothing to join). The sweep now requires the matching lease, an invalid lease AND every target's done flag (all wrappers reached exit housekeeping); a negative-control test invalidates the lease inside the registration hook while the followers wait on a silent Hello and asserts the handle stays registered.
+* The apply-gate test announced every pull result, including an empty batch or an error, and its 300 ms pause did not prove that a follower reached the gate: the source now announces only a non-empty batch (an empty one encodes as the one-byte msgpack array 0x90). Known limit, accepted: arrival at the gate itself is still covered by the pause, which can only weaken the check on a slow runner and never fail it (an acknowledgement of the pending gate read would need a new seam inside the loop).
+* Wording: a born-cancelled follower exits at its FIRST CANCELLATION CHECKPOINT (it may first load its receipt or prepare the identity fence), and an expiry of the replication join means follower quiescence was not established (it can also come from a reconcile stalled on the catalogue with no follower at all).
+
 ## Non-goals
 
 No change to `stop_all` semantics, to reconcile outside the early return, or to the scheduled-worker join (item 18) and the GC handle (item 19, its own branch).

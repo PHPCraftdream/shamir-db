@@ -472,7 +472,65 @@ async fn a_follower_that_exits_before_registration_leaves_no_handle() {
     assert!(follower.subscription_lease("sub_a").is_none());
 }
 
-/// A source that announces every produced pull reply before the follower
+/// An invalid lease is not an exit: DROP, PAUSE and terminal marking clear it
+/// while the followers still run, so a start that registers its handle after
+/// that must keep the handle (reconcile and shutdown still have to cancel and
+/// join the live followers). Negative control of the post-insert sweep.
+///
+/// The followers wait on a silent Hello, so they are alive when the lease is
+/// invalidated inside the registration hook, before the insert.
+///
+/// Mutant: a sweep on the invalid lease alone removes the handle and detaches
+/// the live followers (`is_running` turns false).
+#[tokio::test]
+async fn an_invalid_lease_with_live_followers_keeps_the_handle_registered() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let entered = Arc::new(Notify::new());
+    let factory: ReplSourceFactory = {
+        let leader = leader.clone();
+        let entered = Arc::clone(&entered);
+        Arc::new(move |_sub: &Subscription| {
+            Arc::new(SilentSource {
+                inner: InProcessReplSource::new((*leader).clone()),
+                silent_hello: true,
+                entered: Arc::clone(&entered),
+            }) as Arc<dyn ReplSource>
+        })
+    };
+    let parked = ParkedStart::new();
+    let sup = Arc::new(
+        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+            .with_registration_hook(parked.hook()),
+    );
+
+    let mut reconcile = spawn_reconcile(&sup);
+    parked.parked(&mut reconcile).await;
+    tokio::time::timeout(Duration::from_secs(60), entered.notified())
+        .await
+        .expect("a follower must be waiting on its Hello");
+    follower
+        .subscription_lease("sub_a")
+        .expect("the lease is issued")
+        .valid
+        .store(false, Ordering::Release);
+
+    parked.release.notify_one();
+    reconcile.await.expect("reconcile task");
+    assert!(
+        sup.is_running("sub_a"),
+        "an invalid lease with live followers must not be swept"
+    );
+
+    sup.begin_stop();
+    sup.stop_all().await;
+    assert!(!sup.is_running("sub_a"));
+}
+
+/// A source that announces every non-empty pull reply before the follower
 /// moves on to apply it.
 struct PullNotifySource {
     inner: InProcessReplSource,
@@ -496,7 +554,12 @@ impl ReplSource for PullNotifySource {
             .inner
             .pull(db, repo, from_version, limit, wait_ms)
             .await;
-        self.pulled.notify_one();
+        // Announced only for a NON-EMPTY batch (an empty one encodes as the one-byte
+        // msgpack array 0x90, an error carries no batch): only then does the
+        // follower go on to the identity fence and the apply gate.
+        if matches!(&reply, Ok(ReplResponse::Pull { events, .. }) if events.len() > 1) {
+            self.pulled.notify_one();
+        }
         reply
     }
 }

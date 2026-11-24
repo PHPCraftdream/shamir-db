@@ -616,12 +616,17 @@ impl SubscriptionSupervisor {
             handle.stop();
         } else {
             // The last exit may have run before this insert (a follower born
-            // cancelled exits at once): it invalidates the lease first and then
-            // deregisters, so its removal found nothing and the dead handle is
-            // swept here. Either that removal sees the handle or this check sees
-            // the invalid lease (the registry's bucket lock orders the two).
+            // cancelled exits at its first cancellation checkpoint): it
+            // invalidates the lease first and then deregisters, so its removal
+            // found nothing and the dead handle is swept here. Either that removal
+            // sees the handle or this check sees the invalid lease (the registry's
+            // bucket lock orders the two). An invalid lease alone is NOT an exit:
+            // DROP, PAUSE and terminal marking clear it while followers still run,
+            // so every target must also have reached its exit housekeeping.
             let _ = self.registry.remove_if_sync(&sub.name, |h| {
-                Arc::ptr_eq(&h.lease, &registered_lease) && !h.lease.valid.load(Ordering::Acquire)
+                Arc::ptr_eq(&h.lease, &registered_lease)
+                    && !h.lease.valid.load(Ordering::Acquire)
+                    && h.dones.iter().all(|done| done.load(Ordering::Acquire))
             });
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");
         }
