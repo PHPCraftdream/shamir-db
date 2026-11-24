@@ -63,6 +63,10 @@ pub struct SubscriptionSupervisor {
     pub(crate) teardown_count: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(crate) teardown_done: Arc<tokio::sync::Notify>,
+    /// Signalled by the last exiting wrapper right before it waits for the
+    /// replication control lock: every loop returned and every done flag is set.
+    #[cfg(test)]
+    pub(crate) teardown_entered: Arc<tokio::sync::Notify>,
 }
 
 impl SubscriptionSupervisor {
@@ -98,6 +102,8 @@ impl SubscriptionSupervisor {
             teardown_count: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             teardown_done: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            teardown_entered: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -135,6 +141,11 @@ impl SubscriptionSupervisor {
     #[cfg(test)]
     pub(crate) fn teardown_signal(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.teardown_done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn teardown_entered_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.teardown_entered)
     }
 
     /// Cap each loop at `n` iterations (tests only — avoids relying on

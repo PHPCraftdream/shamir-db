@@ -537,10 +537,10 @@ async fn an_invalid_lease_with_live_followers_keeps_the_handle_registered() {
 /// `stop_all` still joins that wrapper (it owns the database until it is done).
 ///
 /// The test holds the control lock, stops the followers (both wait on a silent
-/// Hello and exit on the stop), invalidates the lease, releases the parked start
-/// so it registers, and only then lets the wrapper finish. The pause that gives
-/// the followers time to return can only weaken the check on a slow runner,
-/// never fail it.
+/// Hello and exit on the stop), invalidates the lease, waits for the signal the
+/// last wrapper gives right before it waits for the held lock (every loop
+/// returned, every done flag is set), releases the parked start so it registers,
+/// and only then lets the wrapper finish. No pause is involved.
 ///
 /// Mutant: a sweep on the invalid lease plus the done flags removes the handle
 /// and `stop_all` would find nothing to join (`is_running` turns false early).
@@ -569,6 +569,7 @@ async fn a_handle_whose_last_wrapper_is_still_tearing_down_stays_registered() {
             .with_registration_hook(parked.hook()),
     );
     let teardown = sup.teardown_signal();
+    let teardown_entered = sup.teardown_entered_signal();
 
     let mut reconcile = spawn_reconcile(&sup);
     parked.parked(&mut reconcile).await;
@@ -599,7 +600,9 @@ async fn a_handle_whose_last_wrapper_is_still_tearing_down_stays_registered() {
         .expect("the lease is issued")
         .valid
         .store(false, Ordering::Release);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::timeout(Duration::from_secs(60), teardown_entered.notified())
+        .await
+        .expect("the last wrapper must reach the wait for the control lock");
 
     parked.release.notify_one();
     reconcile.await.expect("reconcile task");

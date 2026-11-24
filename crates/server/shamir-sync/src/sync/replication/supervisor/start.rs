@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
@@ -352,6 +352,8 @@ impl SubscriptionSupervisor {
             #[cfg(test)]
             let teardown_done = Arc::clone(&self.teardown_done);
             #[cfg(test)]
+            let teardown_entered = Arc::clone(&self.teardown_entered);
+            #[cfg(test)]
             let exit_signal = cfg.exit_hook.clone();
             #[cfg(test)]
             let signal_other_exit = exit_signal
@@ -583,12 +585,22 @@ impl SubscriptionSupervisor {
                 // shared count, and let only the last loop invalidate/remove.
                 done.store(true, Ordering::Release);
                 if live.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    #[cfg(test)]
+                    teardown_entered.notify_one();
                     let control = local.lock_replication_control().await;
                     local.invalidate_subscription_lease(&sub_name, &lease_for_exit, &control);
                     drop(control);
+                    // This wrapper's own database handle goes before the flag: the
+                    // other wrappers' handles are dropped when their tasks end.
+                    drop(local);
                     // Before the removal attempt: a registration that lands after
                     // that attempt finds nothing to remove and sweeps on this flag.
                     torn_down_exit.store(true, Ordering::Release);
+                    // Pairs with the fence after the registry insert: the removal
+                    // below may find the map without any bucket array and then
+                    // takes no bucket lock, so the ordering is made here, not by
+                    // the map.
+                    fence(Ordering::SeqCst);
                     let lease_check = Arc::clone(&lease_for_exit);
                     let _ =
                         registry.remove_if_sync(&sub_name, |h| Arc::ptr_eq(&h.lease, &lease_check));
@@ -629,12 +641,15 @@ impl SubscriptionSupervisor {
             // invalidates the lease, publishes `torn_down` and only then tries
             // to deregister, so its removal found nothing and the dead handle is
             // swept here. Either that removal sees the handle or this check sees
-            // the flag (the registry's bucket lock orders the two). Neither an
+            // the flag: the two SeqCst fences (flag store, fence, map read there;
+            // map insert, fence, flag read here) rule out both missing each other,
+            // also on an empty map where the removal takes no bucket lock. Neither an
             // invalid lease (DROP, PAUSE and terminal marking clear it while
             // followers still run) nor the done flags (set before the last wrapper
             // waits for the control lock) prove the teardown finished, so only the
             // flag does: a handle that is not fully torn down stays registered and
             // `stop_all` still joins it.
+            fence(Ordering::SeqCst);
             let _ = self.registry.remove_if_sync(&sub.name, |h| {
                 Arc::ptr_eq(&h.lease, &registered_lease) && h.torn_down.load(Ordering::Acquire)
             });
