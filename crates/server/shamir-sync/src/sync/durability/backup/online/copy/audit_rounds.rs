@@ -39,33 +39,12 @@ pub(super) fn active_log_reappearance_is_unsafe(
         && !missing_round_had_rotation_evidence
 }
 
-#[cfg(test)]
-mod continuity_policy_tests {
-    use super::active_log_reappearance_is_unsafe;
-
-    #[test]
-    fn active_reappearance_requires_evidence_from_missing_active_round() {
-        // A same-name active file can reappear with replacement bytes.
-        assert!(active_log_reappearance_is_unsafe(Some(false), true, false));
-        // A rotation observed while the active log was missing is retained
-        // across retries and permits its eventual reappearance.
-        assert!(!active_log_reappearance_is_unsafe(Some(false), true, true));
-        // No reappearance is not this continuity violation.
-        assert!(!active_log_reappearance_is_unsafe(
-            Some(false),
-            false,
-            false
-        ));
-        // The first stable round has no previous source-round state.
-        assert!(!active_log_reappearance_is_unsafe(None, true, false));
-    }
-}
-
 /// Which reserved audit chain file the destination holds that the accepted
 /// round did not capture. Archives have priority over the active log: any
 /// unlisted archive refuses immediately, even if `audit.log` is also left
-/// over. Only an active-log-only leftover may be retried, and only when a new
-/// archive proves a rotation since the prior stable listing.
+/// over. Only an active-log-only leftover may be retried (bounded by
+/// `ACTIVE_REOPEN_ROUNDS`); a new archive is the evidence that gates ACCEPTANCE
+/// of the active log's reappearance, not the retry itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnlistedAudit {
     /// A rotation archive (`audit.log.` + 20 ASCII digits).

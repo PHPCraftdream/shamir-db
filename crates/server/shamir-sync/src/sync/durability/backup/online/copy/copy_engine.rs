@@ -575,6 +575,9 @@ pub(super) fn run_data_dir_copy_pass(
         }
         unstable_rounds += 1;
         if unstable_rounds >= AUDIT_CAPTURE_ROUNDS {
+            if cancel.is_cancelled() {
+                return Err(CopyError::Cancelled);
+            }
             return Err(CopyError::AuditFilesUnstable {
                 rounds: AUDIT_CAPTURE_ROUNDS,
             });

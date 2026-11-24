@@ -195,14 +195,17 @@ fn a_source_that_vanishes_in_an_unstable_round_carries_its_missing_count() {
 }
 
 #[test]
-fn stale_active_replacement_without_a_new_archive_is_refused_without_retry() {
+fn stale_active_replacement_without_a_new_archive_exhausts_bounded_retries() {
     let source_dir = TempDir::new().expect("source temp dir");
     let to_dir = TempDir::new().expect("destination temp dir");
     let (source, to) = (source_dir.path(), to_dir.path());
     audit_fixtures::seed_alpha_repo(source);
     let archive = archive_name(1);
-    write_file(&source.join(&archive), b"existing rotation archive\n");
-    write_file(&to.join("audit.log"), b"stale active replacement\n");
+    let archive_bytes = b"existing rotation archive\n";
+    let stale_active = b"stale active replacement\n";
+    write_file(&source.join(&archive), archive_bytes);
+    write_file(&to.join(&archive), archive_bytes);
+    write_file(&to.join("audit.log"), stale_active);
 
     let captures = Arc::new(AtomicUsize::new(0));
     let captures_for_hook = captures.clone();
@@ -212,6 +215,17 @@ fn stale_active_replacement_without_a_new_archive_is_refused_without_retry() {
             captures_for_hook.fetch_add(1, Ordering::SeqCst);
         }
     }));
+    let destination_scans = Arc::new(AtomicUsize::new(0));
+    let scans_for_hook = destination_scans.clone();
+    let destination_active_survived = Arc::new(AtomicBool::new(true));
+    let survived_for_hook = destination_active_survived.clone();
+    let stale_active = stale_active.to_vec();
+    let scan = test_seams::set_destination_audit_order(Box::new(move |root, paths| {
+        scans_for_hook.fetch_add(1, Ordering::SeqCst);
+        let survives = fs::read(root.join("audit.log")).is_ok_and(|bytes| bytes == stale_active);
+        survived_for_hook.fetch_and(survives, Ordering::SeqCst);
+        paths
+    }));
     let result = run_data_dir_copy_pass(
         source,
         to,
@@ -219,16 +233,30 @@ fn stale_active_replacement_without_a_new_archive_is_refused_without_retry() {
         &CancelFlag::default(),
         &CopyOptions::default(),
     );
+    drop(scan);
     drop(capture);
 
     assert!(
+        !source.join("audit.log").exists(),
+        "the direct pass must not copy a source active log"
+    );
+    assert!(
         matches!(result, Err(CopyError::AuditArchiveLost)),
-        "a stale active log with no newly accepted archive must not retry: {result:?}"
+        "the stale active destination must be refused after bounded retries: {result:?}"
     );
     assert_eq!(
         captures.load(Ordering::SeqCst),
-        1,
-        "the accepted pre-existing archive is captured once; no reopen retry"
+        4,
+        "the accepted archive is captured in the initial round and each of three retries"
+    );
+    assert_eq!(
+        destination_scans.load(Ordering::SeqCst),
+        4,
+        "the destination audit guard scans once in each exhausted round"
+    );
+    assert!(
+        destination_active_survived.load(Ordering::SeqCst),
+        "the stale destination active bytes survive every guard scan through refusal"
     );
 }
 
@@ -359,8 +387,8 @@ fn active_log_reappearance_without_a_new_archive_is_lost() {
     );
     assert_eq!(
         destination_scans.load(Ordering::SeqCst),
-        3,
-        "destination audit guard scans in D, E's first stable round, and its retry"
+        2,
+        "destination audit guard scans in D and in E's first stable round; the retry refuses before scanning"
     );
     assert!(
         replacement_created.load(Ordering::SeqCst),
@@ -948,53 +976,4 @@ fn an_iterator_failure_of_the_data_dir_root_is_a_typed_path_free_refusal() {
         !rendered.contains(&fixture_dir) && !rendered.contains("audit.log"),
         "the enumeration refusal must carry no path and no entry name: {rendered}"
     );
-}
-
-/// A file that merely happens to be named `audit.log` under a WAL root is an ordinary WAL file: its metadata failure keeps the path-bearing `CopyError::Io`.
-///
-/// The audit classification is scoped to phase 1 of the DATA-directory pass (`skip_audit_files`). Every other listing — the WAL directory here — is an `AuditFiles::InOrder` pass whose root
-/// is not the audit root, so a reserved name in it is not an audit chain file and its unreadable metadata must name the path the operator has to fix.
-///
-/// Mutant caught: classifying by name at EVERY pass root (the ungated `dir == source_root && is_audit_log_file_name` condition) — the failure becomes the path-free `CopyError::AuditListing`
-/// and the typed `Io` naming the WAL file fails.
-#[test]
-fn a_wal_root_file_named_audit_log_stays_a_plain_io_refusal() {
-    let source_dir = TempDir::new().expect("source temp dir");
-    let to_dir = TempDir::new().expect("destination temp dir");
-    let (source, to) = (source_dir.path(), to_dir.path());
-    audit_fixtures::seed_alpha_repo(source);
-    let wal_audit_log = source.join("repos/alpha.shamirwal/audit.log");
-    write_file(&wal_audit_log, b"not-an-audit-chain-file\n");
-    let failing = wal_audit_log.clone();
-    let seam = test_seams::set_symlink_metadata(Box::new(move |path: &Path| {
-        if path == failing {
-            Some(Err(std::io::Error::new(
-                ErrorKind::PermissionDenied,
-                "listing denied",
-            )))
-        } else {
-            None
-        }
-    }));
-    let port = InjectPort::with_repos(source, &["alpha"]);
-    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
-    drop(seam);
-    let error = result.expect_err("an unreadable WAL file must fail the run");
-    let OnlineBackupError::Failed {
-        stage,
-        source: primary,
-        ..
-    } = &error
-    else {
-        panic!("expected Failed, got {error:?}");
-    };
-    assert_eq!(*stage, BackupStage::Copying);
-    let OnlineBackupFailure::Copy(CopyError::Io { path, source }) = primary else {
-        panic!("a WAL file named audit.log must stay a plain io failure, got {primary:?}");
-    };
-    assert_eq!(
-        path, &wal_audit_log,
-        "the ordinary listing failure must name the exact unreadable file"
-    );
-    assert_eq!(source.kind(), ErrorKind::PermissionDenied);
 }

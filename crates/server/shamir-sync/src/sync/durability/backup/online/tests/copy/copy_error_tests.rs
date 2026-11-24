@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::super::failure_injection_tests::{run as run_online, write_file, InjectPort};
+use super::audit_fixtures;
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
 use crate::sync::durability::backup::online::copy_engine::{run_copy_pass, CopyError, CopyOptions};
 use crate::sync::durability::backup::online::manifest;
@@ -688,4 +689,53 @@ fn publication_directory_fsync_obeys_the_one_tolerance_rule() {
     );
     assert_eq!(port.pins_currently_held(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
+}
+
+/// A file that merely happens to be named `audit.log` under a WAL root is an ordinary WAL file: its metadata failure keeps the path-bearing `CopyError::Io`.
+///
+/// The audit classification is scoped to phase 1 of the DATA-directory pass (`skip_audit_files`). Every other listing — the WAL directory here — is an `AuditFiles::InOrder` pass whose root
+/// is not the audit root, so a reserved name in it is not an audit chain file and its unreadable metadata must name the path the operator has to fix.
+///
+/// Mutant caught: classifying by name at EVERY pass root (the ungated `dir == source_root && is_audit_log_file_name` condition) — the failure becomes the path-free `CopyError::AuditListing`
+/// and the typed `Io` naming the WAL file fails.
+#[test]
+fn a_wal_root_file_named_audit_log_stays_a_plain_io_refusal() {
+    let source_dir = TempDir::new().expect("source temp dir");
+    let to_dir = TempDir::new().expect("destination temp dir");
+    let (source, to) = (source_dir.path(), to_dir.path());
+    audit_fixtures::seed_alpha_repo(source);
+    let wal_audit_log = source.join("repos/alpha.shamirwal/audit.log");
+    write_file(&wal_audit_log, b"not-an-audit-chain-file\n");
+    let failing = wal_audit_log.clone();
+    let seam = test_seams::set_symlink_metadata(Box::new(move |path: &Path| {
+        if path == failing {
+            Some(Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "listing denied",
+            )))
+        } else {
+            None
+        }
+    }));
+    let port = InjectPort::with_repos(source, &["alpha"]);
+    let (result, _progress) = run_online(&port, source, to, &CancelFlag::default());
+    drop(seam);
+    let error = result.expect_err("an unreadable WAL file must fail the run");
+    let OnlineBackupError::Failed {
+        stage,
+        source: primary,
+        ..
+    } = &error
+    else {
+        panic!("expected Failed, got {error:?}");
+    };
+    assert_eq!(*stage, BackupStage::Copying);
+    let OnlineBackupFailure::Copy(CopyError::Io { path, source }) = primary else {
+        panic!("a WAL file named audit.log must stay a plain io failure, got {primary:?}");
+    };
+    assert_eq!(
+        path, &wal_audit_log,
+        "the ordinary listing failure must name the exact unreadable file"
+    );
+    assert_eq!(source.kind(), ErrorKind::PermissionDenied);
 }

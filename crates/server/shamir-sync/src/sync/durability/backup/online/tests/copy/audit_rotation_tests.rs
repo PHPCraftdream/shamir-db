@@ -482,14 +482,20 @@ fn cancellation_during_active_log_reopen_check_wins_over_audit_archive_lost() {
     let cancel_for_scan = cancel.clone();
     let scans = Arc::new(AtomicUsize::new(0));
     let scans_for_hook = scans.clone();
+    let rotated_for_scan = rotated.clone();
     let destination_scan =
         test_seams::set_destination_audit_order(Box::new(move |_root, paths| {
             let saw_active_log = paths.iter().any(|path| {
                 path.file_name().and_then(|name| name.to_str()) == Some(ROTATION_AUDIT_LOG)
             });
-            if saw_active_log && scans_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
-                // Cancellation arrives during an active-log leftover scan, on a
-                // bounded reopen retry after the rotation has been observed.
+            // Only scans AFTER the rotation count: pass D's ordinary scan also
+            // lists the active log. The fourth post-rotation scan is the
+            // terminal stale-active attempt (three extra reopen rounds are
+            // spent), so only the check before `AuditArchiveLost` can report it.
+            if saw_active_log
+                && rotated_for_scan.load(Ordering::SeqCst)
+                && scans_for_hook.fetch_add(1, Ordering::SeqCst) == 3
+            {
                 cancel_for_scan.cancel();
             }
             paths
@@ -500,6 +506,11 @@ fn cancellation_during_active_log_reopen_check_wins_over_audit_archive_lost() {
     drop(hash);
     drop(arm);
     assert!(rotated.load(Ordering::SeqCst), "the rotation hook must run");
+    assert_eq!(
+        scans.load(Ordering::SeqCst),
+        4,
+        "three reopen retries plus the terminal stale-active attempt scan after the rotation"
+    );
     let error = result.expect_err("cancellation must win over the stale active-log refusal");
     assert!(
         matches!(
