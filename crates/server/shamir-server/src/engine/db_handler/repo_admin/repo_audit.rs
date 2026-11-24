@@ -209,7 +209,8 @@ pub(crate) struct CancelRefusalAudit {
     /// push+prune. None of that waits for the audit writer, its persistence
     /// gate or a flush.
     unfinished: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
-    /// Test-only seam fired after reservation and before spawn.
+    /// Test-only seam fired BEFORE the spawn gate is taken (close-wins window);
+    /// the IN-GATE seam is `fire_spawn_window_probe`.
     #[cfg(test)]
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Test seam (drop accounting): when set, the shared detached-audit clock
@@ -357,11 +358,8 @@ impl CancelRefusalAudit {
     ) {
         match self.principals.try_entry(principal.to_owned()) {
             Some(scc::hash_map::Entry::Occupied(_entry)) => park(),
-            Some(scc::hash_map::Entry::Vacant(entry)) => {
-                drop(entry);
-                park();
-            }
-            None => park(),
+            Some(scc::hash_map::Entry::Vacant(entry)) => drop(entry),
+            None => {}
         }
     }
 
@@ -541,7 +539,12 @@ struct CancelAuditSlot {
 impl Drop for CancelAuditSlot {
     fn drop(&mut self) {
         // Admitted-job completion drops here on the blocking worker; reply-path
-        // refusals use bounded try-entry/deferred release instead of entry_sync.
+        // refusals never construct a slot. During runtime shutdown only, tokio may drop a submitted spawn_blocking closure
+        // on the submitting thread when the blocking pool is already shutting
+        // down (pinned tokio runtime/blocking/pool.rs, ~393-403). The slot then
+        // runs this blocking entry_sync release on the caller while it still
+        // holds the spawn gate. This is a known shutdown-time limit; no deferred-
+        // release mechanism is used by decision.
         if !self.appended {
             self.queue.record_drop(self.class);
         }
@@ -622,6 +625,10 @@ pub(super) fn enqueue_operator_cancel_audit(
             return None;
         }
     };
+    #[cfg(test)]
+    if let Some(pause) = queue.pause_before_spawn.as_ref() {
+        pause();
+    }
     let mut handles = match queue.try_spawn_gate() {
         Some(handles) => handles,
         None => {
@@ -634,10 +641,11 @@ pub(super) fn enqueue_operator_cancel_audit(
         queue.record_drop(AuditEventClass::Security);
         return None;
     }
-    let slot = match queue.try_reserve(&session.username, AuditEventClass::Security) {
-        Some(slot) => slot,
-        None => {
+    let slot = match queue.reserve_verdict(&session.username, AuditEventClass::Security) {
+        Ok(slot) => slot,
+        Err(verdict) => {
             drop(handles);
+            queue.log_refusal(verdict, AuditEventClass::Security);
             return None;
         }
     };
@@ -653,10 +661,6 @@ pub(super) fn enqueue_operator_cancel_audit(
         audit: Arc::clone(audit),
         slot,
     };
-    #[cfg(test)]
-    if let Some(pause) = queue.pause_before_spawn.as_ref() {
-        pause();
-    }
     #[cfg(test)]
     fire_spawn_window_probe();
     // The decision is taken BEFORE spawn, and the abort handle is registered under
@@ -801,8 +805,12 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         dropped_message,
         rejected_message,
     } = job;
-    let now_ns = detached_audit_now(queue, class)?;
+    #[cfg(test)]
+    if let Some(pause) = queue.pause_before_spawn.as_ref() {
+        pause();
+    }
     // Clock gate precedes the gate; registry contention refuses before any slot.
+    let now_ns = detached_audit_now(queue, class)?;
     let mut handles = match queue.try_spawn_gate() {
         Some(handles) => handles,
         None => {
@@ -815,10 +823,11 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         queue.record_drop(class);
         return None;
     }
-    let slot = match queue.try_reserve(&session.username, class) {
-        Some(slot) => slot,
-        None => {
+    let slot = match queue.reserve_verdict(&session.username, class) {
+        Ok(slot) => slot,
+        Err(verdict) => {
             drop(handles);
+            queue.log_refusal(verdict, class);
             return None;
         }
     };
@@ -833,10 +842,6 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         slot,
         dropped_message,
     };
-    #[cfg(test)]
-    if let Some(pause) = queue.pause_before_spawn.as_ref() {
-        pause();
-    }
     #[cfg(test)]
     fire_spawn_window_probe();
     // The decision is taken BEFORE spawn, and the abort handle is registered under

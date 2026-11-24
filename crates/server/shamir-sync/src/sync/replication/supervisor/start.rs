@@ -302,6 +302,7 @@ impl SubscriptionSupervisor {
         // A child of the supervisor's stop token: `begin_stop` reaches it, and one
         // created after the stop is born cancelled.
         let cancel = self.stop.child_token();
+        let loops_cancel = cancel.child_token();
         let mut joins = Vec::with_capacity(pull_targets.len());
         let mut dones: Vec<Arc<AtomicBool>> = Vec::with_capacity(pull_targets.len());
         // One live-count reference per target; only the final exit may
@@ -340,8 +341,9 @@ impl SubscriptionSupervisor {
 
             let local = self.local.clone();
             let src = source.clone();
-            let tok = cancel.clone();
-            let tok_exit_for_cancel = cancel.clone();
+            let tok = loops_cancel.clone();
+            let tok_loops_for_cancel = loops_cancel.clone();
+            let tok_exit_for_wrapper = cancel.clone();
             let sub_name = sub.name.clone();
             // Generation fences stale terminal callbacks from replacements.
             let generation = sub.binding_generation;
@@ -368,7 +370,7 @@ impl SubscriptionSupervisor {
             // §5.6 — each loop is its own task; never blocks the server. A wrapper dropped before finishing (for example, a detached handle at runtime shutdown) still leaves lease/registry teardown undone; that pre-existing gap is not fixed here.
             let join = tokio::spawn(async move {
                 // Retry terminal marking after the loop returns.
-                let tok_exit = tok.clone();
+                let tok_exit = tok_exit_for_wrapper;
                 let target = format!("{}/{}", cfg.db, cfg.repo);
                 let loop_result = match std::panic::AssertUnwindSafe(run_follower_loop(
                     local.clone(),
@@ -381,13 +383,29 @@ impl SubscriptionSupervisor {
                 {
                     Ok(result) => Some(result),
                     Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+                        let disposal =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                drop(payload)
+                            }));
+                        if disposal.is_err() {
+                            error!(
+                                subscription = %sub_name,
+                                target = %target,
+                                "follower loop panic payload disposal panicked"
+                            );
+                        }
                         error!(
                             subscription = %sub_name,
                             target = %target,
-                            panic = ?payload,
+                            panic_msg = %msg,
                             "follower loop panicked"
                         );
-                        tok_exit_for_cancel.cancel();
+                        tok_loops_for_cancel.cancel();
                         None
                     }
                 };

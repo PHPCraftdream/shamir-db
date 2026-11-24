@@ -18,10 +18,11 @@ use crate::server::{BootstrapMode, ServerHandle, ServerLauncher};
 /// Maximum time to wait for in-flight connections to drain after receiving
 /// a shutdown signal. If the deadline expires, we return an unclean report.
 ///
-/// A single 1 s reserve is kept for late-stage WAITs. The metadata join WAIT uses
-/// the earlier of its 5 s cap and the outer deadline minus 500 ms; store release
-/// uses the earlier of its 10 s cap and the deadline minus 250 ms, leaving 250 ms
-/// for report propagation. A timed-out WAIT stops waiting, not the stage's task.
+/// A single 1 s reserve is kept for late-stage WAITs. Each ends at the earlier
+/// of stage start + cap and outer deadline minus reserve: 5 s / 500 ms for the
+/// metadata join, 10 s / 250 ms for store release. These bound WAITs only;
+/// synchronous work is not interrupted, and the detached metadata join may
+/// continue after timeout. Report propagation retains the remaining reserve.
 /// The scheduled-backup worker and data-directory lock remain owned outside
 /// the bounded future and are awaited before `serve` returns. There is no forced
 /// exit and nothing calls `std::process::exit`.
@@ -90,10 +91,11 @@ pub async fn serve(
 /// the worker is still awaited here before the data-directory lock is released
 /// by `ShutdownOwner::drain`.
 ///
-/// One absolute instant is shared by the bounded teardown and its stages.
-/// Earlier stages stop at `deadline_at - 1 s`; each late-stage WAIT uses the
-/// earlier of its 5 s/10 s cap and the outer deadline minus its 500 ms/250 ms
-/// reserve. A timed-out WAIT stops waiting, not its still-running task.
+/// The outer deadline is one absolute instant. Each late-stage WAIT ends at the
+/// earlier of stage start + cap and outer deadline minus reserve (metadata join:
+/// 5 s / 500 ms; store release: 10 s / 250 ms). These bound WAITs only;
+/// synchronous work is not interrupted, and the detached metadata join may
+/// continue after timeout.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,

@@ -32,6 +32,11 @@ enum AdmissionDecision {
     RetryLimit,
 }
 
+/// Opaque refusal verdict: decided under the queue's guards, accounted and logged
+/// by [`CancelRefusalAudit::log_refusal`] after the caller dropped them.
+#[derive(Clone, Copy)]
+pub(super) struct Refusal(AdmissionDecision);
+
 impl CancelRefusalAudit {
     /// Reserve one slot of `principal`'s share (for `Observability` also of its
     /// observability share) AND one global slot as ONE bounded, non-waiting
@@ -53,40 +58,50 @@ impl CancelRefusalAudit {
     /// A principal entry therefore always implies a reserved slot, so the map
     /// can never hold more live entries than `CANCEL_AUDIT_CAPACITY` (the bound
     /// its doc states).
+    #[cfg(test)]
     pub(super) fn try_reserve(
         self: &Arc<Self>,
         principal: &str,
         class: AuditEventClass,
     ) -> Option<CancelAuditSlot> {
-        // READ-ONLY pre-check: an already-capped principal is refused without
-        // reaching the map update at all. It decides nothing (the same share
-        // test runs under the bucket lock below); it only spares the saturated
-        // case one state CAS and one entry lookup.
+        match self.reserve_verdict(principal, class) {
+            Ok(slot) => Some(slot),
+            Err(verdict) => {
+                self.log_refusal(verdict, class);
+                None
+            }
+        }
+    }
+
+    /// Decide admission without accounting or logging; callers holding the
+    /// spawn gate must release it before processing a refusal.
+    pub(super) fn reserve_verdict(
+        self: &Arc<Self>,
+        principal: &str,
+        class: AuditEventClass,
+    ) -> Result<CancelAuditSlot, Refusal> {
         if self.share_is_full(principal, class) {
-            self.refuse_share_full(class);
-            return None;
+            return Err(Refusal(AdmissionDecision::ShareFull));
         }
         #[cfg(test)]
         fire_share_decision_probe();
         match self.reserve_share_and_global(principal, class) {
-            AdmissionDecision::Reserved => Some(CancelAuditSlot {
+            AdmissionDecision::Reserved => Ok(CancelAuditSlot {
                 queue: Arc::clone(self),
                 principal: principal.to_owned(),
                 class,
                 appended: false,
             }),
-            AdmissionDecision::ShareFull => {
-                self.refuse_share_full(class);
-                None
-            }
-            AdmissionDecision::Global(reason) => {
-                self.refuse_global(reason, class);
-                None
-            }
-            AdmissionDecision::RetryLimit => {
-                self.refuse_retry_limit(class);
-                None
-            }
+            verdict => Err(Refusal(verdict)),
+        }
+    }
+
+    pub(super) fn log_refusal(&self, verdict: Refusal, class: AuditEventClass) {
+        match verdict.0 {
+            AdmissionDecision::ShareFull => self.refuse_share_full(class),
+            AdmissionDecision::Global(reason) => self.refuse_global(reason, class),
+            AdmissionDecision::RetryLimit => self.refuse_retry_limit(class),
+            AdmissionDecision::Reserved => unreachable!("reserved is not a refusal"),
         }
     }
 

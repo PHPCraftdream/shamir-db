@@ -21,10 +21,10 @@ use crate::server::store_release_barrier::{
     release_stores_until, ReleaseOutcome, UnverifiedReason,
 };
 
-/// One reserve shared by earlier teardown stages. Each late-stage WAIT uses the
-/// earlier of its own cap (5 s metadata / 10 s store release) and the outer
-/// deadline minus its reserve (500 ms / 250 ms). Timeout stops WAITING; the
-/// stage task may continue.
+/// Each late-stage WAIT ends at the earlier instant: stage start + its cap, or
+/// outer deadline - reserve (500 ms metadata / 250 ms store release). These
+/// bound waits only: synchronous work is not interrupted; a timed-out join's
+/// task may continue (the metadata join is detached).
 const LATE_RESERVE: Duration = Duration::from_secs(1);
 
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -434,6 +434,7 @@ impl ShutdownOwner {
     }
 }
 
+/// Bounds WAITs by the earlier of stage start + cap and outer deadline minus reserve; synchronous work is not interrupted, and timed-out joins may continue. `early_stage_bound` uses min(stage start + cap, early cutoff).
 fn stage_bound(
     deadline_at: Option<tokio::time::Instant>,
     cap: Duration,
@@ -705,8 +706,9 @@ impl ServerHandle {
                 .await
                 .is_err()
             {
-                // The abandoned teardown may not have reached its own stop
-                // request: signal the flusher here (idempotent).
+                // Timeout abandons this wait; teardown work may continue. Its
+                // blocking probe's abort only stops a not-yet-started job; a
+                // filesystem operation already running may outlive the verdict.
                 self.audit_appender.request_flusher_stop();
                 report.add_error(format!(
                     "audit teardown exceeded shutdown budget {audit_budget:?}"
@@ -936,8 +938,9 @@ impl ServerHandle {
                     ));
                 }
                 ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired) => {
-                    // State is UNKNOWN if the probe failed, discovery was
-                    // incomplete, or the budget expired before submission.
+                    // UNKNOWN if no usable observation exists. A timed-out
+                    // retry after a completed held observation is StillLocked;
+                    // abort stops only a queued probe, not a running filesystem call.
                     tracing::warn!("shutdown: release probe deadline expired before submission");
                     report_unsubmitted_release_probe(
                         report,
@@ -948,7 +951,7 @@ impl ServerHandle {
                     let (summary, detail) = match reason {
                         UnverifiedReason::PoolStarved => (
                             "the store-release blocking job did not complete before its deadline",
-                            "the blocking job may still have been queued or running; state is UNKNOWN",
+                            "the blocking job may still be queued or running; if running, its filesystem call may continue after this UNKNOWN verdict",
                         ),
                         UnverifiedReason::DiscoveryGap => (
                             "store discovery was incomplete",

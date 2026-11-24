@@ -7,6 +7,7 @@
 //! which is exactly the window this test parks in.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_query_types::admin::activity::{CancelOutcome, RequestExecId};
 
 use crate::db_handler::repo_audit::{
-    enqueue_cancel_refusal_audit, CancelRefusalAudit, ShareDecisionProbeGuard,
-    SpawnWindowProbeGuard, CANCEL_AUDIT_PRINCIPAL_SHARE,
+    enqueue_cancel_refusal_audit, enqueue_shape_reset_audit, CancelRefusalAudit,
+    ShareDecisionProbeGuard, SpawnWindowProbeGuard, CANCEL_AUDIT_PRINCIPAL_SHARE,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -394,6 +395,125 @@ async fn a_contended_principal_bucket_refuses_promptly_without_waiting() {
         "seed reservation cleaned up"
     );
     assert!(queue.drain().await, "queue drained");
+}
+
+/// A contender rejected at the spawn gate must never reach principal-share
+/// admission; exercise both refusal and detached shape-reset paths.
+///
+/// Mutant killed: moving reservation before the spawn gate. The reordered
+/// contender reaches the share pre-check/decision and fires its probe. On the
+/// current parent (gate-first, bounded `try_entry`), this test passes: it is a
+/// regression guard, and the probe-not-fired assertion specifically kills that
+/// reordering mutant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gate_rejected_contender_never_enters_reservation() {
+    assert_gate_rejected_contender_never_enters_reservation(false).await;
+    assert_gate_rejected_contender_never_enters_reservation(true).await;
+}
+
+async fn assert_gate_rejected_contender_never_enters_reservation(shape_reset: bool) {
+    let appender = Arc::new(CountingAppender::default());
+    let writer = Arc::new(AuditChainWriter::new(AuditChain::new([6u8; 32]), appender));
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let gate = Arc::new((Mutex::new(SpawnWindowState::default()), Condvar::new()));
+    let owner_name = if shape_reset {
+        "shape-owner"
+    } else {
+        "cancel-owner"
+    };
+    let contender_name = if shape_reset {
+        "shape-contender"
+    } else {
+        "cancel-contender"
+    };
+
+    let (owner_tx, owner_rx) = mpsc::channel();
+    let owner = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let writer = Arc::clone(&writer);
+        let gate = Arc::clone(&gate);
+        let owner_name = owner_name.to_owned();
+        move || {
+            let probe = queue_arm_spawn_window_probe(gate);
+            let owner_session = session(&owner_name);
+            let job = if shape_reset {
+                enqueue_shape_reset_audit(&queue, &writer, &owner_session, "owner-repo")
+            } else {
+                enqueue_cancel_refusal_audit(
+                    &queue,
+                    &writer,
+                    &owner_session,
+                    RequestExecId(11),
+                    &CancelOutcome::NotCancellable,
+                )
+            };
+            std::mem::forget(probe);
+            let _ = owner_tx.send(job);
+        }
+    });
+    let _release = ReleaseSpawnWindow(Arc::clone(&gate));
+    wait_for_spawn_window(&gate, "owner held-gate entry", |state| state.entered);
+
+    let (probe_tx, probe_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let dropped_before = queue.dropped_count();
+    let contender = std::thread::spawn({
+        let queue = Arc::clone(&queue);
+        let writer = Arc::clone(&writer);
+        let contender_name = contender_name.to_owned();
+        move || {
+            let _probe = CancelRefusalAudit::arm_share_decision_probe(move || {
+                let _ = probe_tx.send(());
+            });
+            let contender_session = session(&contender_name);
+            let result = if shape_reset {
+                enqueue_shape_reset_audit(&queue, &writer, &contender_session, "contender-repo")
+            } else {
+                enqueue_cancel_refusal_audit(
+                    &queue,
+                    &writer,
+                    &contender_session,
+                    RequestExecId(12),
+                    &CancelOutcome::NotCancellable,
+                )
+            };
+            let _ = result_tx.send(result.is_none());
+        }
+    });
+    assert!(
+        result_rx
+            .recv_timeout(TIMEOUT)
+            .expect("gate refusal must be prompt"),
+        "contender must be refused while the owner holds the spawn gate"
+    );
+    assert!(
+        matches!(
+            probe_rx.recv_timeout(Duration::from_secs(2)),
+            Err(RecvTimeoutError::Timeout)
+        ),
+        "gate-rejected contender must not reach share admission"
+    );
+    contender.join().expect("contender thread");
+    assert_eq!(
+        queue.principal_held_for_test(contender_name),
+        0,
+        "gate refusal must not reserve a principal slot"
+    );
+    assert_eq!(
+        queue.dropped_count(),
+        dropped_before + 1,
+        "this contender submission is counted exactly once"
+    );
+
+    open_spawn_window(&gate);
+    owner.join().expect("owner thread");
+    let owner_job = owner_rx
+        .recv_timeout(TIMEOUT)
+        .expect("owner enqueue result");
+    queue.discard_queued();
+    if let Some(owner_job) = owner_job {
+        let _ = tokio::time::timeout(TIMEOUT, owner_job).await;
+    }
 }
 
 fn queue_arm_spawn_window_probe(
