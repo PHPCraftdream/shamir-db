@@ -639,8 +639,7 @@ impl TokenService {
         self.gc_live
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let live = LiveCollector(Arc::clone(&self.gc_live));
-        *task = Some(tokio::spawn(async move {
-            let _live = live;
+        let collector = async move {
             let _ = gc.collect().await;
             let mut interval = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(3600),
@@ -650,6 +649,13 @@ impl TokenService {
             loop {
                 tokio::select! { biased; _ = stop.cancelled() => break, _ = shutdown.cancelled() => break, _ = interval.tick() => { let _ = gc.collect().await; } }
             }
+        };
+        // The guard wraps the collector from outside: the awaited collector (and
+        // the store handles it captured) is destroyed before the guard counts
+        // the task out, on a normal return, a panic and an abort alike.
+        *task = Some(tokio::spawn(async move {
+            let _live = live;
+            collector.await;
         }));
         // Only after the spawn succeeded: a spawn that panicked leaves the
         // "never started" answer intact.
@@ -661,11 +667,13 @@ impl TokenService {
     /// slot: a `shutdown_gc` abandoned at a deadline detaches the handle while
     /// the collector may still run, and a restart spawns a new one. The slot
     /// lock makes the answer one snapshot against `start_gc`: a first start can
-    /// not land between the started flag and the stop-token reads.
+    /// not land between the started flag and the stop-token reads. A handle that
+    /// is still in the slot must also report finished, as before.
     pub async fn gc_task_finished(&self) -> bool {
-        let _slot = self.gc_task.lock().await;
+        let slot = self.gc_task.lock().await;
         if self.gc_spawned.load(std::sync::atomic::Ordering::Acquire) {
             self.gc_live.load(std::sync::atomic::Ordering::Acquire) == 0
+                && slot.as_ref().is_none_or(|task| task.is_finished())
         } else {
             self.gc_shutdown.is_cancelled()
         }

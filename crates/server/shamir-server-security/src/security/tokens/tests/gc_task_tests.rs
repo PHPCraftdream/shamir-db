@@ -151,13 +151,21 @@ async fn a_restarted_collector_is_not_reported_finished() {
 /// Two collectors alive at once (an abandoned `shutdown_gc`, then a restart):
 /// the first one ending must not report finished while the second still runs.
 ///
-/// The window after the first release only ever lets a mutant fail (an exit flag
-/// that the first collector's end sets turns the answer true within
-/// milliseconds); the correct implementation never reads true in it.
+/// The first collector's end is witnessed independently of the service: the
+/// runtime's alive-task count must drop by one while the second collector stays
+/// parked, and only then the answer is read.
+///
+/// Mutant: an exit flag set by the first collector's end reads true there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn the_first_collector_ending_does_not_finish_a_live_second_one() {
     let temp = TempDir::new().expect("tempdir");
     let mut clock = ParkableClock::open(&temp).await;
+    let alive_tasks = || {
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+    };
+    let alive_before = alive_tasks();
     clock.arm();
     clock.service.start_gc(CancellationToken::new()).await;
     clock.await_parked(0);
@@ -168,14 +176,25 @@ async fn the_first_collector_ending_does_not_finish_a_live_second_one() {
     clock.service.start_gc(CancellationToken::new()).await;
     clock.await_parked(1);
 
+    // Independent witness that the first collector's task is really gone while
+    // the second is still parked: the runtime's alive-task count drops by one.
+    assert_eq!(
+        alive_tasks(),
+        alive_before + 2,
+        "both collector tasks must be alive"
+    );
     clock.release(0);
-    for _ in 0..50 {
-        assert!(
-            !clock.service.gc_task_finished().await,
-            "the second collector is still parked"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while alive_tasks() != alive_before + 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first collector's task must end once its clock is released");
+    assert!(
+        !clock.service.gc_task_finished().await,
+        "the second collector is still parked"
+    );
 
     clock.release(1);
     clock.wait_until_finished().await;
