@@ -10,8 +10,14 @@ Both defects were found by the landing review of BACKUP-TAILS-SERVER and deliber
 ## Change
 
 * `open_lock`: the vanished marker is `LockState::DiscoveryGap` (UNKNOWN, reported as `store discovery was incomplete`), the same class as a dangling marker. The `Unlocked` doc no longer mentions a removed lock file.
-* `bounded_probe`: the blocking job stamps its own completion against the std form of the absolute deadline; a result completed at or after the deadline is `PoolStarved`, so the first look is `Unverified(PoolStarved)` and a late RE-probe keeps the last in-budget held observation (`StillLocked`).
-* Tests: the seam test now asserts that a vanished marker is a gap (it asserted the opposite on purpose before); `a_probe_finishing_after_the_deadline_is_not_an_observation` blocks the runtime thread past the deadline so that both the late result and the expired timer are ready at the next poll (a bare-value mutant returns `Ok`). New test seam `bounded_probe_for_test` (cfg(test)).
+* Report text (`server_handle.rs`): the discovery-gap detail names both causes, an incomplete walk and a discovered marker that could no longer be verified.
+* `bounded_probe`: the blocking job stamps its own completion on the timer's clock (`tokio::time::Instant`, runtime-entered inside the blocking job) right after the probe returns, against the absolute deadline; a result completed at or after the deadline is `PoolStarved`, so the first look is `Unverified(PoolStarved)` and a late RE-probe keeps the last in-budget held observation (`StillLocked`).
+* Tests: the seam test now asserts that a vanished marker is a gap (it asserted the opposite on purpose before). Two deterministic tests of the completion stamp run on a current-thread runtime with a PAUSED clock and ONE blocking worker (no real-time sleeps, no race with the scheduler): `a_probe_finishing_after_the_deadline_is_not_an_observation` holds the job on a channel, advances the virtual clock past the deadline, releases the job and drains the worker, so the result and the expired timer are both ready at the next poll (a bare-value mutant returns `Ok`); `a_probe_finishing_before_the_deadline_is_an_observation_even_when_polled_late` lets the job finish in budget, advances the clock past the deadline and only then polls (a stamp taken on the receiving side returns `PoolStarved`). The runtime thread waits on a sentinel job queued behind the probe, so the timer cannot fire in between. New test seam `bounded_probe_for_test` (cfg(test)).
+
+## Review result (round 1 FAIL, round 2 FAIL on the tests only, all fixed)
+
+* Round 1: the late-probe test could pass vacuously, the std/tokio clocks of the stamp and of the timer disagreed, one wording was off: fixed by the sentinel, the tokio clock and the text.
+* Round 2 (production code verified correct): the test did not catch a stamp moved to the async side and its first-poll assertion depended on real-time scheduling; the wording of the gap detail and of this brief was stale. Fixed by the two paused-clock tests above and the two texts.
 
 ## Not in this branch (stay in SHUTDOWN-ORACLES)
 
@@ -19,4 +25,4 @@ Item 11 (a database named like a system store, e.g. `users`, nests its repositor
 
 ## Acceptance
 
-`fmt`, clippy `-D warnings` for `shamir-server`, the layout gate and the visibility check exit 0; full-tier CI green on the head; the two new or changed tests pass on both OS (the seam test is Unix-only).
+`fmt`, clippy `-D warnings` for `shamir-server`, the layout gate and the visibility check exit 0; full-tier CI green on the head; the three new or changed tests pass on both OS (the seam test is Unix-only).

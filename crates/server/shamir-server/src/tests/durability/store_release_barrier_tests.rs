@@ -224,42 +224,59 @@ fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
     );
 }
 
+/// Current-thread runtime with a PAUSED clock and ONE blocking worker: virtual
+/// time moves only through `advance`, so the completion stamp and the deadline
+/// are compared without any real-time race.
+fn paused_runtime_with_one_blocking_worker() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime")
+}
+
+/// Waits on the runtime thread (so no timer can fire meanwhile) until every
+/// blocking job queued before this call has finished: a sentinel queued behind
+/// them signals only after they ran.
+fn drain_blocking_worker() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the sentinel runs after the queued jobs on the one blocking worker");
+}
+
 /// A probe whose blocking job finishes AFTER the absolute deadline is not an
 /// in-budget observation, even when its result is already waiting at the next
 /// poll: `timeout_at` polls the receiver before its timer, so without the
 /// completion stamp the late result would win and a late empty held set would
 /// certify a release.
 ///
-/// Deterministic: one poll submits the job, the runtime has ONE blocking
-/// worker, and a sentinel queued behind the probe signals only after the probe
-/// job finished and sent its result; the runtime thread waits for that signal
-/// (so the timer cannot fire in between) before the probe is polled again.
+/// The job is held on a channel, the virtual clock is advanced past the
+/// deadline, and only then the job is released and drained: the result and the
+/// expired timer are both ready at the next poll.
 ///
 /// Mutant: sending the bare value (no completion stamp) returns `Ok`.
 #[test]
 fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .max_blocking_threads(1)
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async {
+    paused_runtime_with_one_blocking_worker().block_on(async {
         let deadline = Instant::now() + Duration::from_millis(100);
-        let mut probe = Box::pin(bounded_probe_for_test(deadline, || {
-            std::thread::sleep(Duration::from_millis(150));
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, move || {
+            // Parks until the sender is dropped (an `Err` also returns).
+            let _ = gate_rx.recv();
             "late empty held set"
         }));
         // One poll runs the future up to its receiver await: the job is queued.
         let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
         assert!(first.is_pending(), "the probe must wait for its job");
 
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        tokio::task::spawn_blocking(move || {
-            let _ = done_tx.send(());
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(60))
-            .expect("the sentinel runs after the probe job on the one blocking worker");
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(gate_tx);
+        drain_blocking_worker();
 
         let outcome = probe.await;
 
@@ -267,6 +284,33 @@ fn a_probe_finishing_after_the_deadline_is_not_an_observation() {
             outcome,
             Err(UnverifiedReason::PoolStarved),
             "a result completed after the deadline must not be accepted as an observation"
+        );
+    });
+}
+
+/// The complement: a probe that finished BEFORE the deadline keeps its result
+/// even when the receiver is first polled after the deadline.
+///
+/// Mutant: a stamp taken on the receiving side classifies by the time of the
+/// poll and rejects this result as late.
+#[test]
+fn a_probe_finishing_before_the_deadline_is_an_observation_even_when_polled_late() {
+    paused_runtime_with_one_blocking_worker().block_on(async {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut probe = Box::pin(bounded_probe_for_test(deadline, || "in-budget held set"));
+        let first = std::future::poll_fn(|cx| Poll::Ready(probe.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the probe must wait for its job");
+
+        // The job runs and sends while the virtual clock is still before the deadline.
+        drain_blocking_worker();
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        let outcome = probe.await;
+
+        assert_eq!(
+            outcome,
+            Ok("in-budget held set"),
+            "a result completed in budget must survive a late poll"
         );
     });
 }
