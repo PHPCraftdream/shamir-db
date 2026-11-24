@@ -536,8 +536,8 @@ async fn an_invalid_lease_with_live_followers_keeps_the_handle_registered() {
 /// wrapper still waits for the control lock must stay registered, so that
 /// `stop_all` still joins that wrapper (it owns the database until it is done).
 ///
-/// The test holds the control lock, stops the followers (both wait on a silent
-/// Hello and exit on the stop), invalidates the lease, waits for the signal the
+/// The test holds the control lock, stops the followers (at least one waits on
+/// a silent Hello, both exit on the stop), invalidates the lease, waits for the signal the
 /// last wrapper gives right before it waits for the held lock (every loop
 /// returned, every done flag is set), releases the parked start so it registers,
 /// and only then lets the wrapper finish. No pause is involved.

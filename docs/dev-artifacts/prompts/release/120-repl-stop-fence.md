@@ -39,6 +39,11 @@ Found by the review of the flake branch (FLAKE #2009) and by the landing review 
 * Left as it is, with the reason: a follower that PANICS (for example inside `hello`) skips the exit housekeeping, because the loop is awaited inline in the wrapper and the decrement is not unwind-safe; the lease then stays valid and `stop_all` would remove the handle while ignoring the failed join. This is older than this branch (the exit path was never panic-safe) and is not a shutdown-ordering defect of the stop fence: it is tracked in the SHUTDOWN-ORACLES tail task as its own item (supervise abnormal completion so teardown runs exactly once, with a panicking-source regression).
 * Known limits, accepted: no isolated regression for the server-side expiry and flush decision (above), and the apply-gate test reaches the gate through a pause (above).
 
+## Review result, round 6 (verdict PASS_WITH_NOTES, no P0/P1/P2: two P3 wording points, fixed)
+
+* The comment on `torn_down` and the field doc said "fully torn down" / "teardown is complete"; they now say what the flag proves (the lease teardown is complete and no further database work is admitted; the other wrappers drop their database handles when their tasks end). The regression's comment says that at least one follower waits on a silent Hello (the test waits for one Hello notification) and that both loops return before the registration.
+* Confirmed by the reviewer from the pinned `scc` source: the array pointer is read with Acquire, the first array is published with an AcqRel CAS and a removal on a null array takes no bucket lock, so the two SeqCst fences are what orders the wrapper's flag store against the starter's insert; Release/Acquire on the flag is sufficient together with them. Known limits, accepted: no isolated regression for the removal of just `drop(local)`, just the fences (the weak-memory interleaving is not reachable by an ordered test) or just the post-reply apply check.
+
 ## Non-goals
 
 No change to `stop_all` semantics, to reconcile outside the early return, or to the scheduled-worker join (item 18) and the GC handle (item 19, its own branch).

@@ -306,9 +306,11 @@ impl SubscriptionSupervisor {
         // One live-count reference per target; only the final exit may
         // invalidate the shared lease after every apply guard is gone.
         let live_targets = Arc::new(AtomicUsize::new(pull_targets.len()));
-        // Set by the LAST exiting wrapper once the lease is invalidated: the
-        // handle is dead and fully torn down (a done flag alone is set before
-        // the wrapper waits for the control lock).
+        // Set by the LAST exiting wrapper once the lease is invalidated: every
+        // loop returned and no further database work is admitted (a done flag
+        // alone is set before the wrapper waits for the control lock). It does
+        // not say that every wrapper task has ended: the other wrappers drop
+        // their database handles when their tasks end.
         let torn_down = Arc::new(AtomicBool::new(false));
         // Last exit tears down the shared lease.
         lease_guard.defuse();
@@ -647,7 +649,7 @@ impl SubscriptionSupervisor {
             // invalid lease (DROP, PAUSE and terminal marking clear it while
             // followers still run) nor the done flags (set before the last wrapper
             // waits for the control lock) prove the teardown finished, so only the
-            // flag does: a handle that is not fully torn down stays registered and
+            // flag does: a handle whose lease teardown is not complete stays registered and
             // `stop_all` still joins it.
             fence(Ordering::SeqCst);
             let _ = self.registry.remove_if_sync(&sub.name, |h| {
