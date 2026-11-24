@@ -1,13 +1,14 @@
 use super::*;
 
 /// Attempts for the positive-budget claim. Between the end of the meta-snapshot
-/// join (outer deadline minus 500 ms) and the start of the store-release probe
-/// (outer deadline minus 250 ms) only ~250 ms remain for the reaper joins and
-/// the synchronous drops of the engine and its stores. On a loaded runner that
-/// stretch can run longer and the release stage then reports ZERO budget, a
-/// different verdict (its text has its own test): the scenario is retried a
-/// bounded number of times, and only on that complete verdict, instead of
-/// asserting a slack the test cannot own.
+/// join (outer deadline minus 500 ms) and the latest usable deadline of the
+/// store-release probe (outer deadline minus 250 ms) only ~250 ms remain for
+/// the reaper joins and the synchronous drops of the engine and its stores. On
+/// a loaded runner that stretch can run longer and the release stage then
+/// reports ZERO budget (no probe is submitted), a different verdict (its text
+/// has its own test): the scenario is retried a bounded number of times, and
+/// only on that complete verdict, instead of asserting a slack the test cannot
+/// own.
 const LATE_BUDGET_ATTEMPTS: usize = 3;
 
 /// The reason the release stage writes when no budget was left.
@@ -16,18 +17,30 @@ const NO_BUDGET_VERDICT: &str = "no shutdown budget remained";
 #[test]
 fn late_teardown_stages_report_the_remaining_shutdown_budget() {
     try_install_global_tracing_ring();
+    // One guard for the whole test, owned by the test thread: it outlives every
+    // attempt, the runtime teardown and the assertions, so a failure anywhere
+    // (an assertion, the attempt bound, a panic of the attempt thread resumed
+    // here) prints the timeline and the log ring.
+    let guard = Arc::new(FlakeGuard::with_watchdog(
+        "late_teardown_stages_report_the_remaining_shutdown_budget",
+        Duration::from_secs(300),
+    ));
     for attempt in 1..=LATE_BUDGET_ATTEMPTS {
-        let (report, pool_still_occupied) = late_budget_attempt(attempt);
+        let (report, pool_still_occupied) = late_budget_attempt(attempt, &guard);
         // Everything that does not depend on the slack is checked on EVERY
         // attempt: a deviation there is never a reason to retry.
         assert_common_claims(&report, pool_still_occupied);
         if attempt < LATE_BUDGET_ATTEMPTS && is_zero_budget_verdict(&report) {
-            eprintln!(
-                "late-budget attempt {attempt}: the release stage reported zero budget, \
-                 running another attempt"
+            guard.note(
+                format!("attempt {attempt} verdict"),
+                "the release stage reported zero budget; another attempt follows",
             );
             continue;
         }
+        guard.note(
+            format!("attempt {attempt} verdict"),
+            "judged by the positive-budget claim",
+        );
         assert_positive_budget_verdict(&report);
         return;
     }
@@ -35,10 +48,14 @@ fn late_teardown_stages_report_the_remaining_shutdown_budget() {
 
 /// One attempt: a fresh runtime with ONE blocking thread (dropped, and with it
 /// every queued blocking job drained, before the data directory is removed).
-fn late_budget_attempt(attempt: usize) -> (shamir_db::ShutdownReport, bool) {
+fn late_budget_attempt(
+    attempt: usize,
+    guard: &Arc<FlakeGuard>,
+) -> (shamir_db::ShutdownReport, bool) {
     let temp = tempfile::tempdir().expect("test root");
     let data_dir = temp.path().join("data");
     create_private_dir(&data_dir).expect("private data directory");
+    let attempt_guard = Arc::clone(guard);
     let outcome = run_blocking(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -46,11 +63,15 @@ fn late_budget_attempt(attempt: usize) -> (shamir_db::ShutdownReport, bool) {
             .build()
             .expect("test runtime")
             .block_on(async {
-                timeout(BOUND, late_budget_shutdown(attempt, data_dir))
-                    .await
-                    .expect("the shutdown must settle inside the bound even with a starved pool")
+                timeout(
+                    BOUND,
+                    late_budget_shutdown(attempt, data_dir, &attempt_guard),
+                )
+                .await
+                .expect("the shutdown must settle inside the bound even with a starved pool")
             })
     });
+    guard.mark(format!("attempt {attempt}: runtime dropped"));
     drop(temp);
     outcome
 }
@@ -59,11 +80,8 @@ fn late_budget_attempt(attempt: usize) -> (shamir_db::ShutdownReport, bool) {
 async fn late_budget_shutdown(
     attempt: usize,
     data_dir: PathBuf,
+    guard: &FlakeGuard,
 ) -> (shamir_db::ShutdownReport, bool) {
-    let guard = FlakeGuard::with_watchdog(
-        "late_teardown_stages_report_the_remaining_shutdown_budget",
-        Duration::from_secs(300),
-    );
     guard.note("attempt", attempt.to_string());
 
     // No backup schedule: the scheduled worker's wait is a separate stage, and
