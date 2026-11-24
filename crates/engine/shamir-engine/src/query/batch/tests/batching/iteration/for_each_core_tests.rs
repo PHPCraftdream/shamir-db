@@ -18,6 +18,8 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+#[cfg(feature = "fjall")]
+use crate::tx::tests::drain::truncation::truncation_tests::reopen_disk_repo;
 
 // ============================================================================
 // Test 1: for_each_zero_iterations
@@ -665,9 +667,309 @@ async fn for_each_all_iterations_succeed_commits_and_all_rows_visible() {
 // ============================================================================
 // Epic04/D (#655) — `over` resolution, all three sources + "resolved once"
 // ============================================================================
-//
-// Test 1 above (`for_each_zero_iterations`) and tests 2/3/4 already cover the
-// literal-array `over` source end to end. The tests below add the two
-// remaining sources — `$query`-column-ref (`@alias[].field`) and `$fn` call
-// — plus a dedicated test proving `over` is resolved EXACTLY ONCE, before
-// the loop starts, never re-resolved per iteration.
+
+#[tokio::test]
+async fn transactional_body_abort_fails_the_iteration_with_its_stable_code() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("orders")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Body: insert one row, then a Call. A Call inside a transaction is
+    // rejected by the engine with the stable code
+    // `call_in_tx_not_supported`, which aborts the body's transaction.
+    let mut body_queries = new_map();
+    body_queries.insert(
+        "seed".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![mpack!({ "user_id": 1_i64, "note": "body" })],
+                records_idmsgpack: Vec::new(),
+                select: None,
+            }),
+            return_result: false,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    body_queries.insert(
+        "call".to_string(),
+        QueryEntry {
+            op: BatchOp::Call(shamir_query_types::call::CallOp {
+                call: "some_function".to_string(),
+                params: Vec::new(),
+                repo: "main".to_string(),
+            }),
+            return_result: true,
+            abort_on_skip: false,
+            after: vec!["seed".to_string()],
+            when: None,
+        },
+    );
+    let body = BatchRequest {
+        id: QueryValue::Int(700),
+        name: None,
+        transactional: true, // the body opens its own transaction
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: body_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![FilterValue::Int(1)]),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    // `wrap_for_each` builds a NON-transactional outer batch, so the
+    // transactional body runs through `execute_planned_batch_impl`'s own
+    // transaction rather than the outer tx.
+    let req = wrap_for_each(fe);
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("an aborted transactional iteration must fail the outer op");
+    assert_eq!(
+        err.code(),
+        Some("call_in_tx_not_supported"),
+        "the iteration failure must carry the abort's stable code, got: {err:?}"
+    );
+
+    // Nothing was committed by the aborted body.
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders"),
+            )),
+            return_result: true,
+            abort_on_skip: false,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: QueryValue::Int(701),
+        name: None,
+        transactional: false,
+        isolation: None,
+        visibility_wait: None,
+        durability: None,
+        index_visibility: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        0,
+        "the aborted transactional body must not leave its insert behind"
+    );
+}
+
+/// Resolver: on the EXECUTION-phase resolve of `gate` it runs `writer` (a real
+/// transactional batch), committing a concurrent update between the body's
+/// recorded SELECT and the body's commit — the `ssi_tests.rs`
+/// `GateBarrierResolver` shape. `gate_resolves` 0 = `validate_tables`
+/// (pre-execution), 1 = the stage-1 `g` resolve (`runner.rs`).
+struct CommitConflictResolver {
+    repo: RepoInstance,
+    gate_resolves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    writer: BatchRequest,
+}
+
+#[async_trait::async_trait]
+impl crate::query::batch::TableResolver for CommitConflictResolver {
+    async fn resolve(
+        &self,
+        table_ref: &TableRef,
+    ) -> shamir_storage::error::DbResult<crate::table::TableManager> {
+        if table_ref.table == "gate" {
+            let n = self
+                .gate_resolves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 1 {
+                let writer_resolver = TxTestResolver {
+                    repo: self.repo.clone(),
+                };
+                let resp = execute_batch(
+                    &self.writer,
+                    &writer_resolver,
+                    None,
+                    None,
+                    Actor::System,
+                    "test",
+                )
+                .await
+                .expect("the concurrent writer batch must execute");
+                let info = resp.transaction.expect("writer batch carries tx metadata");
+                assert_eq!(info.status, "committed", "writer must commit, got {info:?}");
+            }
+        }
+        self.repo.get_table(&table_ref.table).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::query::batch::BatchResolver for CommitConflictResolver {
+    async fn resolve_repo(
+        &self,
+        _repo_name: &str,
+    ) -> shamir_storage::error::DbResult<crate::tx::RepoCore> {
+        Ok(self.repo.core.clone())
+    }
+}
+
+#[tokio::test]
+async fn transactional_body_commit_conflict_fails_the_iteration_with_tx_conflict() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("gate")],
+    )
+    .await
+    .unwrap();
+    let tx_resolver = TxTestResolver { repo: repo.clone() };
+
+    // Seed one visible row so the body's SELECT records a real version.
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "seed",
+        write::insert("users").row(
+            doc()
+                .set("name", "alice")
+                .unwrap()
+                .set("val", "initial")
+                .unwrap(),
+        ),
+    );
+    let seed_req = seed.build();
+    execute_batch(&seed_req, &tx_resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Concurrent writer: a transactional update that bumps the seeded row's
+    // version while the body's tx is still open.
+    let mut wb = Batch::new();
+    wb.id("writer");
+    wb.transactional();
+    wb.try_update(
+        "w",
+        write::update("users")
+            .where_(shamir_query_builder::filter::eq("name", "alice"))
+            .set(doc().set("val", "rewritten").unwrap()),
+    )
+    .unwrap();
+    let writer_req = wb.build();
+
+    // Body (transactional, Serializable): SELECT the seeded row, then a gate
+    // read in a later stage that runs the writer; the commit must detect it.
+    let mut bb = Batch::new();
+    bb.id("body");
+    bb.transactional();
+    bb.isolation(shamir_query_builder::batch::Isolation::Serializable);
+    let r = bb.query("r", shamir_query_builder::query::Query::from("users"));
+    bb.query(
+        "g",
+        shamir_query_builder::query::Query::from("gate").where_eq("probe", r.first().field("name")),
+    );
+    let body = bb.build();
+
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![FilterValue::Int(1)]),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    let req = wrap_for_each(fe);
+    let resolver = CommitConflictResolver {
+        repo: repo.clone(),
+        gate_resolves: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        writer: writer_req,
+    };
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("a commit-time conflict must fail the iteration, not yield an empty value");
+    assert_eq!(
+        err.code(),
+        Some("tx_conflict"),
+        "the commit-time classification must reach the iteration's code, got: {err:?}"
+    );
+}
+
+#[cfg(feature = "fjall")]
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_requires_reopen() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    struct SegmentCapEnvGuard(Option<std::ffi::OsString>);
+    impl Drop for SegmentCapEnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", value);
+            } else {
+                std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
+            }
+        }
+    }
+    let _segment_cap_env = SegmentCapEnvGuard(std::env::var_os("SHAMIR_WAL_SEGMENT_MAX_BYTES"));
+    std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1");
+    let repo = reopen_disk_repo(
+        "fe_indeterminate",
+        tempdir.path().join("repo"),
+        vec![TableConfig::new("orders")],
+    )
+    .await;
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let big = format!("fe-wal-{}", "p".repeat(512));
+    // Keep the loop input within BatchLimits::default()'s 50-item cap; the
+    // first transaction's forced WAL seal failure still exercises the
+    // indeterminate-commit path and must stop subsequent iterations.
+    let over: Vec<FilterValue> = (0..49)
+        .map(|i| FilterValue::String(format!("{big}-{i:04}")))
+        .collect();
+    let mut body = insert_order_body("uid");
+    body.transactional = true;
+    let fe = ForEachOp {
+        over: FilterValue::Array(over),
+        bind_row: "uid".to_string(),
+        batch: body,
+    };
+    let req = wrap_for_each(fe);
+
+    shamir_wal::WalSink::arm_fail_next_seal_sync_for_test();
+    let result = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
+
+    let err = result.expect_err("an indeterminate outcome must fail the loop");
+    assert_eq!(
+        err.code(),
+        Some("wal_requires_reopen"),
+        "the indeterminate outcome must map to the reopen disposition, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("wal_outcome_unknown"),
+        "the iteration failure must carry the indeterminate outcome's text, got: {err}"
+    );
+}

@@ -240,14 +240,14 @@ address push frames; the client's alias is not echoed.
 
 ## 7. Grant rejections
 
-Grant validation runs synchronously during batch execution, before any bridge is
-started. A rejected grant produces a `QueryError` (no `sub` is assigned, no pushes are
-emitted).
+Grant validation runs synchronously during batch preflight, before any batch operation executes, manager is opened, subscription ID is reserved, or bridge is started. Every source is classified there for availability and actor `Read` access. If any source is absent, closed, or unreadable, the entire request is refused with `unknown_table` and the fixed message `table is unavailable`; no grant or push stream is produced. This takes precedence over multi-repository refusal. A source that becomes unavailable after preflight causes activation to fail rather than silently removing that source or delivering a partial stream.
+
+A rejected grant produces a top-level `QueryError` (no `sub` is assigned, no pushes are emitted). If activation-time reauthorization fails after batch execution, the whole activation response is instead replaced by the same fixed top-level `unknown_table` refusal; earlier batch writes may already have committed.
 
 | Code                                       | Condition                                                                                                |
 |--------------------------------------------|----------------------------------------------------------------------------------------------------------|
-| `multi_repo_subscriptions_not_supported`   | The set of distinct `table.repo` values across `subscribe[]` has cardinality > 1.                        |
-| `table_not_found`                          | Any source's `table` does not resolve in its repo.                                                       |
+| `unknown_table`                            | Any source is absent, closed, or unreadable to the actor.                                                |
+| `multi_repo_subscriptions_not_supported`   | All sources are available, but distinct `table.repo` values across `subscribe[]` have cardinality > 1.  |
 | `subscription_filter_unsupported_operator` | The filter on any source contains a variant not in the supported list below.                             |
 
 **Supported filter variants** (others → rejected):

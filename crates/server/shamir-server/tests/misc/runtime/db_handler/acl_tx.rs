@@ -103,16 +103,24 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     );
     match res {
         DbResponse::Error { code, message } => {
+            // db/store are open here and only the TABLE is closed: the
+            // refusal carries the SAME `unknown_table` code and text an
+            // absent table answers (read-refusal parity: no existence
+            // oracle).
             assert_eq!(
-                code, "access_denied",
+                code, "unknown_table",
                 "non-owner should be denied; got code={code}, msg={message}"
             );
             assert!(
-                message.contains("access denied"),
-                "error message should describe denial: {message}"
+                message.contains("table is unavailable"),
+                "error message should be the fixed refusal: {message}"
+            );
+            assert!(
+                !message.contains("access denied"),
+                "table denial must not leak the old text: {message}"
             );
         }
-        other => panic!("expected access_denied error for eve, got {:?}", other),
+        other => panic!("expected unknown_table error for eve, got {:?}", other),
     }
 
     // --- Superuser session (Actor::System) → ALLOWED ---

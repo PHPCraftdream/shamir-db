@@ -109,6 +109,47 @@ struct CancelAuditDetails<'a> {
     outcome: &'a CancelOutcome,
 }
 
+/// Admission class of a detached audit job.
+///
+/// `Security` covers cancellation refusals, operator cancels and shape-stat
+/// resets — events an operator must be able to see even under read load.
+/// `Observability` covers successful typed-read audits: high volume,
+/// best-effort telemetry that must never crowd a security event out of the
+/// queue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuditEventClass {
+    Security,
+    Observability,
+}
+
+impl AuditEventClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Security => "security",
+            Self::Observability => "observability",
+        }
+    }
+}
+
+/// One principal's live admission counts. `total` is bounded by
+/// [`CANCEL_AUDIT_PRINCIPAL_SHARE`]; `observability` is the subset of that
+/// total charged to [`AuditEventClass::Observability`] and is bounded by
+/// [`CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE`].
+#[derive(Clone, Copy)]
+struct PrincipalHeld {
+    total: usize,
+    observability: usize,
+}
+
+impl PrincipalHeld {
+    /// `true` when `class` may not take one more slot of this principal's share.
+    fn is_full(&self, class: AuditEventClass) -> bool {
+        self.total >= CANCEL_AUDIT_PRINCIPAL_SHARE
+            || (class == AuditEventClass::Observability
+                && self.observability >= CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE)
+    }
+}
+
 // The low bits count queued and running jobs; the high bits close admission
 // and latch the first rejected submission of each saturation episode.
 const CANCEL_AUDIT_CAPACITY: usize = 256;
@@ -119,6 +160,22 @@ const CANCEL_AUDIT_CAPACITY: usize = 256;
 /// between two names — so one principal reaching its share can never deny
 /// another while global slots are free.
 pub(crate) const CANCEL_AUDIT_PRINCIPAL_SHARE: usize = 32;
+/// Global slots `Observability` jobs may occupy — three quarters of
+/// [`CANCEL_AUDIT_CAPACITY`] (192 of 256). Successful typed-read audits are
+/// best-effort telemetry, so they are confined to this part of the cap and
+/// the remaining quarter (64 slots) is always available to `Security`
+/// events. Without the split, enough busy readers could fill all 256 slots
+/// and drop a cancellation refusal. `Security` keeps using the full
+/// [`CANCEL_AUDIT_CAPACITY`].
+pub(crate) const CANCEL_AUDIT_OBSERVABILITY_CAPACITY: usize = CANCEL_AUDIT_CAPACITY / 4 * 3;
+/// Per-principal slots `Observability` jobs may occupy — three quarters of
+/// [`CANCEL_AUDIT_PRINCIPAL_SHARE`] (24 of 32). A principal's own read audits
+/// may fill at most 24 slots, so the remaining 8 are always available to that
+/// same principal's `Security` events: 32 pending read jobs must not make the
+/// principal's next audit-worthy cancellation drop. `Security` keeps using
+/// the full [`CANCEL_AUDIT_PRINCIPAL_SHARE`].
+pub(crate) const CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE: usize =
+    CANCEL_AUDIT_PRINCIPAL_SHARE / 4 * 3;
 const CLOSED: usize = 1 << (usize::BITS - 1);
 const SATURATED: usize = CLOSED >> 1;
 const COUNT_MASK: usize = !(CLOSED | SATURATED);
@@ -143,7 +200,11 @@ pub(crate) struct CancelRefusalAudit {
     /// release on the scc bucket of that name — the map's own bucket lock for
     /// the increment/decrement only, never across an `.await`, never inside the
     /// audit append. No `std` mutex is added to the reply path.
-    principals: scc::HashMap<String, usize, THasher>,
+    principals: scc::HashMap<String, PrincipalHeld, THasher>,
+    /// Live `Observability` jobs (queued + running) across every principal.
+    /// Bounded by [`CANCEL_AUDIT_OBSERVABILITY_CAPACITY`]; `Security` jobs
+    /// never touch it, so the rest of the global cap is theirs alone.
+    observability: AtomicUsize,
     /// Abort handles of accepted-but-unfinished audit jobs. Bounded by
     /// `CANCEL_AUDIT_CAPACITY` live slots (finished entries are pruned on
     /// the next refusal), taken once per accepted refusal for one bounded
@@ -159,219 +220,47 @@ pub(crate) struct CancelRefusalAudit {
     /// admission and sweep the queue inside that exact window.
     #[cfg(test)]
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Test seam (drop accounting): when set, the shared detached-audit clock
+    /// lookup fails without touching the system clock, so a test can drive the
+    /// "clock unavailable" branch deterministically.
+    #[cfg(test)]
+    pub(crate) fail_clock: std::sync::atomic::AtomicBool,
 }
 
-/// Outcome of the single bucket-locked admission decision. Refusal accounting
-/// and logging are performed only after the bucket callback returns.
-enum ShareAdmission {
-    Reserved,
-    ShareFull,
-    GlobalRefused(GlobalRefusal),
-}
-
-#[derive(Clone, Copy)]
-enum GlobalRefusal {
-    Closed,
-    Saturated,
-    Full,
-    RetryLimit,
-}
+#[path = "activity/serving/refusal_admission.rs"]
+mod refusal_admission;
 
 impl CancelRefusalAudit {
-    /// Reserve one slot of `principal`'s share AND one global slot as ONE
-    /// bounded, non-waiting decision, or refuse.
-    ///
-    /// The share test, the global reservation and the increment run under the
-    /// SAME bucket lock (see [`Self::reserve_share_and_global`]), so the global
-    /// slot is taken only when the share still has room: a doomed request from
-    /// a principal already at its share never consumes — and never refuses
-    /// another principal — a global slot. `reserve_global_slot` is a lock-free
-    /// CAS loop, so it takes no second lock and cannot block inside the closure.
-    ///
-    /// A principal entry therefore always implies a reserved slot, so the map
-    /// can never hold more live entries than `CANCEL_AUDIT_CAPACITY` (the bound
-    /// its doc states).
-    fn try_reserve(self: &Arc<Self>, principal: &str) -> Option<CancelAuditSlot> {
-        // READ-ONLY pre-check: an already-capped principal is refused without
-        // reaching the map update at all. It no longer decides anything -- the
-        // same share test runs under the bucket lock below -- it only spares
-        // the saturated case one state CAS and one entry lookup.
-        if self.share_is_full(principal) {
-            self.refuse_share_full();
-            return None;
-        }
-        #[cfg(test)]
-        fire_share_decision_probe();
-        if !self.reserve_share_and_global(principal) {
-            return None;
-        }
-        Some(CancelAuditSlot {
-            queue: Arc::clone(self),
-            principal: principal.to_owned(),
-            appended: false,
-        })
-    }
-
-    /// Read-only share test: creates no entry and takes no slot.
-    fn share_is_full(&self, principal: &str) -> bool {
-        self.principals
-            .read_sync(principal, |_, held| *held >= CANCEL_AUDIT_PRINCIPAL_SHARE)
-            .unwrap_or(false)
-    }
-
-    /// Take one slot of `principal`'s share AND one global slot in ONE
-    /// bucket-locked decision, or refuse without waiting.
-    ///
-    /// The share test, the global CAS and the increment run inside the same
-    /// `update_sync`, so no global slot is ever held by a request that the
-    /// share check then refuses: the slot another principal needs is never
-    /// consumed by a doomed reservation, not even for an instant. Exact per
-    /// NAME: two principals never share a counter and the count cannot drift
-    /// from the live slots.
-    fn reserve_share_and_global(&self, principal: &str) -> bool {
-        for _ in 0..ADMISSION_RETRY_LIMIT {
-            match self.principals.update_sync(principal, |_, held| {
-                if *held >= CANCEL_AUDIT_PRINCIPAL_SHARE {
-                    return ShareAdmission::ShareFull;
-                }
-                match self.reserve_global_slot() {
-                    Ok(()) => {
-                        *held += 1;
-                        ShareAdmission::Reserved
-                    }
-                    Err(reason) => ShareAdmission::GlobalRefused(reason),
-                }
-            }) {
-                Some(ShareAdmission::Reserved) => return true,
-                Some(ShareAdmission::ShareFull) => {
-                    self.refuse_share_full();
-                    return false;
-                }
-                Some(ShareAdmission::GlobalRefused(reason)) => {
-                    // First-touch failures leave a zero-count placeholder. Retire
-                    // it only if no concurrent admission has made it live.
-                    self.principals.remove_if_sync(principal, |held| *held == 0);
-                    self.refuse_global(reason);
-                    return false;
-                }
-                None => {
-                    // Publish an empty entry first. The subsequent bucket-locked
-                    // update is the sole admission decision for both paths.
-                    let _ = self.principals.insert_sync(principal.to_owned(), 0);
-                }
-            }
-        }
-        self.principals.remove_if_sync(principal, |held| *held == 0);
-        self.refuse_retry_limit();
-        false
-    }
-
-    fn refuse_retry_limit(&self) {
-        let dropped = self.record_drop();
-        tracing::warn!(
-            retries = ADMISSION_RETRY_LIMIT,
-            dropped,
-            "cancel refusal audit admission retry limit reached; dropping event"
-        );
-    }
-
-    fn refuse_global(&self, reason: GlobalRefusal) {
-        match reason {
-            GlobalRefusal::Closed => {
-                let dropped = self.record_drop();
-                tracing::debug!(dropped, "cancel refusal audit dropped: admission closed");
-            }
-            GlobalRefusal::Full => {
-                let dropped = self.record_drop();
-                tracing::warn!(
-                    capacity = CANCEL_AUDIT_CAPACITY,
-                    dropped,
-                    "cancel refusal audit queue full; dropping events"
-                );
-            }
-            GlobalRefusal::Saturated => {
-                self.record_drop();
-            }
-            GlobalRefusal::RetryLimit => {
-                self.refuse_retry_limit();
-            }
-        }
-    }
-
-    /// Record one refused submission: exactly one drop and one warn line, the
-    /// same accounting for the read-only pre-check and for the decision.
-    fn refuse_share_full(&self) {
-        let dropped = self.record_drop();
-        tracing::warn!(
-            share = CANCEL_AUDIT_PRINCIPAL_SHARE,
-            dropped,
-            "cancel refusal audit principal share full; dropping event"
-        );
-    }
-
-    /// Take one GLOBAL slot, or refuse: admission closed, capacity reached, or
-    /// an earlier rejection in the same saturation episode already latched it.
-    /// The count grows only here.
-    fn reserve_global_slot(&self) -> Result<(), GlobalRefusal> {
-        let mut state = self.state.load(Ordering::Acquire);
-        for _ in 0..ADMISSION_RETRY_LIMIT {
-            if state & CLOSED != 0 {
-                return Err(GlobalRefusal::Closed);
-            }
-            let full = state & COUNT_MASK == CANCEL_AUDIT_CAPACITY;
-            if full && state & SATURATED != 0 {
-                return Err(GlobalRefusal::Saturated);
-            }
-            let next = if full { state | SATURATED } else { state + 1 };
-            match self
-                .state
-                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) if full => return Err(GlobalRefusal::Full),
-                Ok(_) => return Ok(()),
-                Err(current) => state = current,
-            }
-        }
-        Err(GlobalRefusal::RetryLimit)
-    }
-
-    /// Give one GLOBAL slot back, clearing the saturation latch in the same
-    /// transition. Every path that reserved a slot but produced no
-    /// [`CancelAuditSlot`] calls this; the slot's own `Drop` does too.
-    fn release_global_slot(&self) {
-        let mut state = self.state.load(Ordering::Acquire);
-        loop {
-            let next = (state - 1) & !SATURATED;
-            match self
-                .state
-                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => {
-                    if next == CLOSED {
-                        self.idle.notify_waiters();
-                    }
-                    return;
-                }
-                Err(current) => state = current,
-            }
-        }
-    }
-
-    /// Release one principal slot and retire the entry when it reaches zero.
+    /// Release one principal slot of `class` and retire the entry when it
+    /// reaches zero.
     ///
     /// The decrement and the removal both run inside the name's bucket lock, so
     /// a reservation arriving in between is never lost: it either increments
     /// before the removal (the removal then sees a non-zero count and keeps the
     /// entry) or inserts a fresh entry afterwards.
-    fn release_share(&self, principal: &str) {
+    fn release_share(&self, principal: &str, class: AuditEventClass) {
         self.principals.update_sync(principal, |_, held| {
-            *held = held.saturating_sub(1);
+            held.total = held.total.saturating_sub(1);
+            if class == AuditEventClass::Observability {
+                held.observability = held.observability.saturating_sub(1);
+            }
         });
-        self.principals.remove_if_sync(principal, |held| *held == 0);
+        self.principals
+            .remove_if_sync(principal, |held| held.total == 0);
     }
 
-    fn record_drop(&self) -> usize {
-        self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    /// Release one global observability slot; a no-op for `Security` jobs,
+    /// which never charged one.
+    fn release_observability(&self, class: AuditEventClass) {
+        if class == AuditEventClass::Observability {
+            self.observability.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn record_drop(&self, class: AuditEventClass) -> usize {
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        tracing::trace!(class = class.label(), dropped, "audit job dropped");
+        dropped
     }
 
     /// Drops recorded so far — the test observable for the refusal accounting
@@ -496,7 +385,7 @@ impl CancelRefusalAudit {
     /// releases the slot like a finished job, returning the queue to idle.
     #[cfg(test)]
     pub(crate) fn hold_admission_slot_for_test(self: &Arc<Self>) -> impl Drop {
-        self.try_reserve("test-held-refusal")
+        self.try_reserve("test-held-refusal", AuditEventClass::Security)
             .expect("refusal admission must be open")
     }
 
@@ -519,7 +408,7 @@ impl CancelRefusalAudit {
     #[cfg(test)]
     pub(crate) fn principal_held_for_test(&self, principal: &str) -> usize {
         self.principals
-            .read_sync(principal, |_, held| *held)
+            .read_sync(principal, |_, held| held.total)
             .unwrap_or(0)
     }
 
@@ -529,7 +418,7 @@ impl CancelRefusalAudit {
         self: &Arc<Self>,
         principal: &str,
     ) -> Option<HeldReservations> {
-        self.try_reserve(principal)
+        self.try_reserve(principal, AuditEventClass::Security)
             .map(|slot| HeldReservations(vec![slot]))
     }
 
@@ -546,7 +435,7 @@ impl CancelRefusalAudit {
         HeldReservations(
             (0..count)
                 .map(|_| {
-                    self.try_reserve(principal)
+                    self.try_reserve(principal, AuditEventClass::Security)
                         .expect("seeded reservation must be admitted")
                 })
                 .collect(),
@@ -669,15 +558,19 @@ struct CancelAuditSlot {
     /// The NAME this slot is charged to — never a hash bucket, so two
     /// principals can never share one counter.
     principal: String,
+    /// The class the slot was admitted under; `Observability` slots also hold
+    /// one global observability slot that [`Self::drop`] must release.
+    class: AuditEventClass,
     appended: bool,
 }
 
 impl Drop for CancelAuditSlot {
     fn drop(&mut self) {
         if !self.appended {
-            self.queue.record_drop();
+            self.queue.record_drop(self.class);
         }
-        self.queue.release_share(&self.principal);
+        self.queue.release_observability(self.class);
+        self.queue.release_share(&self.principal, self.class);
         // Releasing any slot necessarily makes the queue non-full; the shared
         // helper clears the saturation latch in the same transition.
         self.queue.release_global_slot();
@@ -707,6 +600,7 @@ impl Drop for PendingCancelAudit {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
                 tracing::error!(
+                    class = self.slot.class.label(),
                     target_id = self.target,
                     outcome = self.result,
                     "cancel refusal audit job dropped before append completed"
@@ -742,7 +636,7 @@ pub(super) fn enqueue_operator_cancel_audit(
     outcome: &CancelOutcome,
 ) -> Option<JoinHandle<()>> {
     let result = cancel_outcome_label(outcome);
-    let slot = queue.try_reserve(&session.username)?;
+    let slot = queue.try_reserve(&session.username, AuditEventClass::Security)?;
     let details = match rmp_serde::to_vec_named(&CancelAuditDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
@@ -826,31 +720,136 @@ struct ShapeResetAuditDetails<'a> {
     repo: &'a str,
 }
 
-// Report a shape-reset job discarded before execution (e.g. during runtime
+// Report a detached audit job discarded before execution (e.g. during runtime
 // teardown), so a refused spawn is visible and its slot is accounted.
-struct PendingShapeResetAudit {
+struct PendingDetachedAudit {
     dispatcher: tracing::Dispatch,
     completed: bool,
     // Field drop order: release the writer before signalling idle.
     audit: Arc<AuditChainWriter>,
     slot: CancelAuditSlot,
+    /// The operation-specific message logged when the job never ran.
+    dropped_message: &'static str,
 }
 
-impl PendingShapeResetAudit {
+impl PendingDetachedAudit {
     fn complete(mut self, appended: bool) {
         self.completed = true;
         self.slot.appended = appended;
     }
 }
 
-impl Drop for PendingShapeResetAudit {
+impl Drop for PendingDetachedAudit {
     fn drop(&mut self) {
         if !self.completed {
             tracing::dispatcher::with_default(&self.dispatcher, || {
-                tracing::error!("shape reset audit job dropped before append completed");
+                tracing::error!(class = self.slot.class.label(), "{}", self.dropped_message);
             });
         }
     }
+}
+
+/// One ready-to-spawn detached audit append. The operation-specific pieces
+/// (label, encoded details, the two error messages) are supplied by the
+/// caller; everything else — the bounded admission/share reservation, the
+/// clock, the session-prefix fields and the blocking append — is shared.
+struct DetachedAuditJob<'a> {
+    queue: &'a Arc<CancelRefusalAudit>,
+    audit: &'a Arc<AuditChainWriter>,
+    session: &'a Session,
+    operation: &'static str,
+    details: Vec<u8>,
+    class: AuditEventClass,
+    dropped_message: &'static str,
+    rejected_message: &'static str,
+}
+
+/// Clock gate shared by the detached audit enqueues.
+///
+/// A clock failure drops the job BEFORE any reservation, so it must record the
+/// drop itself (for `class`) — otherwise the queue's counter would miss a
+/// dropped job. The test-only `fail_clock` seam makes this branch
+/// deterministic without touching the system clock.
+fn detached_audit_now(queue: &CancelRefusalAudit, class: AuditEventClass) -> Option<u64> {
+    #[cfg(test)]
+    let clock_failure = queue.fail_clock.load(Ordering::Acquire);
+    #[cfg(not(test))]
+    let clock_failure = false;
+    if clock_failure {
+        let dropped = queue.record_drop(class);
+        tracing::error!(
+            class = class.label(),
+            dropped,
+            "audit append skipped: clock unavailable"
+        );
+        return None;
+    }
+    match UnixNanos::try_now() {
+        Ok(now) => Some(now.as_u64()),
+        Err(error) => {
+            let dropped = queue.record_drop(class);
+            tracing::error!(
+                %error,
+                class = class.label(),
+                dropped,
+                "audit append skipped: clock unavailable"
+            );
+            None
+        }
+    }
+}
+
+/// Shared body of every best-effort, detached `ok` audit append: reserve one
+/// bounded share slot in `class`, spawn a tracked blocking job and append
+/// under the caller's dispatcher. A job that cannot be built (clock
+/// unavailable, share or observability quota exhausted) never spawns and
+/// accounts as a drop exactly like the cancel enqueues.
+fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
+    let DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation,
+        details,
+        class,
+        dropped_message,
+        rejected_message,
+    } = job;
+    let now_ns = detached_audit_now(queue, class)?;
+    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
+    // a job that cannot be built never consumes a share slot.
+    let slot = queue.try_reserve(&session.username, class)?;
+    let mut session_prefix = [0u8; 8];
+    session_prefix.copy_from_slice(&session.session_id[..8]);
+    let transport = transport_name(session.transport_kind);
+    let username = session.username.clone();
+    let pending = PendingDetachedAudit {
+        dispatcher: tracing::dispatcher::get_default(Clone::clone),
+        completed: false,
+        audit: Arc::clone(audit),
+        slot,
+        dropped_message,
+    };
+    queue.spawn_tracked(move || {
+        let guard = pending;
+        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
+            if let Err(error) = guard.audit.append(
+                operation,
+                transport,
+                username,
+                "",
+                session_prefix,
+                "ok",
+                details,
+                now_ns,
+            ) {
+                tracing::error!(%error, "{}", rejected_message);
+                return false;
+            }
+            true
+        });
+        guard.complete(appended);
+    })
 }
 
 /// Best-effort, detached audit append for a successful shape-statistics
@@ -861,7 +860,8 @@ impl Drop for PendingShapeResetAudit {
 ///
 /// Operation label `reset_shape_stats` names the reset; the status word is
 /// the fixed `ok` (the wipe has no partial outcome) and the details carry
-/// the repository name only.
+/// the repository name only. Admitted as [`AuditEventClass::Security`]: it is
+/// an operator-visible admin event, so it keeps the full cap and share.
 pub(super) fn enqueue_shape_reset_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
@@ -875,45 +875,86 @@ pub(super) fn enqueue_shape_reset_audit(
             return None;
         }
     };
-    let now_ns = match UnixNanos::try_now() {
-        Ok(now) => now.as_u64(),
+    spawn_detached_audit(DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation: "reset_shape_stats",
+        details,
+        class: AuditEventClass::Security,
+        dropped_message: "shape reset audit job dropped before append completed",
+        rejected_message: "audit append rejected shape reset",
+    })
+}
+
+/// Payload of one successful TYPED READ (`status` / `get_record`): the scope
+/// NAMES only.
+///
+/// A read can return record values or carry a caller-supplied key/filter, and
+/// NONE of that may enter the audit chain. The operation label, the db name
+/// and (when the read is scoped to one table) the repository and table names
+/// are the whole payload — no value, key, filter or literal.
+#[derive(serde::Serialize)]
+struct TypedReadAuditDetails<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table: Option<&'a str>,
+}
+
+/// Best-effort, detached audit append for a successful typed read. Uses the
+/// same bounded queue, admission/share accounting, clock and session-prefix
+/// fields as [`enqueue_shape_reset_audit`]; only the operation label and the
+/// names-only payload differ.
+///
+/// `operation` is the stable label (`status` / `get_record`), `db` is the read
+/// scope's database name (the server-wide `status` passes an empty name, which
+/// is omitted from the payload), and `repo_table` is `Some` for a table-scoped
+/// read. The status word is the fixed
+/// `ok`: this is called only on the success path, so a refusal is never
+/// audited. The payload carries names only — never a record value, key, filter
+/// or caller literal. Admitted as [`AuditEventClass::Observability`]: it is
+/// high-volume, best-effort telemetry, confined to the reserved observability
+/// part of the cap and share.
+pub(super) fn enqueue_typed_read_audit(
+    queue: &Arc<CancelRefusalAudit>,
+    audit: &Arc<AuditChainWriter>,
+    session: &Session,
+    operation: &'static str,
+    db: &str,
+    repo_table: Option<(&str, &str)>,
+) -> Option<JoinHandle<()>> {
+    let db = (!db.is_empty()).then_some(db);
+    let (repo, table) = match repo_table {
+        Some((repo, table)) => (Some(repo), Some(table)),
+        None => (None, None),
+    };
+    let details = match rmp_serde::to_vec_named(&TypedReadAuditDetails { db, repo, table }) {
+        Ok(details) => details,
         Err(error) => {
-            tracing::error!(%error, "audit append skipped: clock unavailable");
+            // No reservation was taken, so this path must record the dropped
+            // observability job itself.
+            let dropped = queue.record_drop(AuditEventClass::Observability);
+            tracing::error!(
+                %error,
+                class = AuditEventClass::Observability.label(),
+                dropped,
+                "audit append skipped: typed read encoding failed"
+            );
             return None;
         }
     };
-    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
-    // a job that cannot be built never consumes a share slot.
-    let slot = queue.try_reserve(&session.username)?;
-    let mut session_prefix = [0u8; 8];
-    session_prefix.copy_from_slice(&session.session_id[..8]);
-    let transport = transport_name(session.transport_kind);
-    let username = session.username.clone();
-    let pending = PendingShapeResetAudit {
-        dispatcher: tracing::dispatcher::get_default(Clone::clone),
-        completed: false,
-        audit: Arc::clone(audit),
-        slot,
-    };
-    queue.spawn_tracked(move || {
-        let guard = pending;
-        let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
-            if let Err(error) = guard.audit.append(
-                "reset_shape_stats",
-                transport,
-                username,
-                "",
-                session_prefix,
-                "ok",
-                details,
-                now_ns,
-            ) {
-                tracing::error!(%error, "audit append rejected shape reset");
-                return false;
-            }
-            true
-        });
-        guard.complete(appended);
+    spawn_detached_audit(DetachedAuditJob {
+        queue,
+        audit,
+        session,
+        operation,
+        details,
+        class: AuditEventClass::Observability,
+        dropped_message: "typed read audit job dropped before append completed",
+        rejected_message: "audit append rejected typed read",
     })
 }
 

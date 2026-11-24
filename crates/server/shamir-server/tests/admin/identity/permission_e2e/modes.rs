@@ -114,6 +114,19 @@ async fn permission_deny_allow_by_mode() {
     let (alice_sid, mut alice_r, mut alice_w, mut alice_rid) =
         scram_login(server_addr, "alice", &user_pw).await;
 
+    // Open parent resources so this assertion isolates the table ACL.
+    for req in [
+        chmod_db_batch(admin_sid, db_name, 0o777),
+        chmod_store_batch(admin_sid, db_name, "main", 0o777),
+    ] {
+        let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
+        assert!(
+            matches!(resp, DbResponse::Batch { .. }),
+            "open parent ACL: {:?}",
+            resp
+        );
+    }
+
     // --- Alice tries to read from secret table → DENIED ---
     let resp = roundtrip(
         &read_req(db_name, table_name),
@@ -126,17 +139,17 @@ async fn permission_deny_allow_by_mode() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
+                code, "unknown_table",
                 "alice should be denied, got code={}, msg={}",
                 code, message
             );
             assert!(
-                message.contains("access denied"),
-                "message should describe denial: {}",
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
                 message
             );
         }
-        other => panic!("expected access_denied error, got {:?}", other),
+        other => panic!("expected unknown_table error, got {:?}", other),
     }
 
     // --- Admin reads from the same table → ALLOWED ---
@@ -408,12 +421,14 @@ async fn permission_group_grant() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
-                "carol should be denied, got code={}, msg={}",
+                code, "unknown_table",
+                "carol's Table Read is denied; the refusal carries the SAME \
+                 unknown_table code an absent table answers (no existence \
+                 oracle), got code={}, msg={}",
                 code, message
             );
         }
-        other => panic!("expected access_denied for carol, got {:?}", other),
+        other => panic!("expected unknown_table for carol, got {:?}", other),
     }
 
     // Cleanup
@@ -521,6 +536,19 @@ async fn permission_open_default_allows_any_user() {
         resp
     );
 
+    // Open parent resources to make the default table mode the sole gate.
+    for req in [
+        chmod_db_batch(admin_sid, db_name, 0o777),
+        chmod_store_batch(admin_sid, db_name, "main", 0o777),
+    ] {
+        let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
+        assert!(
+            matches!(resp, DbResponse::Batch { .. }),
+            "open parent ACL: {:?}",
+            resp
+        );
+    }
+
     // --- Dave reads from public table → DENIED (enforced default 0o700) ---
     let (dave_sid, mut dave_r, mut dave_w, mut dave_rid) =
         scram_login(server_addr, "dave", &dave_pw).await;
@@ -534,12 +562,19 @@ async fn permission_open_default_allows_any_user() {
     )
     .await;
     match resp {
-        DbResponse::Error { code, .. } => assert_eq!(
-            code, "access_denied",
-            "enforced default (0o700) should deny a non-owner stranger"
-        ),
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_table",
+                "enforced default (0o700) should deny a non-owner stranger"
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
+                message
+            );
+        }
         other => panic!(
-            "expected access_denied under enforced default, got {:?}",
+            "expected unknown_table under enforced default, got {:?}",
             other
         ),
     }

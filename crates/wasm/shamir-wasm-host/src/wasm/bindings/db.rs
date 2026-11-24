@@ -1,7 +1,22 @@
 use super::super::wasm_function::{
     read_guest_mem, write_bytes_to_guest, write_value_to_guest, HostState,
 };
+use crate::gateway::db_gateway::DbGatewayError;
+use crate::runtime::error::FunctionError;
 use shamir_types::types::value::QueryValue;
+
+/// Wrap a gateway failure so a refusal's stable, server-minted code survives
+/// the host-import boundary as a typed [`FunctionError::DbRefused`] instead of
+/// trap text (guest code can never write this value).
+///
+/// The rendered message keeps the pre-existing `"<op>: <gateway error>"` form;
+/// an uncoded gateway failure keeps its message and simply carries no code.
+fn gateway_refusal(op: &str, error: DbGatewayError) -> wasmtime::Error {
+    wasmtime::Error::new(FunctionError::DbRefused {
+        code: error.code().map(str::to_string),
+        message: format!("{op}: {error}"),
+    })
+}
 
 // ── Async host imports: db_get / db_insert / db_query (slice 8b) ───────
 //
@@ -60,7 +75,7 @@ pub(in crate::wasm) fn host_db_get(
         let result = gateway
             .get(&repo, &table, key)
             .await
-            .map_err(|e| wasmtime::Error::msg(format!("db_get: {e}")))?;
+            .map_err(|e| gateway_refusal("db_get", e))?;
 
         // Phase 3: write result back.
         write_value_to_guest(&mut caller, result).await
@@ -106,7 +121,7 @@ pub(in crate::wasm) fn host_db_insert(
         let result = gateway
             .insert(&repo, &table, doc)
             .await
-            .map_err(|e| wasmtime::Error::msg(format!("db_insert: {e}")))?;
+            .map_err(|e| gateway_refusal("db_insert", e))?;
 
         write_value_to_guest(&mut caller, Some(result)).await
     })
@@ -159,7 +174,7 @@ pub(in crate::wasm) fn host_db_query(
         let records = gateway
             .query(&repo, &table, filter)
             .await
-            .map_err(|e| wasmtime::Error::msg(format!("db_query: {e}")))?;
+            .map_err(|e| gateway_refusal("db_query", e))?;
 
         // Pack as a Value::List.
         let list_value = QueryValue::List(records);
@@ -194,7 +209,7 @@ pub(in crate::wasm) fn host_db_execute(
         let resp_bytes = gateway
             .execute(&req_bytes)
             .await
-            .map_err(|e| wasmtime::Error::msg(format!("db_execute: {e}")))?;
+            .map_err(|e| gateway_refusal("db_execute", e))?;
         write_bytes_to_guest(&mut caller, &resp_bytes).await
     })
 }

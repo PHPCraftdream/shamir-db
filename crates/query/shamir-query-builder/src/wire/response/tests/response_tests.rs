@@ -353,6 +353,7 @@ fn is_committed_true_when_tx_committed() {
         commit_version: Some(101),
         visibility: Some(shamir_query_types::batch::VisibilityState::Visible),
         reason: None,
+        abort_code: None,
         error: None,
         materialized: true,
     };
@@ -374,6 +375,7 @@ fn is_committed_false_when_tx_aborted() {
         commit_version: None,
         visibility: None,
         reason: Some("tx_conflict".to_owned()),
+        abort_code: None,
         error: None,
         materialized: true,
     };

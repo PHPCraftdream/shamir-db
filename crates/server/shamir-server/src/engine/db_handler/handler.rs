@@ -97,8 +97,9 @@ use super::admin::{
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::error_response;
-use super::cursor_support::authorize_cursor_read;
+use super::cursor_support::{authorize_cursor_read, resolve_repo};
 use super::handlers::token_admin;
+use super::operator_state::table_unavailable_response;
 use super::repo_audit::CancelRefusalAudit;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
@@ -163,6 +164,12 @@ pub struct ShamirDbHandler {
     /// Slow-query log threshold. Default disabled for unit tests; the
     /// boot path sets this from the operator's config.
     pub(super) slow_query: SlowQueryConfig,
+    /// Test-only seam: pins the exact `elapsed_us` the slow-query decision
+    /// sees, so a WARN assertion never depends on how long the real read
+    /// happened to take. `None` in production (a `#[cfg(...)]` field — no
+    /// runtime cost, no production surface).
+    #[cfg(any(test, feature = "test-util"))]
+    pub(super) slow_query_elapsed_override: Option<u64>,
     /// Server-side hard caps on per-batch resources.
     pub(super) query_limits: QueryLimitsCap,
     /// Server-side hard cap on per-interactive-tx staged bytes.
@@ -305,6 +312,8 @@ impl ShamirDbHandler {
             transactions: crate::config::TransactionsConfig::default(),
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
+            #[cfg(any(test, feature = "test-util"))]
+            slow_query_elapsed_override: None,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
             byte_budget: ByteBudget::unbounded(),
@@ -335,6 +344,8 @@ impl ShamirDbHandler {
             transactions: crate::config::TransactionsConfig::default(),
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
+            #[cfg(any(test, feature = "test-util"))]
+            slow_query_elapsed_override: None,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
             byte_budget: ByteBudget::unbounded(),
@@ -391,6 +402,26 @@ impl ShamirDbHandler {
     pub fn with_slow_query(mut self, slow_query: SlowQueryConfig) -> Self {
         self.slow_query = slow_query;
         self
+    }
+
+    /// Test-only: pin the `elapsed_us` the slow-query decision sees, so a
+    /// WARN assertion never depends on how long the real read happened to
+    /// take (see [`Self::slow_query_elapsed`]).
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_slow_query_elapsed(mut self, elapsed_us: u64) -> Self {
+        self.slow_query_elapsed_override = Some(elapsed_us);
+        self
+    }
+
+    /// The `elapsed_us` every slow-query decision compares and logs: the
+    /// pinned test seam when present, the measured value otherwise. The
+    /// `#[cfg]` lives here alone so production has no seam surface.
+    pub(super) fn slow_query_elapsed(&self, measured: u64) -> u64 {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(pinned) = self.slow_query_elapsed_override {
+            return pinned;
+        }
+        measured
     }
 
     /// Set server-side hard caps on per-batch resources.
@@ -855,8 +886,12 @@ impl ShamirDbHandler {
     /// strings, exactly like `create_cursor` does) is what keeps an
     /// unauthorized caller's response indistinguishable from a genuine
     /// not-found — `self.db.get_ddl_op_status` (which does the actual
-    /// resolution and can reveal unknown-db/unknown-repo distinctly) is
-    /// never even called unless authorization already succeeded.
+    /// resolution) is never even called unless authorization already
+    /// succeeded. When it does run, a miss is classified with the SAME
+    /// table-Read parity the gate itself uses: an absent TABLE answers
+    /// `unknown_table` (the code `authorize_cursor_read`'s Table denial
+    /// answers for a closed table), while a vanished parent keeps its own
+    /// typed `unknown_db`/`unknown_repo`.
     async fn get_ddl_op_status(
         &self,
         session: &Session,
@@ -867,19 +902,47 @@ impl ShamirDbHandler {
     ) -> DbResponse {
         let actor = session_actor(session);
         if let Err(e) = authorize_cursor_read(&self.db, &actor, db, repo, table).await {
+            if error_code(&e) == "unknown_table" {
+                return table_unavailable_response();
+            }
             return error_response(&e);
+        }
+
+        // Availability BEFORE the op_id is parsed: `get_ddl_op_status`
+        // parses the id before resolving the table, so a malformed id would
+        // otherwise answer `validation` for an absent table while a closed
+        // one is refused by the Table ACL. Decide the parent/table gate here
+        // instead: a vanished parent keeps its typed `unknown_db`/
+        // `unknown_repo`, while an absent table and an existing-but-closed
+        // table both answer the SAME fixed refusal.
+        let repo_instance = match resolve_repo(&self.db, db, repo) {
+            Ok(repo) => repo,
+            Err(parent) => return error_response(&parent),
+        };
+        if !repo_instance.has_table(table) {
+            return table_unavailable_response();
         }
 
         match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
             Ok(status) => DbResponse::DdlOpStatus { status },
-            Err(e) => DbResponse::Error {
-                code: match e {
-                    shamir_db::DbError::Validation(_) => "validation",
-                    shamir_db::DbError::NotFound(_) => "not_found",
-                    _ => "query",
+            Err(e) => match e {
+                // A table that vanished between the configured-table check
+                // and the engine lookup is the same fixed table-unavailable
+                // refusal. A vanished PARENT keeps its own typed code.
+                shamir_db::DbError::NotFound(_) => match resolve_repo(&self.db, db, repo) {
+                    Ok(_) => table_unavailable_response(),
+                    Err(parent) => error_response(&parent),
+                },
+                other => {
+                    let code = match &other {
+                        shamir_db::DbError::Validation(_) => "validation",
+                        _ => "query",
+                    };
+                    DbResponse::Error {
+                        code: code.to_string(),
+                        message: format!("Failed to read DDL op status: {}", other),
+                    }
                 }
-                .to_string(),
-                message: format!("Failed to read DDL op status: {}", e),
             },
         }
     }

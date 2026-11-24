@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_db::access::Actor;
@@ -15,23 +15,10 @@ use crate::subscriptions::{bridge, SubscriptionRegistry};
 const ACTIVATION_WAIT: Duration = Duration::from_secs(5);
 
 /// Activates/deactivates subscriptions after a successful batch execute.
-/// Called from handler.rs alongside persist_table_lifecycle.
-///
-/// # CRIT-5 (#439): partial-reject delivery semantics
-///
-/// The client always receives a `sub_id` synchronously here, BEFORE
-/// `bridge_task` runs the per-table read-ACL checks. The bridge silently
-/// excludes any source the actor cannot `read` (see `bridge_task`). This
-/// means a subscription that requested tables the actor has no `read` on
-/// will deliver only the authorized subset — the client gets a `sub_id`
-/// but fewer (or zero) event streams than requested.
-///
-/// A synchronous error to the client for the "all sources denied" case is
-/// NOT possible here without a wider refactor: `authorize_access` is
-/// `async`, but this function is synchronous. The bridge handles the
-/// all-denied case by aborting (no receiver, no push). A future HIGH task
-/// could surface this as a synchronous rejection if `activate_subscriptions`
-/// is made async.
+/// Called from handler.rs alongside persist_table_lifecycle. Returns true if
+/// any bridge failed the activation barrier; the request handler then replaces
+/// the successful batch response with the fixed table-unavailable refusal.
+/// Batch operations have already executed by then and are not rolled back.
 ///
 /// # Activation barrier
 ///
@@ -47,9 +34,9 @@ pub(crate) async fn activate_subscriptions(
     batch: &BatchRequest,
     response: &mut BatchResponse,
     actor: Actor,
-) {
+) -> bool {
     let Some(push) = conn.push.as_ref() else {
-        return; // No push channel — can't activate subscriptions.
+        return false; // No push channel — can't activate subscriptions.
     };
 
     // Downcast extensions to an OWNED, independently-cloneable
@@ -66,7 +53,7 @@ pub(crate) async fn activate_subscriptions(
         .and_then(|ext| ext.downcast::<SubscriptionRegistry>().ok())
     else {
         tracing::debug!("no subscription registry on connection");
-        return;
+        return false;
     };
 
     let mut ready_waiters = Vec::new();
@@ -143,26 +130,30 @@ pub(crate) async fn activate_subscriptions(
             _ => {}
         }
     }
+    let activation_ids: Vec<u64> = ready_waiters.iter().map(|(sub_id, _)| *sub_id).collect();
+    let mut activation_failed = false;
     for (sub_id, ready_rx) in ready_waiters {
-        // Not ready (bridge exited: denied/unavailable source, or the wait timed out): the ack
-        // goes out either way, exactly as before the barrier existed.
-        let waited = Instant::now();
-        match tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await {
-            Ok(Ok(())) => tracing::info!(
-                sub_id,
-                waited_us = waited.elapsed().as_micros() as u64,
-                "activation barrier released; acknowledging the subscription",
-            ),
-            Ok(Err(_)) => tracing::warn!(
-                sub_id,
-                waited_us = waited.elapsed().as_micros() as u64,
-                "bridge exited before attaching; acknowledging without a live stream",
-            ),
-            Err(_) => tracing::warn!(
-                sub_id,
-                waited_ms = ACTIVATION_WAIT.as_millis() as u64,
-                "activation barrier timed out; acknowledging anyway",
-            ),
+        // `sub_id` remains monotonic, but a failed activation must not leave
+        // a registry slot or a client-visible grant.
+        let failed = match tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await {
+            Ok(Ok(())) => false,
+            Ok(Err(_)) => {
+                tracing::warn!(sub_id, "bridge exited before attaching; activation failed");
+                true
+            }
+            Err(_) => {
+                tracing::warn!(sub_id, "activation barrier timed out; activation failed");
+                true
+            }
+        };
+        if failed {
+            activation_failed = true;
+            // Remove every reservation/grant from this batch, not merely the failed alias.
+            for reserved_id in &activation_ids {
+                registry.remove(*reserved_id);
+            }
+            break;
         }
     }
+    activation_failed
 }

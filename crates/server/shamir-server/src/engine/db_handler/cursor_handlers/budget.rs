@@ -3,6 +3,7 @@
 use shamir_db::query::batch::BatchError;
 
 use crate::byte_budget::{stash_guard, ByteBudgetGuard};
+use crate::db_handler::cursor_support::resolve_repo;
 use crate::db_handler::handler::{DbResponse, ShamirDbHandler};
 
 /// Wrap an engine [`shamir_storage::error::DbError`] (or any `Display`
@@ -16,6 +17,37 @@ pub(super) fn wrap_engine_err(e: impl std::fmt::Display) -> BatchError {
     }
 }
 
+/// Wrap a `ShamirDb::get_table` failure on a cursor read path.
+///
+/// An absent table must answer `unknown_table` — the SAME code
+/// `authorize_cursor_read`'s Table denial answers for an existing but
+/// unreadable table — instead of the legacy-mapped `query` that
+/// `wrap_engine_err`'s untagged error falls back to, so a cursor create or
+/// fetch never tells the caller whether the table exists. A `NotFound` whose
+/// PARENT no longer resolves keeps its own typed name-resolution code
+/// (`unknown_db`/`unknown_repo`, via [`resolve_repo`]); every other error is
+/// wrapped exactly like [`wrap_engine_err`]. The table-miss message is the
+/// crate's fixed refusal text (`table is unavailable`), never the engine's
+/// name-bearing not-found text, so absence matches a closed table.
+pub(super) fn wrap_table_lookup_err(
+    db: &shamir_db::ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+    e: shamir_db::DbError,
+) -> BatchError {
+    if matches!(&e, shamir_db::DbError::NotFound(_)) {
+        return match resolve_repo(db, db_name, repo_name) {
+            Ok(_) => BatchError::QueryError {
+                alias: String::new(),
+                message: crate::db_handler::operator_state::TABLE_UNAVAILABLE_MESSAGE.to_string(),
+                code: Some("unknown_table".to_string()),
+            },
+            Err(parent) => parent,
+        };
+    }
+    wrap_engine_err(e)
+}
+
 pub(in crate::engine::db_handler) fn error_response(e: &BatchError) -> DbResponse {
     if let BatchError::AsOfVisibilityTimeout {
         requested,
@@ -24,6 +56,13 @@ pub(in crate::engine::db_handler) fn error_response(e: &BatchError) -> DbRespons
         ..
     } = e
     {
+        // B6: keep the VARIANT (the client maps it onto
+        // `ClientError::AsOfVisibilityTimeout` by tag, so reshaping it into
+        // `DbResponse::Error` would change the wire tag and drop the
+        // structured positions). `repo_admin::execute` classifies this
+        // variant as a BOUNDED CANONICAL refusal instead: its encoded bytes
+        // bypass the CALLER's `max_result_size`, stay fenced by the
+        // operator's cap, and are charged to the response-byte budget.
         return DbResponse::AsOfVisibilityTimeout {
             code: "as_of_visibility_timeout".into(),
             message: e.to_string(),

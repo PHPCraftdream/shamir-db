@@ -401,9 +401,25 @@ Pending is **committed**, never an instruction to resend. Rust exposes
 `execute_transactional`; TS `db.tx()` returns `{ status: 'committed', state,
 value, transaction, visibility }`. Published `wal_durability` warnings remain
 in `transaction.error`, independently of pending/visible. Aborts and
-`wal_requires_reopen` remain errors with their original reason; indeterminate
+`wal_requires_reopen` remain errors with their original reason, and an abort
+exposes the failing op's stable code in `transaction.abort_code` when one
+exists (`crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`); indeterminate
 WAL is not proof that writes are absent and is reported as
-`status: "indeterminate"`. No value-only transaction convenience
+`status: "indeterminate"`. `transaction.reason` is not uniformly debug text:
+`skip_aborted` is the one plan-abort special case that is written into
+`reason` as its own code
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`),
+and commit-time classifications also populate `abort_code` now — `tx_conflict`,
+`unique_violation`, `version_conflict`, `table_migrating`,
+`wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`,
+`cancelled`
+(`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`).
+Inside `for_each`, a transactional body's `indeterminate` outcome stops the
+loop with `wal_requires_reopen` (the iteration may have committed, so the
+prefix is unknown and must be reconciled, not retried), while a committed
+prefix is NOT rolled back when a later iteration fails
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`).
+No value-only transaction convenience
 hides these outcomes.
 
 ```ts
@@ -881,11 +897,20 @@ intent для алерта — неограниченный рост без но
 
 Известные ограничения (ни одно не обходит гейт):
 
-1. Отказ `CreateUser` в строгом транзакционном батче возвращается как прерванная транзакция без стабильного кода `server_busy`.
-2. Хранимая функция, создающая пользователя через `db_execute` и шлюз БД, возвращает общий код `query`.
-3. Нативный `Execute` может заменить отказ на `result_too_large`, если лимит результата меньше закодированного ответа.
+1. `server_busy` — фиксированный ответ admission gate, не универсальный
+   исход операции. Если request-slot admission стоит до проверки availability,
+   здоровая и quarantined таблицы получают одинаковый busy-ответ; порядок
+   `GetRecord` обратный для absent/closed таблиц (сначала `unknown_table`,
+   затем slot), quarantine проверяется позже. Argon2 admission для создания
+   пользователей допускает не более `2 × capacity` задач; переполнение,
+   истечение permit-бюджета или сбой часов дают `server_busy` до KDF. Это
+   описывает отказ самого gate и НЕ гарантирует, что он сохранится через
+   внешний `Call` stored function. Не повторяйте смешанный батч по этому коду.
+2. Стабильный код отказавшей операции в строгом транзакционном батче читается из `transaction.abort_code`, а не из `transaction.reason`: у отклонённого `CreateUser` там будет `server_busy` (`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`). `reason` парсингу не подлежит, но и не всегда является debug-текстом: `skip_aborted` — единственный план-аборт, который записывается в `reason` собственным кодом (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`), а commit-time классификации теперь тоже заполняют `abort_code` — `tx_conflict`, `unique_violation`, `version_conflict`, `table_migrating`, `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`, `cancelled` (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`). Поля `abort_code` может не быть вовсе — когда у аборта нет стабильного слова (`Storage` без собственного `code`, `Expired`; `crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`), — поэтому полагаться на код в каждом аборте нельзя. Внутри `for_each` первая неуспешная итерация останавливает цикл. Уже независимо закоммиченный префикс сохраняется; повтор всего внешнего `ForEach` не эквивалентен повтору только упавшей итерации и может дублировать префикс. `indeterminate` у тела останавливает цикл с `wal_requires_reopen` (итерация могла закоммититься — сначала reconcile, не слепой повтор; `crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`). TS SDK помечает `tx_conflict` как retryable для новой транзакции, но автоматически запрос не повторяет.
+3. Внешний `Call` хранимой функции несёт стабильный код отказа, который классифицировал шлюз БД на вызове `db_execute` или другого `db_*` (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:47-65`). Код пишет только сервер (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:14-19`), поэтому гость не может его подделать: текст guest-trap, лишь упоминающий кодовое слово, кодом не становится. Если шлюз отказ не классифицировал, стабильного кода у `Call` нет, и судить о причине по тексту ошибки нельзя. Вложенный хранимый вызов (функция вызывает функцию), внутри которого транзакционный `db_execute` абортится, кода наружу не передаёт: абортированный `BatchResponse` — это успех на шлюзе (данные, которые разбирает гость), а транзакционная проверка гостя поднимает общий abort без кода (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:23-32`; `crates/wasm/shamir-lang/src/back/emit/support/db/tx.rs:254-300`), тогда как код наружного `Call` берётся только из ускользнувшего отказа шлюза (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:45-62`). `DbGatewayError::code()` классифицирует только `not_found` и `access_denied`, поэтому отказ на ЧТЕНИЕ таблицы по ACL даёт наружному `Call` вообще без стабильного кода (не `unknown_table`): `unknown_table` намеренно не имеет ветки и попадает в общий `ExecutionSource` (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:208-238`), а сам `code()` возвращает код лишь для этих двух классов (`crates/wasm/shamir-wasm-host/src/gateway/db_gateway.rs:67-82`).
+4. Фиксированный конверт ошибки, включая `server_busy`, доходит до клиента со своим кодом при любом клиентском `limits.max_result_size`; закрытый набор канонических кодов отказа `unknown_table | server_busy | cancelled | resync_required | permission_denied | read_only_replica | schema_migration_follower_read_only`, а также success-shaped `DbResponse::AsOfVisibilityTimeout`, освобождён от клиентского `limits.max_result_size` и ограничен только серверным `max_result_size_bytes`, а любой ДРУГОЙ конверт ошибки выше клиентского лимита заменяется на `result_too_large`. Канонический конверт отказа ограничен лишь серверным `max_result_size_bytes`, а не клиентским лимитом (`crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs:429-499,548-593`).
 
-Если создание было отклонено до записи, повторите после паузы только обычный нетранзакционный `CreateScramUser`, не весь батч. Сам по себе код `query` не доказывает отказ гейта.
+Если создание было отклонено до записи, повторите после паузы только обычный нетранзакционный `CreateScramUser`, не весь батч. Стабильный код теперь и есть ответ гейта, но он не обещает, что повтор пройдёт: `server_busy` утверждает занятость, а не успех, и клиент не может вывести из кода ничего сверх того, что код сам утверждает.
 
 Отказы native auth-init в синхронном handshake уже учитывает `auth_attempts_total{result="rate_limited"}`, а отказы входного токенного gate по частоте — `shamir_token_auth_total{channel,result="rate_limited"}`; дублирующих счётчиков нет. `shamir_token_request_denied_total{endpoint}` учитывает отказы по scope/политике, а не посессионный лимит частоты после аутентификации.
 
@@ -3073,12 +3098,46 @@ Lines (схема v1), в том числе на TTY; stderr — только д
 | `data head DB REPO TABLE N` | первые N записей в порядке серверного скана (см. ниже) | Read на поименно названной базе команды (floor профиля не требуется); затем обычный ACL базы/таблицы сервера (batch-путь) |
 | `data get DB REPO TABLE KEY` | точечное чтение по точному ключу: тело одной записи (см. поля результата ниже) или типизированный `not_found`. KEY — Base58 `RecordId` длиной **16–22** символа (22 — каноническая полная форма), проверяется локально до соединения; некорректный ключ — типизированный отказ `invalid_record_id` (exit 1), не паника и не скан | сначала Database Read, затем Table Read на поименно названной базе (floor профиля не требуется), с проверкой предка до любого поиска; та же двухшаговая проверка повторяется после ожидания бюджета ответа (см. ниже); курсор не создаётся, курсорный путь не задействуется |
 
-**Паритет `data get` с batch-чтением и одна известная граница.** Вызывающий
-с Database Read, но без Table Read может отличить *существующую* приватную
-таблицу (`access_denied`) от *отсутствующей* (`unknown_table`): ACL таблицы
-по умолчанию открыт для отсутствующей таблицы, поэтому проверка прав
-проходит, а разрешение имени — нет. Это то же раскрытие, которое уже даёт
-batch-путь чтения; отдельной «маскировки» у точечного чтения нет.
+**Единый отказ чтения: таблица не выдаёт своего существования.** Если
+вызывающий не может прочитать таблицу — потому ли, что она закрыта ACL, или
+потому, что её нет, — все пути чтения данных возвращают **один и тот же**
+типизированный код `unknown_table` (exit 5): точечное чтение `data get`,
+batch-чтение (`data count` / `data head`), создание и чтение курсора. Тот же
+код получает и опрос статуса DDL-операции. Закрытая таблица и отсутствующее
+имя по коду неразличимы. Правило действует в одной точке на каждом пути:
+отказ `Read` на `Table` в авторизации batch-запроса, проверка существования
+таблицы перед выполнением batch-чтения и двухшаговая проверка
+`Database`→`Table` у точечного чтения, создания/чтения курсора и опроса
+статуса DDL. Отказ уровня **базы** (`Database Read`) по-прежнему
+`access_denied` (exit 4): он выполняется до любого разрешения таблицы и
+поэтому о таблице ничего не сообщает. Отсутствующие родители сохраняют свои
+коды `unknown_db` / `unknown_repo`. Той же маской закрыты `DescribeTable` и
+`GetTableSchema`: закрытая и отсутствующая таблица дают `unknown_table` с
+фиксированным сообщением `table is unavailable` (родительская проверка базы
+остаётся `access_denied`).
+
+Важно не обобщать это правило на все операции READ: паритет отказа для
+чтения данных действует как на здоровых, так и на quarantined репозиториях,
+но порядок admission и проверки доступности различается. При slot admission
+раньше availability таблицы в обоих состояниях получают одинаковый
+фиксированный `server_busy`. На `GetRecord` availability раньше slot:
+absent/closed таблицы получают `unknown_table`, quarantine проверяется позже.
+Остаётся узкое окно name-to-handle между повторной проверкой регистрации и
+получением handle; terminal-state гонка курсора также follow-up. `List(Tables)`
+через store List перечисляет настроенные имена; `List(Indexes)` различает
+состояния. `GetBufferConfig` и `ListValidators` через stored function всё ещё
+различают availability. Для batch missing repository остаётся legacy untagged
+error, не typed `unknown_repo`.
+`Subscribe` с любым нечитаемым или отсутствующим source целиком отклоняется
+до создания потока; нет частичного исключения источников. Утверждённая
+совместимость `runLive` — отклонить весь promise без выдачи stream.
+
+Практическое следствие: раньше пути расходились — закрытая таблица давала
+`access_denied` (exit 4), а отсутствующая на batch-пути приходила общим кодом
+`query` (в шелле — `server_error`). Теперь и закрытая, и отсутствующая
+таблица дают `unknown_table` (exit 5) на всех перечисленных путях. Неудачная
+попытка прочитать таблицу больше не подтверждает и не опровергает её
+существование.
 
 **Вторая авторизация и сравнение регистрации.** Точечное чтение — не batch-
 и не курсорный путь, поэтому он сам выполняет ту же двухшаговую проверку

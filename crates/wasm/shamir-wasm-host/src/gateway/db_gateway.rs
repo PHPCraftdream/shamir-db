@@ -42,6 +42,7 @@ pub enum DbGatewayError {
     #[error("db gateway: not found: {message}")]
     NotFound {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -49,6 +50,7 @@ pub enum DbGatewayError {
     #[error("db gateway: permission denied: {message}")]
     Permission {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -59,9 +61,22 @@ pub enum DbGatewayError {
     #[error("db gateway: execution failed: {message}")]
     ExecutionSource {
         message: String,
+        code: Option<String>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+impl DbGatewayError {
+    /// Stable, server-minted code of this failure, when the gateway has one.
+    pub(crate) fn code(&self) -> Option<&str> {
+        match self {
+            DbGatewayError::NotFound { code, .. }
+            | DbGatewayError::Permission { code, .. }
+            | DbGatewayError::ExecutionSource { code, .. } => code.as_deref(),
+            DbGatewayError::Execution(_) => None,
+        }
+    }
 }
 
 /// Async gateway that lets a WASM function read/write database tables.

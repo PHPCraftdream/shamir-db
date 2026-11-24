@@ -1,10 +1,12 @@
-use crate::query::batch::executor_traits::TableResolver;
+use crate::query::batch::authorized::table_unavailable;
+use crate::query::batch::executor_traits::BatchResolver;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterValue;
 use shamir_collections::{TFxSet, TMap};
 use shamir_query_types::batch::{BatchLimits, BatchTreeVisitor, LimitKind};
 use shamir_query_types::filter::Filter;
 use shamir_query_types::read::{ReadQuery, SelectExpr, SelectItem};
+use shamir_storage::error::DbError;
 
 /// Validate that all referenced tables exist before execution.
 ///
@@ -14,9 +16,22 @@ use shamir_query_types::read::{ReadQuery, SelectExpr, SelectItem};
 /// Tables/repos that are **created** by this same batch are exempted:
 /// the DDL will materialise them before the DML runs (enforced by
 /// `after` ordering edges).
+///
+/// A missing table on a READ (`BatchOp::Read`) answers the layer's ONE
+/// table refusal — [`table_unavailable`], the same `unknown_table` code and
+/// fixed `"table is unavailable"` text `Authorized::authorize` returns for
+/// a table-Read ACL denial — so a read refusal never tells the caller
+/// whether the table exists.
+///
+/// A missing PARENT (repository) is a different failure: it keeps the
+/// pre-parity `code: None` shape (the table-echoing diagnostic), so an
+/// absent repository never impersonates an absent table. Table-vs-parent is
+/// decided from the CATALOGUE — the parent probe `resolve_repo` — never by
+/// parsing the resolver's error text. Every non-read op is untouched
+/// (`code: None`, message unchanged).
 pub(in crate::query::batch) async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     limits: &BatchLimits,
     root_limits: &BatchLimits,
 ) -> Result<(), BatchError> {
@@ -41,17 +56,28 @@ pub(in crate::query::batch) async fn validate_tables(
             }
 
             if seen.insert(key) {
-                resolver
-                    .resolve(table_ref)
-                    .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.clone(),
-                        message: format!(
-                            "Table '{}' in repo '{}' not found: {}",
-                            table_ref.table, table_ref.repo, e
-                        ),
-                        code: None,
-                    })?;
+                let is_read = matches!(&entry.op, BatchOp::Read(_));
+                let Err(error) = resolver.resolve(table_ref).await else {
+                    continue;
+                };
+                // A READ whose table is genuinely absent takes the shared
+                // refusal; a missing parent repository keeps the pre-parity
+                // shape. `resolve_repo` is the catalogue probe that tells
+                // the two apart without reading the error text.
+                if is_read
+                    && matches!(&error, DbError::NotFound(_))
+                    && resolver.resolve_repo(&table_ref.repo).await.is_ok()
+                {
+                    return Err(table_unavailable());
+                }
+                return Err(BatchError::QueryError {
+                    alias: alias.clone(),
+                    message: format!(
+                        "Table '{}' in repo '{}' not found: {}",
+                        table_ref.table, table_ref.repo, error
+                    ),
+                    code: None,
+                });
             }
         }
     }

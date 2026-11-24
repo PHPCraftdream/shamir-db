@@ -200,7 +200,8 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
 
     // (b) DescribeTable/GetTableSchema on the secret table: coarse gate
     // passes it through (allowlisted), but the op's own per-table Read
-    // check denies — proves the coarse-gate relaxation does not itself
+    // check refuses with the fixed `unknown_table` refusal — same answer as
+    // an absent table, proving the coarse-gate relaxation does not itself
     // grant access.
     let resp = roundtrip(
         &describe_table_req(db_name, secret_table),
@@ -213,12 +214,12 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
     match resp {
         DbResponse::Error { code, .. } => {
             assert_eq!(
-                code, "access_denied",
-                "DescribeTable(secret) should be access_denied"
+                code, "unknown_table",
+                "DescribeTable(secret) should be unknown_table"
             );
         }
         other => panic!(
-            "expected access_denied for DescribeTable(secret), got {:?}",
+            "expected unknown_table for DescribeTable(secret), got {:?}",
             other
         ),
     }
@@ -234,12 +235,12 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
     match resp {
         DbResponse::Error { code, .. } => {
             assert_eq!(
-                code, "access_denied",
-                "GetTableSchema(secret) should be access_denied"
+                code, "unknown_table",
+                "GetTableSchema(secret) should be unknown_table"
             );
         }
         other => panic!(
-            "expected access_denied for GetTableSchema(secret), got {:?}",
+            "expected unknown_table for GetTableSchema(secret), got {:?}",
             other
         ),
     }

@@ -15,6 +15,7 @@ use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::config::NodeMode;
 use super::cursor_handlers::error_response;
 use super::handlers::backup_handlers;
+use super::operator_state::table_unavailable_response;
 use super::repo_audit;
 use super::subscribe_handler;
 use super::ShamirDbHandler;
@@ -266,10 +267,18 @@ impl ShamirDbHandler {
             .max_result_size
             .min(self.query_limits.max_result_size_bytes);
         let mut budget_guard = None;
+        // Fixed error headroom is reserved together with the ordinary caller
+        // reservation before DB execution. It is a hard serialized-byte bound,
+        // not permission to grow a live guard after execution.
+        const FIXED_ERROR_ALLOWANCE: usize = 512;
+        let reservation_bytes = reserve_bytes
+            .saturating_add(FIXED_ERROR_ALLOWANCE)
+            .min(self.query_limits.max_result_size_bytes);
         let control_op =
             single_cancel.is_some() || single_cancel_tx.is_some() || single_cancel_cursor.is_some();
         // Keep the request slot through response encoding on tracked paths.
         let in_flight;
+        let mut typed_canonical_refusal = false;
         let final_response = if let Some(id) = single_cancel {
             // Cancel must reach saturated work even if its session has no slots
             // — true for all three cancel operations, which skip admission.
@@ -309,7 +318,7 @@ impl ShamirDbHandler {
             if needs_budget {
                 budget_guard = self
                     .byte_budget
-                    .acquire_cancellable(reserve_bytes, cancel)
+                    .acquire_cancellable(reservation_bytes, cancel)
                     .await;
             }
             if needs_budget && budget_guard.is_none() {
@@ -378,11 +387,15 @@ impl ShamirDbHandler {
                             // = 0 disables (e.g. in unit tests). R4b-1: the minted
                             // [`RequestExecId`] and the OPTIONAL client `rid` ride
                             // along (ids only — no token, no prefix, no new lines).
+                            // The pinned test seam overrides the measured
+                            // duration for the decision AND the field; the
+                            // response itself is untouched.
+                            let elapsed_us = self.slow_query_elapsed(response.execution_time_us);
                             if self.slow_query.threshold_us > 0
-                                && response.execution_time_us > self.slow_query.threshold_us
+                                && elapsed_us > self.slow_query.threshold_us
                             {
                                 tracing::warn!(
-                                    elapsed_us = response.execution_time_us,
+                                    elapsed_us = elapsed_us,
                                     threshold_us = self.slow_query.threshold_us,
                                     db = db_name,
                                     queries = batch.queries.len(),
@@ -393,7 +406,7 @@ impl ShamirDbHandler {
                                 );
                             }
                             self.persist_table_lifecycle(db_name, &batch);
-                            subscribe_handler::activate_subscriptions(
+                            let activation_failed = subscribe_handler::activate_subscriptions(
                                 conn,
                                 &self.db,
                                 db_name,
@@ -403,16 +416,28 @@ impl ShamirDbHandler {
                             )
                             .await;
 
-                            DbResponse::Batch { response }
+                            if activation_failed {
+                                typed_canonical_refusal = true;
+                                table_unavailable_response()
+                            } else {
+                                DbResponse::Batch { response }
+                            }
                         }
-                        Err(e) => error_response(&e),
+                        Err(e) => {
+                            typed_canonical_refusal = is_typed_canonical_refusal(&e);
+                            if typed_canonical_refusal {
+                                table_unavailable_response()
+                            } else {
+                                error_response(&e)
+                            }
+                        }
                     }
                 }
             }
         };
 
-        // Like rejection envelopes, the fixed cancellation error is encoded
-        // by the handler even when the target's result cap is too small.
+        // Fixed cancellation error remains a fixed-limit exception, but its
+        // bytes are covered by the pre-execution allowance above.
         if matches!(
             &final_response,
             DbResponse::Error { code, .. }
@@ -422,34 +447,27 @@ impl ShamirDbHandler {
             return final_response;
         }
 
-        // RI-15 (CR-B2) — single convergence point for capped success and
-        // error replies (including all three cancel operations): serialize
-        // the final `DbResponse` envelope exactly ONCE, shrink the upfront
-        // reservation down to that actual size (an error response's tiny
-        // actual size still needs its pessimistic over-reservation narrowed
-        // back down), then stash both the guard and the already-serialized
-        // bytes so `RequestHandler::handle` reuses them instead of encoding
-        // the SAME response a second time.
-        //
-        // The guard is stashed in a task-local (`byte_budget::stash_guard`)
-        // rather than returned from this function: `execute`'s return type
-        // is `DbResponse` (asserted on directly by tests) and the caller,
-        // `RequestHandler::handle`, has a fixed `Result<Vec<u8>, String>`
-        // signature owned by `shamir-connect`. `connection::request_loop`
-        // retrieves the guard with `byte_budget::take_stashed_guard` right
-        // after the dispatch future resolves and rides it inside
-        // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
-        // writer task, after the socket write completes — never in this
-        // dispatch task.
+        // B6: the sole caller-cap exception is a typed unknown-table refusal
+        // with server-owned fixed text. Its possible bytes were reserved before
+        // execution as part of FIXED_ERROR_ALLOWANCE; never grow a live guard.
+        // All other replies, including resync/as-of errors with contextual
+        // fields, are caller-capped. The guard is stashed until writer completion.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            if !control_op && bytes.len() > reserve_bytes {
-                // Includes arbitrary error strings, not just successful payloads.
+            let fixed_refusal = typed_canonical_refusal;
+            let size_cap = if fixed_refusal {
+                reserve_bytes
+                    .saturating_add(FIXED_ERROR_ALLOWANCE)
+                    .min(self.query_limits.max_result_size_bytes)
+            } else {
+                reserve_bytes
+            };
+            if !control_op && bytes.len() > size_cap {
                 // Release before returning; never stash the rejected payload.
                 drop(budget_guard);
                 return DbResponse::Error {
                     code: "result_too_large".to_string(),
                     message: format!(
-                        "encoded response is {} bytes; maximum is {reserve_bytes}",
+                        "encoded response is {} bytes; maximum is {size_cap}",
                         bytes.len(),
                     ),
                 };
@@ -492,6 +510,14 @@ impl ShamirDbHandler {
             }
         }
     }
+}
+
+/// Only the engine's canonical typed refusal is eligible; do not infer it from
+/// rendered Display text, which may contain caller-derived diagnostics.
+fn is_typed_canonical_refusal(error: &BatchError) -> bool {
+    matches!(error,
+        BatchError::QueryError { alias, message, code: Some(code) }
+            if alias.is_empty() && code == "unknown_table" && message == "table is unavailable")
 }
 
 #[cfg(test)]

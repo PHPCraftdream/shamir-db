@@ -42,14 +42,23 @@ impl FunctionInvoker for ShamirFunctionInvoker {
         }
         params.set("args", crate::types::value::QueryValue::List(args_list));
 
+        // The code is read from the failure that actually escapes; nothing is
+        // stored outside it, so an earlier refused gateway call cannot supply
+        // a code to a later unrelated failure.
         let qv = self
             .shamir
-            .invoke_function_in_db_as(&self.db_name, &op.repo, &op.call, params, actor.clone())
+            .invoke_function_in_db_as_with_gateway_code(
+                &self.db_name,
+                &op.repo,
+                &op.call,
+                params,
+                actor.clone(),
+            )
             .await
-            .map_err(|e| BatchError::QueryError {
+            .map_err(|failure| BatchError::QueryError {
                 alias: String::new(),
-                message: e.to_string(),
-                code: None,
+                message: failure.to_string(),
+                code: failure.code().map(str::to_string),
             })?;
 
         // Map QueryValue -> QueryResult with `value` field.

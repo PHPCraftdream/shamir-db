@@ -322,8 +322,8 @@ async fn rv_db_c58706f9_chmod_between_requests_is_not_memoized() {
         .execute_as(Actor::User(7), "authdb", &request)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("items"));
-    assert!(error.to_string().to_ascii_lowercase().contains("denied"));
+    assert!(error.to_string().contains("unknown_table"));
+    assert!(error.to_string().contains("table is unavailable"));
 }
 
 #[tokio::test]
@@ -368,8 +368,8 @@ async fn rv_db_c58706f9_batch_denial_names_table() {
         .execute_as(Actor::User(7), "authdb", &request)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("private"));
-    assert!(error.to_string().to_ascii_lowercase().contains("denied"));
+    assert!(error.to_string().contains("unknown_table"));
+    assert!(error.to_string().contains("table is unavailable"));
 }
 
 #[tokio::test]

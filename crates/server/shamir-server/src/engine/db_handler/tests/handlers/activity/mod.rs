@@ -4,4 +4,5 @@ pub mod activity_privacy_tests;
 pub mod activity_request_slot_tests;
 pub mod activity_requests_tests;
 pub mod operator_status_tests;
+pub mod read_outcome_audit_tests;
 pub mod shape_stats_tests;

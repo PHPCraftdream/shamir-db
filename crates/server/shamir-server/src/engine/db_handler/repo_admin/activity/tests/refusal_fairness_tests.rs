@@ -11,6 +11,7 @@
 //! 32 blocking jobs parked until their own deadline.
 
 use std::hash::BuildHasher;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -23,7 +24,9 @@ use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_query_types::admin::activity::{CancelOutcome, RequestExecId};
 
 use crate::db_handler::repo_audit::{
-    enqueue_cancel_refusal_audit, CancelRefusalAudit, CANCEL_AUDIT_PRINCIPAL_SHARE,
+    enqueue_cancel_refusal_audit, enqueue_typed_read_audit, CancelRefusalAudit,
+    CANCEL_AUDIT_OBSERVABILITY_CAPACITY, CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE,
+    CANCEL_AUDIT_PRINCIPAL_SHARE,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -237,5 +240,263 @@ async fn one_principal_cannot_exceed_its_share_while_another_is_recorded() {
     assert!(
         re_admitted,
         "a finished refusal must release its share slot for the same principal"
+    );
+}
+
+/// BLOCKED-APPENDER FLOOD, per principal.
+///
+/// The per-principal observability allowance (three quarters of the share) is
+/// not the principal's whole share: after a principal's read audits fill their
+/// allowance, a security event for that SAME principal must still be admitted
+/// and appended once the barrier is released. The extra observability probe
+/// pins the reserved boundary: pre-change the queue had one counter per
+/// principal and admitted it, so `further_refused` fails.
+#[tokio::test]
+async fn observability_flood_cannot_drop_a_security_event_for_the_same_principal() {
+    let appender = Arc::new(GatedAppender::default());
+    let writer = Arc::new(AuditChainWriter::new_with_shared(
+        Arc::new(AuditChain::new([13; 32])),
+        appender.clone(),
+    ));
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let principal = session("principal-shared-reads", 4);
+
+    let mut accepted = Vec::new();
+    let mut admitted_observability = 0usize;
+    for _ in 0..CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE as u64 {
+        let job = enqueue_typed_read_audit(
+            &queue,
+            &writer,
+            &principal,
+            "status",
+            "app",
+            Some(("repo", "table")),
+        );
+        if let Some(job) = job {
+            admitted_observability += 1;
+            accepted.push(job);
+        }
+    }
+
+    let security = enqueue_cancel_refusal_audit(
+        &queue,
+        &writer,
+        &principal,
+        RequestExecId(u64::MAX),
+        &CancelOutcome::NotCancellable,
+    );
+    let security_admitted = security.is_some();
+    if let Some(job) = security {
+        accepted.push(job);
+    }
+
+    // One more read audit for the SAME principal must be refused while the
+    // principal is still below its FULL share: the observability allowance is
+    // the reserved boundary. Pre-change this submission was admitted.
+    let further = enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+    let further_refused = further.is_none();
+    if let Some(job) = further {
+        accepted.push(job);
+    }
+
+    // Release unconditionally before asserting: a panic must not leave a
+    // blocking append parked until its own deadline.
+    appender.release_all();
+    for job in accepted {
+        tokio::time::timeout(TIMEOUT, job)
+            .await
+            .expect("accepted audit job timed out")
+            .unwrap();
+    }
+
+    assert_eq!(
+        admitted_observability, CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE,
+        "every observability job inside the per-principal allowance must be admitted"
+    );
+    assert!(
+        security_admitted,
+        "a security event for the flooded principal must use the reserved headroom"
+    );
+    assert!(
+        further_refused,
+        "the observability allowance must not grow into the security headroom"
+    );
+    let recorded = appender.recorded();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|entry| entry.user == principal.username && entry.event == "cancel_request")
+            .count(),
+        1,
+        "the same principal's security event is appended exactly once after the barrier"
+    );
+}
+
+/// BLOCKED-APPENDER FLOOD, global.
+///
+/// Read audits from many distinct principals fill only the observability part
+/// of the global cap (three quarters). A security event from ANOTHER principal
+/// must still be admitted, and one further observability submission must be
+/// refused once that part is exhausted. Pre-change the global counter had no
+/// class split, so the extra observability submission was admitted and
+/// `extra_refused` fails.
+#[tokio::test]
+async fn observability_flood_cannot_drop_a_security_event_from_another_principal() {
+    let appender = Arc::new(GatedAppender::default());
+    let writer = Arc::new(AuditChainWriter::new_with_shared(
+        Arc::new(AuditChain::new([17; 32])),
+        appender.clone(),
+    ));
+    let queue = Arc::new(CancelRefusalAudit::default());
+
+    let mut accepted = Vec::new();
+    let mut admitted_observability = 0usize;
+    for index in 0..CANCEL_AUDIT_OBSERVABILITY_CAPACITY {
+        let name = format!("observability-{index}");
+        let principal = session(&name, (index % 251) as u8);
+        let job = enqueue_typed_read_audit(&queue, &writer, &principal, "get_record", "app", None);
+        if let Some(job) = job {
+            admitted_observability += 1;
+            accepted.push(job);
+        }
+    }
+
+    let security_principal = session("security-outsider", 250);
+    let security = enqueue_cancel_refusal_audit(
+        &queue,
+        &writer,
+        &security_principal,
+        RequestExecId(1),
+        &CancelOutcome::NotCancellable,
+    );
+    let security_admitted = security.is_some();
+    if let Some(job) = security {
+        accepted.push(job);
+    }
+
+    let extra_principal = session("observability-overflow", 249);
+    let extra = enqueue_typed_read_audit(&queue, &writer, &extra_principal, "status", "app", None);
+    let extra_refused = extra.is_none();
+    if let Some(job) = extra {
+        accepted.push(job);
+    }
+
+    appender.release_all();
+    for job in accepted {
+        tokio::time::timeout(TIMEOUT, job)
+            .await
+            .expect("accepted audit job timed out")
+            .unwrap();
+    }
+
+    assert_eq!(
+        admitted_observability, CANCEL_AUDIT_OBSERVABILITY_CAPACITY,
+        "every observability job inside the global allowance must be admitted"
+    );
+    assert!(
+        security_admitted,
+        "a security event from another principal must use the reserved global headroom"
+    );
+    assert!(
+        extra_refused,
+        "the global observability allowance must be exhausted before the full cap"
+    );
+    let recorded = appender.recorded();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|entry| entry.user == security_principal.username)
+            .count(),
+        1,
+        "the other principal's security event is appended exactly once"
+    );
+}
+
+/// DROP ACCOUNTING.
+///
+/// A typed-read job whose clock cannot be read never reserves a slot and must
+/// still increment the queue's drop counter. The clock is driven through the
+/// `fail_clock` test seam (`UnixNanos::try_now` cannot be made to fail without
+/// one); the encoding branch records the same drop and is not separately
+/// exercised because the names-only payload cannot fail to encode.
+#[tokio::test]
+async fn typed_read_clock_failure_is_counted_as_a_dropped_job() {
+    let appender = Arc::new(GatedAppender::default());
+    let writer = Arc::new(AuditChainWriter::new_with_shared(
+        Arc::new(AuditChain::new([19; 32])),
+        appender.clone(),
+    ));
+    let queue = Arc::new(CancelRefusalAudit::default());
+    let principal = session("clock-failure", 6);
+
+    queue.fail_clock.store(true, Ordering::SeqCst);
+    let dropped = enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+    assert!(
+        dropped.is_none(),
+        "a clock failure must not admit an observability job"
+    );
+    assert_eq!(
+        queue.dropped_count(),
+        1,
+        "a clock-failed observability job must be counted as a dropped event"
+    );
+
+    // Clock failure precedes reservation. After clearing the seam, fill
+    // precisely the per-principal allowance while the appender is gated.
+    queue.fail_clock.store(false, Ordering::SeqCst);
+    let mut accepted = Vec::new();
+    let mut admitted = 0usize;
+    for _ in 0..CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE {
+        let job = enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+        if let Some(job) = job {
+            admitted += 1;
+            accepted.push(job);
+        }
+    }
+    let over_principal_share =
+        enqueue_typed_read_audit(&queue, &writer, &principal, "status", "app", None);
+    let principal_refused = over_principal_share.is_none();
+    if let Some(job) = over_principal_share {
+        accepted.push(job);
+    }
+
+    // Use the full remaining per-principal allowance, then enough distinct
+    // principals to reach the exact global observability boundary as well.
+    let mut global_accepted = Vec::new();
+    let global_slots_needed = CANCEL_AUDIT_OBSERVABILITY_CAPACITY - admitted;
+    for index in 0..global_slots_needed {
+        let other = session(&format!("clock-global-{index}"), (index % 251) as u8);
+        let job = enqueue_typed_read_audit(&queue, &writer, &other, "status", "app", None);
+        if let Some(job) = job {
+            global_accepted.push(job);
+        }
+    }
+    let global_overflow = session("clock-global-overflow", 251);
+    let global_refused =
+        enqueue_typed_read_audit(&queue, &writer, &global_overflow, "status", "app", None)
+            .is_none();
+
+    let global_accepted_count = global_accepted.len();
+    appender.release_all();
+    for job in accepted.into_iter().chain(global_accepted) {
+        tokio::time::timeout(TIMEOUT, job)
+            .await
+            .expect("admitted quota audit job timed out")
+            .unwrap();
+    }
+    assert_eq!(admitted, CANCEL_AUDIT_OBSERVABILITY_PRINCIPAL_SHARE);
+    assert!(
+        principal_refused,
+        "per-principal observability quota must stop at 24"
+    );
+    assert_eq!(global_accepted_count, global_slots_needed);
+    assert!(
+        global_refused,
+        "global observability quota must stop at 192"
+    );
+    assert_eq!(
+        queue.dropped_count(),
+        3,
+        "clock failure plus both quota refusals are the only drops"
     );
 }

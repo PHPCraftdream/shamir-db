@@ -14,12 +14,14 @@ use crate::cursor_registry::{CursorRegistryError, PaginationMode};
 
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
+    wrap_table_lookup_err,
 };
 use super::keyset::{
     build_filter_context, fetch_keyset_page, order_by_field_value, row_record_id, KeysetOutcome,
 };
 use crate::db_handler::cursor_support::{authorize_cursor_read, resolve_repo};
-use crate::db_handler::handler::{session_actor, DbResponse, ShamirDbHandler};
+use crate::db_handler::handler::{error_code, session_actor, DbResponse, ShamirDbHandler};
+use crate::db_handler::operator_state::table_unavailable_response;
 use crate::db_handler::visibility_handlers::quarantine_cursor_error;
 
 /// Outcome of [`fetch_offset_page`]: the up-to-`effective_page_size` rows
@@ -111,8 +113,9 @@ impl ShamirDbHandler {
     /// happens INSIDE the per-table `OnceCell` init closure, serialized
     /// against a concurrent `remove_table`) — so a `DropTable` that commits
     /// WHILE a cursor is open mid-scroll is observed on the very next
-    /// `FetchNext` as a clean engine error (routed through
-    /// `wrap_engine_err`/`error_code` like any other read failure), instead
+    /// `FetchNext` as a clean typed `unknown_table`
+    /// (`wrap_table_lookup_err` — the SAME code an absent table answers, so
+    /// the refusal is not an existence oracle), instead
     /// of silently continuing to serve reads against a conceptually-dropped
     /// table. A CACHED `TableManager` handle would paper over exactly that:
     /// the handle itself has no lifecycle hook that revalidates the table
@@ -207,10 +210,13 @@ impl ShamirDbHandler {
         // change from making the ORDER matter, so keeping the two handlers
         // consistent is worth the pure reshuffle.
         //
-        // W-6 (#790, Wave D review): NOT quite a pure reshuffle after all —
-        // a db dropped between `CreateCursor` and this `FetchNext` now
-        // surfaces as `access_denied`, not `unknown_db`, for a non-admin
-        // actor. Verified mechanism (NOT resource_meta's fail-closed path —
+        // W-6 (#790, Wave D review) + read-refusal parity: a db dropped
+        // between `CreateCursor` and this `FetchNext` still surfaces through
+        // the TABLE check (not `unknown_db`) for a non-admin actor, but that
+        // table-level refusal is now the SAME typed `unknown_table` every
+        // read path answers for an absent/forbidden table — NOT
+        // `access_denied`, which would tell the caller the table exists.
+        // Verified mechanism (NOT resource_meta's fail-closed path —
         // `ShamirDb::remove_db` only deletes the db's own catalogue row,
         // which `resource_meta` treats as a plain not-found default-open,
         // not a storage error): the TARGET TABLE's own real, still-
@@ -220,7 +226,7 @@ impl ShamirDbHandler {
         // Either way this is a deliberate, accepted consequence of
         // authorizing before resolving, documented here since it was not
         // explicitly called out when the reorder landed (CR-D5/N-9) — see
-        // `fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unknown_db`.
+        // `fetch_next_after_db_dropped_mid_scroll_surfaces_unknown_table_not_unknown_db`.
         //
         // Re-authorize on every FetchNext, not just at CreateCursor time: a
         // pinned snapshot only bounds WHAT DATA a cursor can see, not
@@ -236,7 +242,26 @@ impl ShamirDbHandler {
         {
             self.cursor_registry.remove(cursor_id.0);
             drop(state);
+            if error_code(&e) == "unknown_table" {
+                return table_unavailable_response();
+            }
             return error_response(&e);
+        }
+
+        // Availability BEFORE any gate that can differ: resolve the parents
+        // (typed `unknown_db`/`unknown_repo`) and require the table to still
+        // be configured. An ABSENT table therefore answers the SAME fixed
+        // refusal a CLOSED table answered at the ACL above, in the same
+        // availability phase and before the quarantine probe can distinguish
+        // them.
+        let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
+            Ok(repo) => repo,
+            Err(parent) => return error_response(&parent),
+        };
+        if !repo.has_table(&table_name) {
+            self.cursor_registry.remove(cursor_id.0);
+            drop(state);
+            return table_unavailable_response();
         }
 
         // S5c-X PR8b: a cursor created BEFORE its repo was quarantined must
@@ -247,14 +272,6 @@ impl ShamirDbHandler {
         if let Some(e) = quarantine_cursor_error(&self.db, cursor.db(), cursor.repo()) {
             self.cursor_registry.remove(cursor_id.0);
             drop(state);
-            return error_response(&e);
-        }
-
-        // `resolve_repo` is still called here (its `RepoInstance` result is
-        // now unused) purely for its distinct `unknown_db`/`unknown_repo`
-        // error classification (CR-C1) ahead of `ShamirDb::get_table`'s own,
-        // less-specific not-found error below.
-        if let Err(e) = resolve_repo(&self.db, cursor.db(), cursor.repo()) {
             return error_response(&e);
         }
 
@@ -271,7 +288,20 @@ impl ShamirDbHandler {
             .await
         {
             Ok(t) => t,
-            Err(e) => return error_response(&wrap_engine_err(e)),
+            // A table that vanished between the configured-table check and
+            // this lookup is a terminal table miss: answer the SAME fixed
+            // refusal and retire the cursor (like the revoked-Read path
+            // above). A vanished PARENT keeps its typed `unknown_db`/
+            // `unknown_repo` and is not a table miss.
+            Err(e) => {
+                let wrapped = wrap_table_lookup_err(&self.db, cursor.db(), cursor.repo(), e);
+                if error_code(&wrapped) == "unknown_table" {
+                    self.cursor_registry.remove(cursor_id.0);
+                    drop(state);
+                    return table_unavailable_response();
+                }
+                return error_response(&wrapped);
+            }
         };
 
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();

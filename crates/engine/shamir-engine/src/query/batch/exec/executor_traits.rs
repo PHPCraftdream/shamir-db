@@ -32,6 +32,17 @@ pub trait BatchResolver: TableResolver {
     /// for transactional batches.
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore>;
 
+    /// Optional catalogue metadata probe used to preflight table reads.
+    /// `None` means the resolver cannot answer without resolving the table.
+    fn table_read_exists(
+        &self,
+        _db_name: &str,
+        _repo_name: &str,
+        _table_name: &str,
+    ) -> Option<bool> {
+        None
+    }
+
     /// Optional per-repository telemetry sink for query dispatch. Implementors
     /// that do not own engine metrics may keep the default no-op behavior.
     fn query_metrics(&self, _repo_name: &str) -> Option<std::sync::Arc<dyn QueryMetrics>> {

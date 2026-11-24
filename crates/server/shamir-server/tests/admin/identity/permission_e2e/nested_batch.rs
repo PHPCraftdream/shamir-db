@@ -59,6 +59,18 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
         "setup: {:?}",
         resp
     );
+    // Open parent resources so the nested table read tests only table ACL.
+    for req in [
+        chmod_db_batch(admin_sid, db_name, 0o777),
+        chmod_store_batch(admin_sid, db_name, "main", 0o777),
+    ] {
+        let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
+        assert!(
+            matches!(resp, DbResponse::Batch { .. }),
+            "open parent ACL: {:?}",
+            resp
+        );
+    }
     // secret_table is left at its enforced default (0o700, owner=System) —
     // carol below has no rights to it whatsoever.
 
@@ -99,7 +111,8 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
 
     // Carol sends Batch{ sub: Read(secret_table) }. The container is not an
     // admin op, so the coarse gate lets the data-only leaf through and the
-    // per-resource authorization denies the READ on the forbidden table.
+    // per-resource authorization refuses the READ on the forbidden table with
+    // the same `unknown_table` refusal an absent table answers.
     let resp = roundtrip(
         &nested_batch_read_req(db_name, secret_table),
         carol_sid,
@@ -111,13 +124,18 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "access_denied",
-                "nested Batch{{Read(forbidden)}} must be denied by per-resource authorization, got code={}, msg={}",
+                code, "unknown_table",
+                "nested Batch{{Read(forbidden)}} must be refused by per-resource authorization, got code={}, msg={}",
                 code, message
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "message should be the fixed refusal: {}",
+                message
             );
         }
         other => panic!(
-            "expected access_denied for nested Batch{{Read(forbidden)}}, got {:?}",
+            "expected unknown_table for nested Batch{{Read(forbidden)}}, got {:?}",
             other
         ),
     }

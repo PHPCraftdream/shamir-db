@@ -184,13 +184,22 @@ pub(super) fn assert_gateway_read_denial(result: DbResult<QueryValue>) {
     let DbError::Function(message) = error else {
         panic!("expected gateway DbError::Function, got {error:?}");
     };
+    // A denied READ carries the unified `unknown_table` code (the SAME code
+    // an absent table answers), so the gateway classifies it as a generic
+    // execution failure rather than `Permission`.
     assert!(
-        message.contains("db_execute: db gateway: permission denied:"),
-        "expected normal db_execute gateway denial, got: {message}"
+        message.contains("db_execute: db gateway: execution failed:"),
+        "expected the masked db_execute gateway read denial, got: {message}"
     );
     assert!(
-        message.contains(&format!("access denied: User({RESTRICTED_ID}) cannot READ")),
-        "expected source-table READ denial, got: {message}"
+        message.contains("table is unavailable"),
+        "expected the fixed unknown_table context, got: {message}"
+    );
+    assert!(
+        !message.contains("access denied:")
+            && !message.contains(&format!("User({RESTRICTED_ID})"))
+            && !message.contains("source_rows"),
+        "a read refusal must not disclose a table ACL diagnostic, restricted ID, or table name, got: {message}"
     );
 }
 

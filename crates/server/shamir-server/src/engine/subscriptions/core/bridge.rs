@@ -1,5 +1,5 @@
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -107,6 +107,7 @@ pub(crate) async fn bridge_task(
     let slot_guard = SubscriptionSlotGuard { registry, sub_id };
 
     let started = std::time::Instant::now();
+    let activated = AtomicBool::new(false);
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.
@@ -126,50 +127,33 @@ pub(crate) async fn bridge_task(
     };
 
     let run = async {
-        // CRIT-5 (#439): Per-table read-ACL enforcement.
-        //
-        // `BatchOp::Subscribe` is classified at the session layer as
-        // `(Action::Read, Resource::Global)` — a coarse "can this actor
-        // subscribe at all?" gate. The per-table checks the classifier
-        // comment promises ("actual table checks happen when the
-        // subscription is activated") MUST happen here, in the bridge,
-        // where the full `sources` list is known. Without this loop a user
-        // with global `read` but no `read` on table `secrets` would receive
-        // every live insert/update/delete from `secrets`.
-        //
-        // Strategy: authorize each source's table via `authorize_access`;
-        // keep only the authorized subset. Denied sources are logged and
-        // silently excluded (not a hard failure — mirrors the existing
-        // "changefeed not available" partial-reject path). If ALL sources
-        // are denied, bail out before subscribing to any changefeed (no
-        // receiver created, no push).
-        let mut authorized_sources: Vec<SubscriptionSource> = Vec::with_capacity(sources.len());
-        for source in sources {
+        // Authorization is rechecked at activation in case ACLs changed
+        // after Authorized preflight. Any unavailable source fails the whole
+        // activation; never filter it out and continue with a partial stream.
+        for source in &sources {
+            let member = db
+                .get_db(&db_name)
+                .is_some_and(|repo_db| repo_db.has_table(&source.table.repo, &source.table.table));
             let path = ResourcePath::Table {
                 db: db_name.clone(),
                 store: source.table.repo.clone(),
                 table: source.table.table.clone(),
             };
-            match db.authorize_access(&actor, &path, Action::Read).await {
-                Ok(()) => authorized_sources.push(source),
-                Err(_) => {
-                    tracing::warn!(
-                        sub_id,
-                        repo = %source.table.repo,
-                        table = %source.table.table,
-                        "subscription source denied by read-ACL; excluding from delivery",
-                    );
-                }
+            if !member
+                || db
+                    .authorize_access(&actor, &path, Action::Read)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(
+                    sub_id,
+                    repo = %source.table.repo,
+                    table = %source.table.table,
+                    "subscription activation failed: source is no longer readable",
+                );
+                return;
             }
         }
-        if authorized_sources.is_empty() {
-            tracing::warn!(
-                sub_id,
-                "all subscription sources denied by read-ACL; aborting bridge"
-            );
-            return;
-        }
-        let sources = authorized_sources;
 
         let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
             .iter()
@@ -244,6 +228,7 @@ pub(crate) async fn bridge_task(
             "bridge live; releasing the activation barrier",
         );
         slot_guard.registry.signal_ready(sub_id);
+        activated.store(true, Ordering::Release);
 
         let terminal_gates = delivery_gates.clone();
         let bridge_work = async {
@@ -682,17 +667,20 @@ pub(crate) async fn bridge_task(
         );
     });
 
-    // Always emit Closed frame (best-effort) on self-exit so the client
-    // knows the subscription ended server-side.
-    let s = seq.load(Ordering::Relaxed);
-    let closed = PushEnvelope {
-        push: PushKind::Closed,
-        sub: sub_id,
-        seq: s,
-        data: None,
-        gap_at: None,
-    };
-    if let Ok(frame) = rmp_serde::to_vec_named(&closed) {
-        let _ = push.try_push(frame);
+    // A bridge that exits before signalling readiness failed activation. It has
+    // no client-visible grant, so emitting Closed would leak a frame for an
+    // unknown subscription. Once activated, self-exits remain observable.
+    if activated.load(Ordering::Acquire) {
+        let s = seq.load(Ordering::Relaxed);
+        let closed = PushEnvelope {
+            push: PushKind::Closed,
+            sub: sub_id,
+            seq: s,
+            data: None,
+            gap_at: None,
+        };
+        if let Ok(frame) = rmp_serde::to_vec_named(&closed) {
+            let _ = push.try_push(frame);
+        }
     }
 }

@@ -73,13 +73,7 @@ pub enum FunctionSource<'a> {
     Shamir(&'a str),
 }
 
-/// The caller-holds-proof newtype for `replication_control_lock` (round 5,
-/// A3). The constructor is `pub(crate)`, so code outside `shamir-db` cannot
-/// fabricate a guard — the compiler enforces the caller-holds-lock contract
-/// as far as crate boundaries go (no compile-fail evidence is available in
-/// this repo's CI: a counterexample simply does not compile). Every API that
-/// must run under the interlock takes `&ReplicationControlGuard` instead of
-/// a raw `tokio::sync::MutexGuard<()>`.
+/// Caller-holds-proof guard for `replication_control_lock`; its crate-private constructor prevents external fabrication.
 pub struct ReplicationControlGuard<'a> {
     guard: tokio::sync::MutexGuard<'a, ()>,
 }
@@ -89,9 +83,7 @@ impl<'a> ReplicationControlGuard<'a> {
         Self { guard }
     }
 
-    /// Monitoring seam: per-acquisition identity of the held interlock. The
-    /// guard's entire VALUE is its lifetime + Drop — dropping it releases
-    /// `replication_control_lock`.
+    /// Identity of the held interlock; dropping this guard releases the lock.
     pub fn interlock_id(&self) -> usize {
         std::ptr::from_ref(&*self.guard).addr()
     }
@@ -905,7 +897,6 @@ impl ShamirDb {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     pub(super) fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
-        // Unavailable backends return None; recorded engine names remain intact.
         #[cfg(not(feature = "fjall"))]
         let _ = path;
         match engine {
@@ -924,13 +915,7 @@ impl ShamirDb {
         Self::storage_type_inner(factory, true).to_string()
     }
 
-    /// `top == true` labels the factory the catalogue will record: a RAW
-    /// `Fjall` variant at the top of the stack is an unbuffered repo and
-    /// must be recorded as `"fjall_raw"` so the boot path re-attaches it
-    /// raw (`supports_atomic_batch() == true`). A `Fjall` reached THROUGH
-    /// a wrapper is part of a buffered stack and must keep reporting the
-    /// wrapped kind `"fjall"` — relabeling it raw would make the boot path
-    /// drop the buffer layer on reopen.
+    /// Labels the top-level Fjall variant raw; wrapped Fjall keeps its wrapped kind.
     fn storage_type_inner(factory: &BoxRepoFactory, top: bool) -> &'static str {
         #[cfg(not(feature = "fjall"))]
         let _ = top;
@@ -946,9 +931,6 @@ impl ShamirDb {
             }
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Hybrid(_) => "hybrid",
-            // The buffer/cache layers don't have an identity of their own
-            // — recurse to the underlying backend so reflection sees the
-            // real engine, but as a WRAPPED (non-top) backend.
             BoxRepoFactory::MemBuffer(f) => Self::storage_type_inner(&f.inner, false),
             BoxRepoFactory::Cached(f) => Self::storage_type_inner(&f.inner, false),
         }
@@ -966,9 +948,6 @@ impl ShamirDb {
         }
     }
 
-    /// Canonical table-ref string for validator binding tracking.
-    /// Format: `"db/repo/table"` — matches the form used by
-    /// `ValidatorRegistry::add_binding` / `bound_tables`.
     pub(super) fn table_ref_str(db: &str, repo: &str, table: &str) -> String {
         format!("{}/{}/{}", db, repo, table)
     }

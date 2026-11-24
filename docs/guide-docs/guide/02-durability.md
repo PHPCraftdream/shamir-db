@@ -130,6 +130,49 @@ resp.transaction?.commit_version;  // number
 построиться до ответа. Если `false` — коммит durable, но какие-то
 проекции отложены до recovery (данные появятся после рестарта).
 
+При аборте `resp.transaction?.status` равен `'aborted'`. Поле
+`resp.transaction?.reason` — не «просто debug-текст»: обычный план-аборт
+складывает туда `{:?}`-форму ошибки
+(`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`),
+но `skip_aborted` спецслучаем записывается как сам код — единственное такое
+исключение (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`).
+Стабильный машиночитаемый код упавшей операции вынесен отдельно в
+`resp.transaction?.abort_code`: это код план-аборта (например
+`call_in_tx_not_supported` или `skip_aborted`) и — теперь — код
+commit-time классификации: `tx_conflict`, `unique_violation`,
+`version_conflict`, `table_migrating`, `wal_retention_exceeded`,
+`commit_admission_refused`, `wal_requires_reopen`, `cancelled`
+(`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`).
+Классификации без стабильного слова (`Storage` без собственного `code`,
+`Expired`) по-прежнему оставляют `abort_code` пустым
+(`crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`).
+Для `committed` и `indeterminate` исходов `abort_code` отсутствует
+(там же: строки 79 и 126 — соответствующие конструкторы оставляют `None`).
+
+Тело `for_each` с собственным `transactional: true` разбирает исход коммита
+явно по `status`
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`):
+
+* `aborted` — итерация падает с кодом из `abort_code` (или
+  `transaction_aborted`, если кода нет): коммита не было, поэтому пустой
+  результат не выдаётся за вычисленное значение
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:493-501`);
+* `indeterminate` — итерация падает с кодом `wal_requires_reopen` и текстом
+  из `reason`/`error`: коммит МОГ пройти (WAL-кадр, возможно, записан), поэтому
+  цикл останавливается — иначе результирующий список имел бы неизвестный
+  префикс. Клиент обязан сначала согласовать исход (reopen и WAL replay), а не
+  повторять слепо (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:515-523`);
+* `committed` — результаты итерации добавляются в список
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:526`);
+* любой другой статус — отказ с фиксированным кодом `internal`
+  (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:529-538`).
+
+Уже закоммиченный префикс при этом НЕ откатывается: каждая итерация коммитит
+свою собственную транзакцию, поэтому ошибка на поздней итерации означает
+«остановиться здесь», а не «отменить закоммиченное»
+(`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:351-381`
+возвращает метаданные как есть, а диспозицию выбирает вызывающий).
+
 ### Кросс-таблицная атомарность
 
 ```ts

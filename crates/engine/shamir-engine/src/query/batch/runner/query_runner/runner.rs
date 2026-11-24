@@ -4,12 +4,14 @@ use shamir_collections::TFxSet;
 use shamir_engine_query::query::filter::read_budget::{QueryMetrics, QueryOp};
 use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
+use shamir_storage::error::DbError;
 use shamir_tx::CancelState;
 use shamir_types::access::{Actor, ResourcePath};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
+use crate::query::batch::authorized::table_unavailable;
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
@@ -256,9 +258,31 @@ impl<'a> QueryRunner<'a> {
             };
         }
 
-        // Subscribe — validate sources exist, return a grant marker.
-        // Real activation happens in the server handler post-processing.
+        // Subscribe — validate every source before applying the single-repo
+        // feature gate, then return a grant marker. Authorization preflight
+        // has already classified source availability and READ access; this
+        // resolver check closes the execution-time race before the grant is
+        // constructed. Real activation happens in the server handler.
         if let BatchOp::Subscribe(op) = &entry.op {
+            for src in &op.subscribe {
+                if let Err(error) = self.resolver.resolve(&src.table).await {
+                    // One unavailable source refuses the whole op BEFORE the
+                    // grant map / subscription id below. Preserve missing
+                    // parent errors; a missing table within an existing repo
+                    // uses the canonical table refusal.
+                    if matches!(&error, DbError::NotFound(_))
+                        && self.resolver.resolve_repo(&src.table.repo).await.is_ok()
+                    {
+                        return Err(table_unavailable());
+                    }
+                    return Err(BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("table not found: {}", src.table),
+                        code: Some("table_not_found".to_string()),
+                    });
+                }
+            }
+
             let unique_repos: TFxSet<&str> =
                 op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
             if unique_repos.len() > 1 {
@@ -270,15 +294,6 @@ impl<'a> QueryRunner<'a> {
             }
 
             for src in &op.subscribe {
-                self.resolver
-                    .resolve(&src.table)
-                    .await
-                    .map_err(|_| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("table not found: {}", src.table),
-                        code: Some("table_not_found".to_string()),
-                    })?;
-
                 if let Some(ref filter) = src.filter {
                     if let Some(unsupported) = find_unsupported_subscription_filter(filter) {
                         return Err(BatchError::QueryError {
@@ -318,15 +333,27 @@ impl<'a> QueryRunner<'a> {
         };
         let resource = self.table_resource(table_ref);
 
-        let table = self
-            .resolver
-            .resolve(table_ref)
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: e.to_string(),
-                code: None,
-            })?;
+        let table = match self.resolver.resolve(table_ref).await {
+            Ok(table) => table,
+            Err(error) => {
+                // A READ whose table is absent answers the layer's ONE table
+                // refusal (never `code: None` + the raw engine text); a
+                // missing parent repository, or any non-read op, keeps
+                // today's shape. `resolve_repo` is the catalogue probe that
+                // tells the two apart without reading the error text.
+                if matches!(&entry.op, BatchOp::Read(_))
+                    && matches!(&error, DbError::NotFound(_))
+                    && self.resolver.resolve_repo(&table_ref.repo).await.is_ok()
+                {
+                    return Err(table_unavailable());
+                }
+                return Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: error.to_string(),
+                    code: None,
+                });
+            }
+        };
 
         let interner = table
             .interner()

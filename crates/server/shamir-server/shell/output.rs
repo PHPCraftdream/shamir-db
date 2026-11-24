@@ -201,7 +201,7 @@ impl ShellError {
             ShellError::Denied => "permission denied by the server",
             ShellError::Server => "the operation failed on the server",
             ShellError::NotFound => "the addressed resource was not found",
-            ShellError::UnknownTable => "the addressed table does not exist",
+            ShellError::UnknownTable => "table is unavailable",
             ShellError::ResyncRequired => "the repository is in replication quarantine; a reseed is required",
             ShellError::ResultTooLarge => "the encoded response exceeds the server's result-size cap",
             ShellError::ProjectionLimit => "the record could not be projected to the output schema",

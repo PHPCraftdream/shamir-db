@@ -163,16 +163,19 @@ fn token_subset_zero_dial_proven_by_relay_counter() {
 }
 
 #[test]
-fn token_database_read_table_read_denied() {
-    let secure = boot_secure("token_database_read_table_read_denied");
+fn token_database_read_table_unavailable() {
+    let secure = boot_secure("token_database_read_table_unavailable");
     let fixture = &secure.shell;
     seed_catalogue(fixture);
     seed_shell_user(fixture);
 
     // The child has OTHER-read on the named database, so Database Read
     // succeeds; the addressed table is owner-only, so the second
-    // Table-Read authorization fails. This is distinct from the no-role
-    // case (which can fail at the first, Database check).
+    // Table-Read authorization fails. Under read-refusal parity that table
+    // denial answers exactly like an absent table: `unknown_table` / "table
+    // is unavailable" (exit 5), with no ACL diagnostic. This is distinct
+    // from the no-role case (which can fail at the first, Database check and
+    // keeps `access_denied` / exit 4).
     set_acl_mode(
         fixture,
         ResourceRef::Database {
@@ -190,7 +193,7 @@ fn token_database_read_table_read_denied() {
     // Positive ACL control: the same user/token can read a different table
     // in the same database after the database-level grant. This establishes
     // that Database Read succeeds and that only the target table's missing
-    // Other-Read bit causes the next refusals.
+    // Other-Read bit causes the next table-unavailable refusals.
     set_acl_mode(
         fixture,
         ResourceRef::Store {
@@ -242,7 +245,12 @@ fn token_database_read_table_read_denied() {
             Some(&secure.ca_path),
         );
         let run = run_token_shell(fixture, &token, args);
-        refusal(&run, "data", "permission_denied", 4);
+        let value = refusal(&run, "data", "unknown_table", 5);
+        assert_eq!(
+            value["message"].as_str(),
+            Some("table is unavailable"),
+            "the table read refusal must not distinguish closed from absent"
+        );
     }
 }
 

@@ -6,9 +6,7 @@
 //! every §3.2 typed refusal plus auth/resume routing; `--secret-fd`/env;
 //! insecure profile leaves with restore controls; catalogue DATA reflection
 //! (escaped text only, byte-scanned, decoded equality); real non-superuser
-//! denial (exit 4) with auth controls; scripted interactive REPL behind a
-//! fake terminal; hygiene. No sleeps; every await bounded by the harness
-//! 120 s hang bounds and the `FlakeGuard::with_watchdog` dump.
+//! fake terminal; hygiene. No sleeps; awaits are bounded by the harness.
 
 use serde_json::Value;
 use std::io::Cursor;
@@ -782,15 +780,13 @@ fn shell_transport_insecure_profile_leaf_refused() {
     }
 }
 
-/// Malicious-peer rule + hygiene on a failing request: only typed code and fixed local message — never peer detail, argv or panic; no history file.
+/// Hygiene on a failing request: only typed code and fixed local message; no peer detail or history file.
 #[test]
 fn shell_transport_hygiene_and_reflection() {
     let fixture = boot("shell_transport_hygiene_and_reflection");
     let path = write_profile(&fixture);
     seed_catalogue(&fixture);
 
-    // Failing request: a missing table name the server reflects in its
-    // error message — the needle must not come back through the shell.
     let needle = "ghosttable";
     let run = run_shell(&fixture, &["table", "describe", REPO_NAME, needle]);
     assert_no_leak(&fixture, &run);
@@ -799,9 +795,15 @@ fn shell_transport_hygiene_and_reflection() {
     assert!(!stdout.contains(needle) && !stderr.contains(needle));
     assert!(!stderr.contains(&format!("table describe {REPO_NAME} {needle}")));
     let record = parse_one_record(&run);
-    expect_error(&run, &record, "table describe", "not_found", 5, None);
+    expect_error(
+        &run,
+        &record,
+        "table describe",
+        "unknown_table",
+        5,
+        Some("table is unavailable"),
+    );
 
-    // Argv hygiene: the canary never travels on argv; profile stays clean.
     assert_profile_clean(&fixture, &path);
     assert_no_created_files(&fixture);
 }
@@ -982,13 +984,10 @@ fn shell_transport_scripted_interactive() {
         !human.contains("error"),
         "a failed command renders the fixed error block"
     );
-    // Escaped name re-rendered (JSON-doubled then \u005C); the escape-boundary
-    // truncation of the 200-char cap always keeps the head fragment.
     assert!(
         human.contains(INDEX_ODD_HUMAN_FRAGMENT),
         "escaped name fragment must appear"
     );
-    // Full name when the cell fits, else the escape-safe truncation marker.
     assert!(human.contains(INDEX_ODD_HUMAN_FULL) || human.contains("..."));
     assert_no_raw_controls(&stderr, "interactive stderr");
     assert_profile_clean(&fixture, &path);

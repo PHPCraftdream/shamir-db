@@ -297,8 +297,14 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                 return Err(plan_err);
             }
 
-            let info =
+            let mut info =
                 shamir_query_types::batch::TransactionInfo::aborted(tx_id, abort_reason(&plan_err));
+            // Keep the stable code of the failing operation alongside the
+            // debug-text reason; `abort_reason` debug-formats the error and
+            // must not remain the only record of the cause.
+            if let Some(code) = plan_err.code() {
+                info = info.with_abort_code(code);
+            }
             Ok((new_map(), Some(info)))
         }
         Ok(results) => {
@@ -343,6 +349,21 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                 }
                 Err(crate::tx::CommitError::Cancelled) => Err(BatchError::Cancelled),
                 Err(commit_err) => {
+                    // The commit outcome is returned as metadata — never
+                    // swallowed here — because the CALLER decides the
+                    // disposition:
+                    //   * a top-level transactional batch returns this as
+                    //     `Ok((results, Some(info)))` with `transaction`
+                    //     metadata exactly as before (no behaviour change on
+                    //     that path: an aborted or `indeterminate` outcome is
+                    //     still a `Some(info)` on an `Ok` response);
+                    //   * a `for_each` iteration (`arms_read.rs`) inspects
+                    //     `info.status` and turns a non-committed outcome into
+                    //     an iteration failure.
+                    // `into_transaction_info` is what classifies the error
+                    // (abort `reason` + its stable `abort_code`, or the
+                    // `indeterminate` status for a possibly-written WAL frame);
+                    // this arm must not narrow or re-interpret that.
                     let info = commit_err.into_transaction_info(tx_id, snapshot_version);
                     if info.is_committed() {
                         Ok((

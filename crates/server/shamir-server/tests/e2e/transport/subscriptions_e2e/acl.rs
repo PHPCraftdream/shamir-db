@@ -1,5 +1,6 @@
-//! CRIT-5 (#439): per-table read-ACL on Subscribe — denied tables leak
-//! NOTHING to the unauthorized subscriber.
+//! CRIT-5 (#439): per-table read-ACL on Subscribe — ONE unreadable source
+//! refuses the WHOLE Subscribe op, so nothing is granted and nothing is
+//! delivered.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,25 +20,37 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::TableRef;
 
-use shamir_server::db_handler::ShamirDbHandler;
+use shamir_server::db_handler::{DbResponse, ShamirDbHandler};
 use shamir_server::subscriptions::SubscriptionRegistry;
 
 use super::common::{
-    capture, conn_with, decode, encode, execute_built, next_event_for, settle, sub_id_of,
-    unwrap_batch, user_session,
+    capture, conn_with, decode, encode, execute_built, next_event_for, next_push, settle,
+    sub_id_of, unwrap_batch, user_session,
 };
 
 // ============================================================================
-// 8. CRIT-5 (#439): per-table read-ACL on Subscribe — denied table leaks
-//    NOTHING to the unauthorized subscriber.
+// 8. CRIT-5 (#439): per-table read-ACL on Subscribe — an unreadable source
+//    refuses the WHOLE op: no grant, no subscription id, no delivery.
 // ============================================================================
 //
-// Regression: `BatchOp::Subscribe` is classified as `(Read, Global)` at the
-// session layer. Before CRIT-5 the bridge never checked per-table read
-// access, so a user with global read but no read on `secrets` received every
-// live insert/update/delete from `secrets`. The fix authorizes each source's
-// table in `bridge_task` before subscribing to the changefeed; denied sources
-// are silently excluded from delivery.
+// Regression: `BatchOp::Subscribe` carries no `required_access` entry, so a
+// user with global read but no read on `secrets` used to receive every live
+// insert/update/delete from `secrets`. Every source's table is now classified
+// at the ACL seam BEFORE any subscription manager is resolved: a table the
+// actor cannot `Read` — or one that does not exist — answers the layer's ONE
+// fixed table refusal, `code: "unknown_table"` with the constant text
+// `"table is unavailable"`. The refusal REPLACES the old "denied sources are
+// silently excluded from delivery" behaviour: the whole operation is refused,
+// so a mixed allowed+denied op cannot be partially honoured either.
+//
+// Two consequences the tests below pin down:
+//   * the server answers a top-level `DbResponse::Error` (not a
+//     `DbResponse::Batch`): the runner never builds the grant map / sub id,
+//     and the subscribe handler's post-processing only injects `sub` into an
+//     existing `results[alias].value`, so no bridge is spawned; and
+//   * the refusal is byte-identical to an absent table's — it never echoes
+//     the table name and never says `access denied`, so it is not an
+//     existence oracle.
 
 /// Fixture: one repo with two tables — `messages` (open) and `secrets`
 /// (restricted to a DIFFERENT owner). The default user session ("alice")
@@ -104,6 +117,48 @@ fn system_session() -> Session {
     s
 }
 
+/// Assert `resp` is the layer's ONE fixed table refusal — a top-level
+/// `DbResponse::Error` with `code == "unknown_table"` and the constant text
+/// `"table is unavailable"` — and that it leaks NOTHING about the source:
+/// no table name in `forbidden` (no existence oracle) and no `access denied`
+/// diagnostic (a read denial must be indistinguishable from an absent table).
+fn assert_table_unavailable_refusal(resp: DbResponse, forbidden: &[&str]) {
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_table",
+                "a refused Subscribe source must answer the layer's one table refusal, got {:?}",
+                message
+            );
+            assert!(
+                message.contains("table is unavailable"),
+                "the refusal must carry the fixed text `table is unavailable`, got {:?}",
+                message
+            );
+            for name in forbidden {
+                assert!(
+                    !message.contains(name),
+                    "the refusal must not echo the table name `{}` (existence oracle): {:?}",
+                    name,
+                    message
+                );
+            }
+            assert!(
+                !message.contains("access denied"),
+                "a table-Read denial must not answer `access denied` (existence oracle): {:?}",
+                message
+            );
+        }
+        other => panic!(
+            "expected the fixed `unknown_table` refusal (DbResponse::Error), got {:?}",
+            other
+        ),
+    }
+}
+
+/// A Subscribe whose only source is a table alice cannot `Read` is refused
+/// as a WHOLE: the client gets the fixed `unknown_table` refusal instead of a
+/// grant, and no frame (not even `Ready`) ever reaches the push sink.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crit5_acl_denied_table_delivers_nothing() {
     let shamir = make_db_one_repo_split_acl("app", "main").await;
@@ -114,22 +169,28 @@ async fn crit5_acl_denied_table_delivers_nothing() {
     let registry = Arc::new(SubscriptionRegistry::new());
     let conn = conn_with(push, registry.clone());
 
-    // Alice subscribes to `secrets` — a table she has NO read access to.
+    // Alice subscribes to `secrets` — a table she has NO read access to. The
+    // source is classified before any manager is resolved, so the whole op is
+    // refused: no grant map, no subscription id, no bridge.
     let sub_op = Subscribe::table(TableRef::with_repo("main", "secrets")).build();
     let mut sb = Batch::new();
     sb.id(1);
     sb.subscribe("m", sub_op);
-    let resp = unwrap_batch(decode(
+    let resp = decode(
         &handler
             .handle(&alice, &encode(&execute_built("app", sb.build())), &conn)
             .await
             .unwrap(),
-    ));
-    let sub_id = sub_id_of(&resp, "m");
+    );
+    assert_table_unavailable_refusal(resp, &["secrets"]);
+    assert_eq!(
+        registry.count(),
+        0,
+        "a refused Subscribe must not register a subscription"
+    );
 
-    settle().await;
-
-    // System writes a row into `secrets`. Alice must NOT receive any Event.
+    // System writes a row into `secrets`. Alice has no bridge, so the push
+    // sink must stay COMPLETELY silent — not merely "no Event frames".
     let sys = system_session();
     let mut wb = Batch::new();
     wb.id(2);
@@ -142,11 +203,137 @@ async fn crit5_acl_denied_table_delivers_nothing() {
         .await
         .unwrap();
 
-    let leak = next_event_for(&mut rx, sub_id, Duration::from_millis(400)).await;
+    let frame = next_push(&mut rx, Duration::from_millis(400)).await;
     assert!(
-        leak.is_none(),
-        "CRIT-5: ACL-denied subscriber must NOT receive events from `secrets`, got {:?}",
-        leak
+        frame.is_none(),
+        "CRIT-5: a refused Subscribe must deliver NO frame at all, got {:?}",
+        frame
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crit5_preflight_refusal_precedes_batch_writes_and_is_indistinguishable() {
+    async fn run_case(source: &str, include_secrets: bool, marker: &str) -> (Vec<u8>, u64) {
+        let shamir = if include_secrets {
+            make_db_one_repo_split_acl("app", "main").await
+        } else {
+            let shamir = ShamirDb::init_memory().await.expect("init shamir");
+            shamir.create_db("app").await.expect("create_db");
+            let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("messages"));
+            shamir.add_repo("app", cfg).await.expect("add repo");
+            let open = shamir_types::access::ResourceMeta::open();
+            shamir
+                .set_resource_meta(&shamir_types::access::ResourcePath::database("app"), &open)
+                .await
+                .unwrap();
+            shamir
+                .set_resource_meta(
+                    &shamir_types::access::ResourcePath::store("app", "main"),
+                    &open,
+                )
+                .await
+                .unwrap();
+            shamir
+                .set_resource_meta(
+                    &shamir_types::access::ResourcePath::table("app", "main", "messages"),
+                    &open,
+                )
+                .await
+                .unwrap();
+            Arc::new(shamir)
+        };
+        let handler = ShamirDbHandler::new(shamir.clone());
+        let alice = user_session();
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let (push, _rx) = capture();
+        let conn = conn_with(push, registry.clone());
+
+        // The unavailable source is rejected during preflight, before execution.
+        // This proves preflight ordering only; it does not imply that a later
+        // activation-time failure can undo writes already committed.
+        let mut batch = Batch::new();
+        batch.id(1);
+        batch.insert(
+            "marker",
+            insert("messages").row(doc! { "_id" => marker, "payload" => "must-not-write" }),
+        );
+        batch.subscribe(
+            "sub",
+            Subscribe::table(TableRef::with_repo("main", source)).build(),
+        );
+        let response = handler
+            .handle(&alice, &encode(&execute_built("app", batch.build())), &conn)
+            .await
+            .unwrap();
+        let decoded = decode(&response);
+        match &decoded {
+            DbResponse::Error { code, message } => {
+                assert_eq!(code, "unknown_table");
+                assert_eq!(message, "table is unavailable");
+            }
+            other => panic!("expected fixed table refusal, got {:?}", other),
+        }
+        assert_table_unavailable_refusal(decoded, &[source]);
+
+        // This preflight refusal happens before the INSERT executes. This is
+        // not an assertion about activation-time failures, which may follow
+        // already-committed earlier batch operations.
+        let db = shamir.get_db("app").expect("app db");
+        let messages = db.get_table("main", "messages").await.expect("messages");
+        assert_eq!(
+            messages.count().await.unwrap(),
+            0,
+            "preflight refusal must occur before the INSERT executes"
+        );
+        assert_eq!(
+            registry.count(),
+            0,
+            "refused subscribe must not leave a registry entry"
+        );
+
+        // Compare the next successful subscription id to the fresh-registry
+        // baseline; count alone cannot expose a consumed id counter.
+        let mut success = Batch::new();
+        success.id(2);
+        success.subscribe(
+            "ok",
+            Subscribe::table(TableRef::with_repo("main", "messages")).build(),
+        );
+        let success_response = decode(
+            &handler
+                .handle(
+                    &alice,
+                    &encode(&execute_built("app", success.build())),
+                    &conn,
+                )
+                .await
+                .unwrap(),
+        );
+        let id = sub_id_of(&unwrap_batch(success_response), "ok");
+        (response, id)
+    }
+
+    let (closed_response, closed_next_id) =
+        run_case("secrets", true, "acl-refusal-write-marker").await;
+    let (absent_response, absent_next_id) =
+        run_case("secrets_missing", false, "absent-refusal-write-marker").await;
+
+    assert_eq!(
+        closed_response, absent_response,
+        "closed and absent sources must return byte-identical whole responses"
+    );
+    assert_eq!(
+        closed_next_id, 1,
+        "closed-source refusal consumed a subscription id"
+    );
+    assert_eq!(
+        absent_next_id, 1,
+        "absent-source refusal consumed a subscription id"
+    );
+    assert_eq!(
+        closed_next_id, absent_next_id,
+        "paired controls must allocate identically"
     );
 }
 
@@ -195,10 +382,10 @@ async fn crit5_acl_authorized_table_still_delivers() {
     assert_eq!(env.push, PushKind::Event);
 }
 
+/// One mixed-source subscription with a closed/unreadable source refuses the whole batch; no
+/// partial delivery is permitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn crit5_mixed_subscription_delivers_only_authorized() {
-    // Mixed: subscribe to BOTH `messages` (allowed) and `secrets` (denied)
-    // in one subscription. Only `messages` events must arrive.
+async fn crit5_mixed_subscription_with_a_denied_source_is_refused_whole() {
     let shamir = make_db_one_repo_split_acl("app", "main").await;
     let handler = ShamirDbHandler::new(shamir.clone());
     let alice = user_session();
@@ -208,23 +395,31 @@ async fn crit5_mixed_subscription_delivers_only_authorized() {
     let conn = conn_with(push, registry.clone());
 
     // Two sources, same repo — this is allowed (single-repo, multi-table).
+    // `secrets` is unreadable, which refuses the entire operation.
     let src_msgs = SourceBuilder::table(TableRef::with_repo("main", "messages")).build();
     let src_secrets = SourceBuilder::table(TableRef::with_repo("main", "secrets")).build();
     let sub_op = Subscribe::sources(vec![src_msgs, src_secrets]).build();
     let mut sb = Batch::new();
     sb.id(1);
     sb.subscribe("m", sub_op);
-    let resp = unwrap_batch(decode(
+    let resp = decode(
         &handler
             .handle(&alice, &encode(&execute_built("app", sb.build())), &conn)
             .await
             .unwrap(),
-    ));
-    let sub_id = sub_id_of(&resp, "m");
+    );
+    // The refusal must not name EITHER source: it is indistinguishable from a
+    // missing table, and it must not single out the one that was denied.
+    assert_table_unavailable_refusal(resp, &["messages", "secrets"]);
+    assert_eq!(
+        registry.count(),
+        0,
+        "a refused Subscribe must not register a subscription"
+    );
 
-    settle().await;
-
-    // System inserts into BOTH tables.
+    // System inserts into BOTH tables. Since nothing was granted, Alice must
+    // not receive ANY frame — the readable `messages` source is not honoured
+    // partially either.
     let sys = system_session();
     let mut wb = Batch::new();
     wb.id(2);
@@ -241,18 +436,13 @@ async fn crit5_mixed_subscription_delivers_only_authorized() {
         .await
         .unwrap();
 
-    // Alice should receive the `messages` event...
-    let env_ok = next_event_for(&mut rx, sub_id, Duration::from_millis(500))
-        .await
-        .expect("authorized `messages` event must be delivered");
-    assert_eq!(env_ok.sub, sub_id);
-
-    // ...but NOT the `secrets` event. Drain remaining frames for a moment
-    // to ensure nothing leaks through.
-    let leak = next_event_for(&mut rx, sub_id, Duration::from_millis(300)).await;
+    let frame = next_push(&mut rx, Duration::from_millis(400)).await;
     assert!(
-        leak.is_none(),
-        "CRIT-5: mixed subscription must not deliver events from ACL-denied `secrets`, got {:?}",
-        leak
+        frame.is_none(),
+        concat!(
+            "CRIT-5: a mixed allowed+denied Subscribe must be refused whole ",
+            "and deliver NO frame at all, got {:?}",
+        ),
+        frame
     );
 }

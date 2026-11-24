@@ -10,10 +10,10 @@
 //!
 //! The park rendezvous is deterministic and sleep/yield free: the test holds
 //! the whole byte budget, and the session's single request slot is the
-//! observable — the handler takes it (step 3 of `get_record`) and then runs
-//! the synchronous resolve/`has_table`/incarnation capture (step 5) before
-//! its next suspension at the budget acquire (step 6), so "slot taken"
-//! implies "pre-budget resolution finished". The read future is polled
+//! observable — the handler runs the synchronous parent resolution,
+//! configured-table check and incarnation capture BEFORE taking the slot,
+//! then suspends at the budget acquire, so "slot taken" implies
+//! "pre-budget resolution finished". The read future is polled
 //! directly (not spawned), so nothing can race the mutation.
 //!
 //! Fixture mirrors `get_record_tests.rs` (in-memory `ShamirDb`, owner alice,
@@ -41,18 +41,19 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{create_table, drop_table};
 use shamir_query_builder::doc;
+use shamir_query_builder::query::Query;
 use shamir_query_builder::wire::admin::get_record;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{DropTableOp, ResourceRef};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex};
-use shamir_query_types::read::QueryRecord;
+use shamir_query_types::read::{QueryRecord, ReadQuery};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 
 use shamir_types::types::record_id::RecordId;
 
 use crate::byte_budget::ByteBudget;
-use crate::db_handler::config::QueryLimitsCap;
+use crate::db_handler::config::{CursorLimitsCap, QueryLimitsCap};
 use crate::db_handler::handler::ShamirDbHandler;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
@@ -73,7 +74,7 @@ const REPLACEMENT_V: i64 = 99;
 const REGISTRATION_CHANGED: &str = "the authorized table registration changed during the request";
 /// The fixed-text refusal for a table that is not configured in the
 /// repository (`unknown_table_response`, `operator_state.rs:149-154`).
-const UNKNOWN_TABLE_MESSAGE: &str = "table is not registered in the repository";
+const UNKNOWN_TABLE_MESSAGE: &str = "table is unavailable";
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -209,11 +210,12 @@ fn expect_unknown_table(resp: DbResponse, context: &str) {
     }
 }
 
-/// Drive the point read until it parks at the upfront budget reservation with
-/// the pre-budget resolution done. The session's single request slot is the
-/// observable: while we can still take it the child has not reached step 3, so
-/// poll the child once (it must stay Pending, the budget is held); once we
-/// cannot, the child took it and ran the synchronous step 4/5 code in that poll.
+/// Drive the point read until it is parked at the upfront budget reservation
+/// with the pre-budget resolution already done. The session's single request
+/// slot is the observable: while we can still take it ourselves the child has
+/// not reached the slot gate, so poll the child once (it must stay Pending,
+/// the budget is held); once we cannot take it, the child has taken the slot
+/// after its synchronous resolution/availability code, so the capture is done.
 async fn drive_to_capture<F: Future<Output = DbResponse>>(
     read: &mut Pin<Box<F>>,
     session: &Session,
@@ -573,11 +575,13 @@ async fn replace_repo_with_legacy_items(handler: &ShamirDbHandler) {
 // P1#1 — authorization must stay bound to the incarnation that is read.
 // ---------------------------------------------------------------------------
 
-/// The read passes the early ACL and parks on the held budget, the table's
-/// Read right is revoked, the budget is released: the reply must be the typed
-/// `access_denied`, never a record payload. WITHOUT the fix the handler never
-/// re-authorizes: the parked read resolves the table and returns the seeded
-/// `DbResponse::Record`.
+/// The read passes the early ACL, parks on the held budget, the table's Read
+/// right is revoked, the budget is released: the reply must be the typed
+/// `unknown_table` (the SAME code an absent table answers — the table ACL
+/// cannot be used as an existence oracle), never a record payload.
+///
+/// WITHOUT the fix the handler never re-authorizes, so the parked read
+/// resolves the table and returns the seeded `DbResponse::Record`.
 #[tokio::test]
 async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() {
     let budget = ByteBudget::new(Some(SMALL_BUDGET));
@@ -608,7 +612,7 @@ async fn get_record_refuses_when_table_read_is_revoked_while_parked_on_budget() 
         .expect("the released read must complete within the 120s bound");
     expect_error(
         resp,
-        "access_denied",
+        "unknown_table",
         "table Read revoked while parked on the budget",
     );
 }
@@ -983,3 +987,8 @@ async fn get_record_refuses_over_long_names_without_echoing_them() {
         "255-byte table name passes the bound",
     );
 }
+
+// Cell-retention and slot-saturation tests of the point read live in a child
+// module so this file stays under the layout limit; it reuses these helpers.
+#[path = "handler/get_record_cell_growth_tests.rs"]
+mod cell_growth_tests;

@@ -387,12 +387,20 @@ pub enum TxError {
 
 impl TxError {
     /// Map commit errors without turning a published version into an abort.
+    ///
+    /// Every abort classification that already has a stable wire word keeps
+    /// that word in `reason` UNCHANGED *and* publishes it through
+    /// [`TransactionInfo::with_abort_code`], so a caller that must choose a
+    /// disposition (the `for_each` arm, which fails an iteration with this
+    /// code) never has to parse debug text. No code is invented here:
+    /// classifications with no stable word (`Storage` without a
+    /// [`DbError::code`], `Expired`) still leave `abort_code` absent.
     pub fn into_transaction_info(
         self,
         tx_id: u64,
         snapshot_version: u64,
     ) -> shamir_query_types::batch::TransactionInfo {
-        let reason = match self {
+        let (reason, abort_code): (String, Option<&'static str>) = match self {
             Self::WalDurability {
                 commit_version,
                 materialization,
@@ -407,30 +415,53 @@ impl TxError {
                 )
                 .with_visibility(visibility);
             }
-            Self::MigrationFrozen { .. } => "table_migrating".to_string(),
-            Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
-                "tx_conflict".to_string()
+            Self::MigrationFrozen { .. } => {
+                ("table_migrating".to_string(), Some("table_migrating"))
             }
-            Self::UniqueViolation { .. } => "unique_violation".to_string(),
+            Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
+                ("tx_conflict".to_string(), Some("tx_conflict"))
+            }
+            Self::UniqueViolation { .. } => {
+                ("unique_violation".to_string(), Some("unique_violation"))
+            }
             // FG-7: commit-time CAS failures retain the staging-time code.
-            Self::CasConflict { .. } => "version_conflict".to_string(),
-            Self::WalRequiresReopen => "wal_requires_reopen".to_string(),
+            Self::CasConflict { .. } => ("version_conflict".to_string(), Some("version_conflict")),
+            Self::WalRequiresReopen => (
+                "wal_requires_reopen".to_string(),
+                Some("wal_requires_reopen"),
+            ),
             Self::WalOutcomeUnknown { commit_version } => {
                 return TransactionInfo::indeterminate(tx_id, snapshot_version, commit_version);
             }
-            Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
-            Self::CommitAdmissionRefused => "commit_admission_refused".to_string(),
+            Self::WalRetentionExceeded => (
+                "wal_retention_exceeded".to_string(),
+                Some("wal_retention_exceeded"),
+            ),
+            Self::CommitAdmissionRefused => (
+                "commit_admission_refused".to_string(),
+                Some("commit_admission_refused"),
+            ),
             // Batch callers return cancellation on the error path instead.
-            Self::Cancelled => "cancelled".to_string(),
-            Self::Storage(e) => e
-                .code()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("storage: {}", e)),
-            Self::Expired { elapsed, max } => {
-                format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
-            }
+            Self::Cancelled => ("cancelled".to_string(), Some("cancelled")),
+            // Preserve a storage error's stable classification in both fields:
+            // `reason` remains byte-for-byte the existing diagnostic/code, while
+            // `abort_code` is populated only when DbError exposes a code.
+            Self::Storage(e) => (
+                e.code()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("storage: {}", e)),
+                e.code(),
+            ),
+            Self::Expired { elapsed, max } => (
+                format!("tx expired: elapsed {:?} > max {:?}", elapsed, max),
+                None,
+            ),
         };
-        TransactionInfo::aborted(tx_id, reason)
+        let info = TransactionInfo::aborted(tx_id, reason);
+        match abort_code {
+            Some(code) => info.with_abort_code(code),
+            None => info,
+        }
     }
 }
 
