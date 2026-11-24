@@ -944,7 +944,10 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
     let resolver = TxTestResolver { repo: repo.clone() };
 
     let big = format!("fe-wal-{}", "p".repeat(512));
-    let over: Vec<FilterValue> = (0..64)
+    // Keep the loop input within BatchLimits::default()'s 50-item cap; the
+    // first transaction's forced WAL seal failure still exercises the
+    // indeterminate-commit path and must stop subsequent iterations.
+    let over: Vec<FilterValue> = (0..49)
         .map(|i| FilterValue::String(format!("{big}-{i:04}")))
         .collect();
     let mut body = insert_order_body("uid");

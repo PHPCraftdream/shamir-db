@@ -1,5 +1,5 @@
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -107,6 +107,7 @@ pub(crate) async fn bridge_task(
     let slot_guard = SubscriptionSlotGuard { registry, sub_id };
 
     let started = std::time::Instant::now();
+    let activated = AtomicBool::new(false);
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.
@@ -130,15 +131,19 @@ pub(crate) async fn bridge_task(
         // after Authorized preflight. Any unavailable source fails the whole
         // activation; never filter it out and continue with a partial stream.
         for source in &sources {
+            let member = db
+                .get_db(&db_name)
+                .is_some_and(|repo_db| repo_db.has_table(&source.table.repo, &source.table.table));
             let path = ResourcePath::Table {
                 db: db_name.clone(),
                 store: source.table.repo.clone(),
                 table: source.table.table.clone(),
             };
-            if db
-                .authorize_access(&actor, &path, Action::Read)
-                .await
-                .is_err()
+            if !member
+                || db
+                    .authorize_access(&actor, &path, Action::Read)
+                    .await
+                    .is_err()
             {
                 tracing::warn!(
                     sub_id,
@@ -223,6 +228,7 @@ pub(crate) async fn bridge_task(
             "bridge live; releasing the activation barrier",
         );
         slot_guard.registry.signal_ready(sub_id);
+        activated.store(true, Ordering::Release);
 
         let terminal_gates = delivery_gates.clone();
         let bridge_work = async {
@@ -661,17 +667,20 @@ pub(crate) async fn bridge_task(
         );
     });
 
-    // Always emit Closed frame (best-effort) on self-exit so the client
-    // knows the subscription ended server-side.
-    let s = seq.load(Ordering::Relaxed);
-    let closed = PushEnvelope {
-        push: PushKind::Closed,
-        sub: sub_id,
-        seq: s,
-        data: None,
-        gap_at: None,
-    };
-    if let Ok(frame) = rmp_serde::to_vec_named(&closed) {
-        let _ = push.try_push(frame);
+    // A bridge that exits before signalling readiness failed activation. It has
+    // no client-visible grant, so emitting Closed would leak a frame for an
+    // unknown subscription. Once activated, self-exits remain observable.
+    if activated.load(Ordering::Acquire) {
+        let s = seq.load(Ordering::Relaxed);
+        let closed = PushEnvelope {
+            push: PushKind::Closed,
+            sub: sub_id,
+            seq: s,
+            data: None,
+            gap_at: None,
+        };
+        if let Ok(frame) = rmp_serde::to_vec_named(&closed) {
+            let _ = push.try_push(frame);
+        }
     }
 }

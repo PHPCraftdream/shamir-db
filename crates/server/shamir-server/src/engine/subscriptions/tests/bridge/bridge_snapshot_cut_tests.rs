@@ -309,7 +309,7 @@ async fn resume_precedes_snapshot_ready_and_live() {
     interleaving(1, true).await;
 }
 
-// Old code logs a failed query (or ignores configured limits) and emits Ready.
+// Failed activation emits no frame; post-activation self-exits emit Closed.
 #[tokio::test]
 async fn snapshot_failure_closes_without_ready_and_releases_pin() {
     for missing in [false, true] {
@@ -361,7 +361,7 @@ async fn snapshot_failure_closes_without_ready_and_releases_pin() {
     }
 }
 
-// Compatibility control: snapshot filters and denied-source exclusion still apply.
+// Compatibility control: snapshot filters and authorization still apply.
 #[tokio::test]
 async fn snapshot_preserves_actor_filters_and_authorization() {
     let db = database().await;
@@ -395,10 +395,7 @@ async fn snapshot_preserves_actor_filters_and_authorization() {
         1,
         db,
         "test_db".to_owned(),
-        vec![
-            SourceBuilder::table("users").filter(eq("group", 7)).build(),
-            SourceBuilder::table("other").build(),
-        ],
+        vec![SourceBuilder::table("users").filter(eq("group", 7)).build()],
         DeliverMode::Records,
         Actor::User(42),
         Arc::new(Sink(frames)),
@@ -430,8 +427,38 @@ async fn snapshot_preserves_actor_filters_and_authorization() {
     assert_eq!(registry.count(), 0);
 }
 
-// Negative control for actor propagation: activation succeeds, then access is
-// revoked after begin. Executing snapshot reads as System would emit Ready.
+#[tokio::test]
+async fn missing_source_activation_emits_no_frame_or_grant() {
+    let db = database().await;
+    write(db.clone(), "allowed", true).await;
+    let registry = Arc::new(SubscriptionRegistry::new());
+    registry.try_reserve().unwrap();
+    registry.reserve_pending(1);
+    let (frames, mut observed) = mpsc::channel(8);
+    let bridge = Box::pin(bridge_task(
+        1,
+        db,
+        "test_db".to_owned(),
+        vec![
+            SourceBuilder::table("users").build(),
+            SourceBuilder::table("activation_missing").build(),
+        ],
+        DeliverMode::Records,
+        Actor::User(42),
+        Arc::new(Sink(frames)),
+        None,
+        true,
+        BatchLimits::default(),
+        registry.clone(),
+    ));
+    bridge.await;
+    assert!(
+        observed.try_recv().is_err(),
+        "failed activation must emit neither a grant (Ready) nor Closed"
+    );
+    assert_eq!(registry.count(), 0);
+}
+
 #[tokio::test]
 async fn snapshot_reauthorizes_reads_as_subscriber() {
     let db = database().await;

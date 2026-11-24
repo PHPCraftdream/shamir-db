@@ -593,7 +593,22 @@ async fn plain_read_with_version_true_still_returns_versions_regression() {
 async fn create_cursor_denies_non_owner_without_grant() {
     let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
     let bob = other_session();
-
+    handler
+        .db()
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::database("app"),
+            &shamir_types::access::ResourceMeta::open(),
+        )
+        .await
+        .expect("open parent database for table-only ACL test");
+    handler
+        .db()
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::store("app", "main"),
+            &shamir_types::access::ResourceMeta::open(),
+        )
+        .await
+        .expect("open parent store for table-only ACL test");
     let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
     let resp = send(&handler, &bob, create_cursor_req(query, 2)).await;
 
@@ -603,9 +618,9 @@ async fn create_cursor_denies_non_owner_without_grant() {
                 code, "unknown_table",
                 "enforced default (0o700) must deny bob"
             );
-            assert!(
-                message.contains("table is unavailable"),
-                "message should be the fixed refusal: {message}"
+            assert_eq!(
+                message, "Query '' failed [unknown_table]: table is unavailable",
+                "message should use the fixed wire refusal"
             );
         }
         other => panic!("expected unknown_table, got {other:?}"),

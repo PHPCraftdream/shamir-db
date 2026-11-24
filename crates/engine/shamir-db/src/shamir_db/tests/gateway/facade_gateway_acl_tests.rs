@@ -108,7 +108,16 @@ async fn execute_as_user_denied_on_restricted_database() {
 async fn execute_as_user_denied_on_restricted_table() {
     let shamir = setup().await;
 
-    // Database is open (defaults), but the table is locked to User(1).
+    // Open the database and repo so the table-only ACL is the subject.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
     let table_meta = ResourceMeta {
         owner: Actor::User(1),
         group: None,
@@ -139,8 +148,11 @@ async fn execute_as_user_denied_on_restricted_table() {
         .await
         .expect_err("User(99) must be denied read on restricted table");
 
-    assert_eq!(err.code(), Some("unknown_table"));
-    assert_eq!(err.to_string(), "unknown_table: table is unavailable");
+    assert!(matches!(
+        err,
+        BatchError::QueryError { code: Some(ref code), ref message, .. }
+            if code == "unknown_table" && message == "table is unavailable"
+    ));
     let diagnostic = format!("{err:?}");
     assert!(
         !diagnostic.contains("access denied") && !diagnostic.contains("Denied"),

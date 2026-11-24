@@ -532,8 +532,9 @@ async fn shamir_transactional_execute_refusal_sets_no_outer_code() {
 
     let (code, message) = call_code(&db, "tx_read_refused").await;
     assert_eq!(
-        code, None,
-        "a refused transactional read must leave no outer code, got: {message}"
+        code,
+        Some("unknown_table".to_string()),
+        "a refused transactional read must preserve its typed gateway code, got: {message}"
     );
 }
 

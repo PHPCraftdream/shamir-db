@@ -136,6 +136,7 @@ async fn t1_read_get_query_refused_while_quarantined() {
 
     let err = read_users(&shamir, "main").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"));
+    super::validation::assert_closed_and_absent_tables_refuse_alike(&shamir).await;
 }
 
 /// The changelog pull path refuses a quarantined repo with
@@ -183,14 +184,16 @@ async fn t3_describe_and_status_stay_readable() {
 async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-    // No tables here: the seed image carries the `users` inventory.
-    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
+    // The read oracle targets an existing destination table even before reseed.
+    db.add_repo(
+        RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
     // Quarantine FIRST, on an ORDINARY destination (no seed receipt).
     quarantine(&shamir, "sub", "prof", "main").await;
     assert!(read_users(&shamir, "main").await.is_err());
-
     // Plain Resume refused.
     let err = resume_subscription(&shamir, 4, "sub").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"));
@@ -199,7 +202,6 @@ async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     assert_eq!(err.code(), Some("resync_required"));
     // Reads stay refused.
     assert!(read_users(&shamir, "main").await.is_err());
-
     // Round 6, traced: the DROP guard surfaces the DEDICATED
     // `replication_destination_quarantined` code (`ensure_drop_allowed` →
     // `repl_guard_error_to_batch`), not the read-path `resync_required`.
@@ -226,10 +228,8 @@ async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
 async fn t5_healthy_and_non_replicated_repos_unaffected() {
     let shamir = setup().await;
     quarantine(&shamir, "sub", "prof", "main").await;
-
     // "side" has no subscription covering it.
     assert!(read_users(&shamir, "side").await.is_ok());
-
     // A covering subscription that is "active" does not quarantine.
     let mut b = Batch::new();
     b.id(5);
@@ -267,8 +267,7 @@ async fn t6_quarantine_survives_restart() {
             .unwrap();
         shamir.create_db("testdb").await.expect("create_db");
         // Durable repo, persisted via the facade so the boot reload finds the
-        // catalogue row. No inline tables: the installed seed image carries
-        // the `users` table (writer registration + catalogue write).
+        // catalogue row. The seed writer registers `users` on the running repo.
         // RAW fjall (no MemBuffer): this test installs a replacement SEED on
         // the repo and binds a SUBSCRIPTION to it, and the new CREATE/RESUME
         // admission (repo-wide atomic-batch capability, see supervisor.rs
@@ -279,7 +278,8 @@ async fn t6_quarantine_survives_restart() {
         shamir
             .add_repo(
                 "testdb",
-                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
+                    .add_table(crate::engine::table::TableConfig::new("users")),
             )
             .await
             .unwrap();
@@ -305,7 +305,6 @@ async fn t6_quarantine_survives_restart() {
         );
         assert!(read_users(&shamir, "main").await.is_err());
     }
-
     // Reopen with a bounded retry (fjall releases its lock shortly after
     // the owning ShamirDb is dropped).
     let mut shamir = None;
@@ -319,14 +318,12 @@ async fn t6_quarantine_survives_restart() {
         }
     }
     let shamir = shamir.expect("system store still locked after retries");
-
     // The repo must have been reloaded from the persisted catalogue (the
     // exact CI regression: `get_repo` was None).
     assert!(
         shamir.get_db("testdb").unwrap().get_repo("main").is_some(),
         "testdb/main must be re-registered from the catalogue after restart"
     );
-
     // Both subscriptions still quarantined across the restart.
     let err = read_users(&shamir, "main").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"));
@@ -406,7 +403,6 @@ async fn t9_changelog_read_entries_refused_while_quarantined() {
     };
     assert!(matches!(err, DbError::ResyncRequired { .. }));
     assert_eq!(err.code(), Some("resync_required"));
-
     // Non-replicated repo is unaffected.
     assert!(shamir
         .read_changelog_from("testdb", "side", 1, 10)
@@ -426,17 +422,14 @@ async fn t9_changelog_read_entries_refused_while_quarantined() {
 async fn t10_tx_reads_refused_while_quarantined() {
     let shamir = setup().await;
     seed_row(&shamir).await;
-
     // Open the tx while `main` is still healthy.
     let (mut tx, _guard) = shamir.tx_begin("testdb", "main", "snapshot").await.unwrap();
     quarantine(&shamir, "sub", "prof", "main").await;
-
     // BEGIN on the quarantined repo is refused.
     let Err(err) = shamir.tx_begin("testdb", "main", "snapshot").await else {
         panic!("tx_begin on a quarantined repo must be refused");
     };
     assert_eq!(err.code(), Some("resync_required"));
-
     // EXECUTE on the pre-quarantine tx is refused too (fail closed on use).
     let mut b = Batch::new();
     b.id(10);
@@ -448,7 +441,6 @@ async fn t10_tx_reads_refused_while_quarantined() {
         panic!("tx_execute on a quarantined repo must be refused");
     };
     assert_eq!(err.code(), Some("resync_required"));
-
     // The healthy, non-replicated `side` repo is unaffected.
     let (mut tx_side, _guard_side) = shamir.tx_begin("testdb", "side", "snapshot").await.unwrap();
     let mut b_side = Batch::new();
@@ -480,7 +472,6 @@ async fn t11_subscribe_changelog_refused_while_quarantined() {
     };
     assert!(matches!(err, DbError::ResyncRequired { .. }));
     assert_eq!(err.code(), Some("resync_required"));
-
     // Non-replicated repo subscribes fine; drop the receiver immediately so
     // no background subscriber leaks.
     let rx = shamir
@@ -499,7 +490,6 @@ async fn t11_subscribe_changelog_refused_while_quarantined() {
 async fn t12_gated_journal_source_refuses_once_quarantined() {
     let shamir = setup().await;
     seed_row(&shamir).await;
-
     // Healthy before the quarantine.
     assert!(shamir
         .read_changelog_bounded("testdb", "main", 1, 10)
@@ -508,14 +498,12 @@ async fn t12_gated_journal_source_refuses_once_quarantined() {
         .is_some());
 
     quarantine(&shamir, "sub", "prof", "main").await;
-
     // The gated journal source's read fails closed with the typed error.
     let Err(err) = shamir.read_changelog_bounded("testdb", "main", 1, 10).await else {
         panic!("read_changelog_bounded on a quarantined repo must be refused");
     };
     assert!(matches!(err, DbError::ResyncRequired { .. }));
     assert_eq!(err.code(), Some("resync_required"));
-
     // Non-replicated repo is unaffected.
     assert!(shamir
         .read_changelog_bounded("testdb", "side", 1, 10)
@@ -554,7 +542,6 @@ pub(crate) mod recovery {
             Ok(self.0.clone())
         }
     }
-
     /// The receipt the installer binds: fresh staging for `testdb/main`,
     /// lineage `[1; 16]`, epoch 2, version 1.
     fn replacement_receipt() -> SeedReceipt {
@@ -571,7 +558,6 @@ pub(crate) mod recovery {
             local_baseline: 1,
         }
     }
-
     /// Upstream Hello consistent with [`replacement_receipt`] and the fresh
     /// (bookmark 0) destination.
     pub(super) fn matching_hello() -> ReplResponse {
@@ -603,7 +589,6 @@ pub(crate) mod recovery {
     pub(crate) fn probe() -> Arc<dyn ResumeProbe> {
         Arc::new(HelloProbe(matching_hello()))
     }
-
     /// Source-interner field ids for the replacement `users` row (arbitrary
     /// — `SeedImageWriter::binding` remaps them to the local interner).
     const NAME_SOURCE_ID: u64 = 100;
@@ -648,8 +633,7 @@ pub(crate) mod recovery {
             .await
             .unwrap();
         writer.finish(&[]).await.unwrap();
-        // Persist the `users` table to the table catalogue: the writer only
-        // registers it on the RUNNING repo instance.
+        // The fixture's earlier empty `users` table is replaced by the seed.
         shamir
             .add_table("testdb", "main", "users", false)
             .await
@@ -717,11 +701,13 @@ pub(crate) mod recovery {
 async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-    // No tables on `main`: the seed image carries them. `side` is an
-    // unrelated, always-readable repo.
-    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
+    // `users` exists locally; `side` is an unrelated, always-readable repo.
+    db.add_repo(
+        RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
     db.add_repo(
         RepoConfig::new("side", BoxRepoFactory::in_memory())
             .add_table(crate::engine::table::TableConfig::new("users")),
@@ -810,7 +796,8 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
                 // destinations with `atomic_batch_unsupported`. Raw fjall is also
                 // the backend the seed writes through, so the durable directory
                 // survives the reopen below.
-                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
+                    .add_table(crate::engine::table::TableConfig::new("users")),
             )
             .await
             .unwrap();
@@ -833,7 +820,7 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         assert_eq!(err.code(), Some("resync_required"), "{err}");
     }
 
-    // Reopen with the bounded fjall-lock retry (mirrors `durable_repo_tests`).
+    // Reopen and check quarantine.
     let mut shamir = None;
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
@@ -871,8 +858,7 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
             .await
             .unwrap();
         shamir.create_db("testdb").await.expect("create_db");
-        // No inline tables: the installed seed image carries the `users`
-        // inventory.
+        // The destination catalogue includes the `users` read target.
         shamir
             .add_repo(
                 "testdb",
@@ -882,7 +868,8 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
                 // destinations with `atomic_batch_unsupported`. Raw fjall is also
                 // the backend the seed writes through, so the durable directory
                 // survives the reopen below.
-                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
+                    .add_table(crate::engine::table::TableConfig::new("users")),
             )
             .await
             .unwrap();
@@ -964,7 +951,7 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         assert_eq!(err.code(), Some("resync_required"));
     }
 
-    // Reopen with the bounded fjall-lock retry (mirrors `durable_repo_tests`).
+    // Reopen and check quarantine.
     let mut shamir = None;
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {

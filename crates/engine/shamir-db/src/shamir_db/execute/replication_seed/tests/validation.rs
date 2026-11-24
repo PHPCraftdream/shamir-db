@@ -1,9 +1,12 @@
 use shamir_engine::meta::repo_identity::RepoIdentity;
 use shamir_engine::repo::SeedReceipt;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::Query;
 use shamir_query_types::admin::{CreatePublicationOp, ReplScope};
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
+use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
-use crate::{validate_seed_hello, SeedRefusal};
+use crate::{validate_seed_hello, SeedRefusal, ShamirDb};
 
 /// A peer-metadata mutation paired with the refusal it must provoke.
 pub(super) type MetadataCase = (fn(&mut ReplRepoInfo), SeedRefusal);
@@ -96,4 +99,37 @@ fn resume_metadata_refusals_are_distinct_and_matching_gap_is_not_bypassed() {
     );
     assert_eq!(validate_seed_hello(&receipt(), 10, "pub", &hello()), Ok(()));
     assert_eq!(receipt().source_version.checked_add(1), Some(11));
+}
+
+/// In a quarantined repo a CLOSED table and an ABSENT table both refuse with the
+/// canonical `unknown_table` (the availability decision precedes the quarantine verdict).
+pub(super) async fn assert_closed_and_absent_tables_refuse_alike(shamir: &ShamirDb) {
+    // Closed and absent tables both use the canonical `unknown_table` refusal.
+    let path = ResourcePath::table("testdb", "main", "users");
+    shamir
+        .set_resource_meta(
+            &path,
+            &ResourceMeta {
+                owner: Actor::User(1),
+                group: None,
+                mode: 0o700,
+            },
+        )
+        .await
+        .unwrap();
+    for (id, table) in [(11, "users"), (12, "absent")] {
+        let mut batch = Batch::new();
+        batch.id(id);
+        batch.query("r", Query::with_repo("main", table));
+        let err = shamir
+            .execute_as(
+                Actor::User(99),
+                "testdb",
+                &batch.to_request_via_msgpack().unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Some("unknown_table"));
+        assert!(err.to_string().contains("table is unavailable"));
+    }
 }

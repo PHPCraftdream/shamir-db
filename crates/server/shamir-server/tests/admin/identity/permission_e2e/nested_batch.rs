@@ -59,6 +59,18 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
         "setup: {:?}",
         resp
     );
+    // Open parent resources so the nested table read tests only table ACL.
+    for req in [
+        chmod_db_batch(admin_sid, db_name, 0o777),
+        chmod_store_batch(admin_sid, db_name, "main", 0o777),
+    ] {
+        let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
+        assert!(
+            matches!(resp, DbResponse::Batch { .. }),
+            "open parent ACL: {:?}",
+            resp
+        );
+    }
     // secret_table is left at its enforced default (0o700, owner=System) —
     // carol below has no rights to it whatsoever.
 

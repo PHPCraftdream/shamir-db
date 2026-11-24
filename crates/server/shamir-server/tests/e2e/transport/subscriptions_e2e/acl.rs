@@ -212,6 +212,135 @@ async fn crit5_acl_denied_table_delivers_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crit5_preflight_refusal_precedes_batch_writes_and_is_indistinguishable() {
+    async fn run_case(source: &str, include_secrets: bool, marker: &str) -> (Vec<u8>, u64) {
+        let shamir = if include_secrets {
+            make_db_one_repo_split_acl("app", "main").await
+        } else {
+            let shamir = ShamirDb::init_memory().await.expect("init shamir");
+            shamir.create_db("app").await.expect("create_db");
+            let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("messages"));
+            shamir.add_repo("app", cfg).await.expect("add repo");
+            let open = shamir_types::access::ResourceMeta::open();
+            shamir
+                .set_resource_meta(&shamir_types::access::ResourcePath::database("app"), &open)
+                .await
+                .unwrap();
+            shamir
+                .set_resource_meta(
+                    &shamir_types::access::ResourcePath::store("app", "main"),
+                    &open,
+                )
+                .await
+                .unwrap();
+            shamir
+                .set_resource_meta(
+                    &shamir_types::access::ResourcePath::table("app", "main", "messages"),
+                    &open,
+                )
+                .await
+                .unwrap();
+            Arc::new(shamir)
+        };
+        let handler = ShamirDbHandler::new(shamir.clone());
+        let alice = user_session();
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let (push, _rx) = capture();
+        let conn = conn_with(push, registry.clone());
+
+        // The unavailable source is rejected during preflight, before execution.
+        // This proves preflight ordering only; it does not imply that a later
+        // activation-time failure can undo writes already committed.
+        let mut batch = Batch::new();
+        batch.id(1);
+        batch.insert(
+            "marker",
+            insert("messages").row(doc! { "_id" => marker, "payload" => "must-not-write" }),
+        );
+        batch.subscribe(
+            "sub",
+            Subscribe::table(TableRef::with_repo("main", source)).build(),
+        );
+        let response = handler
+            .handle(&alice, &encode(&execute_built("app", batch.build())), &conn)
+            .await
+            .unwrap();
+        let decoded = decode(&response);
+        match &decoded {
+            DbResponse::Error { code, message } => {
+                assert_eq!(code, "unknown_table");
+                assert_eq!(
+                    message,
+                    "Query '' failed [unknown_table]: table is unavailable"
+                );
+            }
+            other => panic!("expected fixed table refusal, got {:?}", other),
+        }
+        assert_table_unavailable_refusal(decoded, &[source]);
+
+        // This preflight refusal happens before the INSERT executes. This is
+        // not an assertion about activation-time failures, which may follow
+        // already-committed earlier batch operations.
+        let db = shamir.get_db("app").expect("app db");
+        let messages = db.get_table("main", "messages").await.expect("messages");
+        assert_eq!(
+            messages.count().await.unwrap(),
+            0,
+            "preflight refusal must occur before the INSERT executes"
+        );
+        assert_eq!(
+            registry.count(),
+            0,
+            "refused subscribe must not leave a registry entry"
+        );
+
+        // Compare the next successful subscription id to the fresh-registry
+        // baseline; count alone cannot expose a consumed id counter.
+        let mut success = Batch::new();
+        success.id(2);
+        success.subscribe(
+            "ok",
+            Subscribe::table(TableRef::with_repo("main", "messages")).build(),
+        );
+        let success_response = decode(
+            &handler
+                .handle(
+                    &alice,
+                    &encode(&execute_built("app", success.build())),
+                    &conn,
+                )
+                .await
+                .unwrap(),
+        );
+        let id = sub_id_of(&unwrap_batch(success_response), "ok");
+        (response, id)
+    }
+
+    let (closed_response, closed_next_id) =
+        run_case("secrets", true, "acl-refusal-write-marker").await;
+    let (absent_response, absent_next_id) =
+        run_case("secrets_missing", false, "absent-refusal-write-marker").await;
+
+    assert_eq!(
+        closed_response, absent_response,
+        "closed and absent sources must return byte-identical whole responses"
+    );
+    assert_eq!(
+        closed_next_id, 1,
+        "closed-source refusal consumed a subscription id"
+    );
+    assert_eq!(
+        absent_next_id, 1,
+        "absent-source refusal consumed a subscription id"
+    );
+    assert_eq!(
+        closed_next_id, absent_next_id,
+        "paired controls must allocate identically"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crit5_acl_authorized_table_still_delivers() {
     // Positive control: the ACL fix must NOT break legitimate subscriptions.
     // Alice CAN read `messages` — events must flow as before.

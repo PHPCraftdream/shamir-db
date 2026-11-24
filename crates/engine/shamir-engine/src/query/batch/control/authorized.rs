@@ -156,33 +156,33 @@ impl<'a> Authorized<'a> {
 
         let metadata = RequestMetadata::collect(&request.queries, db_name);
         let (created_tables, created_repos) = tables_created_in_batch(&request.queries);
-        // Resolve ordinary table READs against the catalogue before ACL,
-        // planning, pagination and execution. Same-request DDL is exempt: its
-        // dependency ordering materializes the table before the read.
+        // Resolve table availability and ACL in the ordered authorization metadata.
         for (action, path) in &metadata.required_access {
             let ResourcePath::Table { db, store, table } = path else {
+                gate.check(&actor, path, *action)
+                    .await
+                    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
                 continue;
             };
-            if *action != Action::Read
-                || db != db_name
-                || created_tables.contains(&format!("{store}/{table}"))
-                || created_repos.contains(store)
+            let table_read = *action == Action::Read && db == db_name;
+            if table_read
+                && (created_tables.contains(&format!("{store}/{table}"))
+                    || created_repos.contains(store))
             {
                 continue;
             }
-            if gate
-                .table_read_exists(db, store, table)
-                .await
-                .ok()
-                .flatten()
-                == Some(false)
+            if table_read
+                && gate
+                    .table_read_exists(db, store, table)
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(false)
             {
                 return Err(table_unavailable());
             }
-        }
-        for (action, path) in &metadata.required_access {
             gate.check(&actor, path, *action).await.map_err(|e| {
-                if *action == Action::Read && matches!(path, ResourcePath::Table { .. }) {
+                if table_read {
                     table_unavailable()
                 } else {
                     BatchError::query_coded("", "access_denied", e.to_string())
@@ -212,7 +212,7 @@ impl<'a> Authorized<'a> {
                     .await
                     .ok()
                     .flatten();
-                if exists == Some(false) {
+                if exists != Some(true) {
                     return Err(table_unavailable());
                 }
                 if gate.check(&actor, &path, Action::Read).await.is_err() {

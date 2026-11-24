@@ -298,11 +298,13 @@ async fn binding_scope_overlapping_quarantines_clear_independently() {
 async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-    // No inline `users` table on `main`: the installed seed image carries
-    // the table inventory (same layout as `quarantine_reads_tests::t13`).
-    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
+    // The pre-reseed refusal targets a table already present in the destination catalogue.
+    db.add_repo(
+        RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
 
     // BOTH rows are single-stream (`matches_scope` admission rule) and
     // overlap on the ONE destination `testdb/main`.
@@ -365,9 +367,12 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
 async fn binding_scope_resume_removes_quarantine_marker_durably() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
+    db.add_repo(
+        RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
     quarantine(&shamir, "sub", "prof", &[("testdb", "main")]).await;
     assert_refused(&shamir, "testdb", "main").await;
 
@@ -431,7 +436,8 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
                 // destinations with `atomic_batch_unsupported`. Raw fjall is also
                 // the backend the seed writes through, so the durable directory
                 // survives the reopen below.
-                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone())),
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
+                    .add_table(crate::engine::table::TableConfig::new("users")),
             )
             .await
             .unwrap();
@@ -562,9 +568,12 @@ async fn replace_subscription_row_true_replaces_fields() {
 async fn resume_releases_stale_same_name_claim_after_recovery() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-    db.add_repo(RepoConfig::new("main", BoxRepoFactory::in_memory()))
-        .await
-        .unwrap();
+    db.add_repo(
+        RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(crate::engine::table::TableConfig::new("users")),
+    )
+    .await
+    .unwrap();
     quarantine(&shamir, "sub", "prof", &[("testdb", "main")]).await;
     let fault = crate::shamir_db::shamir_db::SeedCatalogueFlushFaultForTest::arm(&shamir);
     assert!(shamir

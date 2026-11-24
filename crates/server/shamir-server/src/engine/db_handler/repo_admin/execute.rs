@@ -15,6 +15,7 @@ use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::config::NodeMode;
 use super::cursor_handlers::error_response;
 use super::handlers::backup_handlers;
+use super::operator_state::table_unavailable_response;
 use super::repo_audit;
 use super::subscribe_handler;
 use super::ShamirDbHandler;
@@ -277,6 +278,7 @@ impl ShamirDbHandler {
             single_cancel.is_some() || single_cancel_tx.is_some() || single_cancel_cursor.is_some();
         // Keep the request slot through response encoding on tracked paths.
         let in_flight;
+        let mut typed_canonical_refusal = false;
         let final_response = if let Some(id) = single_cancel {
             // Cancel must reach saturated work even if its session has no slots
             // — true for all three cancel operations, which skip admission.
@@ -404,7 +406,7 @@ impl ShamirDbHandler {
                                 );
                             }
                             self.persist_table_lifecycle(db_name, &batch);
-                            subscribe_handler::activate_subscriptions(
+                            let activation_failed = subscribe_handler::activate_subscriptions(
                                 conn,
                                 &self.db,
                                 db_name,
@@ -414,9 +416,21 @@ impl ShamirDbHandler {
                             )
                             .await;
 
-                            DbResponse::Batch { response }
+                            if activation_failed {
+                                typed_canonical_refusal = true;
+                                table_unavailable_response()
+                            } else {
+                                DbResponse::Batch { response }
+                            }
                         }
-                        Err(e) => error_response(&e),
+                        Err(e) => {
+                            typed_canonical_refusal = is_typed_canonical_refusal(&e);
+                            if typed_canonical_refusal {
+                                table_unavailable_response()
+                            } else {
+                                error_response(&e)
+                            }
+                        }
                     }
                 }
             }
@@ -439,7 +453,7 @@ impl ShamirDbHandler {
         // All other replies, including resync/as-of errors with contextual
         // fields, are caller-capped. The guard is stashed until writer completion.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            let fixed_refusal = is_bounded_canonical_refusal(&final_response);
+            let fixed_refusal = typed_canonical_refusal;
             let size_cap = if fixed_refusal {
                 reserve_bytes
                     .saturating_add(FIXED_ERROR_ALLOWANCE)
@@ -498,12 +512,12 @@ impl ShamirDbHandler {
     }
 }
 
-/// Its only exception is the typed `unknown_table` refusal with its fixed
-/// server message. The response must additionally fit the fixed, pre-reserved
-/// error allowance and the operator cap. Contextual refusals are excluded.
-fn is_bounded_canonical_refusal(reply: &DbResponse) -> bool {
-    matches!(reply, DbResponse::Error { code, message }
-        if code == "unknown_table" && message == "table is unavailable")
+/// Only the engine's canonical typed refusal is eligible; do not infer it from
+/// rendered Display text, which may contain caller-derived diagnostics.
+fn is_typed_canonical_refusal(error: &BatchError) -> bool {
+    matches!(error,
+        BatchError::QueryError { alias, message, code: Some(code) }
+            if alias.is_empty() && code == "unknown_table" && message == "table is unavailable")
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ async fn fixture(lifetime: Duration) -> (ShamirDbHandler, Session, u64) {
     let session = Session::new(
         [0xAB; 16],
         "alice".into(),
-        SessionPermissions::new(true, false, vec!["read_write".into()]),
+        SessionPermissions::new(false, false, vec!["read_write".into()]),
         TransportKind::Tcp,
         BindingMode::TlsExporter,
         [0; 32],
@@ -133,7 +133,8 @@ where
                 .enable_all()
                 .build()
                 .expect("test runtime")
-                .block_on(body())
+                .block_on(tokio::time::timeout(Duration::from_secs(30), body()))
+                .expect("test exceeded 30-second timeout")
         })
         .expect("spawn test thread")
         .join()
@@ -222,7 +223,10 @@ fn tx_execute_quarantine_masks_absent_and_closed_table_equally() {
         );
         assert_eq!(
             existing_error,
-            ("unknown_table".into(), "table is unavailable".into())
+            (
+                "unknown_table".into(),
+                "Query '' failed [unknown_table]: table is unavailable".into(),
+            )
         );
         handler.tx_rollback(&session, "app", handle).await;
     });
@@ -273,7 +277,10 @@ fn tx_execute_invalid_pagination_masks_absent_and_closed_and_preserves_handle() 
         );
         assert_eq!(
             absent_error,
-            ("unknown_table".into(), "table is unavailable".into())
+            (
+                "unknown_table".into(),
+                "Query '' failed [unknown_table]: table is unavailable".into(),
+            )
         );
 
         let mut reopen = Batch::new();
@@ -314,7 +321,10 @@ fn ordinary_query_error_preserves_handle_for_successful_execute() {
                 // A missing table on a READ is the same typed, name-hiding
                 // refusal as a closed table (no existence oracle).
                 assert_eq!(code, "unknown_table");
-                assert_eq!(message, "table is unavailable");
+                assert_eq!(
+                    message,
+                    "Query '' failed [unknown_table]: table is unavailable"
+                );
             }
             other => panic!("expected missing-table query error, got {other:?}"),
         }

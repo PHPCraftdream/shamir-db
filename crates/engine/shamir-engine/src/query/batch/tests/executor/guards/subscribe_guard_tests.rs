@@ -267,7 +267,24 @@ async fn absent_source_precedes_multi_repo_gate() {
 
 #[tokio::test]
 async fn subscribe_multi_repo_rejected() {
-    let resolver = setup_resolver().await;
+    let db = DbInstance::with_repos(vec![
+        RepoConfig {
+            name: "default".to_string(),
+            factory: BoxRepoFactory::in_memory(),
+            tables: vec![TableConfig::new("users"), TableConfig::new("orders")],
+        },
+        RepoConfig {
+            name: "other_repo".to_string(),
+            factory: BoxRepoFactory::in_memory(),
+            tables: vec![TableConfig::new("sessions")],
+        },
+    ])
+    .await
+    .unwrap();
+    let resolver = TestResolver {
+        db,
+        repo: "default".to_string(),
+    };
     let src1 = SourceBuilder::table(TableRef::with_repo("default", "users")).build();
     let src2 = SourceBuilder::table(TableRef::with_repo("other_repo", "sessions")).build();
     let mut batch = Batch::new();

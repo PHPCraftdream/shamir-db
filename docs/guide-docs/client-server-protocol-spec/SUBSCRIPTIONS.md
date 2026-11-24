@@ -242,7 +242,7 @@ address push frames; the client's alias is not echoed.
 
 Grant validation runs synchronously during batch preflight, before any batch operation executes, manager is opened, subscription ID is reserved, or bridge is started. Every source is classified there for availability and actor `Read` access. If any source is absent, closed, or unreadable, the entire request is refused with `unknown_table` and the fixed message `table is unavailable`; no grant or push stream is produced. This takes precedence over multi-repository refusal. A source that becomes unavailable after preflight causes activation to fail rather than silently removing that source or delivering a partial stream.
 
-A rejected grant produces a top-level `QueryError` (no `sub` is assigned, no pushes are emitted).
+A rejected grant produces a top-level `QueryError` (no `sub` is assigned, no pushes are emitted). If activation-time reauthorization fails after batch execution, the whole activation response is instead replaced by the same fixed top-level `unknown_table` refusal; earlier batch writes may already have committed.
 
 | Code                                       | Condition                                                                                                |
 |--------------------------------------------|----------------------------------------------------------------------------------------------------------|

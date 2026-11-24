@@ -537,8 +537,19 @@ impl<'a> QueryRunner<'a> {
                                         ),
                                     ));
                                 }
-                                // Committed: append the body's results (today's
-                                // implicit path, now stated explicitly).
+                                // Committed: append the body's results, but a
+                                // failed required synced flush is not a silent
+                                // success. Keep the committed disposition in the
+                                // code so callers cannot mistake it for abort.
+                                "committed" if info.error.is_some() => {
+                                    return Err(BatchError::query_coded(
+                                        alias.to_string(),
+                                        "wal_durability",
+                                        info.error
+                                            .as_deref()
+                                            .unwrap_or("synced flush failed after commit"),
+                                    ));
+                                }
                                 "committed" => {}
                                 // Fail closed: an unrecognised status must never
                                 // be treated as a successful iteration.

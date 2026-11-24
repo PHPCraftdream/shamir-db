@@ -310,7 +310,7 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
         let mut plan = plan_and_validate_with_metadata(request, resolver, scope, metadata).await?;
 
         // 3. Execute — branch on transactional.
-        let (all_results, tx_info) = if request.transactional {
+        let (all_results, mut tx_info) = if request.transactional {
             execute_transactional_impl(
                 request,
                 &mut plan,
@@ -344,10 +344,24 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
             (r, None)
         };
 
-        // 3.5. Durability: if `synced`, flush every distinct repo the batch
-        // touched before building the response so the write survives an
-        // immediate hard crash.
-        flush_if_synced_durability(request, resolver, db_name, scope, depth).await?;
+        // Non-transactional writes have no outcome receipt. Once a transactional
+        // commit is known, retain its disposition and expose a durability error
+        // in transaction metadata rather than replacing the receipt.
+        if let Err(flush_error) =
+            flush_if_synced_durability(request, resolver, db_name, scope, depth).await
+        {
+            if request.transactional {
+                if let Some(info) = tx_info.as_mut() {
+                    if info.error.is_none() {
+                        info.error = Some(flush_error.to_string());
+                    }
+                } else {
+                    return Err(flush_error);
+                }
+            } else {
+                return Err(flush_error);
+            }
+        }
 
         // 4. Filter results for response
         let results = crate::query::batch::receipts::filter(all_results, request);
