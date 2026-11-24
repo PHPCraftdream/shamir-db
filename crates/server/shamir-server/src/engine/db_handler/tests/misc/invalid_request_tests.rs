@@ -112,6 +112,7 @@ async fn handler_rejects_unknown_batch_key_as_invalid_request() {
     assert!(
         matches!(&response, DbResponse::Error { code, message } if code == "invalid_request" && message.contains("zombie_key"))
     );
+    assert_eq!(handler.decoded_request_count(), 0);
 }
 
 /// Control: the same envelope WITHOUT the mutation decodes fine and gets a
@@ -134,4 +135,5 @@ async fn control_unmutated_batch_decodes_and_reaches_db_layer() {
         matches!(&res, DbResponse::Error { code, .. } if code == "unknown_db"),
         "control batch must reach the DB layer (unknown_db), got {res:?}"
     );
+    assert_eq!(handler.decoded_request_count(), 1);
 }

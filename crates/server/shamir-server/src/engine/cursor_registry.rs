@@ -710,28 +710,47 @@ impl CursorRegistry {
     /// Does NOT tombstone — a deliberate close is not an error condition a
     /// later fetch should be told "expired" about.
     pub fn remove(&self, cursor_id: u64) -> Option<Arc<Cursor>> {
-        // R4b-1: `remove_if` runs its predicate under the SAME shard write
-        // lock `register`'s vacant-entry guard takes, so the mirror removal
-        // + count decrement are atomic relative to register's
-        // publish-under-guard: a decrement can only happen for an entry
-        // that is CURRENTLY visible (register's mirror row + count
-        // contribution are always made before publication — see
-        // `register`'s doc comment), so there is no interleaving where the
-        // mirror or the count could lose an entry that was never added
-        // (underflow) or keep one whose authoritative entry is gone (ghost
-        // row). If the entry is absent (already removed, or register has
-        // not published yet), the predicate never runs and nothing is
-        // torn down.
+        self.remove_matching(cursor_id, None)
+    }
+
+    /// Remove only the cursor whose activity row was used for the caller's
+    /// authorization decision. The open-entry shard guard serializes this
+    /// identity check with removal/re-registration of a reused id.
+    pub(in crate::engine) fn remove_activity_identity(
+        &self,
+        cursor_id: u64,
+        expected: &Arc<CursorActivity>,
+    ) -> Option<Arc<Cursor>> {
+        self.remove_matching(cursor_id, Some(expected))
+    }
+
+    fn remove_matching(
+        &self,
+        cursor_id: u64,
+        expected: Option<&Arc<CursorActivity>>,
+    ) -> Option<Arc<Cursor>> {
+        // `remove_if`'s predicate runs under the shard write lock also taken
+        // by `register`, making mirror removal and count decrement atomic
+        // with publication. The identity-checked path verifies the activity
+        // Arc under that lock so a reused id cannot remove a replacement.
+        // Absent or mismatched entries are left untouched.
         let mut removed: Option<Arc<Cursor>> = None;
-        self.open.remove_if(&cursor_id, |_, arc| {
-            self.activity.remove_sync(&cursor_id);
-            self.count.fetch_sub(1, Ordering::AcqRel);
-            removed = Some(Arc::clone(arc));
-            true
+        self.open.remove_if(&cursor_id, |_, cursor| {
+            let matches = expected.is_none_or(|expected| {
+                self.activity
+                    .peek_with(&cursor_id, |_, current| Arc::ptr_eq(current, expected))
+                    .unwrap_or(false)
+            });
+            if matches {
+                self.activity.remove_sync(&cursor_id);
+                self.count.fetch_sub(1, Ordering::AcqRel);
+                removed = Some(Arc::clone(cursor));
+            }
+            matches
         });
-        let arc = removed?;
-        self.free_session_slot(&arc.owner_sid);
-        Some(arc)
+        let cursor = removed?;
+        self.free_session_slot(&cursor.owner_sid);
+        Some(cursor)
     }
 
     /// Remove all cursors owned by a disconnecting session. The O(N) scan is

@@ -1,5 +1,4 @@
-//! Shell cancellation of a request parked on a row lock.
-//! Decoded-request counting is deferred to task #2005.
+//! Cumulative decoded-request count is asserted in-crate by `decoded_request_counter_covers_cancellation_dispatches`; this shell test cannot reach the handler's test accessor, and no metric was added.
 use super::access_activity_raw_scram::{
     checked_shell_timeout, decimal, keys_exact, login as scram_login, roundtrip, scan_profile_home,
     scan_streams, scanner_positive_control, shell_own_handle, REQUEST_FIELDS, REQUEST_STATES,
