@@ -43,9 +43,18 @@ pub struct SubscriptionSupervisor {
     pub(super) validate_replicated_payload: bool,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
+    /// Persistent stop admission, cancelled by [`Self::begin_stop`]. Every
+    /// follower's cancellation token is a CHILD of it, so one cancel reaches
+    /// every running follower without walking the registry, and a follower
+    /// started afterwards is born cancelled.
+    pub(super) stop: tokio_util::sync::CancellationToken,
     /// Test seam for replacing the row between lease-take and spawn.
     #[cfg(test)]
     pub(super) start_race_hook: Option<StartRaceHook>,
+    /// Test seam awaited after the follower tasks were spawned and before the
+    /// handle is registered: the window in which a follower can already exit.
+    #[cfg(test)]
+    pub(super) registration_hook: Option<StartRaceHook>,
     #[cfg(test)]
     pub(super) apply_park: Option<Arc<ApplyParkHook>>,
     #[cfg(test)]
@@ -54,6 +63,10 @@ pub struct SubscriptionSupervisor {
     pub(crate) teardown_count: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(crate) teardown_done: Arc<tokio::sync::Notify>,
+    /// Signalled by the last exiting wrapper right before it waits for the
+    /// replication control lock: every loop returned and every done flag is set.
+    #[cfg(test)]
+    pub(crate) teardown_entered: Arc<tokio::sync::Notify>,
 }
 
 impl SubscriptionSupervisor {
@@ -76,8 +89,11 @@ impl SubscriptionSupervisor {
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
             reconcile_lock: tokio::sync::Mutex::new(()),
+            stop: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]
             start_race_hook: None,
+            #[cfg(test)]
+            registration_hook: None,
             #[cfg(test)]
             apply_park: None,
             #[cfg(test)]
@@ -86,6 +102,8 @@ impl SubscriptionSupervisor {
             teardown_count: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             teardown_done: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            teardown_entered: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -95,6 +113,15 @@ impl SubscriptionSupervisor {
     #[cfg(test)]
     pub fn with_start_race_hook(mut self, hook: StartRaceHook) -> Self {
         self.start_race_hook = Some(hook);
+        self
+    }
+
+    /// Install a hook awaited after the follower tasks were spawned and before
+    /// their handle is registered (tests only): a follower can exit in that
+    /// window, before the exit path has anything to deregister.
+    #[cfg(test)]
+    pub fn with_registration_hook(mut self, hook: StartRaceHook) -> Self {
+        self.registration_hook = Some(hook);
         self
     }
 
@@ -114,6 +141,11 @@ impl SubscriptionSupervisor {
     #[cfg(test)]
     pub(crate) fn teardown_signal(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.teardown_done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn teardown_entered_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.teardown_entered)
     }
 
     /// Cap each loop at `n` iterations (tests only — avoids relying on
@@ -209,6 +241,9 @@ impl SubscriptionSupervisor {
     ///   replacement.
     pub async fn reconcile(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
+        if self.stop.is_cancelled() {
+            return;
+        }
         // Lock only the catalogue read; release before task stop/start callbacks.
         let control = self.local.lock_replication_control().await;
         let subs = match self.read_subscriptions().await {
@@ -296,6 +331,21 @@ impl SubscriptionSupervisor {
                 }
             }
         }
+    }
+
+    /// Shutdown, first step: latch the stop admission and cancel EVERY follower
+    /// (running now or started later) by cancelling the parent token their own
+    /// tokens derive from. No lifecycle lock, no registry walk, no await.
+    ///
+    /// A reconcile pass in flight holds [`Self::reconcile_lock`] across its
+    /// catalogue read, so a caller that abandons [`Self::stop_all`] while it
+    /// waits for the lock (a shutdown budget) would otherwise leave every
+    /// follower running. After this call no new pass starts a follower (a pass
+    /// already past its check can still spawn one, born cancelled). Followers
+    /// exit gracefully at their next cancellation checkpoint;
+    /// [`Self::stop_all`] then joins them.
+    pub fn begin_stop(&self) {
+        self.stop.cancel();
     }
 
     /// Stop every running loop and clear the registry (shutdown).

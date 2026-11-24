@@ -28,6 +28,10 @@ pub(super) struct SubHandle {
     /// spawned loop — a shared flag would wrongly mark the whole handle done
     /// when only one of several target loops finished.
     pub(super) dones: Vec<Arc<AtomicBool>>,
+    /// Set by the last exiting wrapper after it invalidated the lease and before
+    /// it tries to deregister this handle: the lease teardown is complete and no
+    /// further database work is admitted.
+    pub(super) torn_down: Arc<AtomicBool>,
     /// The lease all loops of this handle run under (round 5, A1). Arc
     /// identity of the lease identifies THIS handle: a newer start installs
     /// a handle carrying a different lease.
