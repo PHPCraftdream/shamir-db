@@ -306,12 +306,18 @@ impl SubscriptionSupervisor {
             names.push(name.clone());
             true
         });
+        // Signal EVERY follower before awaiting any join: a wait abandoned by
+        // a shutdown budget must not leave later followers running.
+        let mut stopped = Vec::with_capacity(names.len());
         for name in names {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
-                for join in handle.joins {
-                    let _ = join.await;
-                }
+                stopped.push(handle);
+            }
+        }
+        for handle in stopped {
+            for join in handle.joins {
+                let _ = join.await;
             }
         }
     }

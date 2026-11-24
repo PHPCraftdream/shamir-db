@@ -68,7 +68,11 @@ finish successfully. The existing 30-second `serve` deadline can report an
 unclean shutdown but does not abandon the worker: the scheduled worker and the
 data-directory lock are awaited after the deadline, and nothing forces a process
 exit; a kill by the operator can still leave partial output, including a
-partially deleted copy. A cancellation observed before the retention pass starts
+partially deleted copy. With an outer deadline, the early stages share the fixed
+cutoff `outer deadline - LATE_RESERVE` (1 s): an early-stage timeout is recorded
+and drain proceeds, but it does not itself start cleanup that has not yet begun;
+the late metadata join is bounded by what remains of the budget (capped at 5 s), and
+store release keeps 250 ms before the outer deadline for its verdict and report. A cancellation observed before the retention pass starts
 skips its scan. Protocol directories use UTC `YYYYMMDD_HHMMSS` at second
 resolution; collisions fail without overwrite.
 
@@ -129,21 +133,34 @@ Tagging failure counts as retention failure; preserve the verified backup and
 skip pruning, even if a temp sidecar remains. No manifest, protocol or restore change.
 
 1. After success only, scan every direct child; require the exact timestamp name,
-   a real directory, and matching versioned owner tag. Preflight without following
+   a real directory, and matching versioned owner tag — or, for an untagged child,
+   an exact match against the bounded in-memory provenance (recorded name, manifest
+   creation time and manifest-byte SHA-256 from the post-protocol capture), which is
+   tagged first and only then becomes an owned candidate. Preflight without following
    links; reject symlinks, reparse points, special files and (on Unix) entries
    on a different device. Check actual sizes
    and every manifest/WAL/stamp path the verifier may read is contained and safe
-   before calling existing v2 `verify_manifest`. Require parsed v2 online manifest.
+   before calling existing v2 `verify_retention_candidate` (`preflight.rs`). Require parsed v2
+   online manifest.
 2. Use sequential checked budgets: 4,096 root entries, 32 tree levels, 64 KiB
    sidecar, 16 MiB manifest, 100,000 tree entries per candidate, and 1,000,000
-   tree entries and 1 TiB of input per pass. Byte budget: the pass charges the
-   verifier's real reads, by size, when the manifest's file set is known. Each
+   tree entries and 1 TiB of input per pass. Byte budget: the verifier's reads
+   are charged at their precharge points, not necessarily only as execution reaches
+   each read. The first stamp inspection is charged before its verdict; after a
+   valid stamp verdict, the second inspection is charged before later structural
+   checks, payload reads and verifier execution. A manifest-listed stamp's file
+   hash is also charged before hashing. Later structural rejection or verifier
+   failure can therefore leave a charge for a read that was not reached. Each
    manifest-listed file is charged once (the claimed-file loop); a WAL segment
-   is charged a second time (the verifier's WAL loop hashes it again) and the
-   stamp a second time (`inspect` reads it before the manifest-file hash). The
-   manifest is handed to the verifier and never re-read, the tree walk charges
-   directory entries only, so unknown files in a rejected candidate cost one
-   entry each. Exhausted budget or incomplete root scan means no deletion;
+   is charged a second time (the verifier's WAL loop hashes it again). The tree
+   walk charges directory entries only, so unknown files in a rejected candidate
+   cost one entry each. Bounded control-file reads are charged too, each with one
+   extra sentinel byte (`meta.len() + 1`): `manifest.json` once during
+   classification and once during adoption, and `backup.meta.json` once per
+   candidate. Adoption's late sidecar and manifest rereads are charged before
+   digest comparison. A candidate rejected by the comparison pays for those reads
+   if they were performed; if the budget rejects during a late read, later reads
+   do not occur. Exhausted budget or incomplete root scan means no deletion;
    count failure.
    Foreign files, partial or corrupt copies, unsafe trees, other owners and
    unmarked R2a/admin copies stay untouched and are counted. If the just-created
@@ -166,7 +183,7 @@ Added series use the `shamir_backup_` prefix; only the scheduled counter has a l
 
 | Suffix | Meaning |
 |---|---|
-| `last_success_timestamp_seconds` | Unix seconds of the NEWEST evidence that copies work: the latest successful admin or scheduled online protocol (persisted durably at copy success in the `server_meta` store, fjall keyspace `server_meta_v1`, key `backup_last_success_unix_secs_v1`, epoch seconds) or, before the first success, the schedule's FIRST arming time (key `backup_armed_at_unix_secs_v1`, written once by `arm_schedule_clock` when a schedule is first enabled and removed by `disarm_schedule_clock` when none is configured). Removing the schedule deletes the row, so re-adding one arms a NEW time at the first boot that has a schedule again, and the staleness clock restarts there; the gap with no schedule is not reported as staleness. `install_backup_meta_store` seeds the in-memory cell with `max(armed_at, last_success)` at boot, `note_success` raises it with `fetch_max`, and each scrape `fetch_min`s it to "now" IN PLACE: a future stamp is replaced by the current time exactly ONCE and later scrapes report that same clamped value, so the exported age grows. Before the first success the series therefore reports the first arming, and a restored `data_dir` carries both persisted rows of the backup it came from. Zero only when no schedule was ever armed and no success was recorded. |
+| `last_success_timestamp_seconds` | Unix seconds of the NEWEST evidence that copies work: the latest successful admin or scheduled online protocol (persisted durably at copy success in the `server_meta` store, fjall keyspace `server_meta_v1`, key `backup_last_success_unix_secs_v1`, epoch seconds) or, before the first success, the schedule's FIRST arming time (key `backup_armed_at_unix_secs_v1`, written once by `arm_schedule_clock` when a schedule is first enabled and removed by `disarm_schedule_clock` when none is configured). Removing the schedule deletes the row, so re-adding one arms a NEW time at the first boot that has a schedule again, and the staleness clock restarts there; the gap with no schedule is not reported as staleness. That removal is best-effort like the arming write AND not atomic (the row is removed, then the store is persisted): a failure logs one bounded `persist-armed-at-failed` token and the durable outcome is UNCERTAIN — a later boot may still see the OLD row (and keep that arming time) or none (and arm afresh). Arming evidence counts only when THIS boot has a configured schedule: an unconfigured boot ignores the armed-at row entirely, even when the disarm failed to delete it — `install_backup_meta_store(…, false)` takes the disarm path, which returns 0 without reading the row — so that boot's series reports only the last-success row (or Zero), while a configured boot seeds from the row it reads (`ArmingAction::Keep`, `WriteNow` or `UseNowWithoutWriting`). An UNREADABLE row is used for the current boot only and is never overwritten. `install_backup_meta_store` seeds the in-memory cell with `max(armed_at, last_success)` at boot, `note_success` raises it with `fetch_max`, and each scrape `fetch_min`s it to "now" IN PLACE: a future stamp is replaced by the current time exactly ONCE and later scrapes report that same clamped value, so the exported age grows. Before the first success the series therefore reports the first arming, and a restored `data_dir` carries both persisted rows of the backup it came from. Zero whenever no USABLE evidence remains (no configured schedule, no readable armed-at row and no last-success row) — not only when no schedule was ever armed: an arm-then-remove deletes the row (a failed removal may leave the old one — the outcome is uncertain), and an UNREADABLE armed-at row is used for the current boot only (`ArmingAction::UseNowWithoutWriting`, one bounded `read-armed-at-failed` token) and is NEVER overwritten, so the durable first-arming stamp survives a broken read. |
 | `last_duration_seconds`, `last_bytes` | Duration and full manifest payload bytes of the last SUCCESSFUL copy, zero before the first success of the process. In-memory only: the durable rows carry no duration or bytes, so after a restart both read 0 until the first success in the new process. `shamir_backup_last_duration_seconds` is a last-value gauge rendered from the per-scrape snapshot and reads 0 before the first success; `shamir_backup_duration_seconds` is observable-only and OMITTED until the first success of the process (no fabricated zero). Neither changes on a failed run. Share duration measurement/state with existing metrics while preserving their semantics; count WAL and sidecar payload listed in the manifest once, not metadata or retry traffic. |
 | `scheduled_runs_total{result=…}` | `started`, `skipped_busy`, `skipped_window`, `failed`, `completed`; the terminal outcome publishes at protocol completion and refers to the copy, not retention. |
 | `scheduled_failure_streak`, `schedule_enabled` | Saturating streak increments on scheduled `failed` (including an admission refusal) and resets on `completed`, i.e. at copy completion before retention; unchanged on skips/admin, and a retention panic does not touch it. Enabled is 0/1. Both are process state, zero at boot. |

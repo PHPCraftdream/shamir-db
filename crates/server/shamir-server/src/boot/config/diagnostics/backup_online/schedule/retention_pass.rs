@@ -129,6 +129,50 @@ fn fire_scheduled_retention_end() {
     }
 }
 
+// Test-only one-shot POST-PUBLICATION panic armed on the CURRENT thread (the
+// runner thread): fires in the registry's `RunJob::run` IMMEDIATELY after the
+// COPY outcome was published (the scheduler holds `Completed`) and BEFORE the
+// retention pass, so a test can prove what a panic in that window accounts
+// for — one retention failure for a scheduled run, never a second copy one.
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_PANIC: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Clears an unfired [`set_post_publication_panic`] when dropped; a hook that
+/// fires removes itself from the slot. Zero-sized.
+#[cfg(test)]
+pub(crate) struct PostPublicationPanicGuard;
+
+#[cfg(test)]
+impl Drop for PostPublicationPanicGuard {
+    fn drop(&mut self) {
+        PUBLICATION_PANIC.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Arm ONE post-publication panic on the CURRENT thread. The runner thread
+/// arms it from the per-run post-run callback (where the retention pause and
+/// end seams are armed too), so the thread-local is visible to the publication
+/// point that runs next on the same thread. Never process-global.
+#[cfg(test)]
+pub(crate) fn set_post_publication_panic(
+    hook: impl FnOnce() + 'static,
+) -> PostPublicationPanicGuard {
+    PUBLICATION_PANIC.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    PostPublicationPanicGuard
+}
+
+/// Fire and consume the current thread's one-shot post-publication hook, if
+/// any.
+#[cfg(test)]
+pub(crate) fn fire_post_publication_panic() {
+    let hook = PUBLICATION_PANIC.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// Upper bound of the in-memory adoption provenance list (module doc).
 /// Dropping the OLDEST record on overflow keeps the bound without
 /// unbounding the newest outputs; a dropped record simply means that copy

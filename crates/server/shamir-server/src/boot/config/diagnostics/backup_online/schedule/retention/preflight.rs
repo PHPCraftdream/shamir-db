@@ -6,9 +6,9 @@ use crate::sync::durability::backup::online::manifest::{
     self, BackupKind, BACKUP_META_FILE_NAME, MANIFEST_FORMAT_VERSION_V2,
 };
 use crate::sync::durability::backup::{
-    verify_retention_candidate, BackupError, MANIFEST_FILE_NAME,
+    verify_retention_candidate_cancellable, BackupError, MANIFEST_FILE_NAME,
 };
-use crate::sync::format_stamp::STAMP_FILE_NAME;
+use crate::sync::format_stamp::{inspect, StampState, STAMP_FILE_NAME};
 
 use super::super::retention_pass::{manifest_digest_hex, MAX_MANIFEST};
 use super::budget::{metadata, plain_on_root, Budget, Refusal};
@@ -51,36 +51,88 @@ pub(super) fn verified_time(
         return Err(Refusal::Budget);
     }
 
+    // Discovery/validation phase: only the bounded manifest read above and
+    // the walk's entry charges have been charged, so every cheap reject here
+    // costs no byte budget for files the verifier would never open.
     let mut tree = BTreeMap::new();
     walk(dir, "", 0, root_meta, budget, &mut tree)?;
     file_size(&tree, MANIFEST_FILE_NAME)?;
     file_size(&tree, BACKUP_META_FILE_NAME)?;
     match metadata(&dir.join(STAMP_FILE_NAME)) {
         Ok(_) => {
-            // The verifier reads the stamp twice: `format_stamp::inspect`
-            // reads it, then the manifest-file loop hashes it (charged in the
-            // claimed-file loop below). This is the first of the two reads.
+            // The verifier reads the stamp three times: `format_stamp::inspect`
+            // (charged here, before its verdict) twice — the preflight's own
+            // verdict and the verifier's `check_stamp_agreement` — plus the
+            // manifest-file loop's hash (charged with the claimed files below).
             let size = file_size(&tree, STAMP_FILE_NAME)?;
             if size > MAX_STAMP {
                 return Err(Refusal::Budget);
             }
+            // Decide the stamp verdict BEFORE the payload is charged: the
+            // preflight's own `inspect` reads the stamp bytes once, and that
+            // single read is the only stamp debit a corrupt, newer-layout or
+            // epoch-mismatched copy pays. Charging the whole candidate first
+            // made a large WAL pay for a copy that could never verify, and
+            // charging the verifier's read before the verdict made a refusal
+            // pay for a read the verifier never performs.
+            budget.bytes(size)?;
+            match inspect(dir) {
+                StampState::Valid(stamp) => match decoded.format_epoch {
+                    Some(epoch) if epoch == stamp.format_epoch() => {}
+                    _ => return Err(Refusal::Unverifiable),
+                },
+                // Absent is permitted by v2 regardless of the manifest epoch.
+                StampState::Absent { .. } => {}
+                StampState::Corrupt { .. } | StampState::NewerLayout { .. } => {
+                    return Err(Refusal::Unverifiable);
+                }
+            }
+            // Only a stamp that passed the verdict reaches the verifier's
+            // `check_stamp_agreement`, which inspects the same bytes AGAIN:
+            // that second read is debited here, after the verdict and before
+            // any payload byte, so a valid listed stamp totals two inspection
+            // debits plus the files-loop hash while a refusal pays no extra
+            // read. The budget stays an upper bound of the reads this route
+            // performs.
             budget.bytes(size)?;
         }
         Err(Refusal::Unverifiable) => {} // Absent stamp is permitted by v2.
         Err(error) => return Err(error),
     }
-    // Byte charges mirror the verifier's real reads: every manifest-listed
-    // file is hashed once by its file loop (charged here); a WAL segment is
-    // hashed a second time by its WAL loop and the stamp is read a second time
-    // by `inspect` (both charged where they are bound). The walk charges no
-    // bytes and the manifest is handed to the verifier, never re-read.
     let mut claimed = BTreeSet::new();
     for entry in &decoded.files {
         budget.checkpoint()?;
         if !claimed.insert(entry.path.as_str()) {
             return Err(Refusal::Unverifiable);
         }
-        budget.bytes(file_size(&tree, &entry.path)?)?;
+        // Root control files are never listed in `files`: the online writer's
+        // copy pass skips `manifest.json` and `backup.meta.json` at the top
+        // level, so a manifest that lists either is not a copy this server
+        // produced. Excluding such an entry from the hash set instead would
+        // change `verify_retention_candidate`'s contract — that verifier lives
+        // in `shamir-sync`'s shared backup module, hashes every listed path
+        // for other callers too, and is out of this change's area — while
+        // hashing bytes retention itself rewrites (`tag_fresh` replaces
+        // `backup.meta.json`, and `manifest.json` is the file being verified)
+        // cannot be a useful check. The copied `format.stamp` is NOT such a
+        // control file: the writer does list it, so it stays hashable.
+        if entry.path == BACKUP_META_FILE_NAME || entry.path == MANIFEST_FILE_NAME {
+            return Err(Refusal::Unverifiable);
+        }
+        // The verifier refuses a manifest that lists a `cache` payload
+        // (`offline.rs::is_cache_manifest_path`). Decide it HERE, before any
+        // byte of the candidate is charged: a listed cache entry made a
+        // candidate pay its whole payload for a read the verifier never does.
+        let first_component = entry
+            .path
+            .replace('\\', "/")
+            .split('/')
+            .find(|component| !component.is_empty() && *component != ".")
+            .map(str::to_owned);
+        if first_component.as_deref() == Some("cache") {
+            return Err(Refusal::Unverifiable);
+        }
+        file_size(&tree, &entry.path)?;
     }
     let mut wal_dirs = BTreeSet::new();
     let mut wal_files = BTreeSet::new();
@@ -95,8 +147,7 @@ pub(super) fn verified_time(
             {
                 return Err(Refusal::Unverifiable);
             }
-            // The verifier's WAL loop hashes each segment a second time.
-            budget.bytes(file_size(&tree, &segment.file)?)?;
+            file_size(&tree, &segment.file)?;
             if let Some(sidecar) = &segment.sidecar {
                 if !claimed.contains(sidecar.as_str()) {
                     return Err(Refusal::Unverifiable);
@@ -131,21 +182,64 @@ pub(super) fn verified_time(
         }
     }
 
+    // Byte charges come only now, after every cheap reject above passed, and
+    // they mirror the verifier's real reads: the stamp is inspected twice
+    // (`format_stamp::inspect` and `check_stamp_agreement`, both charged in the
+    // discovery phase above) and hashed again by its manifest-file loop
+    // (charged with the claimed files); every manifest-listed file is hashed
+    // once by that loop; a WAL segment is hashed a second time by the
+    // verifier's WAL loop. The walk charges no bytes and the manifest bytes
+    // are handed to the verifier, never re-read. The verifier's stamp hash is
+    // charged with the claimed files below like every other listed file.
+    for entry in &decoded.files {
+        budget.checkpoint()?;
+        budget.bytes(file_size(&tree, &entry.path)?)?;
+    }
+    for listing in &wal.dirs {
+        for segment in &listing.segments {
+            budget.checkpoint()?;
+            budget.bytes(file_size(&tree, &segment.file)?)?;
+        }
+    }
+
     budget.checkpoint()?;
     // The verifier checks the bounded manifest bytes `raw` without a
     // second manifest read. This preserves manifest consistency for this
     // check, but does not prove directory identity or prevent later payload
     // changes under the single-writer-root contract.
-    let verified = verify_retention_candidate(dir, &raw);
+    let verified = verify_retention_candidate_cancellable(dir, &raw, &|| budget.cancelled());
     budget.checkpoint()?;
-    verified.map_err(|error| match error {
-        BackupError::Io(_) => Refusal::Incomplete,
-        _ => Refusal::Unverifiable,
-    })?;
+    verified.map_err(classify_verifier_error)?;
     // Digest the same manifest bytes checked above; this binds the manifest
     // contents only, not the payload tree or directory identity.
     let digest = want_digest.then(|| manifest_digest_hex(&raw));
     Ok((decoded.created_at_unix_ns, digest))
+}
+
+/// Classify the verifier's error for the retention route. ONLY the cancel
+/// hook's own marker is a cancellation; a plain `ErrorKind::Interrupted` is
+/// an ordinary OS `EINTR` and must stay an incomplete read, and every other
+/// I/O error is incomplete too, so the pass still records a retention
+/// failure instead of silently stopping.
+fn classify_verifier_error(error: BackupError) -> Refusal {
+    match error {
+        BackupError::Io(error)
+            if error.get_ref().is_some_and(|inner| {
+                inner.is::<crate::sync::durability::backup::HashCancelled>()
+            }) =>
+        {
+            Refusal::Cancelled
+        }
+        BackupError::Io(_) => Refusal::Incomplete,
+        _ => Refusal::Unverifiable,
+    }
+}
+
+/// Test-only entry point to the private classifier above, so its unit test
+/// exercises the production mapping without widening it.
+#[cfg(test)]
+pub(super) fn classify_verifier_error_for_test(error: BackupError) -> Refusal {
+    classify_verifier_error(error)
 }
 
 fn file_size(tree: &BTreeMap<String, Option<u64>>, path: &str) -> Result<u64, Refusal> {

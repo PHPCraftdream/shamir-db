@@ -11,22 +11,15 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use serde_json::{json, Value};
-use shamir_private_dir::create_private_dir;
-use tempfile::TempDir;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
 use crate::config::BackupRetentionConfig;
-use crate::sync::durability::backup::online::manifest::{
-    self, build_v2, encode, write_backup_meta, write_manifest, ConsistencySection, RepoConsistency,
-    WalDirEntry, WalSection, WalSegmentEntry, BACKUP_META_FILE_NAME,
-};
+use crate::sync::durability::backup::online::manifest::{self, BACKUP_META_FILE_NAME};
 use crate::sync::durability::backup::online::progress::CancelFlag;
 use crate::sync::durability::backup::{
-    try_snapshot_delete_lease, verify_manifest, ManifestFileEntry, MANIFEST_FILE_NAME,
-    SNAPSHOT_LEASE_FILE_NAME,
+    try_snapshot_delete_lease, verify_manifest, MANIFEST_FILE_NAME, SNAPSHOT_LEASE_FILE_NAME,
 };
 
 use super::super::super::retention_pass::manifest_digest_hex;
@@ -34,91 +27,19 @@ use super::super::budget::{Budget, ROOT_ENTRIES};
 use super::super::ownership::{tag_fresh_with_seam, STAGED_PREFIX};
 use super::super::prune::prune_inner;
 use super::super::{prune, RetentionOutcome};
+#[cfg(unix)]
+use super::fixture::private_root_in;
+use super::fixture::{copy_with_payload, owner_tag, private_root, retain, sidecar, OWNER};
 
-const OWNER: &str = "retention-test-owner";
-const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-fn private_root() -> (TempDir, PathBuf) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let root = private_root_in(temp.path());
-    (temp, root)
-}
-
-fn private_root_in(parent: &Path) -> PathBuf {
-    let root = parent.join("private");
-    create_private_dir(&root).expect("private root");
-    root.canonicalize().expect("canonical root")
-}
-
+/// A v2 online copy with an empty WAL segment, untagged or owned by `owner`.
 fn copy(root: &Path, name: &str, time: u128, owner: Option<&str>) -> PathBuf {
-    let dir = root.join(name);
-    let wal_dir = "store.shamirwal";
-    let wal_file = "store.shamirwal/00000000.wal";
-    fs::create_dir_all(dir.join(wal_dir)).expect("WAL dir");
-    fs::write(dir.join(wal_file), []).expect("WAL segment");
-    let manifest = build_v2(
-        time,
-        vec![ManifestFileEntry {
-            path: wal_file.to_owned(),
-            sha256: EMPTY_SHA256.to_owned(),
-            size_bytes: 0,
-        }],
-        None,
-        None,
-        ConsistencySection {
-            per_repo: [(
-                "repo".to_owned(),
-                RepoConsistency {
-                    wal_position: 0,
-                    store_dir: "store".to_owned(),
-                    schema_version: 0,
-                },
-            )]
-            .into(),
-            system_store_version: 0,
-        },
-        WalSection {
-            dirs: vec![WalDirEntry {
-                repo: "repo".to_owned(),
-                dir: wal_dir.to_owned(),
-                segments: vec![WalSegmentEntry {
-                    seq: 0,
-                    file: wal_file.to_owned(),
-                    sidecar: None,
-                    sha256: EMPTY_SHA256.to_owned(),
-                    size: 0,
-                }],
-            }],
-        },
-    );
-    write_manifest(&dir, &encode(&manifest).expect("encode manifest")).expect("write manifest");
-    write_backup_meta(&dir).expect("sidecar");
-    verify_manifest(&dir).expect("valid fixture");
-    if let Some(owner) = owner {
-        let mut value = sidecar(&dir);
-        value["scheduled_retention"] = json!({"version": 1, "owner": owner});
-        fs::write(
-            dir.join(BACKUP_META_FILE_NAME),
-            serde_json::to_vec(&value).expect("encode sidecar"),
-        )
-        .expect("write sidecar");
-    }
-    dir
-}
-
-fn sidecar(dir: &Path) -> Value {
-    serde_json::from_slice(&fs::read(dir.join(BACKUP_META_FILE_NAME)).expect("read sidecar"))
-        .expect("decode sidecar")
+    copy_with_payload(root, name, time, owner, b"")
 }
 
 /// SHA-256 (lowercase hex) of the exact manifest bytes of a fixture copy:
 /// what the registry would have captured for it at completion.
 fn manifest_digest(dir: &Path) -> String {
     manifest_digest_hex(&fs::read(dir.join(MANIFEST_FILE_NAME)).expect("read manifest"))
-}
-
-fn retain(root: &Path, fresh: &Path, keep_last: usize) -> RetentionOutcome {
-    retain_pending(root, fresh, keep_last, &[])
 }
 
 fn tracked_name(dir: &Path) -> String {
@@ -289,7 +210,7 @@ fn keeps_foreign_unverified_and_unknown_entries_even_when_old() {
             .as_object_mut()
             .expect("object")
             .remove("scheduled_retention"),
-        Some(json!({"version": 1, "owner": OWNER}))
+        Some(owner_tag(OWNER))
     );
     assert_eq!(tagged, original_sidecar);
     verify_manifest(&fresh).expect("still verifies after tagging");
@@ -408,7 +329,7 @@ fn pass_budget_does_not_charge_files_the_verifier_never_reads() {
     assert!(unknown.join("unknown").exists());
     assert_eq!(
         sidecar(&fresh).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": OWNER}))
+        Some(&owner_tag(OWNER))
     );
 }
 
@@ -528,7 +449,7 @@ fn broken_marker_fails_the_pass_and_records_provenance_for_repair() {
         sidecar(&fresh)
             .get("scheduled_retention")
             .expect("fresh copy tagged"),
-        &json!({"version": 1, "owner": OWNER})
+        &owner_tag(OWNER)
     );
 }
 
@@ -541,7 +462,7 @@ fn stale_provenance_with_swapped_foreign_tag_is_never_adopted() {
     // repaired pass: ownership is decided on a FRESH sidecar read, so a
     // foreign tag refuses adoption and the copy stays untouched.
     let mut swapped = sidecar(&tracked);
-    swapped["scheduled_retention"] = json!({"version": 1, "owner": "someone-else"});
+    swapped["scheduled_retention"] = owner_tag("someone-else");
     fs::write(
         tracked.join(BACKUP_META_FILE_NAME),
         serde_json::to_vec(&swapped).expect("encode sidecar"),
@@ -573,7 +494,7 @@ fn stale_provenance_with_swapped_foreign_tag_is_never_adopted() {
     assert!(tracked.exists());
     assert_eq!(
         sidecar(&tracked).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": "someone-else"})),
+        Some(&owner_tag("someone-else")),
         "the foreign tag is preserved"
     );
     assert!(mismatch.exists());
@@ -588,7 +509,7 @@ fn already_tagged_provenance_match_reports_adopted_without_retagging() {
     // before failing later): the next pass reports it adopted, keeps the
     // tag byte-identical, and treats it as a normal candidate.
     let mut tagged = sidecar(&tracked);
-    tagged["scheduled_retention"] = json!({"version": 1, "owner": OWNER});
+    tagged["scheduled_retention"] = owner_tag(OWNER);
     fs::write(
         tracked.join(BACKUP_META_FILE_NAME),
         serde_json::to_vec(&tagged).expect("encode sidecar"),
@@ -785,7 +706,7 @@ fn replaced_output_same_name_and_time_different_bytes_is_never_adopted() {
     );
     assert_eq!(
         sidecar(&fresh).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": OWNER}))
+        Some(&owner_tag(OWNER))
     );
 }
 
@@ -827,7 +748,7 @@ fn manifest_replaced_after_scan_is_not_adopted() {
     );
     assert_eq!(
         sidecar(&fresh).get("scheduled_retention"),
-        Some(&json!({"version": 1, "owner": OWNER}))
+        Some(&owner_tag(OWNER))
     );
 }
 

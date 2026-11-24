@@ -6,7 +6,10 @@
 //! `audit.log` plus `audit.log.` + 20 ASCII decimal digits archives — and
 //! shamir-sync carries no config for them. Only exact names count: boot
 //! recovery ignores every other name in the reserved namespace, so a copy
-//! must neither capture such a name as an archive nor skip it as one.
+//! must neither capture such a name as an archive nor skip it as one. A
+//! per-entry listing failure is typed ([`CopyError::AuditListing`]) rather
+//! than a silent omission, so an unreadable entry can never hide a possibly
+//! new rotation archive.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -17,23 +20,26 @@ use super::backup::online::copy_engine::{CopyError, CopyPassResult, SealGate};
 use super::backup::online::progress::CancelFlag;
 
 /// File name of the ACTIVE audit chain log at the top of `data_dir`.
-pub(crate) const AUDIT_LOG_FILE_NAME: &str = "audit.log";
+/// Private: every caller lives in this module (the copy engine uses
+/// `is_audit_log_file_name`, never the raw name).
+const AUDIT_LOG_FILE_NAME: &str = "audit.log";
 
 /// Rotation archives are exactly `audit.log.` + 20 ASCII decimal digits.
 const AUDIT_ARCHIVE_PREFIX: &str = "audit.log.";
 const AUDIT_ARCHIVE_DIGITS: usize = 20;
 
-/// Upper bound on the audit chain rounds of one data-directory pass. Each
-/// round lists the audit files, copies every file it listed and lists them
-/// again; a round whose fresh listing names a rotation archive that round did
-/// not copy repeats. The bound counts rounds: a stable round, the last one
-/// included, succeeds; no stable round within the bound fails the pass typed
-/// (never a silently inconsistent copy).
-pub(crate) const AUDIT_CAPTURE_ROUNDS: usize = 4;
+/// Upper bound on audit chain capture rounds of one data-directory pass. Each
+/// round lists audit files, copies every listed file, and lists again. The
+/// unstable-round budget is four rounds; up to three additional active-reopen
+/// attempts may follow, for at most seven capture rounds per pass. This bounds
+/// the count of work rounds, not an elapsed interval or deadline. A stable
+/// round is a candidate subject to the destination-leftover check; without a
+/// stable round the pass fails typed.
+pub(super) const AUDIT_CAPTURE_ROUNDS: usize = 4;
 
 /// True for the top-level audit chain file names: the active log and its
 /// rotation archives.
-pub(crate) fn is_audit_log_file_name(name: &OsStr) -> bool {
+pub(super) fn is_audit_log_file_name(name: &OsStr) -> bool {
     name == OsStr::new(AUDIT_LOG_FILE_NAME)
         || name.to_str().is_some_and(|name| {
             name.strip_prefix(AUDIT_ARCHIVE_PREFIX)
@@ -44,27 +50,70 @@ pub(crate) fn is_audit_log_file_name(name: &OsStr) -> bool {
         })
 }
 
+/// True for the ACTIVE log name alone (`audit.log`), never an archive. The
+/// data-directory pass needs the distinction to tell the rotation window (the
+/// active name absent between `rename` and the reopen) from a pruned archive.
+pub(super) fn is_audit_active_log_name(name: &OsStr) -> bool {
+    name == OsStr::new(AUDIT_LOG_FILE_NAME)
+}
+
 /// The audit chain files of a data directory, listed FRESH: the rotation
 /// archives in ascending suffix order first, the ACTIVE log last (the order
 /// both the copy loop and the hash pass follow, so the manifest's file order
 /// stays deterministic). Only exact archive names, only regular files;
 /// cancellation and the gate are checked per entry.
-pub(crate) fn list_audit_files(
+///
+/// Every iterator enumeration error is typed as [`CopyError::AuditListing`],
+/// including `NotFound`, because it is not evidence that an already-listed
+/// entry vanished. Only `NotFound` from per-entry metadata after enumeration
+/// is skipped; other metadata failures are typed `AuditListing`. Never a silent
+/// omission: an unreadable entry could be a possibly-new rotation archive.
+pub(super) fn list_audit_files(
     source_root: &Path,
     cancel: &CancelFlag,
     gate: Option<&SealGate>,
 ) -> Result<Vec<PathBuf>, CopyError> {
+    if cancel.is_cancelled() {
+        return Err(CopyError::Cancelled);
+    }
     let mut archives = Vec::new();
     let mut active = None;
     let entries = fs::read_dir(source_root).map_err(|source| CopyError::Io {
         path: source_root.to_path_buf(),
         source,
     })?;
-    let mut entries: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .collect();
-    entries.sort();
-    for entry in entries {
+    if cancel.is_cancelled() {
+        return Err(CopyError::Cancelled);
+    }
+    // Enumerate raw paths and sort first, then classify names and perform
+    // metadata checks entry by entry. Iterator failures, including NotFound,
+    // remain typed AuditListing errors.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut entries = entries.into_iter();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
+        let Some(entry) = entries.next() else {
+            break;
+        };
+        // Test-only seam: an injected ITERATOR failure for this root takes the
+        // very arm a genuine one takes (the pass listing has the same seam).
+        #[cfg(test)]
+        let entry = match super::backup::online::copy_engine::test_seams::fire_read_dir_entry(
+            source_root,
+        ) {
+            Some(error) => Err(error),
+            None => entry,
+        };
+        let entry = entry.map_err(|source| CopyError::AuditListing { source })?;
+        paths.push(entry.path());
+    }
+    paths.sort();
+    for entry in paths {
+        if cancel.is_cancelled() {
+            return Err(CopyError::Cancelled);
+        }
         if let Some(gate) = gate {
             gate.check(cancel)?;
         } else if cancel.is_cancelled() {
@@ -76,9 +125,26 @@ pub(crate) fn list_audit_files(
         if !is_audit_log_file_name(name) {
             continue;
         }
-        let meta = match fs::symlink_metadata(&entry) {
+        // Test-only seam: an injected metadata RESULT for this entry
+        // REPLACES the result the listing consumes, so the injected failure
+        // travels the same match arm as a genuine one (the seam
+        // `copy_engine::list_files` uses).
+        #[cfg(test)]
+        let meta_result =
+            match super::backup::online::copy_engine::test_seams::fire_symlink_metadata(&entry) {
+                Some(result) => result,
+                None => fs::symlink_metadata(&entry),
+            };
+        #[cfg(not(test))]
+        let meta_result = fs::symlink_metadata(&entry);
+        // Only an entry that VANISHED between the listing and this read is
+        // skipped (the retention/rotation race, exactly as in
+        // `copy_engine::list_files`); every other failure is typed, never a
+        // silent omission of a possibly-new archive.
+        let meta = match meta_result {
             Ok(meta) => meta,
-            Err(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(CopyError::AuditListing { source }),
         };
         if !meta.is_file() {
             continue;
@@ -99,7 +165,7 @@ pub(crate) fn list_audit_files(
 /// that listed it captured it, and the anchors were captured before any audit
 /// listing, so bytes appended later are only a longer tail; a rotation landing
 /// after a round forces another round, in which its archive is copied.
-pub(crate) fn audit_capture_is_stable(
+pub(super) fn audit_capture_is_stable(
     source_root: &Path,
     captured: &CopyPassResult,
     cancel: &CancelFlag,
@@ -113,36 +179,4 @@ pub(crate) fn audit_capture_is_stable(
                     || captured.files.iter().any(|file| file.rel_path == name)
             })
     }))
-}
-
-/// Removes the destination's active log when this round's capture has none.
-///
-/// The data-directory pass runs twice into one destination (pass D, then the
-/// snapshot-defining pass E). When the source has no active log at E's audit
-/// listing — a rotation renamed it and has not reopened it yet — E's manifest
-/// has no entry for it, while the copy pass D made would stay behind and fail
-/// the self-verification as an unlisted file. The destination must hold
-/// exactly what the round captured, so the earlier copy goes: the archive the
-/// rotation produced carries its bytes, and recovery accepts a directory
-/// without an active log.
-pub(crate) fn remove_uncaptured_active_log(
-    dest_root: &Path,
-    captured: &CopyPassResult,
-) -> Result<(), CopyError> {
-    if captured
-        .files
-        .iter()
-        .any(|file| file.rel_path == AUDIT_LOG_FILE_NAME)
-    {
-        return Ok(());
-    }
-    let stale = dest_root.join(AUDIT_LOG_FILE_NAME);
-    match fs::remove_file(&stale) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(CopyError::Io {
-            path: stale,
-            source,
-        }),
-    }
 }

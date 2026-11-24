@@ -44,7 +44,7 @@ pub(super) fn verify_manifest_v2(
     raw: &[u8],
 ) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
     let decoded = decode_manifest_v2(raw)?;
-    verify_decoded_manifest_v2(snapshot_dir, decoded)
+    verify_decoded_manifest_v2(snapshot_dir, decoded, &|| false)
 }
 
 /// Decode-and-classify half of [`verify_manifest_v2`]: UTF-8 + JSON decode,
@@ -79,9 +79,13 @@ pub(super) fn decode_manifest_v2(raw: &[u8]) -> Result<online_manifest::Manifest
 /// Payload half of [`verify_manifest_v2`] over the ALREADY-decoded manifest
 /// from [`decode_manifest_v2`] (one parse, no re-read): stamp agreement,
 /// confinement, tree walk and re-hash, WAL rules, file-set check.
+/// `cancel` is threaded into every streaming hash, which consults it once
+/// per chunk; [`verify_manifest_v2`] passes `&|| false` (the public verify
+/// paths are never cancelled), retention passes its own flag.
 pub(super) fn verify_decoded_manifest_v2(
     snapshot_dir: &Path,
     decoded: online_manifest::ManifestV2,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
     check_stamp_agreement(snapshot_dir, decoded.format_epoch)?;
 
@@ -118,7 +122,7 @@ pub(super) fn verify_decoded_manifest_v2(
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
         let file_path = confined_snapshot_path(snapshot_dir, &entry.path)?;
-        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
+        let (digest, actual_size) = hash_file_streaming(&file_path, cancel).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
                 format!("manifest entry {}: {e}", entry.path),
@@ -183,7 +187,7 @@ pub(super) fn verify_decoded_manifest_v2(
                 }
                 declared_wal_names.insert(format!("{:08}.wal", segment.seq));
                 let segment_path = confined_snapshot_path(snapshot_dir, &segment.file)?;
-                let (digest, size) = hash_file_streaming(&segment_path).map_err(|e| {
+                let (digest, size) = hash_file_streaming(&segment_path, cancel).map_err(|e| {
                     BackupError::Io(std::io::Error::new(
                         e.kind(),
                         format!("wal segment {}: {e}", segment.file),
