@@ -843,6 +843,14 @@ fn run_steps(
         });
     }
     port.begin_verify();
+    port.validate_copied_data_dir(dest_dir)
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Verifying,
+            cleanup: None,
+        });
+    }
     let per_repo: BTreeMap<String, _> = recopy
         .points
         .iter()
@@ -900,6 +908,13 @@ fn run_steps(
     );
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
+    // A validation error wins via `?`; cancellation observed after successful validation wins over publication. This final check covers manifest preparation and encoding, which have no deterministic test seam.
+    if cancel.is_cancelled() {
+        return Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Verifying,
+            cleanup: None,
+        });
+    }
     manifest::write_manifest(dest_dir, &encoded)
         .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     manifest::write_backup_meta(dest_dir)

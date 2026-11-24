@@ -76,6 +76,37 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     verify_private_dir(path)
 }
 
+/// Creates `path` (one level; the parent must exist) with a protected
+/// owner-only DACL, refusing when anything already occupies the path.
+///
+/// Race-free: `CreateDirectoryW` is an exclusive-create primitive — it
+/// fails with `ERROR_ALREADY_EXISTS` if the path exists (including as a
+/// symlink/junction), and the protected DACL
+/// `D:P(A;OICI;FA;;;<current-user-SID>)` is applied in the SAME syscall,
+/// never "create then fix up". There is no adopt path that could take over
+/// or delete a pre-existing directory. Post-create verification-failure
+/// cleanup is not practically testable: `CreateDirectoryW` applies the
+/// protected DACL atomically; removing the empty directory preserves the
+/// no-leak invariant regardless.
+pub fn create_exclusive_private_dir(path: &Path) -> io::Result<()> {
+    let sec_desc = OwnerOnlySecurityDescriptor::from_sddl(DIRECTORY_SDDL)?;
+    let wide = path_to_wide(path)?;
+    // SAFETY: `wide` is a valid null-terminated UTF-16 string for the
+    // duration of this call; `sec_desc.as_security_attributes()` points at
+    // a valid `SECURITY_ATTRIBUTES` owned by `sec_desc`, which outlives
+    // the call. `CreateDirectoryW` copies the descriptor, it does not
+    // retain the pointer.
+    let ok = unsafe { CreateDirectoryW(wide.as_ptr(), sec_desc.as_security_attributes()) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if let Err(verify_error) = verify_private_dir(path) {
+        let _ = fs::remove_dir(path);
+        return Err(verify_error);
+    }
+    Ok(())
+}
+
 /// Verifies `path` is a real directory and NOT a reparse point (checked
 /// via `symlink_metadata`, i.e. without following links), that its owner
 /// is the current user SID, and that its DACL is exactly the one private

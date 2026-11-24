@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use shamir_collections::{TFxSet, THasher};
 use shamir_db::ShamirDb;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 use super::handle::StartRaceHook;
@@ -15,6 +15,14 @@ use crate::replication::error::ReplError;
 #[cfg(test)]
 use crate::replication::follower_loop::ApplyParkHook;
 use crate::replication::source;
+
+/// Test-only gate that parks a wrapper between its loop's return and its housekeeping.
+#[cfg(test)]
+pub(crate) struct HousekeepingGate {
+    pub(crate) repo: Option<String>,
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
 
 /// Supervises the lifecycle of follower loops driven by the declarative
 /// subscription catalogue. See the module docs.
@@ -67,6 +75,10 @@ pub struct SubscriptionSupervisor {
     /// replication control lock: every loop returned and every done flag is set.
     #[cfg(test)]
     pub(crate) teardown_entered: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) accounted: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) housekeeping_gate: Option<Arc<HousekeepingGate>>,
 }
 
 impl SubscriptionSupervisor {
@@ -104,6 +116,10 @@ impl SubscriptionSupervisor {
             teardown_done: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             teardown_entered: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            accounted: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            housekeeping_gate: None,
         }
     }
 
@@ -134,8 +150,19 @@ impl SubscriptionSupervisor {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_housekeeping_gate(mut self, gate: Arc<HousekeepingGate>) -> Self {
+        self.housekeeping_gate = Some(gate);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn teardown_count(&self) -> usize {
         self.teardown_count.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accounted_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.accounted)
     }
 
     #[cfg(test)]
@@ -303,7 +330,13 @@ impl SubscriptionSupervisor {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
                 for join in handle.joins {
-                    let _ = join.await;
+                    if let Err(join_error) = join.await {
+                        error!(
+                            subscription = %name,
+                            error = %join_error,
+                            "supervisor: follower wrapper join failed during reconcile"
+                        );
+                    }
                 }
                 info!(subscription = %name, "supervisor: stopped follower loop");
             }
@@ -362,12 +395,18 @@ impl SubscriptionSupervisor {
         for name in names {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
-                stopped.push(handle);
+                stopped.push((name, handle));
             }
         }
-        for handle in stopped {
+        for (name, handle) in stopped {
             for join in handle.joins {
-                let _ = join.await;
+                if let Err(join_error) = join.await {
+                    error!(
+                        subscription = %name,
+                        error = %join_error,
+                        "supervisor: follower wrapper join failed during stop_all"
+                    );
+                }
             }
         }
     }
@@ -381,7 +420,14 @@ impl SubscriptionSupervisor {
             return;
         };
         for join in handle.joins {
-            join.await.expect("subscription task panicked");
+            if let Err(join_error) = join.await {
+                error!(
+                    subscription = %name,
+                    error = %join_error,
+                    "supervisor: follower wrapper join failed while waiting for subscription"
+                );
+                panic!("subscription task panicked: {join_error}");
+            }
         }
     }
 }

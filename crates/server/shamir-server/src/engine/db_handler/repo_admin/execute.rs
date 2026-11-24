@@ -427,6 +427,9 @@ impl ShamirDbHandler {
                             typed_canonical_refusal = is_typed_canonical_refusal(&e);
                             if typed_canonical_refusal {
                                 table_unavailable_response()
+                            } else if is_typed_server_busy_refusal(&e) {
+                                typed_canonical_refusal = true;
+                                server_busy_response()
                             } else {
                                 error_response(&e)
                             }
@@ -447,9 +450,9 @@ impl ShamirDbHandler {
             return final_response;
         }
 
-        // B6: the sole caller-cap exception is a typed unknown-table refusal
-        // with server-owned fixed text. Its possible bytes were reserved before
-        // execution as part of FIXED_ERROR_ALLOWANCE; never grow a live guard.
+        // B6: the caller-cap exceptions are typed unknown-table and server_busy
+        // refusals with server-owned fixed text. Their possible bytes were reserved
+        // before execution as part of FIXED_ERROR_ALLOWANCE; never grow a live guard.
         // All other replies, including resync/as-of errors with contextual
         // fields, are caller-capped. The guard is stashed until writer completion.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
@@ -518,6 +521,14 @@ fn is_typed_canonical_refusal(error: &BatchError) -> bool {
     matches!(error,
         BatchError::QueryError { alias, message, code: Some(code) }
             if alias.is_empty() && code == "unknown_table" && message == "table is unavailable")
+}
+
+/// Argon2 admission is identified by its stable typed code, never by its
+/// rendered diagnostic; the client receives fixed server-owned refusal text.
+fn is_typed_server_busy_refusal(error: &BatchError) -> bool {
+    matches!(error,
+        BatchError::QueryError { alias, code: Some(code), .. }
+            if alias.is_empty() && code == "server_busy")
 }
 
 #[cfg(test)]

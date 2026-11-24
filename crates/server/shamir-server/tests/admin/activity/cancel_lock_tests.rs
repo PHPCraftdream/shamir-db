@@ -878,6 +878,10 @@ fn cancel_tx_never_removes_replacement_under_stale_authorization() {
                 DbResponse::TxRolledBack { tx_handle: got } if got == handle
             ));
             assert!(fixture.handler.tx_registry().is_empty());
+            fixture
+                .expect_tx_cancel(&fixture.admin, handle, CancelOutcome::AlreadyFinished)
+                .await;
+            guard.mark("the removed handle answers already-finished");
         },
     );
 }

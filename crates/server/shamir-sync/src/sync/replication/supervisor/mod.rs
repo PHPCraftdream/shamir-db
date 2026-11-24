@@ -52,4 +52,6 @@ mod machine;
 mod start;
 
 pub use super::source::seed::terminal::{ReplSourceFactory, Subscription};
+#[cfg(test)]
+pub(crate) use machine::HousekeepingGate;
 pub use machine::SubscriptionSupervisor;

@@ -154,11 +154,9 @@ impl PrincipalHeld {
 // and latch the first rejected submission of each saturation episode.
 const CANCEL_AUDIT_CAPACITY: usize = 256;
 /// Share of the queue one principal may hold (queued + running jobs). An
-/// eighth of the global cap, so at least eight principals keep their whole
-/// share while the global cap binds and no single principal can starve the
-/// rest. Charged per principal NAME — one counter per name, never shared
-/// between two names — so one principal reaching its share can never deny
-/// another while global slots are free.
+/// eighth of the global cap; no single principal can starve others through its
+/// independent counter. Persistent map-bucket contention can still make bounded
+/// `try_entry` retries refuse/drop an event, even when both quotas are free.
 pub(crate) const CANCEL_AUDIT_PRINCIPAL_SHARE: usize = 32;
 /// Global slots `Observability` jobs may occupy — three quarters of
 /// [`CANCEL_AUDIT_CAPACITY`] (192 of 256). Successful typed-read audits are
@@ -188,18 +186,14 @@ pub(crate) struct CancelRefusalAudit {
     dropped: AtomicUsize,
     idle: Notify,
     /// Queued + running jobs per principal NAME. A name's entry is inserted
-    /// with its first refusal and removed when its count returns to zero. The
-    /// global slot is reserved inside the SAME bucket-locked decision that
-    /// increments the count, and only when the share still has room (see
-    /// [`CancelRefusalAudit::reserve_share_and_global`]), so every non-zero
-    /// entry implies a held slot: at most `CANCEL_AUDIT_CAPACITY` entries with a
-    /// non-zero count, plus zero entries whose removal raced a reservation
-    /// (retired by that name's next release).
+    /// with its first admitted slot and removed when its count returns to zero.
+    /// The global slot is reserved while holding the same scc bucket entry,
+    /// before inserting a vacant entry, so every published entry has a live slot.
     ///
-    /// Contention: one `update_sync`/`insert_sync` per refusal and one per
-    /// release on the scc bucket of that name — the map's own bucket lock for
-    /// the increment/decrement only, never across an `.await`, never inside the
-    /// audit append. No `std` mutex is added to the reply path.
+    /// Contention: the response path uses scc 3.8's `try_entry`, which returns
+    /// immediately when the bucket is busy; bounded retries refuse admission.
+    /// Release uses one short decrement/removal critical section under the
+    /// entry guard, never across an `.await` or audit append.
     principals: scc::HashMap<String, PrincipalHeld, THasher>,
     /// Live `Observability` jobs (queued + running) across every principal.
     /// Bounded by [`CANCEL_AUDIT_OBSERVABILITY_CAPACITY`]; `Security` jobs
@@ -215,9 +209,8 @@ pub(crate) struct CancelRefusalAudit {
     /// push+prune. None of that waits for the audit writer, its persistence
     /// gate or a flush.
     unfinished: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
-    /// Test seam (ordered-shutdown close/discard race): called after the share
-    /// slot is reserved and before the job is spawned, so a test can close
-    /// admission and sweep the queue inside that exact window.
+    /// Test-only seam fired BEFORE the spawn gate is taken (close-wins window);
+    /// the IN-GATE seam is `fire_spawn_window_probe`.
     #[cfg(test)]
     pub(crate) pause_before_spawn: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Test seam (drop accounting): when set, the shared detached-audit clock
@@ -231,22 +224,26 @@ pub(crate) struct CancelRefusalAudit {
 mod refusal_admission;
 
 impl CancelRefusalAudit {
-    /// Release one principal slot of `class` and retire the entry when it
-    /// reaches zero.
-    ///
-    /// The decrement and the removal both run inside the name's bucket lock, so
-    /// a reservation arriving in between is never lost: it either increments
-    /// before the removal (the removal then sees a non-zero count and keeps the
-    /// entry) or inserts a fresh entry afterwards.
+    /// Releasing a share is one blocking bucket access: a single `entry_sync`
+    /// decrement removes the entry at zero under the entry guard. Admitted-job
+    /// disposal normally does this on the blocking audit worker; during runtime
+    /// shutdown tokio may drop a submitted closure on the submitter, so release
+    /// can run there while it still holds the spawn gate (see
+    /// [`CancelAuditSlot::drop`]).
     fn release_share(&self, principal: &str, class: AuditEventClass) {
-        self.principals.update_sync(principal, |_, held| {
-            held.total = held.total.saturating_sub(1);
-            if class == AuditEventClass::Observability {
-                held.observability = held.observability.saturating_sub(1);
+        match self.principals.entry_sync(principal.to_owned()) {
+            scc::hash_map::Entry::Occupied(mut entry) => {
+                let held = entry.get_mut();
+                held.total = held.total.saturating_sub(1);
+                if class == AuditEventClass::Observability {
+                    held.observability = held.observability.saturating_sub(1);
+                }
+                if held.total == 0 {
+                    let _ = entry.remove();
+                }
             }
-        });
-        self.principals
-            .remove_if_sync(principal, |held| held.total == 0);
+            scc::hash_map::Entry::Vacant(_) => {}
+        }
     }
 
     /// Release one global observability slot; a no-op for `Security` jobs,
@@ -271,13 +268,15 @@ impl CancelRefusalAudit {
     }
 
     pub(crate) fn close(&self) {
-        // ONE decision with `spawn_tracked`: both take this mutex, so `close()`
-        // cannot return while a spawn decision is in flight. After it returns
-        // no job can still be spawned, and the handle of every already spawned
-        // job sits in the list `discard_queued` drains. Setting the bit without
-        // the mutex left exactly that window open.
+        // close() takes this same gate, so it cannot return before any spawn decision.
         let _decision = self.lock_close_decision();
         self.state.fetch_or(CLOSED, Ordering::AcqRel);
+    }
+
+    /// Acquire the spawn-decision mutex without waiting. This is the SAME mutex
+    /// `close()` takes, so close/spawn serialization is unchanged.
+    fn try_spawn_gate(&self) -> Option<std::sync::MutexGuard<'_, Vec<tokio::task::AbortHandle>>> {
+        self.unfinished.try_lock().ok()
     }
 
     /// Acquire the spawn-decision mutex; the test rendezvous observes an actual
@@ -295,8 +294,6 @@ impl CancelRefusalAudit {
         self.unfinished.lock()
     }
 
-    /// Test-only hook fired when `close()` observes the spawn-decision mutex
-    /// already held, before it waits to acquire it.
     #[cfg(test)]
     pub(crate) fn arm_close_decision_probe(
         probe: impl FnOnce() + 'static,
@@ -305,14 +302,7 @@ impl CancelRefusalAudit {
         CloseDecisionProbeGuard
     }
 
-    /// Abort audit jobs that have not started yet.
-    ///
-    /// A job that never ran drops its [`CancelAuditSlot`], so it is counted
-    /// exactly like a refused submission and its `Arc<AuditChainWriter>`
-    /// reference — which would otherwise keep the writer, the appender and
-    /// its fjall store alive past the release timeout — is released now.
-    /// A job already blocked inside the writer's persistence gate keeps
-    /// running: a timeout stops waiting, it does not cancel I/O.
+    /// Abort jobs not yet started. Started blocking work continues until done.
     pub(crate) fn discard_queued(&self) {
         let aborted = self
             .unfinished
@@ -351,33 +341,6 @@ impl CancelRefusalAudit {
         ShareDecisionProbeGuard
     }
 
-    /// Spawn one accepted job and register its abort handle as ONE decision
-    /// with [`Self::close`].
-    ///
-    /// The closed-bit test, the `spawn_blocking` and the push all happen under
-    /// the mutex [`Self::discard_queued`] drains, so after `close()` returned no
-    /// job can still be spawned: the sweep either sees the handle (and aborts
-    /// it before the blocking pool starts it) or the job is never spawned at
-    /// all. That ordering is the whole point — `abort` cannot stop a blocking
-    /// job that already started, so the decision has to be taken BEFORE the
-    /// spawn, never after it. A refused spawn drops `job`, whose slot counts
-    /// the refusal as a dropped event exactly like a refused reservation.
-    fn spawn_tracked(&self, job: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>> {
-        let mut handles = match self.unfinished.lock() {
-            Ok(handles) => handles,
-            Err(_) => return None,
-        };
-        if self.state.load(Ordering::Acquire) & CLOSED != 0 {
-            return None;
-        }
-        #[cfg(test)]
-        fire_spawn_window_probe();
-        let handle = tokio::task::spawn_blocking(job);
-        handles.retain(|queued| !queued.is_finished());
-        handles.push(handle.abort_handle());
-        Some(handle)
-    }
-
     /// Test-only: hold ONE global admission slot open exactly as an admitted
     /// refusal append does between its reservation and its job's completion.
     /// A teardown test uses this to keep [`Self::drain`] pending (and let its
@@ -389,8 +352,21 @@ impl CancelRefusalAudit {
             .expect("refusal admission must be open")
     }
 
-    /// Test-only: the admission width, so a test can size a fill without
-    /// restating the constant.
+    /// Test-only: park while holding an existing principal entry guard.
+    #[cfg(test)]
+    pub(crate) fn park_principal_bucket_for_test(
+        &self,
+        principal: &str,
+        park: Box<dyn FnOnce() + Send>,
+    ) {
+        match self.principals.try_entry(principal.to_owned()) {
+            Some(scc::hash_map::Entry::Occupied(_entry)) => park(),
+            Some(scc::hash_map::Entry::Vacant(entry)) => drop(entry),
+            None => {}
+        }
+    }
+
+    /// Test-only: the admission width, so a test can size a fill without restating the constant.
     #[cfg(test)]
     pub(crate) fn global_capacity_for_test() -> usize {
         CANCEL_AUDIT_CAPACITY
@@ -412,7 +388,6 @@ impl CancelRefusalAudit {
             .unwrap_or(0)
     }
 
-    /// Test-only: ONE real reservation through the production admission path.
     #[cfg(test)]
     pub(crate) fn try_reserve_for_test(
         self: &Arc<Self>,
@@ -566,6 +541,13 @@ struct CancelAuditSlot {
 
 impl Drop for CancelAuditSlot {
     fn drop(&mut self) {
+        // Admitted-job completion drops here on the blocking worker; reply-path
+        // refusals never construct a slot. During runtime shutdown only, tokio may drop a submitted spawn_blocking closure
+        // on the submitting thread when the blocking pool is already shutting
+        // down (pinned tokio runtime/blocking/pool.rs, ~393-403). The slot then
+        // runs this blocking entry_sync release on the caller while it still
+        // holds the spawn gate. This is a known shutdown-time limit; no deferred-
+        // release mechanism is used by decision.
         if !self.appended {
             self.queue.record_drop(self.class);
         }
@@ -610,9 +592,7 @@ impl Drop for PendingCancelAudit {
     }
 }
 
-/// Stable audit status/label for one cancellation outcome. Shared by both
-/// enqueue entry points so a refusal's status word never drifts from the
-/// operator ops'.
+/// Stable audit label for a cancellation outcome.
 fn cancel_outcome_label(outcome: &CancelOutcome) -> &'static str {
     match outcome {
         CancelOutcome::Cancelled => "cancelled",
@@ -622,11 +602,7 @@ fn cancel_outcome_label(outcome: &CancelOutcome) -> &'static str {
     }
 }
 
-/// Best-effort, detached audit append for an OPERATOR-driven cancellation
-/// (`cancel_tx` / `cancel_cursor_admin`): refusals AND successful cross-user
-/// cancels are audited. The details payload carries only the target id and
-/// the outcome. Admission, drain accounting and the blocking append are the
-/// same machinery as [`enqueue_cancel_refusal_audit`].
+/// Detached audit append for operator-driven cancellation outcomes.
 pub(super) fn enqueue_operator_cancel_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
@@ -636,10 +612,10 @@ pub(super) fn enqueue_operator_cancel_audit(
     outcome: &CancelOutcome,
 ) -> Option<JoinHandle<()>> {
     let result = cancel_outcome_label(outcome);
-    let slot = queue.try_reserve(&session.username, AuditEventClass::Security)?;
     let details = match rmp_serde::to_vec_named(&CancelAuditDetails { target, outcome }) {
         Ok(details) => details,
         Err(error) => {
+            queue.record_drop(AuditEventClass::Security);
             tracing::error!(%error, "audit append skipped: cancel refusal encoding failed");
             return None;
         }
@@ -647,7 +623,32 @@ pub(super) fn enqueue_operator_cancel_audit(
     let now_ns = match UnixNanos::try_now() {
         Ok(now) => now.as_u64(),
         Err(error) => {
+            queue.record_drop(AuditEventClass::Security);
             tracing::error!(%error, "audit append skipped: clock unavailable");
+            return None;
+        }
+    };
+    #[cfg(test)]
+    if let Some(pause) = queue.pause_before_spawn.as_ref() {
+        pause();
+    }
+    let mut handles = match queue.try_spawn_gate() {
+        Some(handles) => handles,
+        None => {
+            queue.record_drop(AuditEventClass::Security);
+            return None;
+        }
+    };
+    if queue.state.load(Ordering::Acquire) & CLOSED != 0 {
+        drop(handles);
+        queue.record_drop(AuditEventClass::Security);
+        return None;
+    }
+    let slot = match queue.reserve_verdict(&session.username, AuditEventClass::Security) {
+        Ok(slot) => slot,
+        Err(verdict) => {
+            drop(handles);
+            queue.log_refusal(verdict, AuditEventClass::Security);
             return None;
         }
     };
@@ -664,10 +665,10 @@ pub(super) fn enqueue_operator_cancel_audit(
         slot,
     };
     #[cfg(test)]
-    if let Some(pause) = queue.pause_before_spawn.as_ref() {
-        pause();
-    }
-    queue.spawn_tracked(move || {
+    fire_spawn_window_probe();
+    // The decision is taken BEFORE spawn, and the abort handle is registered under
+    // the same gate close()/discard_queued() use.
+    let handle = tokio::task::spawn_blocking(move || {
         let guard = pending;
         let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
             if let Err(error) = guard.audit.append(
@@ -687,7 +688,11 @@ pub(super) fn enqueue_operator_cancel_audit(
             true
         });
         guard.complete(appended);
-    })
+    });
+    handles.retain(|queued| !queued.is_finished());
+    handles.push(handle.abort_handle());
+    drop(handles);
+    Some(handle)
 }
 
 /// Refusal-only audit for `cancel_request`: appends only for the outcomes
@@ -749,10 +754,7 @@ impl Drop for PendingDetachedAudit {
     }
 }
 
-/// One ready-to-spawn detached audit append. The operation-specific pieces
-/// (label, encoded details, the two error messages) are supplied by the
-/// caller; everything else — the bounded admission/share reservation, the
-/// clock, the session-prefix fields and the blocking append — is shared.
+/// One detached audit append job.
 struct DetachedAuditJob<'a> {
     queue: &'a Arc<CancelRefusalAudit>,
     audit: &'a Arc<AuditChainWriter>,
@@ -764,12 +766,7 @@ struct DetachedAuditJob<'a> {
     rejected_message: &'static str,
 }
 
-/// Clock gate shared by the detached audit enqueues.
-///
-/// A clock failure drops the job BEFORE any reservation, so it must record the
-/// drop itself (for `class`) — otherwise the queue's counter would miss a
-/// dropped job. The test-only `fail_clock` seam makes this branch
-/// deterministic without touching the system clock.
+/// Clock gate shared by detached audit enqueues; failure records a drop before reservation.
 fn detached_audit_now(queue: &CancelRefusalAudit, class: AuditEventClass) -> Option<u64> {
     #[cfg(test)]
     let clock_failure = queue.fail_clock.load(Ordering::Acquire);
@@ -799,11 +796,7 @@ fn detached_audit_now(queue: &CancelRefusalAudit, class: AuditEventClass) -> Opt
     }
 }
 
-/// Shared body of every best-effort, detached `ok` audit append: reserve one
-/// bounded share slot in `class`, spawn a tracked blocking job and append
-/// under the caller's dispatcher. A job that cannot be built (clock
-/// unavailable, share or observability quota exhausted) never spawns and
-/// accounts as a drop exactly like the cancel enqueues.
+/// Shared bounded detached-audit admission and spawn path.
 fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
     let DetachedAuditJob {
         queue,
@@ -815,10 +808,32 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         dropped_message,
         rejected_message,
     } = job;
+    #[cfg(test)]
+    if let Some(pause) = queue.pause_before_spawn.as_ref() {
+        pause();
+    }
+    // Clock gate precedes the gate; registry contention refuses before any slot.
     let now_ns = detached_audit_now(queue, class)?;
-    // Reserve after the encode/clock gates, exactly like the cancel enqueue:
-    // a job that cannot be built never consumes a share slot.
-    let slot = queue.try_reserve(&session.username, class)?;
+    let mut handles = match queue.try_spawn_gate() {
+        Some(handles) => handles,
+        None => {
+            queue.record_drop(class);
+            return None;
+        }
+    };
+    if queue.state.load(Ordering::Acquire) & CLOSED != 0 {
+        drop(handles);
+        queue.record_drop(class);
+        return None;
+    }
+    let slot = match queue.reserve_verdict(&session.username, class) {
+        Ok(slot) => slot,
+        Err(verdict) => {
+            drop(handles);
+            queue.log_refusal(verdict, class);
+            return None;
+        }
+    };
     let mut session_prefix = [0u8; 8];
     session_prefix.copy_from_slice(&session.session_id[..8]);
     let transport = transport_name(session.transport_kind);
@@ -830,7 +845,11 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
         slot,
         dropped_message,
     };
-    queue.spawn_tracked(move || {
+    #[cfg(test)]
+    fire_spawn_window_probe();
+    // The decision is taken BEFORE spawn, and the abort handle is registered under
+    // the same gate close()/discard_queued() use.
+    let handle = tokio::task::spawn_blocking(move || {
         let guard = pending;
         let appended = tracing::dispatcher::with_default(&guard.dispatcher, || {
             if let Err(error) = guard.audit.append(
@@ -849,19 +868,13 @@ fn spawn_detached_audit(job: DetachedAuditJob<'_>) -> Option<JoinHandle<()>> {
             true
         });
         guard.complete(appended);
-    })
+    });
+    handles.retain(|queued| !queued.is_finished());
+    handles.push(handle.abort_handle());
+    drop(handles);
+    Some(handle)
 }
 
-/// Best-effort, detached audit append for a successful shape-statistics
-/// reset. Admission, per-principal share, drain accounting and the blocking
-/// append are the SAME machinery (and the same bounded queue) the operator
-/// cancels use, so a reset can never block the reply and can never grow an
-/// unbounded job list.
-///
-/// Operation label `reset_shape_stats` names the reset; the status word is
-/// the fixed `ok` (the wipe has no partial outcome) and the details carry
-/// the repository name only. Admitted as [`AuditEventClass::Security`]: it is
-/// an operator-visible admin event, so it keeps the full cap and share.
 pub(super) fn enqueue_shape_reset_audit(
     queue: &Arc<CancelRefusalAudit>,
     audit: &Arc<AuditChainWriter>,
@@ -887,13 +900,7 @@ pub(super) fn enqueue_shape_reset_audit(
     })
 }
 
-/// Payload of one successful TYPED READ (`status` / `get_record`): the scope
-/// NAMES only.
-///
-/// A read can return record values or carry a caller-supplied key/filter, and
-/// NONE of that may enter the audit chain. The operation label, the db name
-/// and (when the read is scoped to one table) the repository and table names
-/// are the whole payload — no value, key, filter or literal.
+/// Payload of a successful typed read: scope names only.
 #[derive(serde::Serialize)]
 struct TypedReadAuditDetails<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]

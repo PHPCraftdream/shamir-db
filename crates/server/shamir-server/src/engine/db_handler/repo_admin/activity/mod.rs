@@ -33,6 +33,8 @@ pub(in crate::engine::db_handler) mod list;
 // The guard and entry are named directly only by registry tests.
 pub(in crate::engine::db_handler) use abort_release::tx_abort_release;
 pub(in crate::engine::db_handler) use cancel::CancelCounters;
+#[cfg(test)]
+pub(in crate::engine::db_handler) use cancel::CancelPauseTarget;
 pub(in crate::engine::db_handler) use requests::server_busy_response;
 pub(in crate::engine::db_handler) use requests::ActivityRequests;
 

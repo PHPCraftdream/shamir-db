@@ -234,6 +234,8 @@ pub struct ShamirDbHandler {
     /// `super::activity::requests` for the bounding argument and the
     /// privacy rule.
     pub(super) activity_requests: Arc<ActivityRequests>,
+    /// Counts requests decoded by the raw native request path only; token REST and WebSocket decode separately and are not counted. Production has no reader; cost is one Relaxed add per native request.
+    pub(super) decoded_requests: Arc<std::sync::atomic::AtomicU64>,
     /// R4b-3 — per-server cancellation outcome counters (one fixed slot
     /// per `CancelOutcome`), backing the `shamir_cancellations_total`
     /// family. Shared across all clones of the handler (`Arc`).
@@ -252,6 +254,13 @@ pub struct ShamirDbHandler {
     #[cfg(test)]
     pub(in crate::engine::db_handler) shape_reset_pause:
         Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) cancel_authorized_pause: Option<(
+        super::activity::CancelPauseTarget,
+        u64,
+        Arc<tokio::sync::Barrier>,
+        Arc<tokio::sync::Barrier>,
+    )>,
 }
 
 /// Boot metadata captured at server launch (see `with_operator_boot`).
@@ -272,6 +281,13 @@ pub(super) struct OperatorBootContext {
 }
 
 impl ShamirDbHandler {
+    /// Reads the raw-native-path decode counter (test-only reader).
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn decoded_request_count(&self) -> u64 {
+        self.decoded_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn cancel_refusal_audit(&self) -> Arc<CancelRefusalAudit> {
         Arc::clone(&self.cancel_refusal_audit)
     }
@@ -327,11 +343,14 @@ impl ShamirDbHandler {
             allow_self_service: true,
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
+            decoded_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
             #[cfg(test)]
             shape_reset_pause: None,
+            #[cfg(test)]
+            cancel_authorized_pause: None,
         }
     }
 
@@ -359,11 +378,14 @@ impl ShamirDbHandler {
             allow_self_service: true,
             session_store: None,
             activity_requests: Arc::new(ActivityRequests::new()),
+            decoded_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             operator_boot: None,
             #[cfg(test)]
             shape_reset_pause: None,
+            #[cfg(test)]
+            cancel_authorized_pause: None,
         }
     }
 
@@ -548,6 +570,8 @@ impl RequestHandler for ShamirDbHandler {
                         .map_err(|encode_err| format!("response encode: {}", encode_err));
                 }
             };
+            self.decoded_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.handle_decoded_with_request_id(session, request, conn, request_id)
                 .await
         })

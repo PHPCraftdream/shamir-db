@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
+use super::protocol_tests::TestPort;
 use crate::sync::durability::backup::online::copy_engine::{CopyError, CopyOptions};
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
@@ -756,6 +757,85 @@ fn g_cancel_at_the_captured_boundary_cleans_up_and_releases_pins() {
         "progress must carry the cancellation"
     );
     assert_source_untouched(&before, &source);
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let dir = std::env::temp_dir().join(format!(
+        "shamir_online_failure_{name}_{}_{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+struct CancelDuringValidation<'a> {
+    inner: &'a TestPort,
+    cancel: &'a CancelFlag,
+}
+
+impl OnlineBackupPort for CancelDuringValidation<'_> {
+    fn catalogue(&self) -> Result<Vec<RepoSource>, PortError> {
+        self.inner.catalogue()
+    }
+    fn acquire_pins(&self) -> Result<(), PortError> {
+        self.inner.acquire_pins()
+    }
+    fn capture_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
+        self.inner.capture_point(repo)
+    }
+    fn capture_system_store(&self) -> Result<u64, PortError> {
+        self.inner.capture_system_store()
+    }
+    fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
+        self.inner.seal_point(repo)
+    }
+    fn end_seal(&self, repo: &str) {
+        self.inner.end_seal(repo)
+    }
+    fn release_pins(&self) {
+        self.inner.release_pins()
+    }
+    fn validate_copied_data_dir(&self, _copied_data_dir: &Path) -> Result<(), PortError> {
+        self.cancel.cancel();
+        Ok(())
+    }
+}
+
+#[test]
+fn run_publishes_no_manifest_when_cancel_fires_during_validation() {
+    let source = temp_dir("cancel_validation_source");
+    let to = temp_dir("cancel_validation_to");
+    TestPort::source_with_data(&source);
+    let inner = TestPort::single_repo(&source);
+    let cancel = CancelFlag::default();
+    let wrapper = CancelDuringValidation {
+        inner: &inner,
+        cancel: &cancel,
+    };
+    let mut progress = BackupProgress::new();
+    let result = run_online_backup(
+        &wrapper,
+        &source,
+        &to,
+        &cancel,
+        &mut progress,
+        &CopyOptions::default(),
+        &SealRecopyCap::default(),
+    );
+    assert!(matches!(
+        result,
+        Err(OnlineBackupError::Cancelled {
+            stage: BackupStage::Verifying,
+            ..
+        })
+    ));
+    assert_eq!(fs::read_dir(&to).expect("destination").count(), 0);
+    let _ = fs::remove_dir_all(&source);
+    let _ = fs::remove_dir_all(&to);
 }
 
 #[test]

@@ -438,19 +438,26 @@ pub fn run_copy_pass(
 /// fail with typed I/O errors for vanished sources.
 ///
 /// Retention may delete an archive between listing and copy; a vanished file
-/// is excluded like any deleted source. Retention never removes the newest
+/// is excluded like any deleted source. A retained archive captured by the
+/// accepted round does not trigger `AuditArchiveLost`. Unsupported active-log
+/// reappearance can trigger it without a leftover copy: the reappearance guard
+/// runs before the leftover scan. Retention never removes the newest
 /// archive, which alone can hold the tail of a just-persisted anchor. A needed
 /// prefix already gone before capture remains the documented limit; boot
 /// validates the saved anchor against the copied chain.
 ///
 /// KNOWN LIMIT: live `server_meta` is copied file by file in phase 1, outside
-/// every seal, and is not a consistent-point snapshot. Hash, size, and
-/// inventory self-verification never opens the store, so a mixed image can
-/// pass: if flush switches `current` to `vN+1` after listing but before copying
-/// `current`, the new pointer and old version coexist without an extra file or
-/// hash mismatch, and the restored store cannot open its named version. The
-/// copier does not repair, validate, or delete this image; failure surfaces at
-/// boot. [`CopyError::AuditArchiveLost`] guards audit files only.
+/// every seal, and is not a consistent-point snapshot. The copier's hash, size,
+/// and inventory self-check never opens the store. Phase F validation runs via
+/// `OnlineBackupPort::validate_copied_data_dir`, whose default is a no-op and
+/// which only the server adapter implements. That adapter opens a disposable
+/// clone covering copied `server_meta`, the `audit_checkpoint` store and copied
+/// audit files, then validates the copied anchor against the copied audit chain
+/// before publication; this can detect a mixed image, but cannot recover missing
+/// source bytes. The copier itself does not repair, validate, or delete files;
+/// boot remains the last resort for copies made without the hook, including older
+/// servers and manual copies.
+/// [`CopyError::AuditArchiveLost`] guards audit files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,

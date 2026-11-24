@@ -167,7 +167,8 @@ fn assert_positive_budget_verdict(report: &shamir_db::ShutdownReport) {
     assert!(
         store_line.contains("store release could not be verified within ")
             && store_line.contains("the store-release blocking job did not complete before its deadline")
-            && store_line.contains("the blocking job may still have been queued or running")
+            && store_line.contains("the blocking job may still be queued or running")
+            && store_line.contains("its filesystem call may continue after this UNKNOWN verdict")
             && store_line.contains("UNKNOWN")
             && !store_line.contains(NO_BUDGET_VERDICT)
             && !store_line.contains("no probe was started")
