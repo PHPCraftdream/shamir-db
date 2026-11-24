@@ -274,6 +274,40 @@ fn verify_manifest_rejects_absolute_path() {
     );
 }
 
+/// A v1 entry with a shape the per-component walk cannot confine refuses
+/// before any file access, on every platform: a drive piece (`C:`) after a
+/// normal directory name would reset the Windows `PathBuf::push` walk, and a
+/// backslash would bundle several hops into one metadata check.
+#[test]
+fn verify_manifest_refuses_noncanonical_entry_shapes() {
+    for entry_path in [
+        "sub/C:/x",
+        "sub/file.txt:stream",
+        "sub\\inner.txt",
+        "dir./x",
+        "dir /x",
+        "./a.txt",
+        "a//b",
+    ] {
+        let dir = TempDir::new().unwrap();
+        write_hand_crafted_manifest(
+            dir.path(),
+            MANIFEST_FORMAT_VERSION,
+            vec![ManifestFileEntry {
+                path: entry_path.to_string(),
+                sha256: "0".repeat(64),
+                size_bytes: 0,
+            }],
+        );
+
+        let err = verify_manifest(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, BackupError::UnconfinedManifestPath(_)),
+            "{entry_path}: expected UnconfinedManifestPath, got {err:?}"
+        );
+    }
+}
+
 /// A v1 manifest entry reaching a file outside the snapshot through a symlink
 /// (final or intermediate component) refuses BEFORE any open: the dangling link
 /// proves no open was attempted (an open would fail as plain `Io`), and the

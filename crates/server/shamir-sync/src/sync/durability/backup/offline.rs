@@ -212,14 +212,14 @@ pub enum BackupError {
     /// refused (fail closed, independent of the restore-side gate).
     #[error("snapshot format stamp is invalid")]
     InvalidSnapshotStamp(#[source] StampError),
-    /// `verify_manifest` (v2): a manifest-controlled path resolves outside
+    /// `verify_manifest` (v1 and v2): a manifest-controlled path resolves outside
     /// the snapshot directory (Windows drive / device prefix, NTFS
     /// alternate-data-stream `:` component, backslash or `..` component, or
     /// a symlink / non-directory component on the fixed snapshot). No byte
-    /// of such a target is ever opened.
+    /// of such a target is opened for content reads.
     #[error("manifest-controlled path is not confined to the snapshot directory: {0}")]
     UnconfinedManifestPath(String),
-    /// `verify_manifest` (v2): a manifest-controlled path names something
+    /// `verify_manifest` (v1 and v2): a manifest-controlled path names something
     /// that is not a regular file (device, FIFO, socket).
     #[error("manifest path is not a regular file: {0}")]
     ManifestPathNotRegularFile(String),
@@ -792,7 +792,7 @@ fn verify_manifest_raw(
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
 
-        // Per-component walk: a symlink or non-regular file refuses before any open.
+        // Strict shape, then per-component walk: a symlink refuses before the content read.
         let file_path = v2_verify::confined_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, &|| false).map_err(|e| {
             BackupError::Io(std::io::Error::new(
@@ -990,7 +990,7 @@ pub(crate) fn copy_dir_recursive(
 }
 
 /// Cheap format-version peek so v2 snapshots route to the v2 verifier
-/// while the v1 path stays byte-identical (design 4.5).
+/// while v1 keeps its own manifest rules (design 4.5).
 fn peek_manifest_format_version(raw: &[u8]) -> Option<u32> {
     let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
     value

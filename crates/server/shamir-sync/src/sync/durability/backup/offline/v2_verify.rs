@@ -459,9 +459,12 @@ fn wal_dir_scan_components(snapshot_dir: &Path, dir: &str) -> Result<bool, Backu
     Ok(true)
 }
 
-/// Resolve an already lexically-validated manifest-controlled path under
-/// `snapshot_dir`, refusing anything that could read outside it BEFORE any
-/// byte of the target is opened. Every path component is walked with
+/// Resolve a manifest-controlled path under `snapshot_dir` (v1 entries and
+/// v2 paths alike), refusing anything that could read outside it BEFORE any
+/// byte of the target is opened. The strict lexical check
+/// ([`reject_canonical_v2_manifest_path`]) runs first, so a piece like `C:`
+/// or a backslash can never reset or bundle the `PathBuf::push` walk on
+/// Windows. Every path component is walked with
 /// `fs::symlink_metadata` on the fixed snapshot:
 /// * a missing component is a plain io error (NotFound propagates);
 /// * a SYMLINK component refuses ([`BackupError::UnconfinedManifestPath`]) —
@@ -478,6 +481,7 @@ pub(super) fn confined_snapshot_path(
     snapshot_dir: &Path,
     entry_path: &str,
 ) -> Result<PathBuf, BackupError> {
+    reject_canonical_v2_manifest_path(entry_path)?;
     let mut current = snapshot_dir.to_path_buf();
     let components: Vec<&str> = entry_path.split('/').collect();
     let last = components.len().saturating_sub(1);

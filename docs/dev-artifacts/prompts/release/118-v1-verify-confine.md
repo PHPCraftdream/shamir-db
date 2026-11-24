@@ -16,3 +16,10 @@ No new error class in the `backup-verify` report (a variant the CLI does not nam
 ## Acceptance
 
 `fmt`, clippy `-D warnings` for `shamir-sync` and `shamir-server`, the layout gate and the visibility check exit 0; the full CI tier is green on the head, with the new unix test passing on Ubuntu.
+
+## Review result (independent review, verdict FAIL, fixed or re-scoped)
+
+* FIXED (P1, introduced by the first version): on Windows an interior piece such as `C:` after a normal directory name resets the `PathBuf::push` walk of `confined_snapshot_path`, and a backslash bundles several hops into one metadata check; the v1 loop only had the whole-path `reject_unsafe_manifest_path`. The strict lexical check (`reject_canonical_v2_manifest_path`: no backslash or colon, no empty, `.` or `..` component, no trailing dot or space) now runs INSIDE `confined_snapshot_path`, so every caller gets it (the v2 callers already ran it). Platform-independent test `verify_manifest_refuses_noncanonical_entry_shapes`.
+* FIXED (P2): the remaining wording ("byte-identical", "(v2)" labels, "before any open") now matches the code; a dangling v1 entry link now returns `UnconfinedManifestPath`, not `Io(NotFound)`.
+* RE-SCOPED to #2010 (pre-existing, outside the manifest-entry fix): the fixed-name control files `manifest.json` and `format.stamp` are read through static links (attacker condition: write access to the snapshot directory, so the same class, not an escalation); the check-then-open window between the path check and the hash or copy (restore enumeration, `staged_listing` checks presence and type only) also exists for v2.
+* Confirmed by the reviewer: Windows classifies junctions and mount points as symlinks in the toolchain used; the unix test is registered, non-vacuous and has no Windows unused import; retention is v2-online only; the v1 writer produces canonical names.
