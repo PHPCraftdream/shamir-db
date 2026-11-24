@@ -235,35 +235,57 @@ fn copy_validation_tree(source: &Path, destination: &Path, depth: usize) -> io::
     Ok(())
 }
 
-struct ValidationTempDir(PathBuf);
+struct ValidationTempDir {
+    path: PathBuf,
+    parent: PathBuf,
+}
 
 impl ValidationTempDir {
     fn new() -> io::Result<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let mut parent = None;
         for _ in 0..128 {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "shamir-backup-validation-{}-{nonce}-{id}",
+                "shamir-backup-validation-parent-{}-{id}",
                 std::process::id()
             ));
-            match fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Ok(_) => continue,
-                Err(error) => return Err(error),
-            }
             match shamir_private_dir::create_private_dir(&path) {
                 Ok(()) => {
-                    if fs::read_dir(&path)?.next().is_some() {
-                        continue;
-                    }
-                    return Ok(Self(path));
+                    parent = Some(path);
+                    break;
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
+            }
+        }
+        let parent = parent.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not allocate validation parent",
+            )
+        })?;
+        let mut owned = Self {
+            path: parent.join("pending"),
+            parent: parent.clone(),
+        };
+        for _ in 0..128 {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!("validation-{id}"));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    owned.path = path;
+                    return Ok(owned);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    if let Err(cleanup) = fs::remove_dir_all(&parent) {
+                        if cleanup.kind() != io::ErrorKind::NotFound {
+                            tracing::warn!(path = %parent.display(), %cleanup, "failed to remove validation parent");
+                        }
+                    }
+                    return Err(error);
+                }
             }
         }
         Err(io::Error::new(
@@ -273,69 +295,143 @@ impl ValidationTempDir {
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for ValidationTempDir {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        for path in [&self.path, &self.parent] {
+            if let Err(error) = fs::remove_dir_all(path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(path = %path.display(), %error, "failed to remove validation directory");
+                }
+            }
+        }
     }
 }
 
 fn is_audit_archive_name(name: &str) -> bool {
-    name.strip_prefix("audit.log.").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    })
+    // Mirror shamir-server-security audit_appender/recovery.rs archive_name shape.
+    let Some(suffix) = name.strip_prefix("audit.log.") else {
+        return false;
+    };
+    suffix.len() == 20 && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn validate_copied_data_dir(copied_data_dir: &Path) -> Result<(), PortError> {
-    let source = copied_data_dir.join("server_meta");
-    let source_metadata = fs::symlink_metadata(&source).map_err(PortError::SystemStore)?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+fn copy_optional_directory(
+    source_root: &Path,
+    copied_root: &Path,
+    name: &str,
+    temp: &Path,
+) -> Result<(), PortError> {
+    let source = source_root.join(name);
+    let copied = copied_root.join(name);
+    let source_meta = match fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(PortError::SystemStore(error)),
+    };
+    if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
         return Err(PortError::SystemStore(io::Error::new(
             io::ErrorKind::InvalidData,
-            "copied server_meta is not a regular directory",
+            format!("source {name} is not a regular directory"),
         )));
     }
+    let copied_meta = match fs::symlink_metadata(&copied) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && name == "audit_checkpoint" => {
+            return Err(PortError::SystemStore(io::Error::other(
+                "copied audit chain does not validate: audit checkpoint is missing",
+            )))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(PortError::SystemStore(io::Error::other(format!(
+                "copied {name} is missing or unreadable: {error}"
+            ))))
+        }
+        Err(error) => return Err(PortError::SystemStore(error)),
+    };
+    if copied_meta.file_type().is_symlink() || !copied_meta.is_dir() {
+        return Err(PortError::SystemStore(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("copied {name} is not a regular directory"),
+        )));
+    }
+    let validation_copy = temp.join(name);
+    copy_validation_tree(&copied, &validation_copy, 0).map_err(|error| {
+        PortError::SystemStore(io::Error::other(format!(
+            "copied {name} cannot be copied for validation: {error}"
+        )))
+    })?;
+    Ok(())
+}
+
+fn validate_copied_data_dir(
+    source_data_dir: &Path,
+    copied_data_dir: &Path,
+) -> Result<(), PortError> {
     let temp = ValidationTempDir::new().map_err(PortError::SystemStore)?;
-    let validation_copy = temp.path().join("server_meta");
-    copy_validation_tree(&source, &validation_copy, 0).map_err(PortError::SystemStore)?;
-    for entry in fs::read_dir(copied_data_dir).map_err(PortError::SystemStore)? {
+    copy_optional_directory(source_data_dir, copied_data_dir, "server_meta", temp.path())?;
+    copy_optional_directory(
+        source_data_dir,
+        copied_data_dir,
+        "audit_checkpoint",
+        temp.path(),
+    )?;
+    let source_entries = fs::read_dir(source_data_dir).map_err(PortError::SystemStore)?;
+    for entry in source_entries {
         let entry = entry.map_err(PortError::SystemStore)?;
         let name = entry.file_name();
         let text = name.to_string_lossy();
         if text != "audit.log" && !is_audit_archive_name(&text) {
             continue;
         }
-        let metadata = fs::symlink_metadata(entry.path()).map_err(PortError::SystemStore)?;
+        let source_path = entry.path();
+        let metadata = fs::symlink_metadata(&source_path).map_err(PortError::SystemStore)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(PortError::SystemStore(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unsupported audit validation entry",
+                "unsupported source audit validation entry",
             )));
         }
-        fs::copy(entry.path(), temp.path().join(name)).map_err(PortError::SystemStore)?;
-    }
-    let store = crate::server_meta::open_existing(&validation_copy).map_err(|error| {
-        PortError::SystemStore(io::Error::other(format!(
-            "copied server_meta cannot open: {error}"
-        )))
-    })?;
-    let key = store.audit_chain_key().map_err(|error| {
-        PortError::SystemStore(io::Error::other(format!(
-            "copied audit key cannot be read: {error}"
-        )))
-    })?;
-    let (appender, _) = store
-        .open_audit_recovered_strict(temp.path(), &key)
-        .map_err(|error| {
+        let copied_path = copied_data_dir.join(&name);
+        let copied_meta = fs::symlink_metadata(&copied_path).map_err(|error| {
             PortError::SystemStore(io::Error::other(format!(
-                "copied audit chain does not validate: {error}"
+                "copied audit entry is missing or unreadable: {error}"
             )))
         })?;
-    drop(appender);
-    drop(store);
+        if !copied_meta.is_file() || copied_meta.file_type().is_symlink() {
+            return Err(PortError::SystemStore(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported copied audit validation entry",
+            )));
+        }
+        fs::copy(&copied_path, temp.path().join(&name)).map_err(PortError::SystemStore)?;
+    }
+    let meta_path = temp.path().join("server_meta");
+    if meta_path.exists() {
+        let store = crate::server_meta::open_existing(&meta_path).map_err(|error| {
+            PortError::SystemStore(io::Error::other(format!(
+                "copied server_meta cannot open: {error}"
+            )))
+        })?;
+        let key = store.audit_chain_key().map_err(|error| {
+            PortError::SystemStore(io::Error::other(format!(
+                "copied audit key cannot be read: {error}"
+            )))
+        })?;
+        // Recovery opens <data_dir>/audit_checkpoint and uses its row as a ChainScan anchor.
+        let (appender, _) = store
+            .open_audit_recovered_strict(temp.path(), &key)
+            .map_err(|error| {
+                PortError::SystemStore(io::Error::other(format!(
+                    "copied audit chain does not validate: {error}"
+                )))
+            })?;
+        drop(appender);
+        drop(store);
+    }
     Ok(())
 }
 
@@ -537,7 +633,7 @@ impl OnlineBackupPort for EngineBackupPort {
     }
 
     fn validate_copied_data_dir(&self, copied_data_dir: &Path) -> Result<(), PortError> {
-        validate_copied_data_dir(copied_data_dir)
+        validate_copied_data_dir(&self.data_dir, copied_data_dir)
     }
 
     fn end_seal(&self, repo: &str) {

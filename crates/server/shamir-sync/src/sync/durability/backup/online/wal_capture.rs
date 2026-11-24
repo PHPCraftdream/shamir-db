@@ -118,7 +118,10 @@ pub trait OnlineBackupPort {
     fn begin_verify(&self) {}
 
     /// Validate copied mutable stores before publication. Implementations must
-    /// perform any recovery-capable open against a throw-away copy.
+    /// perform any recovery-capable open against a throw-away copy. This
+    /// validation is not cancellable mid-flight (its scratch clone is
+    /// proportional to `server_meta` plus the audit files); the protocol checks
+    /// cancellation after it returns.
     fn validate_copied_data_dir(
         &self,
         _copied_data_dir: &std::path::Path,

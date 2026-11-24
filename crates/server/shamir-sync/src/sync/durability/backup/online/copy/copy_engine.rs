@@ -444,13 +444,14 @@ pub fn run_copy_pass(
 /// validates the saved anchor against the copied chain.
 ///
 /// KNOWN LIMIT: live `server_meta` is copied file by file in phase 1, outside
-/// every seal, and is not a consistent-point snapshot. Hash, size, and
-/// inventory self-verification never opens the store, so a mixed image can
-/// pass: if flush switches `current` to `vN+1` after listing but before copying
-/// `current`, the new pointer and old version coexist without an extra file or
-/// hash mismatch, and the restored store cannot open its named version. The
-/// copier does not repair, validate, or delete this image; failure surfaces at
-/// boot. [`CopyError::AuditArchiveLost`] guards audit files only.
+/// every seal, and is not a consistent-point snapshot. The copier's hash, size,
+/// and inventory self-check never opens the store. Phase F now opens a
+/// disposable clone of the copied stores and validates the copied anchor
+/// against the copied audit chain before publication; this can detect a mixed
+/// image, but cannot recover missing source bytes. The copier itself does not
+/// repair, validate, or delete files; boot remains the last resort for older
+/// or manually assembled copies that lack phase-F validation.
+/// [`CopyError::AuditArchiveLost`] guards audit files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,
     dest_root: &Path,

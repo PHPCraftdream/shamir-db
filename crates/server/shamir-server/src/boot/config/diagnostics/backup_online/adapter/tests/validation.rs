@@ -2,8 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::super::validate_copied_data_dir;
 use sha2::{Digest, Sha256};
+
+use super::super::validate_copied_data_dir;
+use crate::audit_appender::FjallAuditAppender;
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChain};
 
 struct TestDir(PathBuf);
 
@@ -34,6 +37,97 @@ impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn copied_server_meta_validator_accepts_valid_chain_with_both_anchors() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(&source).expect("create source root");
+    let meta_path = source.join("server_meta");
+    let store = crate::server_meta::ServerMetaStore::open_or_init(&meta_path)
+        .expect("initialize source meta store");
+    let key = store.audit_chain_key().expect("read audit key");
+    let chain = AuditChain::new(key);
+    let appender = FjallAuditAppender::open_strict(&source).expect("open audit appender");
+    let entry = chain
+        .append("validation", "test", "", "", [0; 8], "ok", Vec::new(), 1)
+        .expect("create audit entry");
+    appender.append_entry(&entry).expect("persist audit entry");
+    let (next_seq, prev_hmac) = chain.checkpoint();
+    appender
+        .checkpoint(next_seq, &prev_hmac)
+        .expect("persist appender anchor");
+    store
+        .store_audit_checkpoint(next_seq, prev_hmac)
+        .expect("persist server_meta anchor");
+    drop(appender);
+    drop(store);
+    copy_tree(&source.join("server_meta"), &copied.join("server_meta"));
+    fs::copy(source.join("audit.log"), copied.join("audit.log")).expect("copy active audit log");
+    copy_tree(
+        &source.join("audit_checkpoint"),
+        &copied.join("audit_checkpoint"),
+    );
+
+    assert!(validate_copied_data_dir(&source, &copied).is_ok());
+}
+
+#[test]
+fn copied_server_meta_validator_refuses_missing_checkpoint_copy() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(&source).expect("create source root");
+    let meta_path = source.join("server_meta");
+    let store = crate::server_meta::ServerMetaStore::open_or_init(&meta_path)
+        .expect("initialize source meta store");
+    let key = store.audit_chain_key().expect("read audit key");
+    let chain = AuditChain::new(key);
+    let appender = FjallAuditAppender::open_strict(&source).expect("open audit appender");
+    let entry = chain
+        .append("validation", "test", "", "", [0; 8], "ok", Vec::new(), 1)
+        .expect("create audit entry");
+    appender.append_entry(&entry).expect("persist audit entry");
+    let (next_seq, prev_hmac) = chain.checkpoint();
+    appender
+        .checkpoint(next_seq, &prev_hmac)
+        .expect("persist appender anchor");
+    store
+        .store_audit_checkpoint(next_seq, prev_hmac)
+        .expect("persist server_meta anchor");
+    drop(appender);
+    drop(store);
+    copy_tree(&source.join("server_meta"), &copied.join("server_meta"));
+    fs::copy(source.join("audit.log"), copied.join("audit.log")).expect("copy active audit log");
+
+    let error =
+        validate_copied_data_dir(&source, &copied).expect_err("missing checkpoint copy refused");
+    assert!(error
+        .to_string()
+        .contains("copied audit chain does not validate"));
+}
+
+#[test]
+fn copied_server_meta_validator_refuses_missing_server_meta_copy() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(source.join("server_meta")).expect("create source server_meta");
+    fs::create_dir_all(&copied).expect("create copied root");
+    let error = validate_copied_data_dir(&source, &copied).expect_err("missing meta copy refused");
+    assert!(error.to_string().contains("copied server_meta is missing"));
+}
+
+#[test]
+fn copied_server_meta_validator_accepts_source_without_any_reserved_stores() {
+    let fixture = TestDir::new();
+    let source = fixture.path().join("source");
+    let copied = fixture.path().join("copied");
+    fs::create_dir_all(&source).expect("create empty source root");
+    fs::create_dir_all(&copied).expect("create empty copied root");
+    assert!(validate_copied_data_dir(&source, &copied).is_ok());
 }
 
 #[test]
@@ -75,6 +169,28 @@ fn copied_server_meta_validator_refuses_real_current_switch_after_listing() {
     store
         .store_audit_checkpoint(2, [0xA5; 32])
         .expect("durably write after listing and flush Fjall");
+    let rotation_db = fjall::Database::builder(&meta_path)
+        .open()
+        .expect("open Fjall fixture for rotation");
+    let rotation_keyspace = rotation_db
+        .keyspace("server_meta_v1", fjall::KeyspaceCreateOptions::default)
+        .expect("open meta keyspace for rotation");
+    rotation_keyspace
+        .rotate_memtable_and_wait()
+        .expect("force a persisted Fjall version rotation");
+    drop(rotation_keyspace);
+    drop(rotation_db);
+    let current_bytes = fs::read(meta_path.join(&current)).expect("read rotated current pointer");
+    let version_id = u64::from_le_bytes(current_bytes[..8].try_into().expect("current version id"));
+    let rotated_version = meta_path.join(format!("v{version_id}"));
+    assert!(
+        rotated_version.is_file(),
+        "rotated current target exists in source"
+    );
+    assert!(
+        !listed.contains(&PathBuf::from(format!("v{version_id}"))),
+        "rotated target is absent from pre-listing copy set"
+    );
     let after = file_inventory(&meta_path);
     assert_ne!(
         before, after,
@@ -91,7 +207,7 @@ fn copied_server_meta_validator_refuses_real_current_switch_after_listing() {
     );
     assert!(
         after.iter().any(|(path, _)| path == &current),
-        "new Fjall current pointer is retained"
+        "fixture assumption unmet: rotate_memtable_and_wait must switch current"
     );
     for old in old_versions {
         assert!(
@@ -159,17 +275,25 @@ fn copied_server_meta_validator_refuses_real_current_switch_after_listing() {
     let probe = fixture.path().join("probe").join("server_meta");
     copy_tree(&copied.join("server_meta"), &probe);
     assert!(
-        crate::server_meta::open_existing(&probe).is_err(),
-        "the malformed copied Fjall store itself must be unopenable"
+        !crate::server_meta::open_existing(&probe)
+            .expect_err("malformed copied Fjall store must fail")
+            .to_string()
+            .is_empty(),
+        "probe open must report the failed store"
     );
     assert_eq!(
         file_inventory(&copied.join("server_meta")),
         copied_inventory,
         "opening the disposable probe leaves the copied fixture untouched"
     );
+    let error = validate_copied_data_dir(&source, &copied).expect_err(
+        "throw-away Fjall open or audit-anchor validation must refuse before publication",
+    );
     assert!(
-        validate_copied_data_dir(&copied).is_err(),
-        "throw-away Fjall open or audit-anchor validation must refuse before publication"
+        error
+            .to_string()
+            .starts_with("system store flush failed: copied server_meta cannot open"),
+        "expected typed copied server_meta refusal, got {error}"
     );
 }
 

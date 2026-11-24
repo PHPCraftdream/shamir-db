@@ -2,7 +2,7 @@
 //! verify"): child module of `offline.rs`, one primary item
 //! ([`verify_manifest_v2`]). Pure file inspection — no engine open.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -116,12 +116,7 @@ pub(super) fn verify_decoded_manifest_v2(
     }
     let mut on_disk = Vec::new();
     collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
-    let mut disk_spellings = BTreeMap::new();
-    for rel in &on_disk {
-        if rel != MANIFEST_FILE_NAME && rel != online_manifest::BACKUP_META_FILE_NAME {
-            disk_spellings.insert(rel.to_lowercase(), rel.clone());
-        }
-    }
+    let exact_paths: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
 
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
     let mut folded_paths = BTreeSet::new();
@@ -134,10 +129,10 @@ pub(super) fn verify_decoded_manifest_v2(
         if !folded_paths.insert(entry.path.to_lowercase()) {
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
-        if let Some(actual) = disk_spellings.get(&entry.path.to_lowercase()) {
-            if actual != &entry.path {
-                return Err(BackupError::UnmanifestedFile(snapshot_dir.join(actual)));
-            }
+        if !exact_paths.contains(entry.path.as_str()) {
+            return Err(BackupError::UnmanifestedFile(
+                snapshot_dir.join(&entry.path),
+            ));
         }
         let file_path = confined_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, cancel).map_err(|e| {

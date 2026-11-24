@@ -111,6 +111,63 @@ fn v2_verify_rejects_disk_spelling_mismatch_portably() {
 }
 
 #[test]
+/// The listing-only identity check must reject a differently-cased control
+/// file even on a case-sensitive CI filesystem; on an insensitive receiver
+/// the same spelling would resolve to the real control file.
+fn v2_manifest_control_file_requires_exact_spelling() {
+    let dir = temp_dir("verify_control_spelling");
+    let actual = dir.join("backup.meta.json");
+    write_file(&actual, b"metadata");
+    let (sha256, size_bytes) = hash_file(&actual).expect("hash actual spelling");
+    let raw = format!(
+        r#"{{
+  "format_version": 2,
+  "kind": "offline",
+  "created_at_unix_ns": 1,
+  "files": [
+    {{ "path": "BACKUP.META.JSON", "sha256": "{sha256}", "size_bytes": {size_bytes} }}
+  ]
+}}"#
+    );
+    fs::write(dir.join("manifest.json"), raw).expect("write manifest");
+    let error = verify_manifest(&dir).expect_err("non-exact control spelling must refuse");
+    assert!(matches!(error, BackupError::UnmanifestedFile(_)));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn v2_case_sensitive_disk_aliases_are_rejected() {
+    let dir = temp_dir("verify_physical_case_alias");
+    let probe = dir.join("x");
+    let upper_probe = dir.join("X");
+    write_file(&probe, b"probe");
+    let insensitive = upper_probe.exists();
+    let _ = fs::remove_file(&probe);
+    let _ = fs::remove_file(&upper_probe);
+    if insensitive {
+        println!("skipping: filesystem is case-insensitive; cannot create distinct case aliases");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+
+    build_snapshot(&dir);
+    let lower = dir.join("audit.log.1");
+    let upper = dir.join("AUDIT.LOG.1");
+    write_file(&lower, b"lower audit");
+    write_file(&upper, b"upper audit");
+    let lower_entry = entry(&lower, &dir);
+    let upper_entry = entry(&upper, &dir);
+    set_manifest_fields(&dir, |decoded| {
+        decoded.files.extend([lower_entry, upper_entry])
+    });
+    assert!(matches!(
+        verify_manifest(&dir),
+        Err(BackupError::DuplicateManifestEntry(_))
+    ));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn v2_case_folded_aliases_are_rejected_by_receiver_model() {
     let spellings = ["audit.log.1", "AUDIT.LOG.1"];
     let sensitive_listing = spellings.to_vec();
