@@ -934,14 +934,8 @@ fn parked_request_is_cancelled_through_the_shell() {
         &["activity", "cancel", &parked_id, "--yes"],
         cap,
     );
-    renew_holder_and_check_victim(
-        fixture,
-        &conn1,
-        tx_handle,
-        parked,
-        deadline,
-        "after authorized cancel",
-    );
+    // No renewal here: the accepted cancel is what ends the victim, and the
+    // join below asserts its typed failure.
     let cancel = data(&cancel_run, "cancel");
     keys_exact(&cancel, &["outcome"], "activity cancel");
     assert_eq!(
