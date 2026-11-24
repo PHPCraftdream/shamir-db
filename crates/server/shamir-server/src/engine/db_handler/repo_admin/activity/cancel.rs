@@ -11,6 +11,44 @@ use shamir_tx::{CancelState, TxContext};
 use shamir_types::access::{Action, ResourcePath};
 
 use super::requests::RequestEntry;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::engine::db_handler) enum CancelPauseTarget {
+    Transaction,
+    Cursor,
+}
+
+impl ShamirDbHandler {
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn with_cancel_authorized_pause(
+        mut self,
+        target: CancelPauseTarget,
+        id: u64,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.cancel_authorized_pause = Some((target, id, reached, resume));
+        self
+    }
+
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) async fn pause_cancel_after_authorization(
+        &self,
+        target: CancelPauseTarget,
+        id: u64,
+    ) {
+        if let Some((configured_target, configured_id, reached, resume)) =
+            &self.cancel_authorized_pause
+        {
+            if *configured_target == target && *configured_id == id {
+                reached.wait().await;
+                resume.wait().await;
+            }
+        }
+    }
+}
+
 use crate::engine::db_handler::handler::{session_actor, ShamirDbHandler};
 use crate::engine::db_handler::repo_audit::{
     enqueue_cancel_refusal_audit, enqueue_operator_cancel_audit,
@@ -207,12 +245,12 @@ impl ShamirDbHandler {
         session: &Session,
         tx_handle: u64,
     ) -> DbResponse {
-        let (target_user_id, target) = match self.tx_registry.peek(tx_handle) {
-            TxParkedState::Open(tx) => (*tx.owner_user_id(), Some(tx)),
+        let (target_user_id, target, committing_row) = match self.tx_registry.peek(tx_handle) {
+            TxParkedState::Open(tx) => (*tx.owner_user_id(), Some(tx), None),
             // A `Committing` reservation parks no `Arc`; its projection row is
-            // the only ownership record, and this branch only REFUSES.
+            // the only ownership record. Retain its identity across auth.
             TxParkedState::Committing => match self.tx_registry.activity_row(tx_handle) {
-                Some(row) => (*row.user_id(), None),
+                Some(row) => (*row.user_id(), None, Some(row)),
                 None => return self.cancel_reply(CancelOutcome::AlreadyFinished),
             },
             TxParkedState::Gone => return self.cancel_reply(CancelOutcome::AlreadyFinished),
@@ -220,9 +258,23 @@ impl ShamirDbHandler {
         if target_user_id != session.user_id && !self.may_manage_other_users_work(session).await {
             return Self::cancel_permission_denied("transaction");
         }
-        let outcome = match target {
-            Some(tx) => self.cancel_parked_tx(tx_handle, tx).await,
-            None => CancelOutcome::AlreadyCommitting,
+        if target_user_id != session.user_id {
+            #[cfg(test)]
+            self.pause_cancel_after_authorization(CancelPauseTarget::Transaction, tx_handle)
+                .await;
+        }
+        let outcome = match (target, committing_row) {
+            (Some(tx), _) => self.cancel_parked_tx(tx_handle, tx).await,
+            (None, Some(row)) => match (
+                self.tx_registry.peek(tx_handle),
+                self.tx_registry.activity_row(tx_handle),
+            ) {
+                (TxParkedState::Committing, Some(current)) if Arc::ptr_eq(&row, &current) => {
+                    CancelOutcome::AlreadyCommitting
+                }
+                _ => CancelOutcome::AlreadyFinished,
+            },
+            (None, None) => CancelOutcome::AlreadyFinished,
         };
         self.audit_operator_cancel(session, "cancel_tx", tx_handle, target_user_id, &outcome);
         self.cancel_reply(outcome)
@@ -252,7 +304,7 @@ impl ShamirDbHandler {
             TxParkedState::Open(tx) => match ctx.take() {
                 Some(parked) => {
                     drop(ctx);
-                    self.release_tx_locks(parked, &tx).await;
+                    self.release_tx_locks(tx_handle, parked, &tx).await;
                     CancelOutcome::Cancelled
                 }
                 None => CancelOutcome::AlreadyFinished,
@@ -269,9 +321,19 @@ impl ShamirDbHandler {
     /// release of the same transaction is a harmless no-op because
     /// `MvccStore::release_locks` removes only holders whose `tx_version`
     /// matches.
-    async fn release_tx_locks(&self, parked: TxContext, tx: &InteractiveTx) {
+    async fn release_tx_locks(&self, tx_handle: u64, parked: TxContext, tx: &InteractiveTx) {
         let release = tx.abort_release();
-        release(parked).await;
+        // The cancel dispatch can be dropped with its caller. Keep the lock
+        // release alive independently; dropping a JoinHandle detaches the
+        // task, while normal dispatch still waits for completion before reply.
+        let release = Arc::clone(release);
+        if let Err(error) = tokio::spawn(async move { release(parked).await }).await {
+            if error.is_panic() {
+                tracing::error!(tx_handle, error = %error, "transaction lock-release task panicked");
+            } else {
+                tracing::warn!(tx_handle, error = %error, "transaction lock-release task was cancelled; accepted cancellation and removed handle remain in effect, but runtime shutdown may stop lock release");
+            }
+        }
     }
 
     /// Cancel another session's result cursor by its id. Ownership comes from
@@ -301,10 +363,17 @@ impl ShamirDbHandler {
         if target_user_id != session.user_id && !self.may_manage_other_users_work(session).await {
             return Self::cancel_permission_denied("cursor");
         }
-
+        if target_user_id != session.user_id {
+            #[cfg(test)]
+            self.pause_cancel_after_authorization(CancelPauseTarget::Cursor, cursor_id.0)
+                .await;
+        }
         // `remove` frees the session slot and detaches the pinned snapshot;
         // dropping the returned `Arc` is what releases that snapshot.
-        let outcome = match self.cursor_registry.remove(cursor_id.0) {
+        let outcome = match self
+            .cursor_registry
+            .remove_activity_identity(cursor_id.0, &row.meta)
+        {
             Some(cursor) => {
                 drop(cursor);
                 CancelOutcome::Cancelled

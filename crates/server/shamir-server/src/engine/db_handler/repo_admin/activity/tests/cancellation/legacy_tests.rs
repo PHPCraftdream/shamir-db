@@ -640,7 +640,9 @@ async fn every_cancel_operation_counts_its_outcome_exactly_once() {
             let id = tokio::time::timeout(
                 TIMEOUT,
                 async {
+                    let mut pace = tokio::time::interval(Duration::from_millis(1));
                     loop {
+                        pace.tick().await;
                         let mut found = None;
                         handler.activity_requests.for_each(|entry| {
                             if !entry.cancellable {
@@ -650,7 +652,6 @@ async fn every_cancel_operation_counts_its_outcome_exactly_once() {
                         if let Some(id) = found {
                             break id;
                         }
-                        tokio::task::yield_now().await;
                     }
                 },
             )

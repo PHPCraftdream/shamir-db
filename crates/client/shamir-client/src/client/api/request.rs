@@ -814,8 +814,9 @@ impl Client {
 
     /// Attempt to cancel a batch by its server-minted execution id.
     ///
-    /// Use a separate SCRAM connection from the one running the target batch.
-    /// The outcome describes the cancellation attempt, not the target's reply.
+    /// Use a separate SCRAM connection to issue cancellation while the target
+    /// request is running; dispatch is lock-step per connection. The outcome
+    /// describes the cancellation attempt, not the target's reply.
     pub async fn cancel_request(
         &self,
         db: &str,
@@ -844,9 +845,11 @@ impl Client {
 
     /// Cancel an open interactive transaction by its handle.
     ///
-    /// Use a separate SCRAM connection from the session that owns the
-    /// transaction (dispatch is lock-step per connection). The outcome
-    /// describes the cancellation attempt, not the transaction's later reply.
+    /// An idle transaction can be cancelled on its owning connection. If that
+    /// connection has an active request, dispatch is lock-step and cannot
+    /// accept cancellation until the request returns; use a separate SCRAM
+    /// connection to cancel it concurrently. The outcome describes the
+    /// cancellation attempt, not the transaction's later reply.
     pub async fn cancel_tx(&self, db: &str, tx_handle: u64) -> Result<CancelOutcome, ClientError> {
         self.require_scram()?;
         let mut batch = shamir_query_builder::batch::Batch::new();
