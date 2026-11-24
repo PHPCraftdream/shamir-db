@@ -212,14 +212,14 @@ pub enum BackupError {
     /// refused (fail closed, independent of the restore-side gate).
     #[error("snapshot format stamp is invalid")]
     InvalidSnapshotStamp(#[source] StampError),
-    /// `verify_manifest` (v2): a manifest-controlled path resolves outside
-    /// the snapshot directory (Windows drive / device prefix, NTFS
-    /// alternate-data-stream `:` component, backslash or `..` component, or
-    /// a symlink / non-directory component on the fixed snapshot). No byte
-    /// of such a target is ever opened.
+    /// `verify_manifest` (v1 and v2): a manifest-controlled path is refused by a
+    /// lexical or metadata check before the entry is opened for content reads:
+    /// an empty or `.` component, a symlink / non-directory component on the
+    /// fixed snapshot, and (v2 on every host, v1 on Windows) a drive / device
+    /// prefix, `:` or backslash. (`..` is `UnsafeManifestPath`.)
     #[error("manifest-controlled path is not confined to the snapshot directory: {0}")]
     UnconfinedManifestPath(String),
-    /// `verify_manifest` (v2): a manifest-controlled path names something
+    /// `verify_manifest` (v1 and v2): a manifest-controlled path names something
     /// that is not a regular file (device, FIFO, socket).
     #[error("manifest path is not a regular file: {0}")]
     ManifestPathNotRegularFile(String),
@@ -729,7 +729,7 @@ pub fn try_snapshot_delete_lease(root: &Path) -> io::Result<Option<File>> {
 
 /// Shared implementation behind the entry points. Dispatches on the cheap
 /// format-version peek: v2 snapshots route to the child module's
-/// [`v2_verify::verify_manifest_v2`], the v1 path stays byte-identical.
+/// [`v2_verify::verify_manifest_v2`]; v1 adds only per-entry confinement.
 /// Lease policy lives entirely in the callers ([`verify_manifest`] leases;
 /// [`verify_manifest_for_restore`], [`verify_writer_snapshot`] and
 /// [`verify_retention_candidate`] do not).
@@ -748,8 +748,8 @@ fn verify_manifest_impl(
 /// and [`verify_writer_snapshot`] read the bytes themselves,
 /// [`verify_retention_candidate`] receives them from the caller. Dispatches
 /// on the cheap format-version peek: v2 snapshots route to the child
-/// module's [`v2_verify::verify_manifest_v2`], the v1 path stays
-/// byte-identical.
+/// module's [`v2_verify::verify_manifest_v2`]; the v1 path adds only
+/// per-entry confinement.
 fn verify_manifest_raw(
     snapshot_dir: &Path,
     raw: &[u8],
@@ -792,7 +792,8 @@ fn verify_manifest_raw(
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
 
-        let file_path = snapshot_dir.join(&entry.path);
+        // Shape rule, then per-component walk: a symlink refuses before the content read.
+        let file_path = v2_verify::confined_v1_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, &|| false).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
@@ -989,7 +990,7 @@ pub(crate) fn copy_dir_recursive(
 }
 
 /// Cheap format-version peek so v2 snapshots route to the v2 verifier
-/// while the v1 path stays byte-identical (design 4.5).
+/// while v1 keeps its own manifest rules (design 4.5).
 fn peek_manifest_format_version(raw: &[u8]) -> Option<u32> {
     let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
     value
