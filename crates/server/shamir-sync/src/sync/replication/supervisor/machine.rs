@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{fence, AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use shamir_collections::{TFxSet, THasher};
@@ -43,10 +43,11 @@ pub struct SubscriptionSupervisor {
     pub(super) validate_replicated_payload: bool,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
-    /// Persistent stop admission, set by [`Self::begin_stop`]: no pass starts
-    /// a follower once it is set, and a follower registered after it is
-    /// cancelled at once.
-    pub(super) stopping: AtomicBool,
+    /// Persistent stop admission, cancelled by [`Self::begin_stop`]. Every
+    /// follower's cancellation token is a CHILD of it, so one cancel reaches
+    /// every running follower without walking the registry, and a follower
+    /// started afterwards is born cancelled.
+    pub(super) stop: tokio_util::sync::CancellationToken,
     /// Test seam for replacing the row between lease-take and spawn.
     #[cfg(test)]
     pub(super) start_race_hook: Option<StartRaceHook>,
@@ -80,7 +81,7 @@ impl SubscriptionSupervisor {
             poll_wait_ms: 5000,
             validate_replicated_payload: false,
             reconcile_lock: tokio::sync::Mutex::new(()),
-            stopping: AtomicBool::new(false),
+            stop: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]
             start_race_hook: None,
             #[cfg(test)]
@@ -214,7 +215,7 @@ impl SubscriptionSupervisor {
     ///   replacement.
     pub async fn reconcile(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
-        if self.stopping.load(Ordering::SeqCst) {
+        if self.stop.is_cancelled() {
             return;
         }
         // Lock only the catalogue read; release before task stop/start callbacks.
@@ -306,25 +307,19 @@ impl SubscriptionSupervisor {
         }
     }
 
-    /// Shutdown, first step: latch the stop admission and cancel EVERY running
-    /// follower, without the lifecycle lock and without awaiting anything.
+    /// Shutdown, first step: latch the stop admission and cancel EVERY follower
+    /// (running now or started later) by cancelling the parent token their own
+    /// tokens derive from. No lifecycle lock, no registry walk, no await.
     ///
     /// A reconcile pass in flight holds [`Self::reconcile_lock`] across its
     /// catalogue read, so a caller that abandons [`Self::stop_all`] while it
     /// waits for the lock (a shutdown budget) would otherwise leave every
-    /// follower running. After this call no pass starts a follower, and one
-    /// that registers concurrently is cancelled by the start path itself.
-    /// Followers exit gracefully at their next await; [`Self::stop_all`] then
-    /// joins them.
+    /// follower running. After this call no new pass starts a follower (a pass
+    /// already past its check can still spawn one, born cancelled). Followers
+    /// exit gracefully at their next cancellation checkpoint;
+    /// [`Self::stop_all`] then joins them.
     pub fn begin_stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
-        // Pairs with the fence after the registry insert in `start_subscription`:
-        // either this walk sees the new handle or that path sees the flag.
-        fence(Ordering::SeqCst);
-        self.registry.iter_sync(|_, handle| {
-            handle.stop();
-            true
-        });
+        self.stop.cancel();
     }
 
     /// Stop every running loop and clear the registry (shutdown).

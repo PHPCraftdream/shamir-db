@@ -203,7 +203,14 @@ pub(super) async fn run_follower_loop_internal(
             return Ok(());
         }
     }
-    let mut max_seen_epoch = match source.hello(&node_id).await {
+    // Cancellation-aware: a stop must not wait for a slow or silent upstream
+    // (the production request timeout is 35 s).
+    let hello = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(()),
+        reply = source.hello(&node_id) => reply,
+    };
+    let mut max_seen_epoch = match hello {
         Ok(resp) => {
             // S5c-X PR7: universal identity fence — verify the recorded
             // (lineage, history_epoch) on EVERY Hello, before any pull.
@@ -394,16 +401,21 @@ pub(super) async fn run_follower_loop_internal(
         let from_version = bookmark
             .checked_add(1)
             .ok_or(shamir_db::SeedRefusal::BookmarkOverflow)?;
-        let resp = match source
-            .pull(
+        // Cancellation-aware like the Hello above: nothing was applied yet, so
+        // dropping the request is safe and the next start pulls again from the
+        // durable bookmark.
+        let pulled = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            reply = source.pull(
                 &db_name,
                 &repo,
                 from_version,
                 DEFAULT_PULL_LIMIT,
                 Some(poll_wait_ms),
-            )
-            .await
-        {
+            ) => reply,
+        };
+        let resp = match pulled {
             Ok(r) => r,
             Err(e @ ReplError::StaleLeaderEpoch { .. })
             | Err(e @ ReplError::ReopenRequired { .. })
@@ -427,6 +439,11 @@ pub(super) async fn run_follower_loop_internal(
                 continue;
             }
         };
+        // A stop requested while the reply was in flight admits no apply; an
+        // apply that is already admitted always finishes.
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
 
         // S5c-X PR7: universal identity fence — verify (or adopt at first
         // contact) on EVERY Pull, BEFORE any event of this response is

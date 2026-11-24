@@ -1,10 +1,9 @@
-use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
 use shamir_db::{SeedRefusal, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::handle::SubHandle;
@@ -299,7 +298,9 @@ impl SubscriptionSupervisor {
         if !lease.valid.load(Ordering::Acquire) {
             return Ok(false);
         }
-        let cancel = CancellationToken::new();
+        // A child of the supervisor's stop token: `begin_stop` reaches it, and one
+        // created after the stop is born cancelled.
+        let cancel = self.stop.child_token();
         let mut joins = Vec::with_capacity(pull_targets.len());
         let mut dones: Vec<Arc<AtomicBool>> = Vec::with_capacity(pull_targets.len());
         // One live-count reference per target; only the final exit may
@@ -605,17 +606,10 @@ impl SubscriptionSupervisor {
         };
         // A racing reconcile may have inserted already; if so, stop the loops
         // we just spawned rather than leak them.
-        let fence_cancel = handle.cancel.clone();
         if let Err((_, handle)) = self.registry.insert_sync(sub.name.clone(), handle) {
             handle.stop();
         } else {
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");
-        }
-        // Pairs with the fence in `begin_stop`: a handle registered after its
-        // registry walk sees the stop flag here and is cancelled at once.
-        fence(Ordering::SeqCst);
-        if self.stopping.load(Ordering::SeqCst) {
-            fence_cancel.cancel();
         }
         Ok(true)
     }

@@ -244,13 +244,67 @@ async fn multi_target_exit_refcount_last_exit_removes() {
     );
 }
 
+/// A source whose Hello or Pull never answers: the cancellation checkpoints of
+/// the loop must not wait for a silent upstream (the production request
+/// timeout is 35 s). `entered` is signalled once the silent call is awaited.
+struct SilentSource {
+    inner: InProcessReplSource,
+    silent_hello: bool,
+    entered: Arc<Notify>,
+}
+#[async_trait]
+impl ReplSource for SilentSource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        if self.silent_hello {
+            self.entered.notify_one();
+            return std::future::pending().await;
+        }
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        if !self.silent_hello {
+            self.entered.notify_one();
+            return std::future::pending().await;
+        }
+        self.inner
+            .pull(db, repo, from_version, limit, wait_ms)
+            .await
+    }
+}
+
+fn honest_factory(leader: &Arc<ShamirDb>) -> ReplSourceFactory {
+    let leader = leader.clone();
+    Arc::new(move |_sub: &Subscription| {
+        Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
+    })
+}
+
+/// The row is still ACTIVE in the catalogue (so a pass that ignored the stop
+/// would start it again).
+async fn assert_row_active(sup: &SubscriptionSupervisor) {
+    let rows = sup.read_subscriptions().await.expect("catalogue read");
+    assert!(
+        rows.iter()
+            .any(|row| row.name == "sub_a" && row.is_active()),
+        "sub_a must still be an active row: {rows:?}"
+    );
+}
+
 /// `begin_stop` cancels every running follower WITHOUT the lifecycle lock and
-/// without awaiting anything, and latches the stop admission: a later pass
-/// starts nothing although the subscription row is still active.
+/// without awaiting anything, and a later pass starts nothing although the
+/// subscription row is still active.
 ///
-/// Mutants: a `begin_stop` that only latches the flag leaves the loops running
-/// (the teardown never signals and the bounded wait fails); one that only
-/// signals lets the next `reconcile` restart the row.
+/// Mutants: a `begin_stop` that cancels nothing leaves the loops running (the
+/// bounded teardown wait fails); a reconcile that ignores the stop token
+/// restarts the row.
 #[tokio::test]
 async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts() {
     let leader = build_db().await;
@@ -258,19 +312,13 @@ async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts()
     write_other_rows(&leader, 0, 2).await;
     let follower = build_db().await;
     create_two_target_subscription(&follower).await;
-    let factory: ReplSourceFactory = {
-        let leader = leader.clone();
-        Arc::new(move |_sub: &Subscription| {
-            Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
-        })
-    };
-    let sup =
-        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_poll_wait_ms(100);
+    let sup = SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+        .with_poll_wait_ms(100);
     let teardown = sup.teardown_signal();
     sup.reconcile().await;
     assert!(sup.is_running("sub_a"), "the follower must be running");
 
-    // No `stop_all`, no lifecycle lock: only the fence signals the loops.
+    // No `stop_all`, no lifecycle lock: only the stop token signals the loops.
     sup.begin_stop();
     tokio::time::timeout(Duration::from_secs(60), teardown.notified())
         .await
@@ -278,11 +326,112 @@ async fn begin_stop_cancels_followers_without_the_lock_and_fences_later_starts()
     assert_eq!(sup.teardown_count(), 1);
     assert!(!sup.is_running("sub_a"));
 
-    // The row is still ACTIVE: without the latch this pass restarts it.
+    assert_row_active(&sup).await;
     sup.reconcile().await;
     assert!(
         !sup.is_running("sub_a"),
         "a stopping supervisor must start no follower"
     );
     assert_eq!(sup.active_count(), 0);
+}
+
+/// A follower that registers AFTER `begin_stop` was called is born cancelled:
+/// an admitted reconcile is parked before its spawn (by the start race hook,
+/// which runs under the lifecycle lock), `begin_stop` runs meanwhile, and the
+/// released start must still end up with no running follower, without
+/// `stop_all`.
+///
+/// Mutant: a start that builds its token without the stop token as parent
+/// leaves the late follower running (the bounded teardown wait fails).
+#[tokio::test]
+async fn a_follower_started_after_begin_stop_is_born_cancelled() {
+    let leader = build_db().await;
+    write_rows(&leader, 0, 3).await;
+    write_other_rows(&leader, 0, 2).await;
+    let follower = build_db().await;
+    create_two_target_subscription(&follower).await;
+    let entered = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let (entered_h, release_h) = (Arc::clone(&entered), Arc::clone(&release));
+    let sup = SubscriptionSupervisor::new(follower.clone(), honest_factory(&leader), "follower-1")
+        .with_poll_wait_ms(100)
+        .with_start_race_hook(Arc::new(move || {
+            let entered = Arc::clone(&entered_h);
+            let release = Arc::clone(&release_h);
+            Box::pin(async move {
+                entered.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+            })
+        }));
+    let teardown = sup.teardown_signal();
+
+    let mut reconcile = Box::pin(sup.reconcile());
+    // `poll!` expands to code containing `.await`: poll the future here until
+    // the hook is entered (the start is admitted and parked before its spawn).
+    for _ in 0..10_000 {
+        if entered.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        let _ = poll!(reconcile.as_mut());
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "the start must be parked"
+    );
+    assert!(!sup.is_running("sub_a"), "nothing is registered yet");
+
+    sup.begin_stop();
+    release.notify_one();
+    reconcile.await;
+
+    tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+        .await
+        .expect("the late follower must exit without stop_all");
+    assert_eq!(sup.teardown_count(), 1);
+    assert!(!sup.is_running("sub_a"));
+}
+
+/// A follower that waits for a silent upstream (Hello or Pull never answers)
+/// exits on `begin_stop` at once instead of after the request timeout.
+///
+/// Mutant: a Hello or Pull awaited without a cancellation select leaves the
+/// loop waiting (the bounded teardown wait fails).
+#[tokio::test]
+async fn begin_stop_does_not_wait_for_a_silent_upstream() {
+    for silent_hello in [true, false] {
+        let leader = build_db().await;
+        write_rows(&leader, 0, 3).await;
+        write_other_rows(&leader, 0, 2).await;
+        let follower = build_db().await;
+        create_two_target_subscription(&follower).await;
+        let entered = Arc::new(Notify::new());
+        let factory: ReplSourceFactory = {
+            let leader = leader.clone();
+            let entered = Arc::clone(&entered);
+            Arc::new(move |_sub: &Subscription| {
+                Arc::new(SilentSource {
+                    inner: InProcessReplSource::new((*leader).clone()),
+                    silent_hello,
+                    entered: Arc::clone(&entered),
+                }) as Arc<dyn ReplSource>
+            })
+        };
+        let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1");
+        let teardown = sup.teardown_signal();
+        sup.reconcile().await;
+        tokio::time::timeout(Duration::from_secs(60), entered.notified())
+            .await
+            .expect("a loop must reach the silent call");
+
+        sup.begin_stop();
+
+        tokio::time::timeout(Duration::from_secs(60), teardown.notified())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("silent_hello={silent_hello}: the loops must exit on begin_stop")
+            });
+        assert!(!sup.is_running("sub_a"));
+    }
 }
