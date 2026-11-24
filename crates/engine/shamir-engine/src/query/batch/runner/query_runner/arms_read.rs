@@ -507,12 +507,33 @@ impl<'a> QueryRunner<'a> {
                                 // back to today's `transaction_aborted` only
                                 // when the abort carries no code.
                                 "aborted" => {
+                                    let reason = info
+                                        .reason
+                                        .as_deref()
+                                        .unwrap_or("transactional body aborted");
+                                    let code =
+                                        info.abort_code.as_deref().unwrap_or("transaction_aborted");
+                                    // Earlier iterations already committed
+                                    // independently and are NOT rolled back: the
+                                    // abort's own code (`tx_conflict` is
+                                    // retryable for clients) must not classify
+                                    // the whole request, because replaying the
+                                    // outer batch would repeat the committed
+                                    // prefix. The cause stays in the message.
+                                    if !iterations.is_empty() {
+                                        return Err(BatchError::query_coded(
+                                            alias.to_string(),
+                                            "transaction_aborted",
+                                            format!(
+                                                "{reason} (abort code {code}; {} earlier iteration(s) committed and are not rolled back)",
+                                                iterations.len()
+                                            ),
+                                        ));
+                                    }
                                     return Err(BatchError::query_coded(
                                         alias.to_string(),
-                                        info.abort_code.as_deref().unwrap_or("transaction_aborted"),
-                                        info.reason
-                                            .as_deref()
-                                            .unwrap_or("transactional body aborted"),
+                                        code,
+                                        reason,
                                     ));
                                 }
                                 // The body's commit outcome is UNKNOWN: the WAL

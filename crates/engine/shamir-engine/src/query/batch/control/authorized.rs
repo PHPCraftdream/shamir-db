@@ -66,6 +66,14 @@ pub trait AccessGate: Send + Sync {
         action: Action,
     ) -> Result<(), AccessError>;
 
+    /// `true` when [`Self::table_read_exists`] is a real catalogue probe.
+    /// A gate that keeps the default (`false`) is trusted native-embedding
+    /// policy: subscription sources are then authorized by `check` alone and
+    /// the executor's normal validation answers an absent source.
+    fn table_probe_supported(&self) -> bool {
+        false
+    }
+
     /// Catalogue-only existence probe for a table READ. `None` means the
     /// repository is absent (preserve the legacy parent error); custom gates
     /// may keep the default and rely on the executor's normal validation.
@@ -207,13 +215,15 @@ impl<'a> Authorized<'a> {
                     store: source.table.repo.clone(),
                     table: source.table.table.clone(),
                 };
-                let exists = gate
-                    .table_read_exists(db_name, &source.table.repo, &source.table.table)
-                    .await
-                    .ok()
-                    .flatten();
-                if exists != Some(true) {
-                    return Err(table_unavailable());
+                if gate.table_probe_supported() {
+                    let exists = gate
+                        .table_read_exists(db_name, &source.table.repo, &source.table.table)
+                        .await
+                        .ok()
+                        .flatten();
+                    if exists != Some(true) {
+                        return Err(table_unavailable());
+                    }
                 }
                 if gate.check(&actor, &path, Action::Read).await.is_err() {
                     return Err(table_unavailable());

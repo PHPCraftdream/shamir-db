@@ -66,6 +66,10 @@ impl shamir_engine::query::batch::AccessGate for BatchAccessGate<'_> {
             .await
     }
 
+    fn table_probe_supported(&self) -> bool {
+        true
+    }
+
     async fn table_read_exists(
         &self,
         db_name: &str,

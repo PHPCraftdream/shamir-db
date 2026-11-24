@@ -80,6 +80,10 @@ struct CatalogueGate;
 
 #[async_trait::async_trait]
 impl AccessGate for CatalogueGate {
+    fn table_probe_supported(&self) -> bool {
+        true
+    }
+
     async fn check(
         &self,
         _actor: &Actor,
@@ -270,6 +274,23 @@ async fn absent_source_precedes_multi_repo_gate() {
             String::new(),
             "table is unavailable".into()
         )
+    );
+}
+
+/// A gate that keeps the default probe (`table_probe_supported() == false`) is
+/// trusted native-embedding policy: an existing, readable source is authorized
+/// by `check` alone instead of being refused as unavailable.
+///
+/// Mutant: treating the default probe's `None` as an absent source refuses every
+/// valid subscription of such a gate unconditionally.
+#[tokio::test]
+async fn subscription_through_a_gate_without_a_probe_is_authorized_by_check_alone() {
+    let request = single_source_subscribe("sub1", "users");
+    let authorized =
+        Authorized::authorize(&request, Actor::User(7), "test", &ClosedSourceGate).await;
+    assert!(
+        authorized.is_ok(),
+        "a gate without a probe must authorize a readable source: {authorized:?}"
     );
 }
 
