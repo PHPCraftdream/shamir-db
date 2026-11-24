@@ -90,6 +90,12 @@ fn sample_wal() -> WalSection {
 #[test]
 fn v2_verify_rejects_disk_spelling_mismatch_portably() {
     let dir = temp_dir("verify_case_spelling");
+    let probe = dir.join("x");
+    let upper_probe = dir.join("X");
+    write_file(&probe, b"probe");
+    let insensitive = upper_probe.exists();
+    let _ = fs::remove_file(&probe);
+    let _ = fs::remove_file(&upper_probe);
     let actual = dir.join("audit.log.1");
     write_file(&actual, b"audit");
     let (sha256, size_bytes) = hash_file(&actual).expect("hash actual spelling");
@@ -106,7 +112,17 @@ fn v2_verify_rejects_disk_spelling_mismatch_portably() {
     );
     fs::write(dir.join("manifest.json"), raw).expect("write manifest");
     let error = verify_manifest(&dir).expect_err("different on-disk spelling must refuse");
-    assert!(matches!(error, BackupError::UnmanifestedFile(_)));
+    if insensitive {
+        assert!(
+            matches!(error, BackupError::ManifestInvalid(ref message) if message.contains("spelling")),
+            "unexpected error: {error}"
+        );
+    } else {
+        assert!(
+            matches!(error, BackupError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::NotFound),
+            "unexpected error: {error}"
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -131,7 +147,10 @@ fn v2_manifest_control_file_requires_exact_spelling() {
     );
     fs::write(dir.join("manifest.json"), raw).expect("write manifest");
     let error = verify_manifest(&dir).expect_err("non-exact control spelling must refuse");
-    assert!(matches!(error, BackupError::UnmanifestedFile(_)));
+    assert!(
+        matches!(error, BackupError::ManifestInvalid(ref message) if message.contains("reserves the root control-file name")),
+        "unexpected error: {error}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -530,6 +549,40 @@ fn set_manifest_fields(dir: &Path, edit: impl FnOnce(&mut ManifestV2)) {
 
 fn wal_segment_paths() -> [&'static str; 2] {
     ["repos/alpha/store.bin", "backup.meta.json"]
+}
+
+#[test]
+fn v2_verify_keeps_confinement_refusal_categories() {
+    let dir = DirGuard::new("verify_confinement_categories");
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        decoded
+            .files
+            .push(crate::sync::durability::backup::ManifestFileEntry {
+                path: "repos/alpha".to_string(),
+                sha256: "00".repeat(32),
+                size_bytes: 1,
+            });
+    });
+    assert!(matches!(
+        verify_manifest(&dir.0),
+        Err(BackupError::ManifestPathNotRegularFile(_))
+    ));
+
+    build_snapshot(&dir.0);
+    set_manifest_fields(&dir.0, |decoded| {
+        decoded
+            .files
+            .push(crate::sync::durability::backup::ManifestFileEntry {
+                path: "repos/alpha/absent.bin".to_string(),
+                sha256: "00".repeat(32),
+                size_bytes: 1,
+            });
+    });
+    assert!(matches!(
+        verify_manifest(&dir.0),
+        Err(BackupError::Io(ref io_error)) if io_error.kind() == std::io::ErrorKind::NotFound
+    ));
 }
 
 #[test]

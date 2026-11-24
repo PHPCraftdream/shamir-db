@@ -2,7 +2,7 @@
 //! verify"): child module of `offline.rs`, one primary item
 //! ([`verify_manifest_v2`]). Pure file inspection — no engine open.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,10 @@ pub(super) fn verify_decoded_manifest_v2(
     let mut on_disk = Vec::new();
     collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
     let exact_paths: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
+    let actual_by_folded: BTreeMap<String, &str> = on_disk
+        .iter()
+        .map(|path| (path.to_lowercase(), path.as_str()))
+        .collect();
 
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
     let mut folded_paths = BTreeSet::new();
@@ -129,10 +133,14 @@ pub(super) fn verify_decoded_manifest_v2(
         if !folded_paths.insert(entry.path.to_lowercase()) {
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
-        if !exact_paths.contains(entry.path.as_str()) {
-            return Err(BackupError::UnmanifestedFile(
-                snapshot_dir.join(&entry.path),
-            ));
+        for control_name in [MANIFEST_FILE_NAME, online_manifest::BACKUP_META_FILE_NAME] {
+            let folded = control_name.to_lowercase();
+            if entry.path.to_lowercase() == folded && entry.path != control_name {
+                return Err(BackupError::ManifestInvalid(format!(
+                    "manifest entry \"{}\" reserves the root control-file name \"{}\" with a different spelling",
+                    entry.path, folded
+                )));
+            }
         }
         let file_path = confined_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, cancel).map_err(|e| {
@@ -150,6 +158,16 @@ pub(super) fn verify_decoded_manifest_v2(
                 actual_sha256,
                 actual_size_bytes: actual_size,
             });
+        }
+        if !exact_paths.contains(entry.path.as_str()) {
+            let actual = actual_by_folded
+                .get(&entry.path.to_lowercase())
+                .copied()
+                .unwrap_or(entry.path.as_str());
+            return Err(BackupError::ManifestInvalid(format!(
+                "manifest entry \"{}\" does not match its exact on-disk spelling \"{}\"",
+                entry.path, actual
+            )));
         }
         total_bytes += actual_size;
         accounted.insert(entry.path.clone());

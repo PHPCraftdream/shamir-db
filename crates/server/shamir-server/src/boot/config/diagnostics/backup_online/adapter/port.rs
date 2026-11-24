@@ -237,55 +237,29 @@ fn copy_validation_tree(source: &Path, destination: &Path, depth: usize) -> io::
 
 struct ValidationTempDir {
     path: PathBuf,
-    parent: PathBuf,
+}
+
+fn default_candidate_name(id: u64) -> String {
+    format!("shamir-backup-validation-{}-{id}", std::process::id())
 }
 
 impl ValidationTempDir {
     fn new() -> io::Result<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        let mut parent = None;
         for _ in 0..128 {
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "shamir-backup-validation-parent-{}-{id}",
-                std::process::id()
-            ));
-            match shamir_private_dir::create_private_dir(&path) {
-                Ok(()) => {
-                    parent = Some(path);
-                    break;
-                }
+            #[cfg(test)]
+            let name = validation_root_candidate().unwrap_or_else(|| default_candidate_name(id));
+            #[cfg(not(test))]
+            let name = default_candidate_name(id);
+            let path = std::env::temp_dir().join(name);
+            // Exclusive private create: a pre-existing path (planted or
+            // otherwise) is NEVER adopted or deleted — the guard only ever
+            // removes a directory this call created.
+            match shamir_private_dir::create_exclusive_private_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
-            }
-        }
-        let parent = parent.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "could not allocate validation parent",
-            )
-        })?;
-        let mut owned = Self {
-            path: parent.join("pending"),
-            parent: parent.clone(),
-        };
-        for _ in 0..128 {
-            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!("validation-{id}"));
-            match fs::create_dir(&path) {
-                Ok(()) => {
-                    owned.path = path;
-                    return Ok(owned);
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    if let Err(cleanup) = fs::remove_dir_all(&parent) {
-                        if cleanup.kind() != io::ErrorKind::NotFound {
-                            tracing::warn!(path = %parent.display(), %cleanup, "failed to remove validation parent");
-                        }
-                    }
-                    return Err(error);
-                }
             }
         }
         Err(io::Error::new(
@@ -301,14 +275,33 @@ impl ValidationTempDir {
 
 impl Drop for ValidationTempDir {
     fn drop(&mut self) {
-        for path in [&self.path, &self.parent] {
-            if let Err(error) = fs::remove_dir_all(path) {
-                if error.kind() != io::ErrorKind::NotFound {
-                    tracing::warn!(path = %path.display(), %error, "failed to remove validation directory");
-                }
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "failed to remove validation directory"
+                );
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VALIDATION_ROOT_CANDIDATE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only seam: overrides the allocator's FIRST candidate root name.
+#[cfg(test)]
+pub(crate) fn set_validation_root_candidate(candidate: Option<String>) {
+    VALIDATION_ROOT_CANDIDATE.with(|slot| *slot.borrow_mut() = candidate);
+}
+
+#[cfg(test)]
+fn validation_root_candidate() -> Option<String> {
+    VALIDATION_ROOT_CANDIDATE.with(|slot| slot.borrow_mut().take())
 }
 
 fn is_audit_archive_name(name: &str) -> bool {
@@ -379,7 +372,13 @@ fn validate_copied_data_dir(
         "audit_checkpoint",
         temp.path(),
     )?;
+    // The SOURCE decides only store requirement / existence / kind — never
+    // contents. A post-capture rotation or retention prune may change the
+    // live source after the copy; judging the copy's audit FILES against
+    // the live source would either reject a valid copy or (worse) omit a
+    // copied archive that boot then scans.
     let source_entries = fs::read_dir(source_data_dir).map_err(PortError::SystemStore)?;
+    let mut source_has_audit_chain = false;
     for entry in source_entries {
         let entry = entry.map_err(PortError::SystemStore)?;
         let name = entry.file_name();
@@ -387,27 +386,43 @@ fn validate_copied_data_dir(
         if text != "audit.log" && !is_audit_archive_name(&text) {
             continue;
         }
-        let source_path = entry.path();
-        let metadata = fs::symlink_metadata(&source_path).map_err(PortError::SystemStore)?;
+        source_has_audit_chain = true;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(PortError::SystemStore)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(PortError::SystemStore(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported source audit validation entry",
             )));
         }
-        let copied_path = copied_data_dir.join(&name);
-        let copied_meta = fs::symlink_metadata(&copied_path).map_err(|error| {
-            PortError::SystemStore(io::Error::other(format!(
-                "copied audit entry is missing or unreadable: {error}"
-            )))
-        })?;
-        if !copied_meta.is_file() || copied_meta.file_type().is_symlink() {
+    }
+    // The COMPLETED DESTINATION defines the published audit set: every
+    // reserved audit entry (active log + archives) is kind-checked and
+    // cloned into the validation tree, because boot scans EVERY archive of
+    // the directory it opens.
+    let copied_entries = fs::read_dir(copied_data_dir).map_err(PortError::SystemStore)?;
+    let mut copied_has_chain = false;
+    for entry in copied_entries {
+        let entry = entry.map_err(PortError::SystemStore)?;
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if text != "audit.log" && !is_audit_archive_name(&text) {
+            continue;
+        }
+        copied_has_chain = true;
+        let copied_path = entry.path();
+        let metadata = fs::symlink_metadata(&copied_path).map_err(PortError::SystemStore)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(PortError::SystemStore(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported copied audit validation entry",
             )));
         }
         fs::copy(&copied_path, temp.path().join(&name)).map_err(PortError::SystemStore)?;
+    }
+    if source_has_audit_chain && !copied_has_chain {
+        return Err(PortError::SystemStore(io::Error::other(
+            "copied audit chain does not validate: the copy lost the whole audit chain",
+        )));
     }
     let meta_path = temp.path().join("server_meta");
     if meta_path.exists() {

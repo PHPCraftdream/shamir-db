@@ -445,12 +445,15 @@ pub fn run_copy_pass(
 ///
 /// KNOWN LIMIT: live `server_meta` is copied file by file in phase 1, outside
 /// every seal, and is not a consistent-point snapshot. The copier's hash, size,
-/// and inventory self-check never opens the store. Phase F now opens a
-/// disposable clone of the copied stores and validates the copied anchor
-/// against the copied audit chain before publication; this can detect a mixed
-/// image, but cannot recover missing source bytes. The copier itself does not
-/// repair, validate, or delete files; boot remains the last resort for older
-/// or manually assembled copies that lack phase-F validation.
+/// and inventory self-check never opens the store. Phase F validation runs via
+/// `OnlineBackupPort::validate_copied_data_dir`, whose default is a no-op and
+/// which only the server adapter implements. That adapter opens a disposable
+/// clone covering copied `server_meta`, the `audit_checkpoint` store and copied
+/// audit files, then validates the copied anchor against the copied audit chain
+/// before publication; this can detect a mixed image, but cannot recover missing
+/// source bytes. The copier itself does not repair, validate, or delete files;
+/// boot remains the last resort for copies made without the hook, including older
+/// servers and manual copies.
 /// [`CopyError::AuditArchiveLost`] guards audit files only.
 pub(super) fn run_data_dir_copy_pass(
     source_root: &Path,

@@ -23,3 +23,12 @@ pub(crate) fn open_existing(path: impl AsRef<Path>) -> Result<ServerMetaStore, M
         .ok_or(MetaError::NotInitialised(KEY_SECRETS))?;
     Ok(store)
 }
+
+/// Test-only: force a durable LSM version switch through the store's own handle.
+#[cfg(test)]
+pub(crate) fn rotate_meta_memtable_for_test(store: &ServerMetaStore) -> Result<(), MetaError> {
+    store
+        .meta
+        .rotate_memtable_and_wait()
+        .map_err(MetaError::Fjall)
+}
