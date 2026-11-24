@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use tempfile::TempDir;
@@ -270,6 +272,52 @@ fn verify_manifest_rejects_absolute_path() {
         matches!(err, BackupError::UnsafeManifestPath(_)),
         "expected UnsafeManifestPath for an absolute entry path, got {err:?}"
     );
+}
+
+/// A v1 manifest entry reaching a file outside the snapshot through a symlink
+/// (final or intermediate component) refuses BEFORE any open: the dangling link
+/// proves no open was attempted (an open would fail as plain `Io`), and the
+/// links to existing outside files carry the matching size and digest, so a
+/// verifier that follows them would report `verified`.
+#[cfg(unix)]
+#[test]
+fn verify_manifest_refuses_symlinks_out_of_the_snapshot() {
+    let outside = TempDir::new().unwrap();
+    let contents = b"outside the snapshot";
+    fs::write(outside.path().join("secret.txt"), contents).unwrap();
+    fs::create_dir(outside.path().join("dir")).unwrap();
+    fs::write(outside.path().join("dir/inner.txt"), contents).unwrap();
+    let sha256 = hex::encode(shamir_connect::common::crypto::sha256(contents));
+
+    // (manifest entry path, symlink name inside the snapshot, link target)
+    let cases = [
+        ("link.txt", "link.txt", outside.path().join("secret.txt")),
+        (
+            "dangling.txt",
+            "dangling.txt",
+            outside.path().join("missing"),
+        ),
+        ("dirlink/inner.txt", "dirlink", outside.path().join("dir")),
+    ];
+    for (entry_path, link_name, target) in cases {
+        let snapshot = TempDir::new().unwrap();
+        symlink(&target, snapshot.path().join(link_name)).unwrap();
+        write_hand_crafted_manifest(
+            snapshot.path(),
+            MANIFEST_FORMAT_VERSION,
+            vec![ManifestFileEntry {
+                path: entry_path.to_string(),
+                sha256: sha256.clone(),
+                size_bytes: contents.len() as u64,
+            }],
+        );
+
+        let err = verify_manifest(snapshot.path()).unwrap_err();
+        assert!(
+            matches!(err, BackupError::UnconfinedManifestPath(_)),
+            "{entry_path}: expected UnconfinedManifestPath, got {err:?}"
+        );
+    }
 }
 
 #[test]

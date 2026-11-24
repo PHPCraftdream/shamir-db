@@ -729,7 +729,7 @@ pub fn try_snapshot_delete_lease(root: &Path) -> io::Result<Option<File>> {
 
 /// Shared implementation behind the entry points. Dispatches on the cheap
 /// format-version peek: v2 snapshots route to the child module's
-/// [`v2_verify::verify_manifest_v2`], the v1 path stays byte-identical.
+/// [`v2_verify::verify_manifest_v2`]; v1 adds only per-entry confinement.
 /// Lease policy lives entirely in the callers ([`verify_manifest`] leases;
 /// [`verify_manifest_for_restore`], [`verify_writer_snapshot`] and
 /// [`verify_retention_candidate`] do not).
@@ -748,8 +748,8 @@ fn verify_manifest_impl(
 /// and [`verify_writer_snapshot`] read the bytes themselves,
 /// [`verify_retention_candidate`] receives them from the caller. Dispatches
 /// on the cheap format-version peek: v2 snapshots route to the child
-/// module's [`v2_verify::verify_manifest_v2`], the v1 path stays
-/// byte-identical.
+/// module's [`v2_verify::verify_manifest_v2`]; the v1 path adds only
+/// per-entry confinement.
 fn verify_manifest_raw(
     snapshot_dir: &Path,
     raw: &[u8],
@@ -792,7 +792,8 @@ fn verify_manifest_raw(
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
 
-        let file_path = snapshot_dir.join(&entry.path);
+        // Per-component walk: a symlink or non-regular file refuses before any open.
+        let file_path = v2_verify::confined_snapshot_path(snapshot_dir, &entry.path)?;
         let (digest, actual_size) = hash_file_streaming(&file_path, &|| false).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
