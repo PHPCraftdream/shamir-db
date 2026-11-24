@@ -312,6 +312,29 @@ fn verify_manifest_refuses_noncanonical_entry_shapes() {
     }
 }
 
+/// A v1 entry whose final component exists but is not a regular file refuses
+/// with the typed error before any content read (a read would fail as `Io`).
+#[test]
+fn verify_manifest_refuses_a_non_regular_final_component() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    write_hand_crafted_manifest(
+        dir.path(),
+        MANIFEST_FORMAT_VERSION,
+        vec![ManifestFileEntry {
+            path: "sub".to_string(),
+            sha256: "0".repeat(64),
+            size_bytes: 0,
+        }],
+    );
+
+    let err = verify_manifest(dir.path()).unwrap_err();
+    assert!(
+        matches!(err, BackupError::ManifestPathNotRegularFile(_)),
+        "expected ManifestPathNotRegularFile, got {err:?}"
+    );
+}
+
 /// A v1 backup carries file names the v2 naming rules refuse (`:`, `\` and a
 /// trailing dot or space are literal characters on Unix; a configured TLS file
 /// can be named like that) and its own snapshot must still verify.

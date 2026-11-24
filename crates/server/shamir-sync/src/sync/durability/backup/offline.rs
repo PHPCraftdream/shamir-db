@@ -213,10 +213,10 @@ pub enum BackupError {
     #[error("snapshot format stamp is invalid")]
     InvalidSnapshotStamp(#[source] StampError),
     /// `verify_manifest` (v1 and v2): a manifest-controlled path is refused by a
-    /// lexical or metadata check (empty or `.` component, Windows drive / device
-    /// prefix, NTFS alternate-data-stream `:` component, backslash, or a symlink
-    /// / non-directory component on the fixed snapshot) before the entry is
-    /// opened for content reads. (`..` is `UnsafeManifestPath`.)
+    /// lexical or metadata check before the entry is opened for content reads:
+    /// an empty or `.` component, a symlink / non-directory component on the
+    /// fixed snapshot, and (v2 on every host, v1 on Windows) a drive / device
+    /// prefix, `:` or backslash. (`..` is `UnsafeManifestPath`.)
     #[error("manifest-controlled path is not confined to the snapshot directory: {0}")]
     UnconfinedManifestPath(String),
     /// `verify_manifest` (v1 and v2): a manifest-controlled path names something
