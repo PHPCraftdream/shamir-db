@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use tempfile::TempDir;
@@ -270,6 +272,137 @@ fn verify_manifest_rejects_absolute_path() {
         matches!(err, BackupError::UnsafeManifestPath(_)),
         "expected UnsafeManifestPath for an absolute entry path, got {err:?}"
     );
+}
+
+/// A v1 entry with a shape the per-component walk cannot confine refuses
+/// before the entry is opened. An empty or `.` component refuses on every
+/// platform; on Windows a drive piece (`C:`) after a normal directory name
+/// would reset the `PathBuf::push` walk and a backslash would bundle several
+/// hops into one metadata check, so those refuse there (on Unix they are
+/// literal name characters, see the round-trip test below).
+#[test]
+fn verify_manifest_refuses_noncanonical_entry_shapes() {
+    let mut shapes = vec!["./a.txt", "a//b"];
+    if cfg!(windows) {
+        shapes.extend([
+            "sub/C:/x",
+            "sub/file.txt:stream",
+            "sub\\inner.txt",
+            "dir./x",
+            "dir /x",
+        ]);
+    }
+    for entry_path in shapes {
+        let dir = TempDir::new().unwrap();
+        write_hand_crafted_manifest(
+            dir.path(),
+            MANIFEST_FORMAT_VERSION,
+            vec![ManifestFileEntry {
+                path: entry_path.to_string(),
+                sha256: "0".repeat(64),
+                size_bytes: 0,
+            }],
+        );
+
+        let err = verify_manifest(dir.path()).unwrap_err();
+        assert!(
+            matches!(err, BackupError::UnconfinedManifestPath(_)),
+            "{entry_path}: expected UnconfinedManifestPath, got {err:?}"
+        );
+    }
+}
+
+/// A v1 entry whose final component exists but is not a regular file refuses
+/// with the typed error before any content read (a read would fail as `Io`).
+#[test]
+fn verify_manifest_refuses_a_non_regular_final_component() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    write_hand_crafted_manifest(
+        dir.path(),
+        MANIFEST_FORMAT_VERSION,
+        vec![ManifestFileEntry {
+            path: "sub".to_string(),
+            sha256: "0".repeat(64),
+            size_bytes: 0,
+        }],
+    );
+
+    let err = verify_manifest(dir.path()).unwrap_err();
+    assert!(
+        matches!(err, BackupError::ManifestPathNotRegularFile(_)),
+        "expected ManifestPathNotRegularFile, got {err:?}"
+    );
+}
+
+/// A v1 backup carries file names the v2 naming rules refuse (`:`, `\` and a
+/// trailing dot or space are literal characters on Unix; a configured TLS file
+/// can be named like that) and its own snapshot must still verify.
+#[cfg(unix)]
+#[test]
+fn backup_with_nonportable_unix_names_verifies() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let names = [
+        "tls:cert.pem",
+        "tls-key.pem ",
+        "tls-cert.pem.",
+        "back\\slash.txt",
+    ];
+    for name in names {
+        fs::write(src.path().join(name), name.as_bytes()).unwrap();
+    }
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    let verified = verify_manifest(&report.dest_dir).unwrap();
+    assert_eq!(verified.files_checked, names.len() as u64);
+}
+
+/// A v1 manifest entry reaching a file outside the snapshot through a symlink
+/// (final or intermediate component) refuses before the entry is opened for
+/// content reads: the dangling link
+/// proves no open was attempted (an open would fail as plain `Io`), and the
+/// links to existing outside files carry the matching size and digest, so a
+/// verifier that follows them would report `verified`.
+#[cfg(unix)]
+#[test]
+fn verify_manifest_refuses_symlinks_out_of_the_snapshot() {
+    let outside = TempDir::new().unwrap();
+    let contents = b"outside the snapshot";
+    fs::write(outside.path().join("secret.txt"), contents).unwrap();
+    fs::create_dir(outside.path().join("dir")).unwrap();
+    fs::write(outside.path().join("dir/inner.txt"), contents).unwrap();
+    let sha256 = hex::encode(shamir_connect::common::crypto::sha256(contents));
+
+    // (manifest entry path, symlink name inside the snapshot, link target)
+    let cases = [
+        ("link.txt", "link.txt", outside.path().join("secret.txt")),
+        (
+            "dangling.txt",
+            "dangling.txt",
+            outside.path().join("missing"),
+        ),
+        ("dirlink/inner.txt", "dirlink", outside.path().join("dir")),
+    ];
+    for (entry_path, link_name, target) in cases {
+        let snapshot = TempDir::new().unwrap();
+        symlink(&target, snapshot.path().join(link_name)).unwrap();
+        write_hand_crafted_manifest(
+            snapshot.path(),
+            MANIFEST_FORMAT_VERSION,
+            vec![ManifestFileEntry {
+                path: entry_path.to_string(),
+                sha256: sha256.clone(),
+                size_bytes: contents.len() as u64,
+            }],
+        );
+
+        let err = verify_manifest(snapshot.path()).unwrap_err();
+        assert!(
+            matches!(err, BackupError::UnconfinedManifestPath(_)),
+            "{entry_path}: expected UnconfinedManifestPath, got {err:?}"
+        );
+    }
 }
 
 #[test]
