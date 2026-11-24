@@ -21,6 +21,7 @@ use shamir_query_builder::wire::admin::{cancel_request, cancel_tx};
 use shamir_query_types::admin::activity::CancelOutcome;
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
+use shamir_sync::durability::tx_cancel::TxParkedState;
 use shamir_test_diag::FlakeGuard;
 use shamir_tx::RepoTxGate;
 
@@ -136,9 +137,7 @@ async fn wire_cancel(handler: &ShamirDbHandler, caller: &Session, id: u64) -> Db
     rmp_serde::from_slice(&result).unwrap()
 }
 
-/// Wire-decoded request accounting includes cancellation dispatches exactly
-/// once, including authorization refusals. A denial is still a successfully
-/// decoded request and must not be hidden from this counter.
+/// Raw-native-path decoded-request accounting (token REST/WS decode separately and are not counted). The cursor case, busy CancelTx case, successful CancelRequest case, and permission denial are all native-path assertions. A denial is still a successfully decoded request and must not be hidden from this counter.
 #[tokio::test]
 async fn decoded_request_counter_covers_cancellation_dispatches() {
     let diag = FlakeGuard::with_watchdog(
@@ -175,19 +174,28 @@ async fn decoded_request_counter_covers_cancellation_dispatches() {
             .cursor_registry()
             .register(501, owner.session_id, cursor, 4)
             .unwrap();
+        let outcomes_before_cursor = handler.activity_counts().cancellations;
         assert!(matches!(
-            wire_request(
-                &handler,
-                &owner,
-                DbRequest::CancelCursor {
-                    cursor_id: CursorId(501)
-                }
-            )
-            .await,
-            DbResponse::CursorClosed {
-                cursor_id: CursorId(501)
+            wire_cursor_cancel(&handler, &owner, 501).await,
+            DbResponse::CancelOutcome {
+                outcome: CancelOutcome::Cancelled
             }
         ));
+        assert!(handler
+            .cursor_registry()
+            .get_owned(501, &owner.session_id)
+            .is_err());
+        let outcomes_after_cursor = handler.activity_counts().cancellations;
+        assert_eq!(
+            [
+                outcomes_after_cursor[0] - outcomes_before_cursor[0],
+                outcomes_after_cursor[1] - outcomes_before_cursor[1],
+                outcomes_after_cursor[2] - outcomes_before_cursor[2],
+                outcomes_after_cursor[3] - outcomes_before_cursor[3],
+            ],
+            [1, 0, 0, 0],
+            "cursor cancel outcome delta"
+        );
         assert_eq!(
             handler.decoded_request_count(),
             1,
@@ -200,12 +208,24 @@ async fn decoded_request_counter_covers_cancellation_dispatches() {
             .get_owned(tx_handle, &owner.session_id)
             .unwrap();
         let ctx_guard = tx.ctx().lock().await;
+        let outcomes_before_busy = handler.activity_counts().cancellations;
         assert!(matches!(
             wire_cancel(&handler, &owner, tx_handle).await,
             DbResponse::CancelOutcome {
                 outcome: CancelOutcome::NotCancellable
             }
         ));
+        let outcomes_after_busy = handler.activity_counts().cancellations;
+        assert_eq!(
+            [
+                outcomes_after_busy[0] - outcomes_before_busy[0],
+                outcomes_after_busy[1] - outcomes_before_busy[1],
+                outcomes_after_busy[2] - outcomes_before_busy[2],
+                outcomes_after_busy[3] - outcomes_before_busy[3],
+            ],
+            [0, 0, 0, 1],
+            "busy CancelTx outcome delta"
+        );
         assert_eq!(
             handler.decoded_request_count(),
             2,
@@ -219,6 +239,7 @@ async fn decoded_request_counter_covers_cancellation_dispatches() {
             .unwrap();
         let mut batch = Batch::new();
         batch.op("cancel", cancel_request(live.id()));
+        let outcomes_before_request = handler.activity_counts().cancellations;
         assert!(matches!(
             wire_request(
                 &handler,
@@ -234,6 +255,17 @@ async fn decoded_request_counter_covers_cancellation_dispatches() {
                 outcome: CancelOutcome::Cancelled
             }
         ));
+        let outcomes_after_request = handler.activity_counts().cancellations;
+        assert_eq!(
+            [
+                outcomes_after_request[0] - outcomes_before_request[0],
+                outcomes_after_request[1] - outcomes_before_request[1],
+                outcomes_after_request[2] - outcomes_before_request[2],
+                outcomes_after_request[3] - outcomes_before_request[3],
+            ],
+            [1, 0, 0, 0],
+            "successful CancelRequest outcome delta"
+        );
         assert_eq!(
             handler.decoded_request_count(),
             3,
@@ -441,10 +473,10 @@ async fn successful_foreign_cancel_tx_is_audited() {
     .expect("successful foreign CancelTx audit scenario timed out");
 }
 
-/// Kills mutant `committing_removed_after_authorization_answers_already_committing`:
-/// the handler captured the committing row and authorized the foreign caller,
-/// but the reservation is removed before it resumes. Parent must return
-/// `AlreadyFinished`, not disclose the stale `Committing` state.
+/// Kills mutant `committing_identity_recheck_omitted`: during the authorization
+/// pause it installs a SECOND Committing reservation under the same handle.
+/// Both rows are Committing but different Arcs, so removing only the ptr_eq
+/// recheck answers AlreadyCommitting instead of AlreadyFinished.
 #[tokio::test]
 async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
     let diag = FlakeGuard::with_watchdog(
@@ -458,7 +490,10 @@ async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
         let id = parked(&base, &db, &owner_actor, &owner).await;
         let tx = base.tx_registry().get_owned(id, &owner.session_id).unwrap();
         let committing = base.tx_registry().begin_commit(id, &tx).unwrap();
-        let original_committing_row = Arc::clone(&tx);
+        let first_activity_row = base
+            .tx_registry()
+            .activity_row(id)
+            .expect("first activity row");
         let reached = Arc::new(tokio::sync::Barrier::new(2));
         let resume = Arc::new(tokio::sync::Barrier::new(2));
         let handler = base.clone().with_cancel_authorized_pause(
@@ -472,7 +507,6 @@ async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
         reached.wait().await;
         drop(committing);
         drop(tx);
-        let replacement_owner = session(3, 3, false);
         let (replacement_ctx, replacement_snapshot) = db
             .tx_begin_as(owner_actor.clone(), "app", "main", "snapshot")
             .await
@@ -480,8 +514,8 @@ async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
         let replacement = InteractiveTx::new(
             replacement_ctx,
             replacement_snapshot,
-            replacement_owner.session_id,
-            replacement_owner.user_id,
+            owner.session_id,
+            owner.user_id,
             "app".into(),
             "main".into(),
             Duration::from_secs(3_600),
@@ -491,15 +525,17 @@ async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
             .register_activity(
                 id,
                 replacement,
-                replacement_owner.activity_handle(),
-                Arc::from(replacement_owner.username.as_str()),
+                owner.activity_handle(),
+                Arc::from(owner.username.as_str()),
             )
             .expect("same handle is available after commit guard drop");
-        let replacement_row = base
+        let second = base.tx_registry().get_owned(id, &owner.session_id).unwrap();
+        let second_committing = base.tx_registry().begin_commit(id, &second).unwrap();
+        let second_activity_row = base
             .tx_registry()
-            .get_owned(id, &replacement_owner.session_id)
-            .unwrap();
-        assert!(!Arc::ptr_eq(&original_committing_row, &replacement_row));
+            .activity_row(id)
+            .expect("second activity row");
+        assert!(!Arc::ptr_eq(&first_activity_row, &second_activity_row));
         resume.wait().await;
         assert!(matches!(
             task.await.unwrap(),
@@ -507,12 +543,12 @@ async fn foreign_cancel_tx_removed_committing_reservation_answers_finished() {
                 outcome: CancelOutcome::AlreadyFinished
             }
         ));
-        assert!(
-            base.tx_registry()
-                .get_owned(id, &replacement_owner.session_id)
-                .is_ok(),
-            "replacement transaction survives stale authorized cancel"
-        );
+        assert!(matches!(
+            base.tx_registry().peek(id),
+            TxParkedState::Committing
+        ));
+        drop(second_committing);
+        drop(second);
     })
     .await
     .expect("committing authorization race timed out");
@@ -529,7 +565,7 @@ async fn cursor_id_reuse_during_handler_authorization_preserves_replacement() {
         TIMEOUT,
     );
     tokio::time::timeout(TIMEOUT, async {
-        let (_db, base, _) = fixture().await;
+        let (db, base, owner_actor) = fixture().await;
         let capture = Arc::new(Capture::default());
         let writer = Arc::new(AuditChainWriter::new(
             AuditChain::new([8; 32]),
@@ -539,7 +575,19 @@ async fn cursor_id_reuse_during_handler_authorization_preserves_replacement() {
         let old_user = session(1, 1, false);
         let new_user = session(3, 3, false);
         let caller = session(2, 2, true);
+        let audited_tx = parked(&base, &db, &owner_actor, &old_user).await;
         let id = 71;
+        assert!(matches!(
+            wire_cancel(&base, &caller, audited_tx).await,
+            DbResponse::CancelOutcome {
+                outcome: CancelOutcome::Cancelled
+            }
+        ));
+        assert!(
+            base.cancel_refusal_audit().drain().await,
+            "audit queue failed to drain"
+        );
+        assert_eq!(capture.0.lock().unwrap().len(), 1, "positive audit control");
         let snapshot = RepoTxGate::new(0, 1).open_snapshot().await;
         let old_cursor = Cursor::new(
             ReadQuery::new("items"),
@@ -614,9 +662,10 @@ async fn cursor_id_reuse_during_handler_authorization_preserves_replacement() {
             handler.cancel_refusal_audit().drain().await,
             "audit queue failed to drain"
         );
-        assert!(
-            capture.0.lock().unwrap().is_empty(),
-            "stale-identity AlreadyFinished is not audited"
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "AlreadyFinished adds no audit entry"
         );
         assert!(
             base.cursor_registry()

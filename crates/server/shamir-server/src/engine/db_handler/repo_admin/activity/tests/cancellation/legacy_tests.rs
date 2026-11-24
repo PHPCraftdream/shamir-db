@@ -701,6 +701,12 @@ async fn every_cancel_operation_counts_its_outcome_exactly_once() {
                 matches!(&finished, DbResponse::TxBatch { .. }),
                 "a `not_cancellable` refusal must not cancel the request: {finished:?}"
             );
+            assert_eq!(outcome, CancelOutcome::NotCancellable, "outcome after join");
+            assert_eq!(
+                handler.activity_counts().cancellations,
+                [1, 3, 1, 1],
+                "final delta after the blocked TxExecute joined"
+            );
             let rolled_back = wire_request(
                 &handler,
                 &waiter,

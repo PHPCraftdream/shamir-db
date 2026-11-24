@@ -234,7 +234,7 @@ pub struct ShamirDbHandler {
     /// `super::activity::requests` for the bounding argument and the
     /// privacy rule.
     pub(super) activity_requests: Arc<ActivityRequests>,
-    /// Counts successfully wire-decoded requests; production has no reader and pays one Relaxed add.
+    /// Counts requests decoded by the raw native request path only; token REST and WebSocket decode separately and are not counted. Production has no reader; cost is one Relaxed add per native request.
     pub(super) decoded_requests: Arc<std::sync::atomic::AtomicU64>,
     /// R4b-3 — per-server cancellation outcome counters (one fixed slot
     /// per `CancelOutcome`), backing the `shamir_cancellations_total`
@@ -281,6 +281,7 @@ pub(super) struct OperatorBootContext {
 }
 
 impl ShamirDbHandler {
+    /// Reads the raw-native-path decode counter (test-only reader).
     #[cfg(test)]
     pub(in crate::engine::db_handler) fn decoded_request_count(&self) -> u64 {
         self.decoded_requests
