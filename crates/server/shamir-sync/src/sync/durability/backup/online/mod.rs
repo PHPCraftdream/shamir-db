@@ -5,7 +5,10 @@ use std::sync::OnceLock;
 
 use crate::sync::durability::backup::{utc_timestamp, utc_timestamp_at};
 
+#[path = "copy/copy_engine.rs"]
 pub mod copy_engine;
+#[path = "copy/copy_types.rs"]
+mod copy_types;
 pub mod manifest;
 pub mod progress;
 pub mod protocol;

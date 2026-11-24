@@ -2,8 +2,8 @@
 //! the port, WAL copied before stores, a second pass at the seal barrier,
 //! the manifest written last with fsync, self-verification before
 //! success. Cancellation is checked at every stage boundary and between
-//! files; a failed or cancelled run removes the destination directory
-//! and releases the pins — on the error return AND on an unwind, via the
+//! files; a failed or cancelled run attempts to remove its destination
+//! directory and releases the pins — on the error return AND on an unwind, via the
 //! RAII run cleanup armed right after the atomic destination create.
 //! The server publishes the real phase through
 //! the port's `begin_copy` (before the first WAL pass) and
@@ -68,14 +68,26 @@ pub enum OnlineBackupFailure {
     Manifest(#[from] manifest::ManifestError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// The DESTINATION side could not be prepared or published: the atomic
-    /// create of the snapshot child and the manifest / backup-metadata
-    /// publication. Kept apart from [`OnlineBackupFailure::Io`] so the
-    /// scheduled reason names a DESTINATION failure
-    /// (`destination-io-<kind>`) instead of looking like a generic io
-    /// error; it carries no path, so the rendering stays path-free.
+    /// The DESTINATION side could not be prepared: specifically, atomic
+    /// creation of the snapshot child directory failed. Manifest and
+    /// backup-metadata publication failures use
+    /// [`OnlineBackupFailure::Publication`]. Kept apart from
+    /// [`OnlineBackupFailure::Io`] so the scheduled reason names a
+    /// DESTINATION failure (`destination-io-<kind>`) instead of looking like a
+    /// generic io error; it carries no path, so the rendering stays path-free.
     #[error("destination io error: {source}")]
     Dest {
+        #[source]
+        source: std::io::Error,
+    },
+    /// The snapshot's PUBLICATION into the already-created snapshot child
+    /// directory (the manifest and the backup-metadata file) failed: unlike
+    /// [`OnlineBackupFailure::Dest`], which covers only atomic creation of
+    /// that child, this variant includes the directory path. The scheduled
+    /// vocabulary is unchanged (`destination-io-<kind>`).
+    #[error("destination publication failed for {dir}: {source}")]
+    Publication {
+        dir: PathBuf,
         #[source]
         source: std::io::Error,
     },
@@ -120,8 +132,10 @@ pub struct SealRecopyCap {
 }
 
 /// A failed run's partial-tree cleanup failure, reported SEPARATELY
-/// from the primary error: bounded and path-free by construction — it
-/// carries only the `io::ErrorKind` of the failed removal.
+/// from the primary error: cleanup attempts to remove the whole destination
+/// run directory but can fail and leave it behind. This value is bounded and
+/// path-free by construction — it carries only the `io::ErrorKind` of the
+/// failed removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CleanupFailure {
     pub kind: ErrorKind,
@@ -135,8 +149,9 @@ pub enum OnlineBackupError {
     #[error("backup cancelled at stage {stage:?}")]
     Cancelled {
         stage: BackupStage,
-        /// Failure of removing the owned partial destination, if any;
-        /// the cancellation stays the PRIMARY outcome.
+        /// Failure of the best-effort removal attempt for the owned partial
+        /// destination, if any; cleanup can fail and leave the directory.
+        /// The cancellation stays the PRIMARY outcome.
         cleanup: Option<CleanupFailure>,
     },
     #[error("backup failed at stage {stage:?}")]
@@ -144,7 +159,8 @@ pub enum OnlineBackupError {
         stage: BackupStage,
         #[source]
         source: OnlineBackupFailure,
-        /// Failure of removing the owned partial destination, if any;
+        /// Failure of the best-effort removal attempt for the owned partial
+        /// destination, if any; cleanup can fail and leave the directory.
         /// `source` stays the PRIMARY error.
         cleanup: Option<CleanupFailure>,
     },
@@ -250,7 +266,7 @@ fn failure_token(failure: &OnlineBackupFailure) -> String {
         OnlineBackupFailure::Verify(_) => "verify-failed".to_string(),
         OnlineBackupFailure::RecopyCap(_) => "recopy-cap-exceeded".to_string(),
         OnlineBackupFailure::Io(error) => format!("io-{}", kind_token(error.kind())),
-        OnlineBackupFailure::Dest { source } => {
+        OnlineBackupFailure::Dest { source } | OnlineBackupFailure::Publication { source, .. } => {
             format!("destination-io-{}", kind_token(source.kind()))
         }
         OnlineBackupFailure::Copy(error) => copy_token(error),
@@ -268,6 +284,8 @@ fn copy_token(error: &CopyError) -> String {
         }
         CopyError::RecopyCap(_) => "copy-recopy-cap".to_string(),
         CopyError::AuditFilesUnstable { .. } => "copy-audit-files-unstable".to_string(),
+        CopyError::AuditListing { source } => format!("copy-io-{}", kind_token(source.kind())),
+        CopyError::AuditArchiveLost => "copy-audit-archive-lost".to_string(),
     }
 }
 
@@ -333,6 +351,21 @@ fn copy_failed(stage: BackupStage, error: CopyError) -> OnlineBackupError {
 /// `stage_and_reason` names the destination (`destination-io-<kind>`).
 fn dest_failed(stage: BackupStage, error: std::io::Error) -> OnlineBackupError {
     failed(stage, OnlineBackupFailure::Dest { source: error })
+}
+
+/// A PUBLICATION failure inside `dir` (the manifest, the backup-metadata
+/// file) as a stage-tagged protocol error: it names the destination
+/// DIRECTORY, so the operator sees which directory could not take the
+/// published bytes. The scheduled token is the same destination vocabulary
+/// (`destination-io-<kind>`).
+fn publication_failed(stage: BackupStage, dir: &Path, error: std::io::Error) -> OnlineBackupError {
+    failed(
+        stage,
+        OnlineBackupFailure::Publication {
+            dir: dir.to_path_buf(),
+            source: error,
+        },
+    )
 }
 
 /// One copy pass's shared context (keeps argument lists short): the
@@ -868,9 +901,9 @@ fn run_steps(
     let encoded =
         manifest::encode(&manifest).map_err(|error| failed(BackupStage::Verifying, error))?;
     manifest::write_manifest(dest_dir, &encoded)
-        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
+        .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     manifest::write_backup_meta(dest_dir)
-        .map_err(|error| dest_failed(BackupStage::Verifying, error))?;
+        .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
     self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
