@@ -31,7 +31,13 @@ struct TestResolver {
 #[async_trait::async_trait]
 impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
-        self.db.get_table(&self.repo, &table_ref.table).await
+        // A source naming its repo resolves there; an unnamed one is the default.
+        let repo = if table_ref.repo.is_empty() {
+            self.repo.as_str()
+        } else {
+            table_ref.repo.as_str()
+        };
+        self.db.get_table(repo, &table_ref.table).await
     }
 }
 

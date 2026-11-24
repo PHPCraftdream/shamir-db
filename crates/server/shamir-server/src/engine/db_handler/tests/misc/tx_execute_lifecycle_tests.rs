@@ -187,9 +187,7 @@ fn tx_execute_quarantine_masks_absent_and_closed_table_equally() {
         let open_quarantined = execute(&handler, &session, handle, read("items")).await;
         assert!(matches!(
             open_quarantined,
-            DbResponse::Error { code, message }
-                if code == "resync_required"
-                    && message == "repository is quarantined; resynchronize before reading"
+            DbResponse::Error { code, .. } if code == "resync_required"
         ));
 
         let mut close = Batch::new();

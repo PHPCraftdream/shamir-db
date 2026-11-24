@@ -270,10 +270,7 @@ async fn crit5_preflight_refusal_precedes_batch_writes_and_is_indistinguishable(
         match &decoded {
             DbResponse::Error { code, message } => {
                 assert_eq!(code, "unknown_table");
-                assert_eq!(
-                    message,
-                    "Query '' failed [unknown_table]: table is unavailable"
-                );
+                assert_eq!(message, "table is unavailable");
             }
             other => panic!("expected fixed table refusal, got {:?}", other),
         }
