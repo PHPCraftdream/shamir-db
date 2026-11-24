@@ -706,9 +706,9 @@ impl ServerHandle {
                 .await
                 .is_err()
             {
-                // Timeout abandons this wait; teardown work may continue. Its
-                // blocking probe's abort only stops a not-yet-started job; a
-                // filesystem operation already running may outlive the verdict.
+                // The abandoned audit wait may mean the flusher never received
+                // its stop request; signal it here (idempotently). This stops
+                // the wait, not audit work already in a gate or fsync.
                 self.audit_appender.request_flusher_stop();
                 report.add_error(format!(
                     "audit teardown exceeded shutdown budget {audit_budget:?}"

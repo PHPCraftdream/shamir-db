@@ -224,9 +224,12 @@ pub(crate) struct CancelRefusalAudit {
 mod refusal_admission;
 
 impl CancelRefusalAudit {
-    /// The decrement/removal use the bucket lock. Reply-path rollback uses
-    /// bounded try-entry with deferred fallback; job completion runs on a
-    /// blocking worker and may use entry_sync.
+    /// Releasing a share is one blocking bucket access: a single `entry_sync`
+    /// decrement removes the entry at zero under the entry guard. Admitted-job
+    /// disposal normally does this on the blocking audit worker; during runtime
+    /// shutdown tokio may drop a submitted closure on the submitter, so release
+    /// can run there while it still holds the spawn gate (see
+    /// [`CancelAuditSlot::drop`]).
     fn release_share(&self, principal: &str, class: AuditEventClass) {
         match self.principals.entry_sync(principal.to_owned()) {
             scc::hash_map::Entry::Occupied(mut entry) => {

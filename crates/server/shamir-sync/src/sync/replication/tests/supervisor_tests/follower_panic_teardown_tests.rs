@@ -15,19 +15,39 @@ use shamir_query_types::wire::repl::ReplResponse;
 use tokio::sync::Notify;
 
 use crate::replication::error::ReplError;
-use crate::replication::follower_loop::ApplyParkHook;
 use crate::replication::in_process::InProcessReplSource;
+use crate::replication::source::seed::terminal;
 use crate::replication::source::ReplSource;
-use crate::replication::supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
+use crate::replication::supervisor::{
+    HousekeepingGate, ReplSourceFactory, Subscription, SubscriptionSupervisor,
+};
 
 use super::{build_db, create_profile_and_subscription};
 
 struct PayloadDropPanics;
-
 impl Drop for PayloadDropPanics {
     fn drop(&mut self) {
         panic!("payload drop panicked");
     }
+}
+struct InnerDropPanics;
+impl Drop for InnerDropPanics {
+    fn drop(&mut self) {
+        panic!("inner drop panicked");
+    }
+}
+struct OuterDropPanics;
+impl Drop for OuterDropPanics {
+    fn drop(&mut self) {
+        std::panic::panic_any(InnerDropPanics);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PanicMode {
+    None,
+    DropPanics,
+    NestedDropPanics,
 }
 
 struct PanicFixture {
@@ -36,7 +56,7 @@ struct PanicFixture {
     sibling_parked: Arc<Notify>,
     release_sibling: Arc<Notify>,
     gap_served: Arc<Notify>,
-    panic_hello: bool,
+    panic_mode: PanicMode,
     sibling_gap: bool,
 }
 
@@ -47,19 +67,20 @@ struct PanicTeardownSource {
     sibling_parked: Arc<Notify>,
     release_sibling: Arc<Notify>,
     gap_served: Arc<Notify>,
-    panic_hello: bool,
+    panic_mode: PanicMode,
     sibling_gap: bool,
 }
 
 #[async_trait]
 impl ReplSource for PanicTeardownSource {
     async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
-        if self.panic_hello {
-            std::panic::panic_any(PayloadDropPanics);
+        match self.panic_mode {
+            PanicMode::DropPanics => std::panic::panic_any(PayloadDropPanics),
+            PanicMode::NestedDropPanics => std::panic::panic_any(OuterDropPanics),
+            PanicMode::None => {}
         }
         self.inner.hello(node_id).await
     }
-
     async fn pull(
         &self,
         db: &str,
@@ -76,9 +97,19 @@ impl ReplSource for PanicTeardownSource {
         if repo == "other" {
             if self.sibling_gap {
                 self.gap_served.notify_one();
-                return Err(ReplError::JournalGap {
-                    gap_at: 2,
-                    from_version,
+                return Ok(ReplResponse::Pull {
+                    leader_epoch: 0,
+                    events: rmp_serde::to_vec_named(
+                        &Vec::<shamir_db::engine::tx::ReplicatedEvent>::new(),
+                    )
+                    .expect("encode empty pull events"),
+                    gap_at: Some(2),
+                    current_version: 1,
+                    repo_lineage_id: None,
+                    history_epoch: None,
+                    gap_first: None,
+                    gap_through: None,
+                    schema_digest: None,
                 });
             }
             self.sibling_parked.notify_one();
@@ -150,121 +181,137 @@ fn panic_factory(leader: &Arc<ShamirDb>, fixture: PanicFixture) -> ReplSourceFac
             sibling_parked: Arc::clone(&fixture.sibling_parked),
             release_sibling: Arc::clone(&fixture.release_sibling),
             gap_served: Arc::clone(&fixture.gap_served),
-            panic_hello: fixture.panic_hello,
+            panic_mode: fixture.panic_mode,
             sibling_gap: fixture.sibling_gap,
         }) as Arc<dyn ReplSource>
     })
 }
 
-/// Mutant: without nested payload-disposal catch, `PayloadDropPanics::drop`
-/// unwinds past wrapper bookkeeping and teardown never completes; this is
-/// parent-red because the committed parent drops the payload bare.
-#[tokio::test]
-async fn one_target_hello_panic_payload_disposal_runs_teardown_once() {
-    let follower = tokio::time::timeout(Duration::from_secs(120), build_db())
-        .await
-        .expect("follower setup bounded");
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        create_profile_and_subscription(&follower),
-    )
-    .await
-    .expect("subscription setup bounded");
-    let leader = tokio::time::timeout(Duration::from_secs(120), build_db())
-        .await
-        .expect("leader setup bounded");
-    let factory = panic_factory(
-        &leader,
-        PanicFixture {
-            main_pull_entered: Arc::new(Notify::new()),
-            release_main_pull: Arc::new(Notify::new()),
-            sibling_parked: Arc::new(Notify::new()),
-            release_sibling: Arc::new(Notify::new()),
-            gap_served: Arc::new(Notify::new()),
-            panic_hello: true,
-            sibling_gap: false,
-        },
-    );
-    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1");
-    let teardown_done = sup.teardown_signal();
-    tokio::time::timeout(Duration::from_secs(120), sup.reconcile())
-        .await
-        .expect("reconcile bounded");
-    tokio::time::timeout(Duration::from_secs(120), teardown_done.notified())
-        .await
-        .expect("panic wrapper must finish teardown");
-    assert_eq!(sup.teardown_count(), 1);
-    assert!(follower.subscription_lease("sub_a").is_none());
-    assert!(!sup.is_running("sub_a"));
+fn fixture(mode: PanicMode, sibling_gap: bool) -> PanicFixture {
+    PanicFixture {
+        main_pull_entered: Arc::new(Notify::new()),
+        release_main_pull: Arc::new(Notify::new()),
+        sibling_parked: Arc::new(Notify::new()),
+        release_sibling: Arc::new(Notify::new()),
+        gap_served: Arc::new(Notify::new()),
+        panic_mode: mode,
+        sibling_gap,
+    }
 }
 
-/// Mutants killed: (a) unwinding past the wrapper (no catch_unwind) means
-/// teardown never runs; (b) missing sibling-cancel on panic means the sibling
-/// never exits and bounded teardown fails; (c) teardown-at-panicking-exit
-/// fails the mid-test zero-count assertion; (d) a token-releasable sibling
-/// park reaches teardown before that assertion. The sibling's pull gate is a
-/// plain Notify and cannot be released by either cancellation token. If the
-/// apply park is reached after release_sibling, the loops token is already
-/// cancelled, so it returns immediately and cannot block the sibling's exit.
+async fn assert_active(sup: &SubscriptionSupervisor) {
+    let rows = sup
+        .read_subscriptions()
+        .await
+        .expect("read durable subscriptions");
+    assert!(rows
+        .iter()
+        .any(|row| row.name == "sub_a" && row.state == "active"));
+}
+
+/// Nested disposal must not unwind past bookkeeping; parent-red before the second-payload leak guard.
+#[tokio::test]
+async fn one_target_hello_panic_payload_disposal_runs_teardown_once() {
+    for mode in [PanicMode::DropPanics, PanicMode::NestedDropPanics] {
+        let follower = tokio::time::timeout(Duration::from_secs(120), build_db())
+            .await
+            .expect("follower setup bounded");
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            create_profile_and_subscription(&follower),
+        )
+        .await
+        .expect("subscription setup bounded");
+        let leader = tokio::time::timeout(Duration::from_secs(120), build_db())
+            .await
+            .expect("leader setup bounded");
+        let sup = SubscriptionSupervisor::new(
+            follower.clone(),
+            panic_factory(&leader, fixture(mode, false)),
+            "follower-1",
+        );
+        let teardown = sup.teardown_signal();
+        tokio::time::timeout(Duration::from_secs(120), sup.reconcile())
+            .await
+            .expect("reconcile bounded");
+        tokio::time::timeout(Duration::from_secs(120), teardown.notified())
+            .await
+            .expect("panic teardown bounded");
+        assert_eq!(sup.teardown_count(), 1);
+        assert!(follower.subscription_lease("sub_a").is_none());
+        assert!(!sup.is_running("sub_a"));
+        assert_active(&sup).await;
+    }
+}
+
+/// The sibling reaches pull cancellation and then housekeeping; teardown waits for its decrement.
 #[tokio::test]
 async fn two_target_pull_panic_waits_for_both_wrappers_before_single_teardown() {
     let leader = tokio::time::timeout(Duration::from_secs(120), build_two_repo_db())
         .await
-        .expect("leader setup bounded");
+        .expect("leader bounded");
     let follower = tokio::time::timeout(Duration::from_secs(120), build_two_repo_db())
         .await
-        .expect("follower setup bounded");
+        .expect("follower bounded");
     tokio::time::timeout(
         Duration::from_secs(120),
         create_two_target_subscription(&follower),
     )
     .await
-    .expect("subscription setup bounded");
-    let main_pull_entered = Arc::new(Notify::new());
-    let release_main_pull = Arc::new(Notify::new());
-    let sibling_parked = Arc::new(Notify::new());
-    let release_sibling = Arc::new(Notify::new());
-    let exited = Arc::new(Notify::new());
-    let factory = panic_factory(
-        &leader,
-        PanicFixture {
-            main_pull_entered: Arc::clone(&main_pull_entered),
-            release_main_pull: Arc::clone(&release_main_pull),
-            sibling_parked: Arc::clone(&sibling_parked),
-            release_sibling: Arc::clone(&release_sibling),
-            gap_served: Arc::new(Notify::new()),
-            panic_hello: false,
-            sibling_gap: false,
-        },
-    );
-    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_apply_park(
-        Arc::new(ApplyParkHook {
-            repo: Some("other".into()),
-            after_apply: false,
-            arrived: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-            exited: Arc::clone(&exited),
-        }),
-    );
-    let teardown_done = sup.teardown_signal();
+    .expect("subscription bounded");
+    let f = fixture(PanicMode::None, false);
+    let gate = Arc::new(HousekeepingGate {
+        repo: Some("other".into()),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let sup = SubscriptionSupervisor::new(
+        follower.clone(),
+        panic_factory(
+            &leader,
+            PanicFixture {
+                main_pull_entered: Arc::clone(&f.main_pull_entered),
+                release_main_pull: Arc::clone(&f.release_main_pull),
+                sibling_parked: Arc::clone(&f.sibling_parked),
+                release_sibling: Arc::clone(&f.release_sibling),
+                gap_served: Arc::clone(&f.gap_served),
+                panic_mode: PanicMode::None,
+                sibling_gap: false,
+            },
+        ),
+        "follower-1",
+    )
+    .with_housekeeping_gate(Arc::clone(&gate));
+    let accounted = sup.accounted_signal();
+    let teardown = sup.teardown_signal();
     tokio::time::timeout(Duration::from_secs(120), sup.reconcile())
         .await
         .expect("reconcile bounded");
-    tokio::time::timeout(Duration::from_secs(120), main_pull_entered.notified())
+    tokio::time::timeout(Duration::from_secs(120), f.main_pull_entered.notified())
         .await
-        .expect("main pull must park");
-    tokio::time::timeout(Duration::from_secs(120), sibling_parked.notified())
+        .expect("main pull bounded");
+    tokio::time::timeout(Duration::from_secs(120), f.sibling_parked.notified())
         .await
-        .expect("sibling pull must park");
-    release_main_pull.notify_one();
-    tokio::time::timeout(Duration::from_secs(120), exited.notified())
+        .expect("sibling pull bounded");
+    f.release_main_pull.notify_one();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::join!(accounted.notified(), gate.entered.notified());
+    })
+    .await
+    .expect("main accounting and sibling housekeeping bounded");
+    assert_eq!(sup.teardown_count(), 0);
+    assert_eq!(
+        follower
+            .subscription_lease("sub_a")
+            .map(|l| l.valid.load(std::sync::atomic::Ordering::Acquire)),
+        Some(true),
+        "lease must still be valid before the sibling's housekeeping"
+    );
+    assert!(sup.is_running("sub_a"));
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(120), teardown.notified())
         .await
-        .expect("panicking wrapper exit must be observed");
-    assert_eq!(sup.teardown_count(), 0, "parked sibling holds live count");
-    release_sibling.notify_one();
-    tokio::time::timeout(Duration::from_secs(120), teardown_done.notified())
-        .await
-        .expect("both wrappers must finish before teardown");
+        .expect("teardown bounded");
     assert_eq!(sup.teardown_count(), 1);
     assert!(follower.subscription_lease("sub_a").is_none());
     assert!(!sup.is_running("sub_a"));
@@ -274,70 +321,70 @@ async fn two_target_pull_panic_waits_for_both_wrappers_before_single_teardown() 
     assert!(sup.is_running("sub_a"));
 }
 
-/// The terminal mark observes the parent `cancel` token, not `loops_cancel`;
-/// therefore sibling cancellation cannot abort its durable `resync_required`
-/// mark. Parent-red: cancelling the terminal-observed token on panic leaves
-/// this row active instead of resync_required.
+/// Regression guard for token separation: parent already separates these tokens; a re-coupled mark cancellation mutant leaves completion unsignalled.
 #[tokio::test]
 async fn a_sibling_terminal_mark_survives_a_concurrent_panic() {
     let leader = tokio::time::timeout(Duration::from_secs(120), build_two_repo_db())
         .await
-        .expect("leader setup bounded");
+        .expect("leader bounded");
     let follower = tokio::time::timeout(Duration::from_secs(120), build_two_repo_db())
         .await
-        .expect("follower setup bounded");
+        .expect("follower bounded");
     tokio::time::timeout(
         Duration::from_secs(120),
         create_two_target_subscription(&follower),
     )
     .await
-    .expect("subscription setup bounded");
-    let gap_served = Arc::new(Notify::new());
-    let main_pull_entered = Arc::new(Notify::new());
-    let release_main_pull = Arc::new(Notify::new());
-    let factory = panic_factory(
-        &leader,
-        PanicFixture {
-            main_pull_entered: Arc::clone(&main_pull_entered),
-            release_main_pull: Arc::clone(&release_main_pull),
-            sibling_parked: Arc::new(Notify::new()),
-            release_sibling: Arc::new(Notify::new()),
-            gap_served: Arc::clone(&gap_served),
-            panic_hello: false,
-            sibling_gap: true,
-        },
+    .expect("subscription bounded");
+    let f = fixture(PanicMode::None, true);
+    let gate_guard = terminal::mark_gate_arm();
+    let gate = Arc::clone(&gate_guard.gate);
+    let sup = SubscriptionSupervisor::new(
+        follower.clone(),
+        panic_factory(
+            &leader,
+            PanicFixture {
+                main_pull_entered: Arc::clone(&f.main_pull_entered),
+                release_main_pull: Arc::clone(&f.release_main_pull),
+                sibling_parked: Arc::clone(&f.sibling_parked),
+                release_sibling: Arc::clone(&f.release_sibling),
+                gap_served: Arc::clone(&f.gap_served),
+                panic_mode: PanicMode::None,
+                sibling_gap: true,
+            },
+        ),
+        "follower-1",
     );
-    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1");
-    let teardown_done = sup.teardown_signal();
+    let teardown = sup.teardown_signal();
     tokio::time::timeout(Duration::from_secs(120), sup.reconcile())
         .await
         .expect("reconcile bounded");
-    tokio::time::timeout(Duration::from_secs(120), main_pull_entered.notified())
+    tokio::time::timeout(Duration::from_secs(120), f.main_pull_entered.notified())
         .await
-        .expect("main pull must park");
-    tokio::time::timeout(Duration::from_secs(120), gap_served.notified())
+        .expect("main pull bounded");
+    tokio::time::timeout(Duration::from_secs(120), f.gap_served.notified())
         .await
-        .expect("sibling must serve JournalGap");
-    release_main_pull.notify_one();
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            let rows = sup
-                .read_subscriptions()
-                .await
-                .expect("read durable subscriptions");
-            if rows
-                .iter()
-                .any(|row| row.name == "sub_a" && row.state == "resync_required")
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("sibling terminal mark must become durable");
-    tokio::time::timeout(Duration::from_secs(120), teardown_done.notified())
+        .expect("gap reply bounded");
+    tokio::time::timeout(Duration::from_secs(120), gate.entered.notified())
         .await
-        .expect("shared teardown must finish");
+        .expect("mark gate bounded");
+    f.release_main_pull.notify_one();
+    tokio::time::timeout(Duration::from_secs(120), gate.loops_token.cancelled())
+        .await
+        .expect("loops cancellation bounded");
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(120), gate.completed.notified())
+        .await
+        .expect("mark completion bounded");
+    let rows = sup
+        .read_subscriptions()
+        .await
+        .expect("read durable subscriptions");
+    assert!(rows
+        .iter()
+        .any(|row| row.name == "sub_a" && row.state == "resync_required"));
+    tokio::time::timeout(Duration::from_secs(120), teardown.notified())
+        .await
+        .expect("teardown bounded");
     assert_eq!(sup.teardown_count(), 1);
 }

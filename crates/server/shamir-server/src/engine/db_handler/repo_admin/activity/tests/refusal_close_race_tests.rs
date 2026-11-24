@@ -1,12 +1,11 @@
 //! Ordered-shutdown close/discard race of the refusal-audit queue.
 //!
-//! A submission that reserved a share slot BEFORE `close()` must either be
-//! spawned before the discard sweep can see the closed bit, or not spawned at
-//! all and counted as dropped. Aborting a blocking job cannot stop one that has
-//! already started, so the closed-bit test has to be taken before the spawn —
-//! which is exactly the window this test parks in.
+//! A submission paused BEFORE the spawn gate has not reserved a share slot yet.
+//! This test proves `close()` wins over that not-yet-gated submission: it is
+//! refused and counted when released. Aborting a blocking job cannot stop one
+//! that has already started, so the closed-bit test has to precede the spawn.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -89,30 +88,41 @@ fn release(gate: &(Mutex<RaceState>, Condvar)) {
     condvar.notify_all();
 }
 
-// Two worker threads: the submission parks one of them inside the seam while
-// the test body drives the close and the sweep from the other.
+// Two worker threads: the submission parks one of them inside the pre-gate
+// seam while the test body drives the close and the sweep from the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refusal_reserved_before_close_is_never_spawned_after_the_sweep() {
+async fn a_pregate_submission_is_never_spawned_after_close_wins() {
     let appender = Arc::new(CountingAppender::default());
     let writer = Arc::new(AuditChainWriter::new_with_shared(
         Arc::new(AuditChain::new([9; 32])),
         appender.clone(),
     ));
     let gate = Arc::new((Mutex::new(RaceState::default()), Condvar::new()));
-    let mut queue = CancelRefusalAudit::default();
-    queue.pause_before_spawn = Some({
-        let gate = Arc::clone(&gate);
-        Arc::new(move || {
-            {
-                let (lock, condvar) = &*gate;
-                let mut state = lock.lock().expect("race state");
-                state.reserved = true;
-                condvar.notify_all();
-            }
-            wait_until(&gate, "close and sweep", |state| state.released);
-        })
+    let queue = Arc::new_cyclic(|queue_weak: &std::sync::Weak<CancelRefusalAudit>| {
+        let mut queue = CancelRefusalAudit::default();
+        let queue_weak = queue_weak.clone();
+        queue.pause_before_spawn = Some({
+            let gate = Arc::clone(&gate);
+            Arc::new(move || {
+                {
+                    let (lock, condvar) = &*gate;
+                    let mut state = lock.lock().expect("race state");
+                    state.reserved = true;
+                    condvar.notify_all();
+                }
+                let queue = queue_weak
+                    .upgrade()
+                    .expect("queue remains alive while submission is paused");
+                assert_eq!(
+                    queue.global_held_for_test(),
+                    0,
+                    "pre-gate: the submission must hold no slot at the seam"
+                );
+                wait_until(&gate, "close and sweep", |state| state.released);
+            })
+        });
+        queue
     });
-    let queue = Arc::new(queue);
 
     let submission = tokio::spawn({
         let queue = Arc::clone(&queue);
@@ -128,8 +138,8 @@ async fn a_refusal_reserved_before_close_is_never_spawned_after_the_sweep() {
             )
         }
     });
-    // The slot is reserved and the spawn has not happened yet.
-    wait_until(&gate, "reservation", |state| state.reserved);
+    // The submission is paused before the spawn gate and holds no slot yet.
+    wait_until(&gate, "pre-gate pause", |state| state.reserved);
 
     // Exactly the window the sweep could not see before: close, then sweep.
     queue.close();
@@ -147,7 +157,7 @@ async fn a_refusal_reserved_before_close_is_never_spawned_after_the_sweep() {
 
     assert!(
         !spawned,
-        "a submission that reserved before close() must not be spawned after the sweep"
+        "a pre-gate submission must not be spawned after close() wins"
     );
     assert_eq!(
         appender.entered.load(Ordering::SeqCst),
@@ -401,9 +411,9 @@ async fn a_contended_principal_bucket_refuses_promptly_without_waiting() {
 /// admission; exercise both refusal and detached shape-reset paths.
 ///
 /// Mutant killed: moving reservation before the spawn gate. The reordered
-/// contender reaches the share pre-check/decision and fires its probe. On the
-/// current parent (gate-first, bounded `try_entry`), this test passes: it is a
-/// regression guard, and the probe-not-fired assertion specifically kills that
+/// contender reaches the share pre-check/decision and sets `probe_fired`. On
+/// the current parent (gate-first, bounded `try_entry`), this test passes: it is
+/// a regression guard, and the probe-not-fired assertion specifically kills that
 /// reordering mutant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gate_rejected_contender_never_enters_reservation() {
@@ -428,7 +438,7 @@ async fn assert_gate_rejected_contender_never_enters_reservation(shape_reset: bo
     };
 
     let (owner_tx, owner_rx) = mpsc::channel();
-    let owner = std::thread::spawn({
+    let owner = tokio::task::spawn_blocking({
         let queue = Arc::clone(&queue);
         let writer = Arc::clone(&writer);
         let gate = Arc::clone(&gate);
@@ -447,23 +457,27 @@ async fn assert_gate_rejected_contender_never_enters_reservation(shape_reset: bo
                     &CancelOutcome::NotCancellable,
                 )
             };
-            std::mem::forget(probe);
+            // Drop the thread-local probe guard after the owner decision; each
+            // invocation also has a fresh fixture, so neither armed probe nor
+            // queue state is shared between the cancel and shape-reset cases.
+            drop(probe);
             let _ = owner_tx.send(job);
         }
     });
     let _release = ReleaseSpawnWindow(Arc::clone(&gate));
     wait_for_spawn_window(&gate, "owner held-gate entry", |state| state.entered);
 
-    let (probe_tx, probe_rx) = mpsc::channel();
+    let probe_fired = Arc::new(AtomicBool::new(false));
     let (result_tx, result_rx) = mpsc::channel();
     let dropped_before = queue.dropped_count();
     let contender = std::thread::spawn({
         let queue = Arc::clone(&queue);
         let writer = Arc::clone(&writer);
         let contender_name = contender_name.to_owned();
+        let probe_fired = Arc::clone(&probe_fired);
         move || {
             let _probe = CancelRefusalAudit::arm_share_decision_probe(move || {
-                let _ = probe_tx.send(());
+                probe_fired.store(true, Ordering::SeqCst);
             });
             let contender_session = session(&contender_name);
             let result = if shape_reset {
@@ -480,20 +494,19 @@ async fn assert_gate_rejected_contender_never_enters_reservation(shape_reset: bo
             let _ = result_tx.send(result.is_none());
         }
     });
-    assert!(
-        result_rx
-            .recv_timeout(TIMEOUT)
-            .expect("gate refusal must be prompt"),
-        "contender must be refused while the owner holds the spawn gate"
-    );
+    let contender_result = result_rx.recv_timeout(TIMEOUT);
     assert!(
         matches!(
-            probe_rx.recv_timeout(Duration::from_secs(2)),
-            Err(RecvTimeoutError::Timeout)
+            contender_result,
+            Ok(true) | Err(RecvTimeoutError::Disconnected)
         ),
-        "gate-rejected contender must not reach share admission"
+        "contender must finish with a gate refusal (or drop its result sender)"
     );
     contender.join().expect("contender thread");
+    assert!(
+        !probe_fired.load(Ordering::SeqCst),
+        "gate-rejected contender must not reach share admission"
+    );
     assert_eq!(
         queue.principal_held_for_test(contender_name),
         0,
@@ -506,10 +519,17 @@ async fn assert_gate_rejected_contender_never_enters_reservation(shape_reset: bo
     );
 
     open_spawn_window(&gate);
-    owner.join().expect("owner thread");
     let owner_job = owner_rx
         .recv_timeout(TIMEOUT)
-        .expect("owner enqueue result");
+        .expect("owner enqueue bounded");
+    assert!(
+        owner_job.is_some(),
+        "owner must be admitted once the gate opens"
+    );
+    tokio::time::timeout(TIMEOUT, owner)
+        .await
+        .expect("owner task bounded")
+        .expect("owner blocking task");
     queue.discard_queued();
     if let Some(owner_job) = owner_job {
         let _ = tokio::time::timeout(TIMEOUT, owner_job).await;

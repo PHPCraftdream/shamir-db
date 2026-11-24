@@ -344,6 +344,8 @@ impl SubscriptionSupervisor {
             let tok = loops_cancel.clone();
             let tok_loops_for_cancel = loops_cancel.clone();
             let tok_exit_for_wrapper = cancel.clone();
+            #[cfg(test)]
+            let tok_gate = tok.clone();
             let sub_name = sub.name.clone();
             // Generation fences stale terminal callbacks from replacements.
             let generation = sub.binding_generation;
@@ -359,6 +361,12 @@ impl SubscriptionSupervisor {
             let teardown_done = Arc::clone(&self.teardown_done);
             #[cfg(test)]
             let teardown_entered = Arc::clone(&self.teardown_entered);
+            #[cfg(test)]
+            let accounted = Arc::clone(&self.accounted);
+            #[cfg(test)]
+            let housekeeping_gate = self.housekeeping_gate.clone();
+            #[cfg(test)]
+            let cfg_repo = cfg.repo.clone();
             #[cfg(test)]
             let exit_signal = cfg.exit_hook.clone();
             #[cfg(test)]
@@ -392,7 +400,11 @@ impl SubscriptionSupervisor {
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                                 drop(payload)
                             }));
-                        if disposal.is_err() {
+                        if let Err(second_payload) = disposal {
+                            // The opaque second payload may itself panic on drop; dropping it here
+                            // could unwind past done.store and the live decrement. There is
+                            // nothing recoverable inside a Box<dyn Any>.
+                            std::mem::forget(second_payload);
                             error!(
                                 subscription = %sub_name,
                                 target = %target,
@@ -432,6 +444,8 @@ impl SubscriptionSupervisor {
                                     gap_at
                                 };
                             let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
+                            #[cfg(test)]
+                            terminal::mark_gate_wait(tok_gate.clone()).await;
                             terminal::mark_with_retry(
                                 &local,
                                 &sub_name,
@@ -453,6 +467,8 @@ impl SubscriptionSupervisor {
                                 },
                             )
                             .await;
+                            #[cfg(test)]
+                            terminal::mark_gate_complete();
                             warn!(
                                 subscription = %sub_name,
                                 error = %e,
@@ -629,6 +645,13 @@ impl SubscriptionSupervisor {
                 // ---- exit housekeeping: shared by every loop return path.
                 // The apply guard is dropped before this point; decrement the
                 // shared count, and let only the last loop invalidate/remove.
+                #[cfg(test)]
+                if let Some(gate) = &housekeeping_gate {
+                    if gate.repo.as_deref().is_some_and(|r| r == cfg_repo) {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
                 done.store(true, Ordering::Release);
                 if live.fetch_sub(1, Ordering::AcqRel) == 1 {
                     #[cfg(test)]
@@ -656,6 +679,8 @@ impl SubscriptionSupervisor {
                         teardown_done.notify_one();
                     }
                 }
+                #[cfg(test)]
+                accounted.notify_one();
             });
             joins.push(join);
             dones.push(done_flag);
