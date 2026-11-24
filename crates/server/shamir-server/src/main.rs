@@ -381,7 +381,14 @@ fn run_main() -> anyhow::Result<u8> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    rt.block_on(run_async(cli))
+    let result = rt.block_on(run_async(cli));
+    if result.is_err() {
+        // A failed run can leave a detached blocking job (a stalled final
+        // snapshot): dropping the runtime would wait for it without a bound and
+        // the error would never be printed.
+        rt.shutdown_timeout(std::time::Duration::from_secs(5));
+    }
+    result
 }
 
 /// Fixed usage line for the standalone `backup-verify` command (stderr; the

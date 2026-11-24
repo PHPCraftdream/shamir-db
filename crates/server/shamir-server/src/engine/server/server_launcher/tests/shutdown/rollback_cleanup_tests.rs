@@ -6,8 +6,11 @@
 //! lowered to debug — the ring captures debug too, so the level assertion is
 //! what fails, not only the "no record at all" case.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use shamir_connect::server::lockout::InMemoryLockoutStore;
@@ -60,20 +63,32 @@ fn launch_rollback_cleanup_logs_errors_and_repository_failures() {
     );
 }
 
+/// Polls a future exactly once without waiting for it.
+async fn poll_once<F: Future<Output = ()> + Unpin>(future: &mut F) -> Poll<()> {
+    std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *future).poll(cx))).await
+}
+
 /// The meta-snapshot join of a failed launch is bounded: the task's final
 /// snapshot is a blocking-pool job, so with the pool saturated an unbounded
-/// `handle.await` never returned the boot error. The pool's only thread is
-/// parked before the task is told to stop, and the join must still return,
-/// log the expiry like any cleanup failure, and leave the pool occupied (the
-/// task is abandoned, not waited for).
+/// `handle.await` never returned the boot error. The pool's only blocking thread
+/// is parked before the task is told to stop; the join must stay pending just
+/// before its 5 s bound, return once the bound passed, log the expiry for its
+/// stage, and return while the pool is still occupied.
 ///
-/// Mutant: the bound removed (`task.handle.await`) leaves the join pending
-/// until the outer guard fails the test.
+/// The clock is PAUSED and advanced explicitly (no real-time wait, no race): the
+/// snapshot task is the only runnable task, and it is given several scheduler
+/// turns to run up to its queued blocking job before the join is first polled.
+///
+/// Mutants: the bound removed (`task.handle.await`) leaves the join pending
+/// after the bound and fails the last poll; a shorter bound completes it before
+/// the bound and fails the middle poll; a text that does not name the stage or
+/// the cause fails the log assertion.
 #[test]
 fn rollback_meta_snapshot_join_is_bounded_with_a_saturated_blocking_pool() {
     let _ = try_install_global_tracing_ring();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .start_paused(true)
         .max_blocking_threads(1)
         .build()
         .expect("test runtime");
@@ -99,15 +114,30 @@ fn rollback_meta_snapshot_join_is_bounded_with_a_saturated_blocking_pool() {
             shutdown.clone(),
         );
         shutdown.cancel();
+        // The task's first tick is immediate and the cancel wins its select: a few
+        // turns take it up to the final snapshot job queued behind the occupant.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
 
-        let joined = tokio::time::timeout(
-            Duration::from_secs(60),
-            join_meta_snapshot("test-rollback-meta-join", Some(task)),
-        )
-        .await;
+        let mut join = Box::pin(join_meta_snapshot("test-rollback-meta-join", Some(task)));
+        assert!(
+            poll_once(&mut join).await.is_pending(),
+            "the join must wait for the stuck task"
+        );
+        tokio::time::advance(Duration::from_millis(4_990)).await;
+        assert!(
+            poll_once(&mut join).await.is_pending(),
+            "the join must still be waiting just before its 5 s bound"
+        );
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let returned = poll_once(&mut join).await;
         let still_occupied = !occupant_done.load(Ordering::SeqCst);
         drop(release_tx);
-        joined.expect("the rollback join must return with the blocking pool saturated");
+        assert!(
+            returned.is_ready(),
+            "the join must return once its bound passed, with the pool saturated"
+        );
         assert!(
             still_occupied,
             "the join must return while the pool is still occupied"
@@ -120,7 +150,7 @@ fn rollback_meta_snapshot_join_is_bounded_with_a_saturated_blocking_pool() {
                 && record.message.contains("stage=\"test-rollback-meta-join\"")
                 && record
                     .message
-                    .contains("meta snapshot task did not stop within 5s")),
+                    .contains("error=\"meta snapshot task did not stop within 5s")),
             "the expired join must be logged at ERROR: {records:?}"
         );
     });

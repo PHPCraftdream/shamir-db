@@ -31,8 +31,9 @@ pub(super) async fn join_meta_snapshot(stage: &'static str, task: Option<MetaSna
     {
         tracing::error!(
             stage,
-            error = "meta snapshot task did not stop within 5s: its final snapshot is queued \
-                     behind a saturated blocking pool and the store lock may still be held",
+            error = "meta snapshot task did not stop within 5s: it may still hold the \
+                     server_meta store lock, so an immediate retry on the same data \
+                     directory can fail",
             "launch rollback cleanup error"
         );
     }
