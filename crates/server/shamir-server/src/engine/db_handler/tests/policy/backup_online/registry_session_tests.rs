@@ -735,6 +735,28 @@ async fn runner_panic_publishes_failed_idle_and_second_start_succeeds() {
     );
     guard.note("panic-published", "failed + idle, output cleaned");
 
+    // The §4.8 metrics, BEFORE the next run can touch them: a manual run has
+    // no completion channel, so the guard must still close `active` and count
+    // the copy failure at its own stage (mutant: accounting keyed on the
+    // optional sender — a manual panic then leaves `active` set and loses the
+    // failed-stage increment, which the follow-up run can no longer reveal).
+    let metrics = backup_metrics_snapshot();
+    assert!(
+        !metrics.active,
+        "a manual run that panics must clear `shamir_backup_active`: {metrics:?}"
+    );
+    assert!(
+        metrics
+            .failed_total_by_stage
+            .iter()
+            .any(|(stage, count)| stage == "sealing" && *count >= 1),
+        "the manual panic must be counted once at its failed stage: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.completed_total, 0,
+        "a panicking manual run is never a completed copy: {metrics:?}"
+    );
+
     // The source is usable: a bounded write through the SAME engine (the
     // seal barrier's pause/gate RAII was released on the unwind).
     let mut batch = Batch::new();

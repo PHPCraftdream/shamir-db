@@ -91,7 +91,7 @@ async fn run() {
             let scheduler_shutdown = shutdown.child_token();
             // Retention-END handshake + published-name reporting for run 1;
             // the outcome observer re-arms it for every following run.
-            arm_run_observer(&registry, &published_tx, &retention_end_tx);
+            arm_run_observer(&registry, Some(&published_tx), &retention_end_tx);
             let observer_registry = Arc::clone(&registry);
             let observer_published = published_tx.clone();
             let observer_ends = retention_end_tx.clone();
@@ -106,7 +106,11 @@ async fn run() {
                 scheduler_shutdown.clone(),
                 TICK,
                 move |ok| {
-                    arm_run_observer(&observer_registry, &observer_published, &observer_ends);
+                    arm_run_observer(
+                        &observer_registry,
+                        Some(&observer_published),
+                        &observer_ends,
+                    );
                     successes += usize::from(ok);
                     if successes == 2 {
                         scheduler_shutdown.cancel();

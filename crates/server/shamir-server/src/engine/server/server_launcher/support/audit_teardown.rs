@@ -6,8 +6,9 @@
 //! final drain, anchor write and fjall `SyncAll`. A scheduled audit
 //! checkpoint therefore can no longer interleave with the final log sync and
 //! anchor write. That final flush acquires the same synchronous persistence
-//! gate a checkpoint takes, on a blocking thread, and it takes it only after
-//! the scheduler has stopped, so the last close runs under the same gate
+//! gate a checkpoint takes, on its OWN dedicated thread (never a ticket in the
+//! blocking pool a cancelled refusal job can saturate), and it takes it only
+//! after the scheduler has stopped, so the last close runs under the same gate
 //! discipline as a checkpoint.
 //!
 //! The audit stage owns the two things that can stall a stop: the
@@ -15,7 +16,8 @@
 //! appender (its background flusher plus that final drain, anchor write and
 //! `SyncAll`). The scheduler join, the flusher join and the final flush are
 //! all bounded by the one [`AUDIT_TEARDOWN_DEADLINE`], the blocking part runs
-//! on a blocking thread instead of inside the shutdown future's own poll, and
+//! off the shutdown future's own poll (the final close on a dedicated thread,
+//! the scheduler's checkpoint ticks on the blocking pool), and
 //! every failure the appender used to discard — flusher join, final flush,
 //! chain anchor, server-meta hook — reaches [`ShutdownReport`] once, at the
 //! moment it is observed.
@@ -66,6 +68,57 @@ const ERR_SCHEDULER_STOP: &str = "scheduler did not stop within";
 const ERR_FINAL_CLOSE_SKIPPED: &str = "audit final close not attempted";
 const ERR_REFUSAL_DRAIN: &str = "refusal audit drain expired";
 
+// Test-only one-shot probe fired at the ENTRY of [`teardown_audit`], before
+// admission is closed. A rollback test arms it to prove the shared audit
+// teardown actually ran on its path (mutant: the `teardown_audit` call removed
+// from a launch-rollback branch would otherwise be invisible).
+#[cfg(test)]
+static TEARDOWN_PROBE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+
+/// Clears an unfired [`arm_teardown_probe`]; a probe that fires removes itself.
+#[cfg(test)]
+pub(crate) struct TeardownProbeGuard;
+
+#[cfg(test)]
+impl Drop for TeardownProbeGuard {
+    fn drop(&mut self) {
+        *TEARDOWN_PROBE.lock().expect("teardown probe") = None;
+    }
+}
+
+/// Arm ONE teardown-entry probe for the next [`teardown_audit`] call.
+#[cfg(test)]
+pub(crate) fn arm_teardown_probe(probe: impl FnOnce() + Send + 'static) -> TeardownProbeGuard {
+    *TEARDOWN_PROBE.lock().expect("teardown probe") = Some(Box::new(probe));
+    TeardownProbeGuard
+}
+
+/// Fire and consume the current teardown-entry probe, if any.
+#[cfg(test)]
+fn fire_teardown_probe() {
+    let probe = TEARDOWN_PROBE.lock().expect("teardown probe").take();
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
+/// The latched cause behind an appender error display.
+///
+/// The final close re-reads the latch as `AppenderError::Io`, whose display
+/// adds `io: `, while the flusher's join error carries the latch text as it is:
+/// the two strings name the SAME failure and must be compared on the cause.
+fn latched_cause(message: &str) -> &str {
+    message.strip_prefix("io: ").unwrap_or(message)
+}
+
+/// Whether `message` repeats a cause an earlier report already named.
+fn already_reported(reported: &Option<String>, message: &str) -> bool {
+    reported
+        .as_deref()
+        .is_some_and(|earlier| latched_cause(earlier) == latched_cause(message))
+}
+
 /// The three audit owners a shutdown must drain, in teardown order.
 pub(crate) struct AuditTeardown<'a> {
     pub(crate) cancel_refusal_audit: &'a Arc<CancelRefusalAudit>,
@@ -90,12 +143,15 @@ pub(crate) struct AuditTeardown<'a> {
 /// is reported instead and nothing is submitted.
 pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut ShutdownReport) -> bool {
     let deadline = tokio::time::Instant::now() + AUDIT_TEARDOWN_DEADLINE;
+    #[cfg(test)]
+    fire_teardown_probe();
     parts.cancel_refusal_audit.close();
     // Signal before joining: the scheduler has its own broadcast, not the
     // root shutdown token, so a join alone would wait for the next tick.
     parts.scheduler.signal_shutdown();
 
     let mut complete = true;
+    let mut drain_settled = true;
 
     // Cancel-safe: nothing is consumed by waiting. On expiry the queued jobs
     // are aborted below; the ones already inside the writer keep running.
@@ -105,6 +161,10 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
     #[cfg(not(test))]
     let drained = drain_refusal(refusal).await;
     if !drained {
+        // The drain could not establish that no admitted work remains: an append
+        // already inside the writer may reach its own inline checkpoint after
+        // any final close we submit now. Remember it for the close rule below.
+        drain_settled = false;
         refusal.discard_queued();
         // Accepted refusal events may just have been discarded: a clean report
         // would hide it (the drop counter keeps the number).
@@ -130,12 +190,31 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
 
     parts.appender.request_flusher_stop();
     let mut flusher_stopped = true;
+    // ONE report per distinct failure: the flusher's join error text and the
+    // final close's latched `flush_error` are the same latch, so the second
+    // observation of that message is suppressed instead of being reported a
+    // second time under another prefix.
+    let mut reported_flusher: Option<String> = None;
     match tokio::time::timeout_at(deadline, parts.appender.join_flusher()).await {
         // A join that returned an error still stopped the task, so the final
         // close may run; its buffered entries are drained by that close.
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
+            // Two shapes arrive here as one string: an INNER blocking job the
+            // task reported (the job had already ended, so the wrapper's
+            // completion DOES prove the blocking work stopped), and an OUTER
+            // `JoinError` (the task panicked or was cancelled — nothing proves
+            // its blocking work stopped). Only the first may be followed by a
+            // final close.
+            let latched = parts.appender.last_failure();
+            let inner_ended = latched
+                .as_deref()
+                .is_some_and(|cause| latched_cause(&message) == cause);
+            if !inner_ended {
+                flusher_stopped = false;
+            }
             report.add_error(format!("{ERR_FLUSHER_JOIN}: {message}"));
+            reported_flusher = Some(message);
             complete = false;
         }
         Err(_) => {
@@ -147,34 +226,63 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
         }
     }
 
-    // ONE rule: the final close is submitted only when both stoppers finished.
-    // A timed-out task can still be inside the persistence gate, so a close
-    // submitted now would run before it — the ordering this stage exists for
-    // would be inverted on exactly the path where it matters most.
-    if !(scheduler_stopped && flusher_stopped) {
+    // ONE rule: the final close is submitted only when every stopper settled —
+    // the scheduler, the audit flusher AND the refusal drain. A timed-out task
+    // can still be inside the persistence gate, and an admitted refusal append
+    // can still reach its own inline checkpoint, so a close submitted now would
+    // run before one of them — the ordering this stage exists for would be
+    // inverted on exactly the path where it matters most.
+    if !(scheduler_stopped && flusher_stopped && drain_settled) {
         report.add_error(format!(
-            "{ERR_FINAL_CLOSE_SKIPPED}: the scheduler or the audit flusher did not stop inside \
-             {AUDIT_TEARDOWN_DEADLINE:?}, so the final audit drain, the chain anchor write and the \
-             server-metadata write were not started; the last buffered audit events and the anchor \
-             are not persisted by this shutdown, and the next start recovers the chain exactly as \
-             it does after a crash"
+            "{ERR_FINAL_CLOSE_SKIPPED}: the scheduler, the audit flusher or the refusal-audit \
+             drain did not settle inside {AUDIT_TEARDOWN_DEADLINE:?}, so the final audit drain, \
+             the chain anchor write and the server-metadata write were not started; the last \
+             buffered audit events and the anchor are not persisted by this shutdown, and the \
+             next start recovers the chain exactly as it does after a crash"
         ));
+        // A background flush error that latched BEFORE this point would stay a
+        // log line only: the step that reports it is the final close this
+        // branch skips. Carry the latch into the report, once.
+        if let Some(message) = parts.appender.last_failure() {
+            if !already_reported(&reported_flusher, &message) {
+                report.add_error(format!("{ERR_FLUSH}: {message}"));
+            }
+        }
         return complete;
     }
 
-    // The final drain + anchor write is synchronous (gate + fsync), so it runs
-    // on a blocking thread, acquires the gate itself there and is bounded by
-    // the shared deadline rather than by whoever holds the gate.
+    // The final drain + anchor write is synchronous (gate + fsync) and it must
+    // not depend on the shared blocking pool: cancelled refusal jobs still
+    // queued there keep their writer references until a worker takes them out,
+    // so a saturated pool would make THIS stage time out before the close even
+    // started. It therefore runs on its own thread — one dedicated thread for
+    // the process's last durable write, never a pool ticket — and stays bounded
+    // by the shared deadline. Dropping the join handle detaches the thread: a
+    // timed-out close keeps its `fsync` and its gate exactly like an in-flight
+    // flush parked on the pool did.
     let appender = Arc::clone(parts.appender);
-    let flush = tokio::time::timeout_at(
-        deadline,
-        tokio::task::spawn_blocking(move || appender.final_flush_blocking()),
-    )
-    .await;
+    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+    let dedicated = std::thread::Builder::new()
+        .name("audit-final-close".to_string())
+        .spawn(move || {
+            let _ = flush_tx.send(appender.final_flush_blocking());
+        });
+    let flush = match dedicated {
+        Ok(_thread) => tokio::time::timeout_at(deadline, flush_rx).await,
+        Err(spawn_error) => {
+            report.add_error(format!(
+                "{ERR_FLUSH_TASK}: the dedicated final-close thread could not be spawned ({})",
+                spawn_error.kind()
+            ));
+            return false;
+        }
+    };
     match flush {
         Ok(Ok(outcome)) => {
             if let Some(message) = outcome.flush_error {
-                report.add_error(format!("{ERR_FLUSH}: {message}"));
+                if !already_reported(&reported_flusher, &message) {
+                    report.add_error(format!("{ERR_FLUSH}: {message}"));
+                }
                 complete = false;
             }
             if let Some(message) = outcome.anchor_error {
@@ -182,8 +290,12 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
                 complete = false;
             }
         }
-        Ok(Err(join_error)) => {
-            report.add_error(format!("{ERR_FLUSH_TASK}: {join_error}"));
+        Ok(Err(_cancelled)) => {
+            // The dedicated thread panicked before it could report: its entries
+            // are gone, so this must reach the report.
+            report.add_error(format!(
+                "{ERR_FLUSH_TASK}: the dedicated final-close thread ended without a result"
+            ));
             complete = false;
         }
         Err(_) => {

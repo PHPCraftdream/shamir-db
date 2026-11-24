@@ -59,6 +59,7 @@ async fn scrape_samples_only_bound_load_and_live_budget() {
         prom: Some(recorder.handle()),
         db: None,
         byte_budget: None,
+        shutdown: tokio_util::sync::CancellationToken::new(),
     };
     let body = scrape(&app).await;
     for (name, _) in LOAD_SERIES {

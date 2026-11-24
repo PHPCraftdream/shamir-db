@@ -226,14 +226,19 @@ fn install_snapshot_source() {
 /// weak handle is replaceable). Arms the schedule clock only when a schedule
 /// is configured, and only while the armed-at row is absent — a restart that
 /// reaches no tick must keep the FIRST arming time — and removes it when no
-/// schedule is configured, so re-enabling later starts a fresh clock. Seeds
-/// `export_last_success_seconds` from the NEWEST of the armed-at row and the
-/// last-success row, so a boot that reaches no tick still exports real
-/// evidence, and installs the scrape source so the gauge exists before any
-/// run.
+/// schedule is configured, so re-enabling later starts a fresh clock; a
+/// schedule-less launch also CLEARS the process-global `schedule_enabled`
+/// cell, so a relaunch in the same process cannot inherit the previous
+/// launch's enabled flag. An UNREADABLE armed-at row is used for this boot
+/// (a provisional clock) but is never overwritten: the durable first-arming
+/// stamp survives a broken read. Seeds `export_last_success_seconds` from the
+/// NEWEST of the armed-at row and the last-success row, so a boot that
+/// reaches no tick still exports real evidence, and installs the scrape
+/// source so the gauge exists before any run.
 ///
 /// Every store failure here is best-effort: a broken data dir logs one bounded
-/// token (`persist-armed-at-failed`), never a boot failure and never a path.
+/// token (`persist-armed-at-failed` or `read-armed-at-failed`), never a boot
+/// failure and never a path.
 pub fn install_backup_meta_store(store: Arc<ServerMetaStore>, schedule_configured: bool) {
     META_STORE.store(Some(Arc::new(Arc::downgrade(&store))));
     let armed_at = if schedule_configured {
@@ -253,26 +258,66 @@ pub fn install_backup_meta_store(store: Arc<ServerMetaStore>, schedule_configure
     install_snapshot_source();
 }
 
+/// What this boot does with the schedule clock, decided from the armed-at
+/// read alone: keep the durable FIRST stamp, write a fresh one, or borrow
+/// "now" for this boot because the row could not be read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ArmingAction {
+    /// The durable first-arming stamp is readable: keep it untouched.
+    Keep(u64),
+    /// The row is ABSENT: write `now` as the durable first arming.
+    WriteNow(u64),
+    /// The row exists but is unreadable: use `now` for this boot only and
+    /// NEVER overwrite the durable stamp (an unreadable row is not absent).
+    UseNowWithoutWriting(u64),
+}
+
+/// Classify one armed-at read against the wall clock (pure, so the three
+/// routing cases are unit-testable without a broken store).
+///
+/// Mutant killed: routing the read error to `WriteNow` overwrites the durable
+/// first-arming stamp and resurrects the stale-alert defect that row prevents.
+pub(crate) fn arm_action(read: Result<Option<u64>, ()>, now: u64) -> ArmingAction {
+    match read {
+        Ok(Some(armed_at)) => ArmingAction::Keep(armed_at),
+        Ok(None) => ArmingAction::WriteNow(now),
+        Err(()) => ArmingAction::UseNowWithoutWriting(now),
+    }
+}
+
 /// Persist the schedule's FIRST arming stamp, or keep the existing one.
 fn arm_schedule_clock(store: &ServerMetaStore) -> u64 {
-    if let Ok(Some(armed_at)) = store.backup_armed_at_unix_secs() {
-        return armed_at;
-    }
-    // Absent (or unreadable — "unknown" is treated as absent) arms now; every
-    // later boot sees the row and keeps this first stamp.
     let now = unix_seconds_now();
-    if store.store_backup_armed_at_unix_secs(now).is_err() {
-        warn_armed_at_not_persisted();
+    match arm_action(store.backup_armed_at_unix_secs().map_err(|_| ()), now) {
+        ArmingAction::Keep(armed_at) => armed_at,
+        // Absent arms now; every later boot sees the row and keeps this first
+        // stamp.
+        ArmingAction::WriteNow(now) => {
+            if store.store_backup_armed_at_unix_secs(now).is_err() {
+                warn_armed_at_not_persisted();
+            }
+            now
+        }
+        // Unreadable is NOT absent: the durable stamp stays as it is and the
+        // clock is provisional for this boot only.
+        ArmingAction::UseNowWithoutWriting(now) => {
+            warn_armed_at_not_read();
+            now
+        }
     }
-    now
 }
 
 /// Drop the armed-at row when no schedule is configured, so re-enabling later
-/// starts a fresh clock. Best-effort like the arming write.
+/// starts a fresh clock, and clear the process-global `schedule_enabled` cell
+/// so a relaunch WITHOUT a schedule does not inherit the previous launch's
+/// flag. Best-effort like the arming write.
 fn disarm_schedule_clock(store: &ServerMetaStore) -> u64 {
     if store.remove_backup_armed_at_unix_secs().is_err() {
         warn_armed_at_not_persisted();
     }
+    STATE
+        .schedule_started_timestamp_seconds
+        .store(0, Ordering::Relaxed);
     0
 }
 
@@ -280,6 +325,16 @@ fn warn_armed_at_not_persisted() {
     tracing::warn!(
         reason = "persist-armed-at-failed",
         "backup schedule arming stamp was not persisted"
+    );
+}
+
+/// A read error is not an absent row: the durable first-arming stamp is left
+/// untouched and this boot only borrows "now" for the exported age.
+fn warn_armed_at_not_read() {
+    tracing::warn!(
+        reason = "read-armed-at-failed",
+        "backup schedule arming stamp was not readable; the durable first-arming stamp was NOT \
+         rewritten and the schedule clock is provisional for this boot only"
     );
 }
 
