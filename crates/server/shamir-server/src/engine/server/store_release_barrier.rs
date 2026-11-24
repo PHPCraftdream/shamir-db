@@ -53,6 +53,9 @@ enum LockState {
     Held,
     /// The lock could not be probed at all: the state is UNKNOWN.
     ProbeError,
+    /// A lock marker was discovered but its target disappeared or could not
+    /// be rechecked while opening it: discovery is no longer trustworthy.
+    DiscoveryGap,
 }
 
 /// How far the discovery walk got.
@@ -95,9 +98,19 @@ fn classify_store_root(dir: &Path) -> StoreClassification {
         Err(_) => return StoreClassification::Gap,
     }
 
-    match std::fs::symlink_metadata(dir.join(LOCK_FILE)) {
+    match std::fs::metadata(dir.join(LOCK_FILE)) {
         Ok(_) => StoreClassification::Complete,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoreClassification::NotStore,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling lock symlink exists but cannot be opened. Distinguish
+            // it from a genuinely absent marker before declaring NotStore.
+            match std::fs::symlink_metadata(dir.join(LOCK_FILE)) {
+                Ok(_) => StoreClassification::Gap,
+                Err(marker_error) if marker_error.kind() == std::io::ErrorKind::NotFound => {
+                    StoreClassification::NotStore
+                }
+                Err(_) => StoreClassification::Gap,
+            }
+        }
         Err(_) => StoreClassification::Gap,
     }
 }
@@ -172,19 +185,37 @@ fn discover(root: &Path) -> Discovery {
     Discovery::Complete(found)
 }
 
-/// One lock observation on a store's canonical directory.
-fn probe(dir: &Path) -> LockState {
-    let file = match OpenOptions::new()
+/// Open one lock marker and preserve the distinction between a marker that
+/// vanished and one that still exists but cannot be followed (for example a
+/// dangling symlink). Classification follows metadata; this recheck handles the
+/// race between that classification and opening the marker.
+fn open_lock(dir: &Path) -> Result<std::fs::File, LockState> {
+    match OpenOptions::new()
         .read(true)
         .write(true)
         .open(dir.join(LOCK_FILE))
     {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(dir.join(LOCK_FILE)) {
+                Ok(_) => Err(LockState::DiscoveryGap),
+                Err(marker_error) if marker_error.kind() == std::io::ErrorKind::NotFound => {
+                    // The marker itself is now absent, retaining the previous
+                    // semantics for a store removed after classification.
+                    Err(LockState::Unlocked)
+                }
+                Err(_) => Err(LockState::ProbeError),
+            }
+        }
+        Err(_) => Err(LockState::ProbeError),
+    }
+}
+
+/// One lock observation on a store's canonical directory.
+fn probe(dir: &Path) -> LockState {
+    let file = match open_lock(dir) {
         Ok(file) => file,
-        // The store is gone: nothing can hold its lock.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LockState::Unlocked,
-        // Locked by another process with no sharing, permissions changing under
-        // us, a `lock` that is not a file — all UNKNOWN, never a release.
-        Err(_) => return LockState::ProbeError,
+        Err(state) => return state,
     };
     match file.try_lock() {
         Ok(()) => {
@@ -196,27 +227,27 @@ fn probe(dir: &Path) -> LockState {
     }
 }
 
-/// Probe every root; `None` when ANY probe answered [`LockState::ProbeError`],
+/// Probe every root; an error from any probe invalidates the observation,
 /// because a partially observed set could under-report a held lock.
-fn observe(roots: &[StoreRoot]) -> Option<Vec<StoreRoot>> {
+fn observe(roots: &[StoreRoot]) -> Result<Vec<StoreRoot>, LockState> {
     let mut held = Vec::new();
     for root in roots {
         match probe(&root.probe) {
             LockState::Unlocked => {}
             LockState::Held => held.push(root.clone()),
-            LockState::ProbeError => return None,
+            state @ (LockState::ProbeError | LockState::DiscoveryGap) => return Err(state),
         }
     }
-    Some(held)
+    Ok(held)
 }
 
 /// Discovery and the FIRST lock observation, in one blocking job: a starved
 /// blocking pool then costs the budget once instead of twice.
 struct FirstLook {
     discovery: Discovery,
-    /// The first COMPLETED observation over the discovered set; `None` when a
+    /// The first COMPLETED observation over the discovered set; `Err` when a
     /// probe errored or the set was never reached.
-    observed: Option<Vec<StoreRoot>>,
+    observed: Result<Vec<StoreRoot>, LockState>,
 }
 
 /// The combined discovery + first probe job.
@@ -232,7 +263,7 @@ fn first_look(root: &Path) -> FirstLook {
         // A gap carries no store set, so there is nothing to observe.
         other => FirstLook {
             discovery: other,
-            observed: None,
+            observed: Err(LockState::DiscoveryGap),
         },
     }
 }
@@ -308,12 +339,21 @@ pub(crate) async fn release_stores_until(root: &Path, deadline: Instant) -> Rele
         // Unknown or Gap: the store set is not knowable, so no release claim.
         return ReleaseOutcome::Unverified(UnverifiedReason::DiscoveryGap);
     };
-    let mut observed = observed;
+    let mut observed = match observed {
+        Ok(held) => Some(held),
+        Err(LockState::ProbeError) => {
+            return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError);
+        }
+        Err(LockState::DiscoveryGap) => {
+            return ReleaseOutcome::Unverified(UnverifiedReason::DiscoveryGap);
+        }
+        Err(LockState::Unlocked | LockState::Held) => unreachable!("observation error state"),
+    };
     let mut delay = POLL_START;
     loop {
         // The verdict always comes from the last COMPLETED observation.
         let Some(held) = observed.take() else {
-            // A probe errored (or discovery never produced a set): UNKNOWN.
+            // The only empty slot is an in-flight result handoff.
             return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError);
         };
         if held.is_empty() {
@@ -327,7 +367,16 @@ pub(crate) async fn release_stores_until(root: &Path, deadline: Instant) -> Rele
         // discard locks already observed held.
         let fallback = held.clone();
         observed = match bounded_probe(deadline, move || observe(&held)).await {
-            Ok(observed) => observed,
+            Ok(Ok(observed)) => Some(observed),
+            Ok(Err(LockState::ProbeError)) => {
+                return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError);
+            }
+            Ok(Err(LockState::DiscoveryGap)) => {
+                return ReleaseOutcome::Unverified(UnverifiedReason::DiscoveryGap);
+            }
+            Ok(Err(LockState::Unlocked | LockState::Held)) => {
+                unreachable!("observation error state")
+            }
             Err(UnverifiedReason::PoolStarved) => {
                 return ReleaseOutcome::StillLocked(logical(fallback));
             }
@@ -336,9 +385,9 @@ pub(crate) async fn release_stores_until(root: &Path, deadline: Instant) -> Rele
         // A fresh observation is answered at once: an errored one is UNKNOWN,
         // and an empty one is a release — no sleep after either.
         match &observed {
-            None => return ReleaseOutcome::Unverified(UnverifiedReason::ProbeError),
             Some(held) if held.is_empty() => return ReleaseOutcome::Released,
             Some(_) => {}
+            None => unreachable!("completed observation is handled above"),
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -372,6 +421,13 @@ async fn bounded_probe<T: Send + 'static>(
             Err(UnverifiedReason::PoolStarved)
         }
     }
+}
+
+/// Test seam for the Unix lock-open classification: a marker that exists but
+/// cannot be opened (a dangling link) is a discovery gap, never `Unlocked`.
+#[cfg(all(test, unix))]
+pub(crate) fn open_lock_is_discovery_gap(dir: &Path) -> bool {
+    matches!(open_lock(dir), Err(LockState::DiscoveryGap))
 }
 
 /// Fail-closed wrapper for the callers that must not publish while the lock

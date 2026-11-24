@@ -4,19 +4,24 @@
 //! `shutdown_deadline_does_not_abandon_the_scheduled_worker` parks the REAL
 //! native backup runner inside its post-run callback — after the protocol
 //! returned, before its completion signal — and then runs the embedding
-//! shutdown (`runtime::drain_server`) with a SHORT deadline. The shutdown
-//! future must stay pending until the worker is released, the report must be
-//! unclean, and the single-instance data-directory lock must be held while the
-//! worker runs and free afterwards.
+//! shutdown (`runtime::drain_server`) with a deadline whose early cutoff is
+//! 2 s. The bounded join must time out there with a zero-budget, stage-specific
+//! error, and the late stages must complete before the outer deadline. The
+//! worker is released near that deadline; `drain_server` may then be waiting for
+//! its owner outside the outer timeout. That wait is not the fallback branch:
+//! fallback is taken only if the outer `timeout_at` actually expires. The
+//! single-instance data-directory lock must be held while the worker runs and
+//! free afterwards.
 //!
 //! The two rollback tests make a bind fail (the listener path and the
 //! observability path) and assert that the ORIGINAL boot error comes back, that
 //! the shared audit deadline bounds the rollback, and that the instance lock is
 //! released again.
 //!
-//! Nothing synchronises with a sleep: the worker rendezvous is a semaphore
-//! signalled from the runner thread, the release is a condition variable, and
-//! every await is bounded by [`BOUND`].
+//! Nothing synchronises with an arbitrary sleep: the worker rendezvous is a
+//! semaphore signalled from the runner thread, the release is a condition
+//! variable, and every await is bounded by [`BOUND`]. The deadline case also
+//! deliberately observes a fixed pending window after the early cutoff.
 //!
 //! [`late_teardown_stages_report_the_remaining_shutdown_budget`] covers the
 //! OTHER half of the same deadline: the two stages that run after the audit and
@@ -58,13 +63,14 @@ const EXAMPLE: &str = include_str!(concat!(
 /// One generous bound for every wait: the Windows CI runner is up to 10x
 /// slower than a workstation.
 const BOUND: Duration = Duration::from_secs(180);
-/// The deadline under test, in REAL time: short enough to expire while the
-/// worker is parked.
-const TEST_DEADLINE: Duration = Duration::from_millis(250);
-/// How long the embedding shutdown future must stay pending after the worker
-/// parked — an order of magnitude more than the deadline, so a future that
-/// returned at the deadline cannot hide behind timing noise.
-const PENDING_WINDOW: Duration = Duration::from_secs(3);
+/// The deadline under test, in REAL time: the early cutoff is 2 s, leaving a
+/// shared 1 s reserve for late stages before the outer timeout.
+const TEST_DEADLINE: Duration = Duration::from_secs(3);
+/// The shared early cutoff: outer deadline minus the 1 s late-stage reserve.
+const EARLY_CUTOFF: Duration = Duration::from_secs(2);
+/// Keep the worker parked through the late-stage reserve, then release it while
+/// `drain_server` can still be waiting for its owner outside the outer timeout.
+const PENDING_WINDOW: Duration = Duration::from_millis(750);
 
 /// The outer deadline for the remaining-budget test.
 ///
@@ -100,6 +106,7 @@ async fn run_scheduled_worker() {
     let parked = Arc::new(Semaphore::new(0));
     let gate = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
     let finished = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicBool::new(false));
 
     let handle = ServerLauncher::new(backup_config(data_dir.clone(), backups))
         .with_bootstrap(BootstrapMode::Skip)
@@ -107,6 +114,7 @@ async fn run_scheduled_worker() {
             let parked = Arc::clone(&parked);
             let gate = Arc::clone(&gate);
             let finished = Arc::clone(&finished);
+            let completed = Arc::clone(&completed);
             move |resolved, registry, owner, shutdown| {
                 registry.arm_post_run_callback_for_shutdown_test({
                     let parked = Arc::clone(&parked);
@@ -126,7 +134,7 @@ async fn run_scheduled_worker() {
                     owner,
                     shutdown.child_token(),
                     Duration::from_secs(3600),
-                    move |_| {},
+                    move |ok| completed.store(ok, Ordering::SeqCst),
                 )
             }
         })
@@ -161,6 +169,10 @@ async fn run_scheduled_worker() {
             let _ = join_tx.send(());
         })
     };
+    let _fallback_join_probe = {
+        let fallback_joined = Arc::clone(&fallback_joined);
+        arm_fallback_drain_join_probe(move || fallback_joined.store(true, Ordering::SeqCst))
+    };
     let _flush_probe = {
         let flush_entered = Arc::clone(&flush_entered);
         arm_repo_flush_probe(move || flush_entered.store(true, Ordering::SeqCst))
@@ -168,6 +180,13 @@ async fn run_scheduled_worker() {
 
     // Only now does the shutdown start: the deadline cannot pre-empt the run
     // start, only the wait for it.
+    // Observe until the fixed early cutoff, measured from the outer shutdown
+    // start. At t=2 s the scheduled join has no budget left; the 1 s reserve
+    // lets late stages finish before the outer t=3 s deadline. Keep the worker
+    // parked for most of that reserve: after bounded teardown, `drain_server`
+    // may still be waiting for its owner outside `timeout_at`. That is not the
+    // fallback branch unless the outer timeout itself expires.
+    let shutdown_started = Instant::now();
     let mut shutdown = tokio::spawn(crate::runtime::drain_server(handle, TEST_DEADLINE));
     timeout(BOUND, teardown_rx)
         .await
@@ -179,10 +198,17 @@ async fn run_scheduled_worker() {
         .expect("the shutdown must reach ShutdownOwner::join_schedule")
         .expect("join probe channel");
     guard.mark("join_schedule reached with the worker parked");
-    let still_pending = timeout(PENDING_WINDOW, &mut shutdown).await.is_err();
+    let until_early_cutoff = EARLY_CUTOFF.saturating_sub(shutdown_started.elapsed());
+    let still_pending = timeout(until_early_cutoff, &mut shutdown).await.is_err();
+    // Keep the worker parked during the late-stage reserve. This distinguishes
+    // bounded teardown completing from the owner drain finishing; the latter
+    // can remain pending outside the outer timeout until the worker is released.
+    timeout(BOUND, tokio::time::sleep(PENDING_WINDOW))
+        .await
+        .expect("the pending window must be bounded");
     // Still while the worker runs: the instance lock must be held.
     let lock_while_running = crate::maintenance_lock::acquire_server(&data_dir).is_err();
-    guard.mark("deadline elapsed with the worker still parked");
+    guard.mark("early cutoff elapsed with worker still parked");
 
     // Unconditional release, then join; assertions run only afterwards.
     release(&gate);
@@ -205,34 +231,42 @@ async fn run_scheduled_worker() {
         shutdown
             .errors()
             .iter()
+            .any(|error| error.contains("backup schedule join exceeded shutdown budget")),
+        "the bounded backup-schedule join must report its own timeout at the early cutoff: {shutdown:?}"
+    );
+    assert!(
+        !shutdown
+            .errors()
+            .iter()
             .any(|error| error.contains("graceful shutdown exceeded deadline")),
-        "the deadline must mark the report unclean: {shutdown:?}"
+        "the late stages must complete before the outer deadline: {shutdown:?}"
     );
     assert_eq!(shutdown.exit_code(), 70, "unclean report: {shutdown:?}");
     assert!(
+        completed.load(Ordering::SeqCst),
+        "the scheduled backup completion callback must report success after the bounded join timeout: {shutdown:?}"
+    );
+    assert!(
         finished.load(Ordering::SeqCst),
-        "the post-run callback passed its release wait (not proof that the callback or spawned task fully exited)"
+        "the post-run callback-stage marker must be set after its release wait (not proof of task exit)"
     );
     assert!(
         lock_after.is_ok(),
-        "the data-directory lock must be free once the worker finished"
+        "the data-directory lock must be free after the callback reported successful completion"
     );
-    // On expiry the bounded teardown future is dropped AT the join and
-    // `ShutdownOwner::drain` only finishes that join and releases the lock: the
-    // repository flush belonged to the dropped future, so it must NOT run.
-    // (Mutant: a flush on the expiry path would write after the report already
-    // declared the teardown abandoned.)
+    // The bounded join timed out at the early cutoff; the outer deadline did
+    // not expire, so fallback drain was not the path taken.
     assert!(
         joined.load(Ordering::SeqCst),
-        "bounded join_schedule marker must fire on the TEST_DEADLINE-expired path"
+        "bounded join marker must fire at the early-cutoff join"
     );
     assert!(
-        fallback_joined.load(Ordering::SeqCst),
-        "fallback ShutdownOwner::drain join marker must fire on the TEST_DEADLINE-expired path"
+        !fallback_joined.load(Ordering::SeqCst),
+        "fallback join marker must not fire without outer deadline expiry"
     );
     assert!(
         !flush_entered.load(Ordering::SeqCst),
-        "the expiry path must not enter the repository flush: {shutdown:?}"
+        "the repository flush must not run while the scheduled run is still pending: {shutdown:?}"
     );
     // The runtime is STILL ALIVE here. Nothing may still hold a store: an
     // observability handle dropped without cancellation would keep its poller
@@ -242,12 +276,12 @@ async fn run_scheduled_worker() {
     let released = release_stores(&data_dir, Duration::from_secs(10)).await;
     assert!(
         matches!(released, ReleaseOutcome::Released),
-        "an expired shutdown must not leave live tasks holding the stores: {released:?}"
+        "a bounded-join timeout must not leave live tasks holding the stores: {released:?}"
     );
 }
 
 /// A NORMAL shutdown (no expiry) joins the scheduled worker before the
-/// repository flush. The callback-stage marker records whether the post-run
+/// repository flush. The callback-stage marker records that the post-run
 /// callback passed its release wait by the time the flush stage started; this
 /// does not establish that the spawned task fully exited.
 #[test]
@@ -274,6 +308,7 @@ async fn run_normal_order() {
     let parked = Arc::new(Semaphore::new(0));
     let gate = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
     let finished = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicBool::new(false));
 
     let handle = ServerLauncher::new(backup_config(data_dir.clone(), backups))
         .with_bootstrap(BootstrapMode::Skip)
@@ -281,6 +316,7 @@ async fn run_normal_order() {
             let parked = Arc::clone(&parked);
             let gate = Arc::clone(&gate);
             let finished = Arc::clone(&finished);
+            let completed = Arc::clone(&completed);
             move |resolved, registry, owner, shutdown| {
                 registry.arm_post_run_callback_for_shutdown_test({
                     let parked = Arc::clone(&parked);
@@ -300,7 +336,7 @@ async fn run_normal_order() {
                     owner,
                     shutdown.child_token(),
                     Duration::from_secs(3600),
-                    move |_| {},
+                    move |ok| completed.store(ok, Ordering::SeqCst),
                 )
             }
         })
@@ -363,8 +399,12 @@ async fn run_normal_order() {
         "the normal case must not expire: {shutdown:?}"
     );
     assert!(
+        completed.load(Ordering::SeqCst),
+        "the scheduled backup completion callback must report success after normal shutdown: {shutdown:?}"
+    );
+    assert!(
         finished.load(Ordering::SeqCst),
-        "the post-run callback passed its release wait before the normal flush (not proof the callback or spawned task fully exited): {shutdown:?}"
+        "the callback-stage marker must be set before the normal flush (not proof of task exit): {shutdown:?}"
     );
     assert!(
         bounded_joined.load(Ordering::SeqCst),
@@ -380,8 +420,8 @@ async fn run_normal_order() {
     );
     assert!(
         flush_saw_completion.load(Ordering::SeqCst),
-        "the scheduled worker and its run are joined BEFORE the repository flush \
-         (mutant: the worker awaited after the flush): {shutdown:?}"
+        "the callback-stage marker is set before the normal flush \
+         (mutant: the callback-stage wait occurs after the flush): {shutdown:?}"
     );
     // A repository outcome is the FLUSH's own result, not the fact that the
     // stage was entered: a skipped flush leaves every repository outcome
@@ -407,8 +447,9 @@ async fn run_normal_order() {
 ///
 /// * the meta-snapshot verdict (step 6): the snapshot did not settle, so the
 ///   `server_meta` store may still be locked;
-/// * a store-release verdict (step 9) naming the budget it really had — none
-///   left — instead of the 10 s constant.
+/// * a store-release verdict (step 9) naming the positive budget it really had —
+///   instead of the 10 s constant — with the pool-starved reason from its
+///   submitted probe.
 ///
 /// Mutants this kills:
 /// * the meta join awaited UNBOUNDED (`let _ = snap.handle.await`): the
@@ -421,6 +462,71 @@ async fn run_normal_order() {
 /// The report must also come back while the pool is STILL parked: a teardown
 /// that waits for the pool instead of for its budget returns after the pool is
 /// released, which the `finished` flag catches.
+#[test]
+fn zero_budget_store_release_reports_unknown_without_claiming_a_probe_ran() {
+    let mut report = shamir_db::ShutdownReport::default();
+    crate::server::server_handle::report_unsubmitted_release_probe_for_test(
+        &mut report,
+        "no shutdown budget remained",
+    );
+
+    let [error] = report.errors() else {
+        panic!("the zero-budget release stage must append one report error: {report:?}");
+    };
+    assert!(error.contains("no probe result was obtained"), "{error}");
+    assert!(error.contains("no probe was started"), "{error}");
+    assert!(error.contains("UNKNOWN"), "{error}");
+    assert!(
+        error.contains("immediate relaunch") && error.contains("`Locked`"),
+        "{error}"
+    );
+    assert!(!error.contains("probe ran"), "{error}");
+    assert!(!report.is_clean(), "the report must be unclean: {report:?}");
+    assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
+}
+
+/// Public `ServerHandle::shutdown()` has no outer deadline, but step 6 must
+/// still bound its meta-snapshot join by `META_SNAPSHOT_JOIN_TIMEOUT`.
+/// The existing one-thread parked-pool fixture exercises that path without
+/// adding a production seam.
+#[test]
+fn public_shutdown_bounds_meta_snapshot_join_without_outer_deadline() {
+    on_single_blocking_thread(|| async {
+        let temp = tempfile::tempdir().expect("test root");
+        let data_dir = temp.path().join("data");
+        create_private_dir(&data_dir).expect("private data directory");
+        let handle = ServerLauncher {
+            config: bind_config(data_dir, "127.0.0.1:0".to_owned(), "127.0.0.1:0".to_owned()),
+            bootstrap: BootstrapMode::Skip,
+            node_mode: NodeMode::ReadWrite,
+        }
+        .launch()
+        .await
+        .expect("launch real server");
+
+        let occupant = BlockingPoolOccupant::park();
+        occupant.await_started();
+        let report = timeout(BOUND, handle.shutdown())
+            .await
+            .expect("public shutdown must settle with the blocking pool parked");
+        let pool_still_occupied = !occupant.finished();
+        drop(occupant);
+
+        let errors = report.errors();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("meta snapshot task did not stop within 5s")),
+            "public shutdown must report the capped meta-snapshot join expiry: {report:?}"
+        );
+        assert!(
+            pool_still_occupied,
+            "the shutdown report must be produced while the blocking job remains parked: {report:?}"
+        );
+        assert!(!report.is_clean(), "the report must be unclean: {report:?}");
+    });
+}
+
 #[test]
 fn late_teardown_stages_report_the_remaining_shutdown_budget() {
     on_single_blocking_thread(|| async {
@@ -485,7 +591,7 @@ async fn run_remaining_budget() {
     );
     let Some(store_line) = errors
         .iter()
-        .find(|error| error.contains("store release could not be verified within"))
+        .find(|error| error.contains("store release could not be verified within "))
     else {
         panic!(
             "the store-release stage must reach the report with its own verdict (mutant: \
@@ -495,9 +601,20 @@ async fn run_remaining_budget() {
         );
     };
     assert!(
-        store_line.contains("no shutdown budget left") && !store_line.contains("10s"),
-        "the store-release line must name the budget it actually used, not the 10 s constant: \
+        store_line.contains("store release could not be verified within ")
+            && store_line.contains("the store-release blocking job did not complete before its deadline")
+            && store_line.contains("the blocking job may still have been queued or running")
+            && store_line.contains("UNKNOWN")
+            && !store_line.contains("no shutdown budget remained")
+            && !store_line.contains("no probe was started")
+            && !store_line.contains("within 0ns")
+            && !store_line.contains("10s"),
+        "the store-release line must report the positive probe budget and pool-starved result, not the 10 s constant: \
          {store_line}"
+    );
+    assert!(
+        !report.is_clean(),
+        "a positive-budget pool-starved store-release probe must make shutdown unclean: {report:?}"
     );
     assert!(
         pool_still_occupied,

@@ -7,6 +7,8 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use crate::server::open_lock_is_discovery_gap;
 use crate::server::{release_stores, wait_stores_released, ReleaseOutcome};
 
 /// A fake fjall store root: `lock` + `version` marker files.
@@ -160,6 +162,56 @@ async fn a_dangling_version_marker_is_a_discovery_gap() {
     assert!(
         matches!(outcome, ReleaseOutcome::Unverified(_)),
         "an undecidable version marker is a discovery gap, never Released: {outcome:?}"
+    );
+}
+
+/// A dangling `lock` marker exists but cannot be opened, so it is a discovery
+/// gap rather than an absent marker or an unlocked store.
+///
+/// Mutant: classifying with `symlink_metadata` alone calls this complete, then
+/// the probe follows the dangling link and treats `NotFound` as Unlocked; the
+/// barrier incorrectly reports `Released`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_lock_marker_is_a_discovery_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = temp.path().join("users");
+    std::fs::create_dir_all(&store).expect("store directory");
+    std::fs::write(store.join("version"), b"3").expect("version marker");
+    std::os::unix::fs::symlink(store.join("missing-lock-target"), store.join("lock"))
+        .expect("dangling lock marker symlink");
+
+    let outcome = release_stores(temp.path(), Duration::from_millis(100)).await;
+
+    assert!(
+        matches!(outcome, ReleaseOutcome::Unverified(_)),
+        "a dangling lock marker is specifically a discovery gap, never Released: {outcome:?}"
+    );
+}
+
+/// Opening a `lock` marker that exists (link metadata says so) but cannot be
+/// opened is a discovery gap; true absence is not.
+///
+/// Mutant: mapping the open-time `NotFound` of an existing marker to Unlocked
+/// (the former open result) makes the dangling link report no gap.
+#[cfg(unix)]
+#[test]
+fn opening_a_dangling_lock_marker_is_a_discovery_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = temp.path().join("users");
+    std::fs::create_dir_all(&store).expect("store directory");
+    std::os::unix::fs::symlink(store.join("missing-lock-target"), store.join("lock"))
+        .expect("dangling lock marker symlink");
+
+    assert!(
+        open_lock_is_discovery_gap(&store),
+        "an existing but unopenable lock marker must be a discovery gap"
+    );
+    let absent = temp.path().join("empty-store");
+    std::fs::create_dir_all(&absent).expect("store without a lock marker");
+    assert!(
+        !open_lock_is_discovery_gap(&absent),
+        "a truly absent lock marker is not a discovery gap"
     );
 }
 
@@ -329,18 +381,24 @@ fn a_starved_re_probe_keeps_the_last_held_observation() {
             .expect("the pool worker started the first occupier");
         let (second_gate_tx, second_gate_rx) = std::sync::mpsc::channel::<()>();
 
+        // Poll the barrier's first future turn directly: it synchronously
+        // submits its first blocking probe before returning Pending. Only then
+        // queue the second occupier behind that probe in the one-worker pool.
         let root = temp.path().to_path_buf();
         let budget = Duration::from_millis(300);
-        let barrier = tokio::spawn(async move { release_stores(&root, budget).await });
-        // Let the barrier reach (and QUEUE) its first probe before the second
-        // occupier is queued behind it.
-        tokio::task::yield_now().await;
+        let mut barrier = Box::pin(release_stores(&root, budget));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(
+            std::future::Future::poll(barrier.as_mut(), &mut context).is_pending(),
+            "the first probe is queued behind the first occupier"
+        );
         let second = tokio::task::spawn_blocking(move || {
             let _ = second_gate_rx.recv();
         });
         let _ = first_gate_tx.send(());
 
-        let outcome = barrier.await.expect("the barrier task joined");
+        let outcome = barrier.await;
         let _ = second_gate_tx.send(());
         first.await.expect("the first occupier joined");
         second.await.expect("the second occupier joined");

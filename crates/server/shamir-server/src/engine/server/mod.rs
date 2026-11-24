@@ -22,9 +22,13 @@ pub use boot_error::BootError;
 pub use bootstrap_mode::BootstrapMode;
 #[cfg(test)]
 pub(crate) use server_handle::drain_connections;
+#[cfg(test)]
+pub(crate) use server_handle::mark_fallback_drain_join;
 pub use server_handle::ServerHandle;
 pub use server_launcher::audit_store_b_vs_directory;
 pub use server_launcher::ServerLauncher;
+#[cfg(all(test, unix))]
+pub(crate) use store_release_barrier::open_lock_is_discovery_gap;
 pub(crate) use store_release_barrier::wait_stores_released;
 #[cfg(test)]
 pub(crate) use store_release_barrier::{release_stores, ReleaseOutcome};

@@ -174,6 +174,7 @@ enum GlobalRefusal {
     Closed,
     Saturated,
     Full,
+    RetryLimit,
 }
 
 impl CancelRefusalAudit {
@@ -291,6 +292,9 @@ impl CancelRefusalAudit {
             GlobalRefusal::Saturated => {
                 self.record_drop();
             }
+            GlobalRefusal::RetryLimit => {
+                self.refuse_retry_limit();
+            }
         }
     }
 
@@ -310,7 +314,7 @@ impl CancelRefusalAudit {
     /// The count grows only here.
     fn reserve_global_slot(&self) -> Result<(), GlobalRefusal> {
         let mut state = self.state.load(Ordering::Acquire);
-        loop {
+        for _ in 0..ADMISSION_RETRY_LIMIT {
             if state & CLOSED != 0 {
                 return Err(GlobalRefusal::Closed);
             }
@@ -328,6 +332,7 @@ impl CancelRefusalAudit {
                 Err(current) => state = current,
             }
         }
+        Err(GlobalRefusal::RetryLimit)
     }
 
     /// Give one GLOBAL slot back, clearing the saturation latch in the same

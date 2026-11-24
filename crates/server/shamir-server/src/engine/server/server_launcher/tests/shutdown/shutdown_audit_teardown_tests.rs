@@ -123,8 +123,8 @@ async fn run_audit_timeout_while_gate_held() {
     // checkpoint. The hook therefore re-arms itself for any non-holder
     // acquisition and parks only the actual checkpoint thread.
     let appender = Arc::clone(&handle.audit_appender);
-    // Observable for the skipped-close rule: the report says the close was not
-    // attempted AND the appender was never asked to attempt one.
+    // Observe either teardown outcome: the flusher may already have work in
+    // flight, or may stop while idle and allow the final close to be submitted.
     let close_observable = Arc::clone(&handle.audit_appender);
     let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
     let holder_thread = Arc::new(OnceLock::new());
@@ -160,12 +160,9 @@ async fn run_audit_timeout_while_gate_held() {
     wait_until(&gate, "gate rendezvous", |state| state.entered);
     guard.mark("real checkpoint holds the audit persistence gate");
 
-    // observations only until the gate is released: a panic here could not
-    // strand the checkpoint (the `GateRelease` guard above releases it and the
-    // hook's own wait is bounded), but the assertions still run only after the
-    // unconditional release below. No refusal is queued, so the drain is
-    // immediate and the deadline is spent waiting for the flusher to join,
-    // which cannot finish while the checkpoint owns the gate.
+    // Observe shutdown while the manual checkpoint holds the gate. The
+    // scheduled audit scheduler is stopped and joined separately; the flusher
+    // may be in flight or idle, so its report marker is observed after release.
     let shutdown = tokio::time::timeout(CALL_TIMEOUT, Box::pin(handle.shutdown())).await;
     let shutdown_returned_while_gate_held = !holder.is_finished();
     let shutdown_report = shutdown.ok();
@@ -230,21 +227,49 @@ async fn run_audit_timeout_while_gate_held() {
         report.repository_failures().is_empty(),
         "repository teardown must still complete: {report:?}"
     );
-    // The close must be skipped while the checkpoint owns the gate; the
-    // timeout is the teardown deadline, not a submitted-close timeout.
-    let skipped_close = report
+    // The test parks the manual checkpoint, not a scheduler tick. The flusher
+    // may already have submitted a blocking job (then its join times out and
+    // the close is skipped), or it may observe stop while idle (then the final
+    // close is submitted and times out on this gate). Both dispositions are
+    // truthful outcomes; distinguish them from the report rather than claiming
+    // the holder alone proves a flusher job is in flight.
+    let final_close_skipped = report
         .errors()
         .iter()
-        .find(|error| error.contains("audit final close not attempted"))
-        .unwrap_or_else(|| panic!("the final close must be skipped: {report:?}"));
-    assert!(
-        skipped_close.contains("waiting for the audit flusher"),
-        "the still-running flusher must explain the skipped close: {skipped_close}"
+        .find(|error| error.contains("audit final close not attempted"));
+    let flusher_timeout = report
+        .errors()
+        .iter()
+        .any(|error| error.contains("waiting for the audit flusher"));
+    let final_close_timeout = report
+        .errors()
+        .iter()
+        .any(|error| error.contains("waiting for the final audit flush"));
+    let teardown_wait_timeouts = report
+        .errors()
+        .iter()
+        .filter(|error| {
+            error.contains("waiting for the audit flusher")
+                || error.contains("waiting for the final audit flush")
+        })
+        .count();
+    assert_eq!(
+        teardown_wait_timeouts, 1,
+        "exactly one teardown wait must time out: {report:?}"
+    );
+    assert_ne!(
+        flusher_timeout, final_close_timeout,
+        "the one wait timeout must identify exactly one teardown phase: {report:?}"
+    );
+    assert_eq!(
+        final_close_skipped.is_some(),
+        flusher_timeout,
+        "the close is skipped iff the flusher failed to stop within the deadline: {report:?}"
     );
     assert_eq!(
         close_observable.final_close_attempts(),
-        0,
-        "shutdown must not submit final close while the checkpoint owns the gate"
+        if final_close_timeout { 1 } else { 0 },
+        "a final close attempt must match the observed final-close timeout"
     );
     assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
 }

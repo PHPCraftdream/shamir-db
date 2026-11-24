@@ -68,7 +68,11 @@ finish successfully. The existing 30-second `serve` deadline can report an
 unclean shutdown but does not abandon the worker: the scheduled worker and the
 data-directory lock are awaited after the deadline, and nothing forces a process
 exit; a kill by the operator can still leave partial output, including a
-partially deleted copy. A cancellation observed before the retention pass starts
+partially deleted copy. With an outer deadline, the early stages share the fixed
+cutoff `outer deadline - LATE_RESERVE` (1 s): an early-stage timeout is recorded
+and drain proceeds, but it does not itself start cleanup that has not yet begun;
+the late metadata join is bounded by what remains of the budget (capped at 5 s), and
+store release keeps 250 ms before the outer deadline for its verdict and report. A cancellation observed before the retention pass starts
 skips its scan. Protocol directories use UTC `YYYYMMDD_HHMMSS` at second
 resolution; collisions fail without overwrite.
 
@@ -140,20 +144,23 @@ skip pruning, even if a temp sidecar remains. No manifest, protocol or restore c
    online manifest.
 2. Use sequential checked budgets: 4,096 root entries, 32 tree levels, 64 KiB
    sidecar, 16 MiB manifest, 100,000 tree entries per candidate, and 1,000,000
-   tree entries and 1 TiB of input per pass. Byte budget: the pass charges the
-   verifier's real reads, by size, as execution reaches them. The first stamp
-   inspection is charged before its verdict; the second inspection is charged
-   only after a valid stamp verdict, and a valid listed stamp also pays its
-   manifest-file hash. Structural refusals pay only bytes read before refusal.
-   Each manifest-listed file is charged once (the claimed-file loop); a WAL
-   segment is charged a second time (the verifier's WAL loop hashes it again).
-   The tree walk charges directory entries only, so unknown files in a rejected
-   candidate cost one entry each. Bounded control-file reads are charged too,
-   each with one extra sentinel byte (`meta.len() + 1`): `manifest.json` once
-   during classification and once during adoption, and `backup.meta.json` once
-   per candidate. Adoption's late sidecar and manifest rereads are charged
-   before digest comparison, including when that candidate is subsequently
-   rejected. Exhausted budget or incomplete root scan means no deletion;
+   tree entries and 1 TiB of input per pass. Byte budget: the verifier's reads
+   are charged at their precharge points, not necessarily only as execution reaches
+   each read. The first stamp inspection is charged before its verdict; after a
+   valid stamp verdict, the second inspection is charged before later structural
+   checks, payload reads and verifier execution. A manifest-listed stamp's file
+   hash is also charged before hashing. Later structural rejection or verifier
+   failure can therefore leave a charge for a read that was not reached. Each
+   manifest-listed file is charged once (the claimed-file loop); a WAL segment
+   is charged a second time (the verifier's WAL loop hashes it again). The tree
+   walk charges directory entries only, so unknown files in a rejected candidate
+   cost one entry each. Bounded control-file reads are charged too, each with one
+   extra sentinel byte (`meta.len() + 1`): `manifest.json` once during
+   classification and once during adoption, and `backup.meta.json` once per
+   candidate. Adoption's late sidecar and manifest rereads are charged before
+   digest comparison. A candidate rejected by the comparison pays for those reads
+   if they were performed; if the budget rejects during a late read, later reads
+   do not occur. Exhausted budget or incomplete root scan means no deletion;
    count failure.
    Foreign files, partial or corrupt copies, unsafe trees, other owners and
    unmarked R2a/admin copies stay untouched and are counted. If the just-created

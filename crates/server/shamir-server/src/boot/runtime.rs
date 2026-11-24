@@ -18,14 +18,14 @@ use crate::server::{BootstrapMode, ServerHandle, ServerLauncher};
 /// Maximum time to wait for in-flight connections to drain after receiving
 /// a shutdown signal. If the deadline expires, we return an unclean report.
 ///
-/// The deadline bounds the whole shutdown future (connection and task drain,
-/// the scheduled-worker wait while it is pending, audit and repository
-/// teardown, store release): on expiry whichever stage is still running is
-/// dropped and the report is marked unclean. The
-/// scheduled-backup worker and the data-directory lock are owned outside it
-/// (extracted before the deadline, borrowed by the future) and are still
-/// awaited before [`serve`] returns. There is no forced exit and nothing calls
-/// `std::process::exit`.
+/// A single 1 s reserve is kept for late diagnostics: metadata gets at most
+/// 500 ms, store release at most 250 ms, and 250 ms remains for report
+/// propagation. Thus a 3 s outer budget gives early stages one shared cutoff
+/// at 2 s after shutdown starts, followed by up to 500 ms metadata, 250 ms
+/// release-probe, and 250 ms report slack.
+/// The scheduled-backup worker and data-directory lock remain owned outside
+/// the bounded future and are awaited before `serve` returns. There is no forced
+/// exit and nothing calls `std::process::exit`.
 const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Boot the server, wait for `shutdown`, then drain gracefully.
@@ -37,11 +37,11 @@ const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 /// After the shutdown signal fires, the drain phase is bounded by
 /// [`SHUTDOWN_DEADLINE`]. If draining exceeds the deadline (e.g. a stuck
 /// connection), we return an unclean report rather than blocking
-/// indefinitely. The bound covers the whole shutdown future (connection and
-/// task drain, the scheduled-worker wait, audit and repository teardown, store
-/// release); the scheduled-backup worker and the data-directory lock are owned outside it
-/// and are still awaited before this function returns (there is no forced
-/// exit and nothing calls `std::process::exit`).
+/// indefinitely. Within that bound, earlier stages share the 1 s late-stage
+/// reserve documented above. The scheduled-backup worker and data-directory
+/// lock are owned outside the bounded future and are still awaited before this
+/// function returns (there is no forced exit and nothing calls
+/// `std::process::exit`).
 ///
 /// Order matters: the scheduled-backup worker and its in-flight run are
 /// awaited BEFORE the repository flush (their original position). Only the
@@ -91,12 +91,9 @@ pub async fn serve(
 /// the worker is still awaited here before the data-directory lock is released
 /// by `ShutdownOwner::drain`.
 ///
-/// The deadline instant is also HANDED to the teardown, so its late stages
-/// share one absolute budget and reserve report slack: each uses
-/// `min(cap, remaining - reserved time for later stages/report)`. For very
-/// short budgets the teardown records the late-stage unknown verdicts before
-/// earlier stages can consume the deadline. This keeps specific reports ahead
-/// of outer expiry without raising the caller's deadline.
+/// One absolute instant is shared by the bounded teardown and its stages.
+/// Earlier stages stop at `deadline_at - 1 s`; metadata may consume at most
+/// 500 ms, release at most 250 ms, and the remaining 250 ms is report slack.
 pub(crate) async fn drain_server(
     handle: ServerHandle,
     deadline: std::time::Duration,
@@ -121,6 +118,8 @@ pub(crate) async fn drain_server(
     .is_err();
     if expired {
         report.add_error(deadline_error(deadline));
+        #[cfg(test)]
+        crate::server::mark_fallback_drain_join();
     }
     // Outside the deadline: on expiry the teardown was abandoned mid-way, but
     // the worker is still awaited here and the lock is released only afterwards.

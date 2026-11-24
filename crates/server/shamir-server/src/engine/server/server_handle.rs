@@ -21,15 +21,17 @@ use crate::server::store_release_barrier::{
     release_stores_until, ReleaseOutcome, UnverifiedReason,
 };
 
-/// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
-/// end once they were told to.
+/// One reserve shared by all earlier teardown stages. The early cutoff is the
+/// fixed instant `outer_deadline - LATE_RESERVE`; individual stage caps may
+/// shorten a wait, but never move that cutoff forward. The late metadata join
+/// may use at most 500 ms of it; store release then keeps 250 ms for its
+/// verdict/report. The remainder is scheduling and report slack.
+const LATE_RESERVE: Duration = Duration::from_secs(1);
+
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Upper bound for forced connection abort to complete.
 const CONN_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound for [`ServerHandle::shutdown`] to wait for the stores to drop
-/// their directory locks (a client that stays connected can hold one).
 const STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upper bound for joining the periodic meta-snapshot task at teardown step 6.
@@ -50,27 +52,13 @@ const META_SNAPSHOT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// stage's verdict.
 const ERR_META_SNAPSHOT_UNSETTLED: &str = "meta snapshot task did not stop within";
 
-/// One shared budget for quiescing and checkpointing every repository at
-/// shutdown. A slow disk (fsync on a loaded runner) must not turn a healthy stop
-/// into an unclean report; with the connection drain it stays inside the
-/// 30 s outer deadline of `runtime::serve`.
+/// Shared budget for repository shutdown quiescing and checkpointing.
 const REPO_FLUSH_BUDGET: Duration = Duration::from_secs(15);
 
-/// Upper bound for stopping the observability server in teardown step 5. Its
-/// `shutdown()` joins a listener that may still be draining a scrape and a
-/// poller that may be inside a database await, each side under its own
-/// `OBS_TASK_JOIN_TIMEOUT`, so the wait is bounded — and an expiry is REPORTED
-/// (see [`ERR_OBS_SHUTDOWN`]) instead of being silently dropped with the
-/// future.
+/// Upper bound for stopping the observability server in teardown step 5.
 const OBS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Report entry when the whole
-/// [`crate::observability::ObservabilityHandle::shutdown`] call is
-/// abandoned by [`OBS_SHUTDOWN_TIMEOUT`] — nothing was joined, so nothing can
-/// be named. Fixed prefix: an unclean report names what may still hold the
-/// database, not just a log line. When the call DOES return, the per-side
-/// outcome reports [`ERR_OBS_LISTENER_DRAINING`] /
-/// [`ERR_OBS_POLLER_RUNNING`] instead, so this message is never duplicated.
+/// Report entry for an observability shutdown that misses its bound.
 const ERR_OBS_SHUTDOWN: &str = "observability shutdown did not complete: the metrics listener or \
                                  the poller may still hold the database";
 
@@ -144,8 +132,8 @@ pub struct ServerHandle {
     /// [`Self::bound_ipc_paths`] for that case.
     pub bound_addrs: Vec<Option<SocketAddr>>,
     /// Companion to [`Self::bound_addrs`], same length/order: `Some(path)`
-    /// for every `kind: unix` listener (the filesystem path / pipe name it
-    /// bound to), `None` for every other listener.
+    /// for each `kind: unix` listener (filesystem path / pipe name), `None`
+    /// for all others.
     pub bound_ipc_paths: Vec<Option<String>>,
     /// HTTP REST gate maintenance workers, retained until connections have drained.
     pub(super) http_gates: Vec<Arc<RestGate>>,
@@ -361,6 +349,12 @@ fn fire_fallback_drain_join_probe() {
     }
 }
 
+/// Mark entry into the post-expiry owner drain (test-only).
+#[cfg(test)]
+pub(crate) fn mark_fallback_drain_join() {
+    fire_fallback_drain_join_probe();
+}
+
 /// One-shot probe fired immediately BEFORE the ordered shutdown's REAL
 /// repository flush call (`ShamirDb::flush_all_report`) — never at the point
 /// the flush would have started, so a SKIPPED flush leaves the probe unfired
@@ -418,8 +412,6 @@ impl ShutdownOwner {
         // Awaited THROUGH `&mut`: while the wait is pending the handle and its
         // drop guard stay in the owner, so the deadline dropping this future
         // mid-wait leaves them for `drain` instead of detaching the worker.
-        #[cfg(test)]
-        fire_scheduled_join_probe();
         let joined = task.await;
         // Finished: forget the handle (the guard drops with it).
         self.schedule_task = None;
@@ -436,8 +428,6 @@ impl ShutdownOwner {
     /// was dropped mid-teardown and the worker is still awaited here — the lock
     /// is released afterwards, never before.
     pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
-        #[cfg(test)]
-        fire_fallback_drain_join_probe();
         self.join_schedule(report).await;
         // Released here, after the scheduled worker finished — never
         // explicitly unlocked (drop is the release).
@@ -445,13 +435,6 @@ impl ShutdownOwner {
     }
 }
 
-/// The ABSOLUTE bound and the duration a late teardown stage may spend.
-///
-/// `cap` is the stage's own constant. Inside an outer shutdown budget the stage
-/// may only spend what is left after reserving `reserve_after` for later stages
-/// and their report entries. The returned instant is kept strictly before the
-/// outer deadline when there is a reservation, so the caller can append its
-/// verdict before the outer timeout abandons the teardown future.
 fn stage_bound(
     deadline_at: Option<tokio::time::Instant>,
     cap: Duration,
@@ -467,6 +450,34 @@ fn stage_bound(
         }
         None => (own, cap),
     }
+}
+
+fn early_stage_bound(
+    early_cutoff: Option<tokio::time::Instant>,
+    cap: Duration,
+) -> (tokio::time::Instant, Duration) {
+    let now = tokio::time::Instant::now();
+    let stage_cap = now + cap;
+    match early_cutoff {
+        Some(cutoff) => {
+            let until = stage_cap.min(cutoff);
+            (until, until.saturating_duration_since(now))
+        }
+        None => (stage_cap, cap),
+    }
+}
+
+fn report_unsubmitted_release_probe(report: &mut ShutdownReport, reason: &str) {
+    report.add_error(format!(
+        "store release could not be verified: no probe result was obtained; no probe was started / {reason}; \
+         whether every store released its directory lock is UNKNOWN; an immediate relaunch of the same \
+         data directory can fail with `Locked`"
+    ));
+}
+
+#[cfg(test)]
+pub(super) fn report_unsubmitted_release_probe_for_test(report: &mut ShutdownReport, reason: &str) {
+    report_unsubmitted_release_probe(report, reason);
 }
 
 /// Store-root names for the release report: bounded tokens, never full paths.
@@ -485,9 +496,8 @@ impl ServerHandle {
         self.format_stamp
     }
 
-    /// Stop accepting new connections, then drain the scheduler + audit log.
-    /// Returns repository-level checkpoint failures; ignored reports preserve
-    /// the existing caller behaviour. Connection drain remains bounded.
+    /// Stop accepting connections, then drain the scheduler and audit log.
+    /// Returns repository checkpoint failures; ignored reports preserve caller behaviour.
     pub async fn shutdown(mut self) -> ShutdownReport {
         let mut report = self.pending_shutdown_report();
         let mut owner = self.take_shutdown_owner();
@@ -502,10 +512,9 @@ impl ServerHandle {
 
     /// Move the scheduled worker and the instance lock out of the handle.
     ///
-    /// `runtime::serve` calls this BEFORE it wraps the shutdown future in its
-    /// deadline, so expiry can abandon the audit/repository teardown without
-    /// dropping a running native backup thread or releasing the data directory.
-    /// Callers that keep the handle until it is consumed (`shutdown`,
+    /// `runtime::serve` extracts this BEFORE wrapping shutdown in its deadline,
+    /// so expiry cannot drop a running native backup thread or release the data directory.
+    /// Callers retaining the handle until consumption (`shutdown`,
     /// `shutdown_with_report`) are unaffected: they still join the worker and
     /// drop the lock themselves.
     pub(crate) fn take_shutdown_owner(&mut self) -> ShutdownOwner {
@@ -533,18 +542,16 @@ impl ServerHandle {
         self.shutdown_with_budget(report, owner, None).await;
     }
 
-    /// The teardown, with the instant its caller's outer deadline expires.
+    /// The teardown and the instant the caller's outer deadline expires.
     ///
-    /// `deadline_at` is the same instant the caller's own `timeout` is bounded
-    /// by, computed BEFORE that timeout starts. The late teardown stages share
-    /// this absolute budget and reserve time for later stages and report
-    /// entries. For a very short budget, specific late-stage unknown verdicts
-    /// are appended before earlier stages can consume the deadline; each wait
-    /// otherwise uses `min(cap, remaining - reserve)`.
+    /// `deadline_at` is the instant bounding the caller's timeout, computed
+    /// before it starts. The early cutoff is fixed at `outer_deadline -
+    /// LATE_RESERVE`; early waits share it, while late stages reserve metadata,
+    /// release-probe, and report time.
     ///
     /// cancel-safe: NO — same as [`Self::shutdown_with_report`].
     pub(crate) async fn shutdown_with_budget(
-        self,
+        mut self,
         report: &mut ShutdownReport,
         owner: &mut ShutdownOwner,
         deadline_at: Option<tokio::time::Instant>,
@@ -556,7 +563,14 @@ impl ServerHandle {
         self.shutdown_token.cancel();
         // 2. Wait for accept loops to finish, then wait for tracked accepted
         // tasks to quiesce before any repository flush.
-        let listener_deadline = tokio::time::Instant::now() + CONN_DRAIN_TIMEOUT;
+        let early_cutoff = deadline_at.map(|outer| {
+            outer
+                .checked_sub(LATE_RESERVE)
+                .unwrap_or_else(tokio::time::Instant::now)
+        });
+        let (listener_deadline, listener_budget) =
+            early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+        // One fixed early cutoff shared by each bounded wait.
         let mut quiesced = true;
         for mut task in self.listener_tasks {
             let abort = task.abort_handle();
@@ -568,11 +582,14 @@ impl ServerHandle {
                 }
                 Err(_) => {
                     abort.abort();
-                    let joined = tokio::time::timeout(CONN_ABORT_TIMEOUT, &mut task)
-                        .await
-                        .is_ok();
+                    let joined = tokio::time::timeout_at(
+                        early_cutoff.unwrap_or(listener_deadline),
+                        &mut task,
+                    )
+                    .await
+                    .is_ok();
                     report.add_error(format!(
-                        "HTTP listener drain exceeded {CONN_DRAIN_TIMEOUT:?}; aborted"
+                        "HTTP listener drain exceeded {listener_budget:?}; aborted"
                     ));
                     quiesced &= joined;
                 }
@@ -580,24 +597,73 @@ impl ServerHandle {
         }
         // One drain budget for listeners and accepted connections together, so
         // the stage stays inside the runtime shutdown deadline.
-        let remaining = listener_deadline.saturating_duration_since(tokio::time::Instant::now());
-        quiesced &=
-            drain_connections(&self.conn_tasks, remaining, CONN_ABORT_TIMEOUT, report).await;
+        let cutoff = early_cutoff.unwrap_or(listener_deadline);
+        let remaining = cutoff.saturating_duration_since(tokio::time::Instant::now());
+        let abort_remaining = cutoff
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(CONN_ABORT_TIMEOUT);
+        let drain = drain_connections(&self.conn_tasks, remaining, abort_remaining, report);
+        match tokio::time::timeout_at(cutoff, drain).await {
+            Ok(drained) => quiesced &= drained,
+            Err(_) => {
+                report.add_error(
+                    "connection drain and abort exceeded shared early shutdown cutoff".to_string(),
+                );
+                quiesced = false;
+            }
+        }
         // Gates stop after transport and connection tasks drain, so the final
         // audit flush includes their notices.
         for gate in &self.http_gates {
-            gate.shutdown().await;
+            if early_cutoff.is_some() {
+                let (gate_deadline, budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+                if tokio::time::timeout_at(gate_deadline, gate.shutdown())
+                    .await
+                    .is_err()
+                {
+                    report.add_error(format!("HTTP gate shutdown exceeded {budget:?}"));
+                }
+            } else {
+                gate.shutdown().await;
+            }
         }
         drop(self.http_gates);
-        self.token_service.shutdown_gc().await;
+        if early_cutoff.is_some() {
+            let (gc_deadline, gc_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+            if tokio::time::timeout_at(gc_deadline, self.token_service.shutdown_gc())
+                .await
+                .is_err()
+            {
+                report.add_error(format!("token GC shutdown exceeded {gc_budget:?}"));
+            }
+        } else {
+            self.token_service.shutdown_gc().await;
+        }
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
         //     to stop by the root `shutdown_token.cancel()` above) so it drops
         //     its supervisor reference. Done after the accept loops stop (no
         //     new subscription rows can arrive) and before flush.
-        self.repl_supervisor.stop_all().await;
-        if let Some(task) = self.repl_supervisor_task {
-            let _ = task.handle.await;
+        if early_cutoff.is_some() {
+            let (repl_deadline, repl_budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+            if tokio::time::timeout_at(repl_deadline, async {
+                self.repl_supervisor.stop_all().await;
+                if let Some(task) = &mut self.repl_supervisor_task {
+                    let _ = (&mut task.handle).await;
+                }
+            })
+            .await
+            .is_err()
+            {
+                report.add_error(format!(
+                    "replication supervisor shutdown exceeded {repl_budget:?}"
+                ));
+            }
+        } else {
+            self.repl_supervisor.stop_all().await;
+            if let Some(task) = &mut self.repl_supervisor_task {
+                let _ = (&mut task.handle).await;
+            }
         }
         // 3. Drain the refusal-audit queue and the audit chain under ONE
         //    shared deadline: the scheduler is signalled before it is joined,
@@ -606,7 +672,14 @@ impl ServerHandle {
         //    unclean instead of stalling the shutdown future. Teardown
         //    continues to the repository flush either way; a timeout does not
         //    cancel an in-flight fsync.
-        teardown_audit(
+        if early_cutoff.is_some() {
+            // Ensure cancellation of the bounded teardown still leaves its
+            // owned workers signalled: teardown_audit may be dropped at cutoff.
+            self.cancel_refusal_audit.close();
+            self.scheduler.signal_shutdown();
+            self.audit_appender.request_flusher_stop();
+        }
+        let audit = teardown_audit(
             AuditTeardown {
                 cancel_refusal_audit: &self.cancel_refusal_audit,
                 appender: &self.audit_appender,
@@ -615,8 +688,23 @@ impl ServerHandle {
                 drain_probe: self.refusal_drain_pending,
             },
             report,
-        )
-        .await;
+        );
+        if deadline_at.is_some() {
+            let (audit_deadline, audit_budget) = early_stage_bound(
+                early_cutoff,
+                crate::server::server_launcher::audit_teardown::AUDIT_TEARDOWN_DEADLINE,
+            );
+            if tokio::time::timeout_at(audit_deadline, audit)
+                .await
+                .is_err()
+            {
+                report.add_error(format!(
+                    "audit teardown exceeded shutdown budget {audit_budget:?}"
+                ));
+            }
+        } else {
+            audit.await;
+        }
         // Signal the observability server to stop BEFORE the wait a deadline can
         // abandon; the wait itself is bounded and reported in step 5. The
         // handle's private cancel-on-drop field cancels the same token, so an
@@ -630,16 +718,41 @@ impl ServerHandle {
         // — and it borrows the owner, so a deadline can abandon this teardown
         // without abandoning the worker (`ShutdownOwner::drain` then awaits it
         // after the deadline).
-        owner.join_schedule(report).await;
+        if deadline_at.is_some() {
+            let (schedule_deadline, schedule_budget) =
+                early_stage_bound(early_cutoff, REPO_FLUSH_BUDGET);
+            #[cfg(test)]
+            fire_scheduled_join_probe();
+            if tokio::time::timeout_at(schedule_deadline, owner.join_schedule(report))
+                .await
+                .is_err()
+            {
+                report.add_error(format!(
+                    "backup schedule join exceeded shutdown budget {schedule_budget:?}"
+                ));
+                // The repository flush must remain after the scheduled run. Keep the
+                // owner intact for the post-deadline join and do not flush ahead of it.
+                quiesced = false;
+            }
+        } else {
+            // Keep the probe at the actual unbounded join too: backup-schedule
+            // tests call ServerHandle::shutdown(), which has no outer deadline.
+            #[cfg(test)]
+            fire_scheduled_join_probe();
+            owner.join_schedule(report).await;
+        }
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
         //    writes can arrive) and BEFORE store locks are released.
         if !quiesced {
-            report.add_error("repository flush skipped: connection tasks still alive".to_string());
+            report.add_error(
+                "repository flush skipped: connection tasks remain or scheduled backup owner is still running"
+                    .to_string(),
+            );
             tracing::error!(
                 live = self.conn_tasks.live(),
-                "shutdown: repository flush skipped because connection tasks remain",
+                "shutdown: repository flush skipped because shutdown ordering is not yet safe",
             );
         } else {
             // The probe belongs to the REAL flush call, not to this point: a
@@ -647,9 +760,18 @@ impl ServerHandle {
             // entered one to a shutdown test.
             #[cfg(test)]
             fire_repo_flush_probe();
-            self.shamir
-                .flush_all_report(REPO_FLUSH_BUDGET, report)
-                .await;
+            let (flush_deadline, flush_budget) = early_stage_bound(early_cutoff, REPO_FLUSH_BUDGET);
+            if tokio::time::timeout_at(
+                flush_deadline,
+                self.shamir.flush_all_report(flush_budget, report),
+            )
+            .await
+            .is_err()
+            {
+                report.add_error(format!(
+                    "repository flush exceeded shutdown budget {flush_budget:?}"
+                ));
+            }
         }
         // 5. Stop the observability HTTP server (if any). BOUNDED and REPORTED:
         //    the listener may still be draining a scrape and the poller may be
@@ -659,7 +781,8 @@ impl ServerHandle {
         //    private cancel-on-drop field), so the tasks stop on their own at
         //    their next cancellation point.
         if let Some(obs) = self.observability {
-            match tokio::time::timeout(OBS_SHUTDOWN_TIMEOUT, obs.shutdown()).await {
+            let (obs_deadline, _) = early_stage_bound(early_cutoff, OBS_SHUTDOWN_TIMEOUT);
+            match tokio::time::timeout_at(obs_deadline, obs.shutdown()).await {
                 // The call returned: name exactly the side(s) that missed their
                 // own join bound. A generic message here would blame a side
                 // that did stop and hand the operator the wrong subsystem.
@@ -688,13 +811,7 @@ impl ServerHandle {
                 }
             }
         }
-        // 6. Join the meta-snapshot task. It was already told to stop by the
-        //    `shutdown_token.cancel()` at the top of this method (it holds a
-        //    clone of the root token). Awaiting its handle lets it drop its
-        //    Arc<ServerMetaStore> reference so the fjall `server_meta` store
-        //    lock releases for a same-data-dir restart. The
-        //    task writes one final lockout + rate-limit snapshot inside its
-        //    cancel branch (best-effort) before exiting.
+        // 6. Join meta-snapshot task; its final write may wait on the blocking pool.
         //
         //    BOUNDED and REPORTED: that final write is a synchronous store
         //    write submitted to the blocking pool, so a starved pool keeps the
@@ -702,16 +819,17 @@ impl ServerHandle {
         //    await here would let an outer expiry replace this stage's own
         //    verdict with the generic deadline message, so the wait spends
         //    only what is left of the shutdown budget, capped by
-        //    META_SNAPSHOT_JOIN_TIMEOUT. Join errors stay ignored exactly as
+        //    META_SNAPSHOT_JOIN_TIMEOUT. With no outer deadline, the same cap
+        //    applies without a reserve. Join errors stay ignored exactly as
         //    before: only an EXPIRY means the store may still be locked.
         if let Some(snap) = self.meta_snapshot_task {
-            // Keep a fixed 500 ms for the release stage and report append; it
-            // still fits inside the 3 s shutdown deadline used by CI tests.
-            let (bound_at, bound) = stage_bound(
-                deadline_at,
-                META_SNAPSHOT_JOIN_TIMEOUT,
-                Duration::from_millis(500),
-            );
+            let reserve_after = if deadline_at.is_some() {
+                Duration::from_millis(500)
+            } else {
+                Duration::ZERO
+            };
+            let (bound_at, bound) =
+                stage_bound(deadline_at, META_SNAPSHOT_JOIN_TIMEOUT, reserve_after);
             if tokio::time::timeout_at(bound_at, snap.handle)
                 .await
                 .is_err()
@@ -728,26 +846,37 @@ impl ServerHandle {
                 ));
             }
         }
-        // 7. Join the interactive-tx reaper (also cancelled by the root token
-        //    above) so its Arc<TxRegistry> drops and any lingering open txs
-        //    are dropped (RAII abort).
+        // 7. Join the interactive-tx reaper; dropping it aborts lingering txs.
         if let Some(reaper) = self.interactive_tx_reaper {
-            let _ = reaper.handle.await;
+            if deadline_at.is_some() {
+                let (reaper_deadline, budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+                if tokio::time::timeout_at(reaper_deadline, reaper.handle)
+                    .await
+                    .is_err()
+                {
+                    report.add_error(format!(
+                        "interactive transaction reaper join exceeded {budget:?}"
+                    ));
+                }
+            } else {
+                let _ = reaper.handle.await;
+            }
         }
-        // 8. Join the cursor reaper (FG-5b, also cancelled by the root
-        //    token above) so its Arc<CursorRegistry> drops and any
-        //    lingering open cursors release their pinned SnapshotGuards.
+        // 8. Join cursor reaper so its Arc drops and pinned snapshots unpin.
         if let Some(reaper) = self.cursor_reaper {
-            let _ = reaper.handle.await;
+            if deadline_at.is_some() {
+                let (reaper_deadline, budget) = early_stage_bound(early_cutoff, CONN_DRAIN_TIMEOUT);
+                if tokio::time::timeout_at(reaper_deadline, reaper.handle)
+                    .await
+                    .is_err()
+                {
+                    report.add_error(format!("cursor reaper join exceeded {budget:?}"));
+                }
+            } else {
+                let _ = reaper.handle.await;
+            }
         }
-        // 9. Release the stores: drop this handle's own references, then wait
-        //    until fjall has dropped every directory lock. Detached tasks
-        //    (buffered-store flushers, connection tasks) can outlive the
-        //    steps above; returning before they finish made an immediate
-        //    relaunch of the same data dir fail with `Locked`. The
-        //    single-instance `data_dir_lock` is released last, on return — or
-        //    by the embedding caller when [`ServerHandle::take_shutdown_owner`]
-        //    owns it.
+        // 9. Drop this handle's store references, then probe directory-lock release.
         let data_dir = self.data_dir;
         // The test seam holds `Arc<ShamirDbHandler>` (and the handler holds the
         // DB), so a fixture that never takes it would keep its OWN stores
@@ -767,15 +896,17 @@ impl ServerHandle {
         // STORE_RELEASE_TIMEOUT and with report slack reserved before expiry.
         // Keep 250 ms before the absolute deadline for recording this verdict
         // and returning the report; do not let the release wait consume it all.
-        let (release_deadline, release_budget) = stage_bound(
-            deadline_at,
-            STORE_RELEASE_TIMEOUT,
-            Duration::from_millis(250),
-        );
+        let (release_deadline, release_budget) = match deadline_at {
+            Some(outer) => stage_bound(
+                Some(outer),
+                STORE_RELEASE_TIMEOUT,
+                Duration::from_millis(250),
+            ),
+            None => stage_bound(None, STORE_RELEASE_TIMEOUT, Duration::ZERO),
+        };
         if release_budget.is_zero() {
-            // No probe was submitted, so do not claim an unverified outcome.
-            // The outer deadline reports that teardown was abandoned.
             tracing::warn!("shutdown: no budget remained to start the store-release probe");
+            report_unsubmitted_release_probe(report, "no shutdown budget remained");
         } else {
             match release_stores_until(&data_dir, release_deadline).await {
                 ReleaseOutcome::Released => {}
@@ -795,9 +926,13 @@ impl ServerHandle {
                 }
                 ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired) => {
                     // The barrier rejected an already-expired absolute
-                    // deadline before submitting a probe. Do not label this a
-                    // completed unverified probe outcome.
+                    // deadline before submitting a probe; state is unknown,
+                    // not a completed unverified probe outcome.
                     tracing::warn!("shutdown: release probe deadline expired before submission");
+                    report_unsubmitted_release_probe(
+                        report,
+                        "the deadline expired before submission",
+                    );
                 }
                 ReleaseOutcome::Unverified(reason) => {
                     let (summary, detail) = match reason {
@@ -830,27 +965,22 @@ impl ServerHandle {
         }
     }
 
-    /// Returns the first bound TCP+TLS-exporter address — useful for
-    /// integration tests that just want "where do I connect?".
+    /// Returns the first bound TCP+TLS-exporter address for connection tests.
     pub fn first_tls_exporter_addr(&self) -> Option<SocketAddr> {
         self.bound_addrs.iter().filter_map(|a| *a).next()
     }
 
-    /// Returns the first bound local-IPC path (Unix socket path / Windows
-    /// pipe name) — the `bound_ipc_paths` analogue of
-    /// [`Self::first_tls_exporter_addr`], for tests that just want "where
-    /// do I connect for the `kind: unix` listener?".
+    /// First bound local-IPC path; see [`Self::first_tls_exporter_addr`].
     pub fn first_ipc_path(&self) -> Option<&str> {
         self.bound_ipc_paths.iter().find_map(|p| p.as_deref())
     }
 
     /// Whether the experimental online storage-migration API
-    /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/
-    /// `MigrationStatus`) is enabled on this booted server. `true` only when
-    /// `security.enable_experimental_migration_api` was set in the config at
-    /// boot — the default is `false`. Exposed primarily so integration tests
-    /// can assert the boot-time wiring in `server_launcher/launch.rs` flipped the
-    /// toggle that every `StartMigration` handler reads.
+    /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/`MigrationStatus`)
+    /// is enabled on this server. `true` only when
+    /// `security.enable_experimental_migration_api` was set at boot (default `false`).
+    /// Primarily exposed to test that `server_launcher/launch.rs` wired the toggle
+    /// read by every `StartMigration` handler.
     pub fn experimental_migration_enabled(&self) -> bool {
         self.shamir.experimental_migration_enabled()
     }
