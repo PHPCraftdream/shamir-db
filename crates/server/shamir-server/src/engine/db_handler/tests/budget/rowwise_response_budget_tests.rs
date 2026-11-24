@@ -517,7 +517,7 @@ async fn bounded_budget_charges_the_canonical_envelope_it_transmits() {
 /// then `execute_with_rid` encodes/stashes the resulting fixed busy response
 /// and keeps the response-budget guard alive for the writer.
 #[tokio::test]
-async fn create_user_argon2_busy_reaches_execute_convergence() {
+async fn create_user_argon2_busy_stays_server_busy_under_one_byte_result_limit() {
     let temp = tempfile::tempdir().expect("user directory tempdir");
     let user_dir = Arc::new(FjallUserDirectory::open(temp.path().join("users")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
@@ -574,7 +574,7 @@ async fn create_user_argon2_busy_reaches_execute_convergence() {
     );
     let mut batch = Batch::new();
     batch.limits(BatchLimits {
-        max_result_size: 4096,
+        max_result_size: 1,
         ..BatchLimits::default()
     });
     batch.create_user(
@@ -606,10 +606,13 @@ async fn create_user_argon2_busy_reaches_execute_convergence() {
     let response: DbResponse = rmp_serde::from_slice(&reply_bytes).expect("decode response");
     assert!(
         matches!(&response, DbResponse::Error { code, message }
-            if code == "server_busy" && message.ends_with("password derivation is busy; retry later")),
-        "CreateUser must return the real port's held-permit refusal: {response:?}",
+            if code == "server_busy" && message == "server_busy"),
+        "CreateUser must return the fixed server-owned busy refusal: {response:?}",
     );
-    assert!(reply_bytes.len() <= 4096, "busy refusal fits caller cap");
+    assert!(
+        reply_bytes.len() <= 1 + 512,
+        "busy refusal fits fixed allowance"
+    );
     assert_eq!(budget.used(), guard.bytes_reserved());
     assert_eq!(guard.bytes_reserved(), reply_bytes.len());
 

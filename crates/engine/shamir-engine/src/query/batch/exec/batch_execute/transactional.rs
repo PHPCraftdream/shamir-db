@@ -337,15 +337,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                         outcome.materialized(),
                     )
                     .with_visibility(outcome.visibility);
-                    Ok((
-                        crate::query::batch::receipts::stamp(
-                            results,
-                            &request.queries,
-                            &info,
-                            depth,
-                        ),
-                        Some(info),
-                    ))
+                    Ok((results, Some(info)))
                 }
                 Err(crate::tx::CommitError::Cancelled) => Err(BatchError::Cancelled),
                 Err(commit_err) => {
@@ -366,15 +358,7 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                     // this arm must not narrow or re-interpret that.
                     let info = commit_err.into_transaction_info(tx_id, snapshot_version);
                     if info.is_committed() {
-                        Ok((
-                            crate::query::batch::receipts::stamp(
-                                results,
-                                &request.queries,
-                                &info,
-                                depth,
-                            ),
-                            Some(info),
-                        ))
+                        Ok((results, Some(info)))
                     } else {
                         Ok((new_map(), Some(info)))
                     }
