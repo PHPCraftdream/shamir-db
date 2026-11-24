@@ -278,9 +278,11 @@ impl SystemStore {
                         .into(),
                 ))
             }
-            DbError::Codec(detail) => Some(DbError::SchemaMigrationJournalUnreadable(format!(
-                "the schema migration journal could not be decoded on open: {detail}"
-            ))),
+            // Fixed text: the codec detail can carry a backend string or a
+            // record id and this text reaches the operator-visible refusal.
+            DbError::Codec(_) => Some(DbError::SchemaMigrationJournalUnreadable(
+                "the schema migration journal could not be decoded on open".into(),
+            )),
             _ => None,
         };
         match &error {
