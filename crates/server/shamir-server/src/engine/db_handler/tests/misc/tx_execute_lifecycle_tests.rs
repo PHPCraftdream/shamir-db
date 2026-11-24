@@ -133,7 +133,10 @@ where
                 .enable_all()
                 .build()
                 .expect("test runtime")
-                .block_on(tokio::time::timeout(Duration::from_secs(30), body()))
+                // The timer must be built inside the runtime.
+                .block_on(
+                    async move { tokio::time::timeout(Duration::from_secs(30), body()).await },
+                )
                 .expect("test exceeded 30-second timeout")
         })
         .expect("spawn test thread")

@@ -37,18 +37,20 @@ impl TableResolver for TestResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for TestResolver {
-    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::tx::RepoCore> {
-        // Back repo lookups with the real in-memory repo: the source
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::tx::RepoCore> {
+        // Back repo lookups with the real in-memory repos: the source
         // classification consults the catalogue (`resolve_repo`) to tell an
-        // absent TABLE from an absent PARENT.
+        // absent TABLE from an absent PARENT. An unnamed repo is the default.
+        let name = if repo_name.is_empty() {
+            self.repo.as_str()
+        } else {
+            repo_name
+        };
         self.db
-            .get_repo(&self.repo)
+            .get_repo(name)
             .map(|repo| repo.core.clone())
             .ok_or_else(|| {
-                shamir_storage::error::DbError::NotFound(format!(
-                    "Repository '{}' not found",
-                    self.repo
-                ))
+                shamir_storage::error::DbError::NotFound(format!("Repository '{name}' not found"))
             })
     }
 }

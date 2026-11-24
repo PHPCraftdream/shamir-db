@@ -1,10 +1,8 @@
 use shamir_engine::meta::repo_identity::RepoIdentity;
 use shamir_engine::repo::SeedReceipt;
-use shamir_query_builder::batch::Batch;
-use shamir_query_builder::Query;
 use shamir_query_types::admin::{CreatePublicationOp, ReplScope};
+use shamir_query_types::batch::{BatchError, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
-use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 use crate::{validate_seed_hello, SeedRefusal, ShamirDb};
 
@@ -101,35 +99,25 @@ fn resume_metadata_refusals_are_distinct_and_matching_gap_is_not_bypassed() {
     assert_eq!(receipt().source_version.checked_add(1), Some(11));
 }
 
-/// In a quarantined repo a CLOSED table and an ABSENT table both refuse with the
-/// canonical `unknown_table` (the availability decision precedes the quarantine verdict).
-pub(super) async fn assert_closed_and_absent_tables_refuse_alike(shamir: &ShamirDb) {
-    // Closed and absent tables both use the canonical `unknown_table` refusal.
-    let path = ResourcePath::table("testdb", "main", "users");
-    shamir
-        .set_resource_meta(
-            &path,
-            &ResourceMeta {
-                owner: Actor::User(1),
-                group: None,
-                mode: 0o700,
-            },
-        )
-        .await
-        .unwrap();
-    for (id, table) in [(11, "users"), (12, "absent")] {
-        let mut batch = Batch::new();
-        batch.id(id);
-        batch.query("r", Query::with_repo("main", table));
-        let err = shamir
-            .execute_as(
-                Actor::User(99),
-                "testdb",
-                &batch.to_request_via_msgpack().unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), Some("unknown_table"));
-        assert!(err.to_string().contains("table is unavailable"));
-    }
+/// A quarantined repo refuses the changelog pull whether or not it has any table:
+/// the quarantine proof that does not depend on a table read (an absent table
+/// refuses as `unknown_table` before the quarantine verdict).
+pub(super) async fn assert_changelog_refused(shamir: &ShamirDb, db: &str, repo: &str) {
+    let Err(err) = shamir.read_changelog_bounded(db, repo, 1, 10).await else {
+        panic!("{db}/{repo}: changelog pull of a quarantined repo must be refused");
+    };
+    assert_eq!(err.code(), Some("resync_required"), "{db}/{repo}: {err}");
+}
+
+/// Before the replacement image the destination has no table: a table read is the
+/// absent-table refusal, and the quarantine is proven by the changelog path.
+pub(super) async fn assert_absent_quarantined(
+    shamir: &ShamirDb,
+    read: Result<BatchResponse, BatchError>,
+    db: &str,
+    repo: &str,
+) {
+    let err = read.unwrap_err();
+    assert_eq!(err.code(), Some("unknown_table"), "{db}/{repo}: {err}");
+    assert_changelog_refused(shamir, db, repo).await;
 }

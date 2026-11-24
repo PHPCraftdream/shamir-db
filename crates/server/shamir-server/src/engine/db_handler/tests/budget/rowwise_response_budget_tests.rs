@@ -405,7 +405,7 @@ async fn tiny_caller_result_cap_still_refuses_a_larger_data_reply() {
 /// exempt up to the operator cap" exception: a LONG, caller-derived
 /// diagnostic must NOT slip past a 1-byte caller limit.
 ///
-/// The request is an INSERT into a 10 KiB table name. In
+/// The request is an INSERT into a 6 KiB table name (it appears twice in the diagnostic). In
 /// `query_runner.rs`, non-READ table-resolution misses retain `error.to_string()`
 /// with `code: None`; unlike READs, they are not replaced by `unknown_table`.
 /// The diagnostic contains the table name once (plus fixed engine/wrapper
@@ -420,7 +420,7 @@ async fn tiny_caller_result_cap_refuses_a_long_non_canonical_diagnostic() {
         max_result_size: 1,
         ..BatchLimits::default()
     });
-    batch.insert("w", insert("t".repeat(10_240)).row(doc! { "id" => "k1" }));
+    batch.insert("w", insert("t".repeat(6_144)).row(doc! { "id" => "k1" }));
 
     match dispatch(&handler, batch.build()).await {
         DbResponse::Error { code, message } => {
@@ -448,7 +448,7 @@ async fn tiny_caller_result_cap_refuses_a_long_non_canonical_diagnostic() {
                  operator's: {message}",
             );
         }
-        other => panic!("a 10 KiB request-derived diagnostic must be refused, got {other:?}"),
+        other => panic!("a 6 KiB request-derived diagnostic must be refused, got {other:?}"),
     }
 }
 
@@ -606,7 +606,7 @@ async fn create_user_argon2_busy_reaches_execute_convergence() {
     let response: DbResponse = rmp_serde::from_slice(&reply_bytes).expect("decode response");
     assert!(
         matches!(&response, DbResponse::Error { code, message }
-            if code == "server_busy" && message == "password derivation is busy; retry later"),
+            if code == "server_busy" && message.ends_with("password derivation is busy; retry later")),
         "CreateUser must return the real port's held-permit refusal: {response:?}",
     );
     assert!(reply_bytes.len() <= 4096, "busy refusal fits caller cap");

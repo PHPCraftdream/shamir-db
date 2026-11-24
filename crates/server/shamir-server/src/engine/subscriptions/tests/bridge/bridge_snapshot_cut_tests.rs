@@ -349,10 +349,17 @@ async fn snapshot_failure_closes_without_ready_and_releases_pin() {
         ));
         let terminal = tokio::select! {
             biased;
-            frame = observed.recv() => frame.unwrap(),
-            () = &mut bridge => observed.try_recv().unwrap(),
+            frame = observed.recv() => frame,
+            () = &mut bridge => observed.try_recv().ok(),
         };
-        assert_eq!(terminal.push, PushKind::Closed);
+        if missing {
+            // An unavailable source fails the activation whole: nothing is
+            // pushed, neither `Ready` nor `Closed` for the failed id.
+            assert!(terminal.is_none(), "no frame for a failed activation");
+        } else {
+            let terminal = terminal.expect("a snapshot failure closes the stream");
+            assert_eq!(terminal.push, PushKind::Closed);
+        }
         // The Closed enqueue happens in the bridge's final synchronous poll.
         drop(bridge);
         assert!(observed.try_recv().is_err());

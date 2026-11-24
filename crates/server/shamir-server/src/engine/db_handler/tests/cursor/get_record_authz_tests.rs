@@ -876,10 +876,7 @@ fn expect_batch_unknown_table_refusal(resp: DbResponse, table: &str) {
     match resp {
         DbResponse::Error { code, message } => assert_eq!(
             (code.as_str(), message.as_str()),
-            (
-                "unknown_table",
-                "Query '' failed [unknown_table]: table is unavailable"
-            ),
+            ("unknown_table", "table is unavailable"),
             "batch read of unknown table '{table}'"
         ),
         other => panic!("batch read of unknown table '{table}': got {other:?}"),
