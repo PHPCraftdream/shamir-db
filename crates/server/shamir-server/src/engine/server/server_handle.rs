@@ -21,11 +21,10 @@ use crate::server::store_release_barrier::{
     release_stores_until, ReleaseOutcome, UnverifiedReason,
 };
 
-/// One reserve shared by all earlier teardown stages. The early cutoff is the
-/// fixed instant `outer_deadline - LATE_RESERVE`; individual stage caps may
-/// shorten a wait, but never move that cutoff forward. The late metadata join
-/// may use at most 500 ms of it; store release then keeps 250 ms for its
-/// verdict/report. The remainder is scheduling and report slack.
+/// Each late-stage WAIT ends at the earlier instant: stage start + its cap, or
+/// outer deadline - reserve (500 ms metadata / 250 ms store release). These
+/// bound waits only: synchronous work is not interrupted; a timed-out join's
+/// task may continue (the metadata join is detached).
 const LATE_RESERVE: Duration = Duration::from_secs(1);
 
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -435,6 +434,7 @@ impl ShutdownOwner {
     }
 }
 
+/// Bounds WAITs by the earlier of stage start + cap and outer deadline minus reserve; synchronous work is not interrupted, and timed-out joins may continue. `early_stage_bound` uses min(stage start + cap, early cutoff).
 fn stage_bound(
     deadline_at: Option<tokio::time::Instant>,
     cap: Duration,
@@ -706,8 +706,9 @@ impl ServerHandle {
                 .await
                 .is_err()
             {
-                // The abandoned teardown may not have reached its own stop
-                // request: signal the flusher here (idempotent).
+                // The abandoned audit wait may mean the flusher never received
+                // its stop request; signal it here (idempotently). This stops
+                // the wait, not audit work already in a gate or fsync.
                 self.audit_appender.request_flusher_stop();
                 report.add_error(format!(
                     "audit teardown exceeded shutdown budget {audit_budget:?}"
@@ -928,19 +929,18 @@ impl ServerHandle {
                     tracing::warn!(
                         ?still_locked,
                         timeout = ?release_budget,
-                        "shutdown: stores still held after the release timeout",
+                        "shutdown: stores still held after the release timeout (last observed held)",
                     );
                     report.add_error(format!(
                         "stores still held after the release timeout {release_budget:?}: \
-                         {stores} — a writer outside this teardown still holds the store (a \
-                         detached task or an external process); an immediate relaunch of the \
-                         same data directory can fail with `Locked`"
+                         {stores} — the last completed probe observed these stores held; an immediate \
+                         relaunch of the same data directory can fail with `Locked`"
                     ));
                 }
                 ReleaseOutcome::Unverified(UnverifiedReason::BudgetExpired) => {
-                    // The barrier rejected an already-expired absolute
-                    // deadline before submitting a probe; state is unknown,
-                    // not a completed unverified probe outcome.
+                    // UNKNOWN if no usable observation exists. A timed-out
+                    // retry after a completed held observation is StillLocked;
+                    // abort stops only a queued probe, not a running filesystem call.
                     tracing::warn!("shutdown: release probe deadline expired before submission");
                     report_unsubmitted_release_probe(
                         report,
@@ -951,7 +951,7 @@ impl ServerHandle {
                     let (summary, detail) = match reason {
                         UnverifiedReason::PoolStarved => (
                             "the store-release blocking job did not complete before its deadline",
-                            "the blocking job may still have been queued or running",
+                            "the blocking job may still be queued or running; if running, its filesystem call may continue after this UNKNOWN verdict",
                         ),
                         UnverifiedReason::DiscoveryGap => (
                             "store discovery was incomplete",

@@ -1,10 +1,11 @@
 use std::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use shamir_db::engine::meta::repl::bookmark_v3::{self, FollowerBookmarkState};
 use shamir_db::{SeedRefusal, SubscriptionBinding};
 use shamir_query_types::admin::ReplDirection;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::handle::SubHandle;
 use super::machine::SubscriptionSupervisor;
@@ -301,6 +302,7 @@ impl SubscriptionSupervisor {
         // A child of the supervisor's stop token: `begin_stop` reaches it, and one
         // created after the stop is born cancelled.
         let cancel = self.stop.child_token();
+        let loops_cancel = cancel.child_token();
         let mut joins = Vec::with_capacity(pull_targets.len());
         let mut dones: Vec<Arc<AtomicBool>> = Vec::with_capacity(pull_targets.len());
         // One live-count reference per target; only the final exit may
@@ -339,7 +341,11 @@ impl SubscriptionSupervisor {
 
             let local = self.local.clone();
             let src = source.clone();
-            let tok = cancel.clone();
+            let tok = loops_cancel.clone();
+            let tok_loops_for_cancel = loops_cancel.clone();
+            let tok_exit_for_wrapper = cancel.clone();
+            #[cfg(test)]
+            let tok_gate = tok.clone();
             let sub_name = sub.name.clone();
             // Generation fences stale terminal callbacks from replacements.
             let generation = sub.binding_generation;
@@ -356,6 +362,12 @@ impl SubscriptionSupervisor {
             #[cfg(test)]
             let teardown_entered = Arc::clone(&self.teardown_entered);
             #[cfg(test)]
+            let accounted = Arc::clone(&self.accounted);
+            #[cfg(test)]
+            let housekeeping_gate = self.housekeeping_gate.clone();
+            #[cfg(test)]
+            let cfg_repo = cfg.repo.clone();
+            #[cfg(test)]
             let exit_signal = cfg.exit_hook.clone();
             #[cfg(test)]
             let signal_other_exit = exit_signal
@@ -363,104 +375,245 @@ impl SubscriptionSupervisor {
                 .is_some_and(|hook| hook.repo.as_deref() != Some(cfg.repo.as_str()));
 
             let registry = self.registry.clone();
-            // §5.6 — each loop is its own task; never blocks the server.
+            // §5.6 — each loop is its own task; never blocks the server. A wrapper dropped before finishing (for example, a detached handle at runtime shutdown) still leaves lease/registry teardown undone; that pre-existing gap is not fixed here.
             let join = tokio::spawn(async move {
                 // Retry terminal marking after the loop returns.
-                let tok_exit = tok.clone();
-                let loop_result = run_follower_loop(local.clone(), src, cfg, tok).await;
+                let tok_exit = tok_exit_for_wrapper;
+                let target = format!("{}/{}", cfg.db, cfg.repo);
+                let loop_result = match std::panic::AssertUnwindSafe(run_follower_loop(
+                    local.clone(),
+                    src,
+                    cfg,
+                    tok,
+                ))
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => Some(result),
+                    Err(payload) => {
+                        let msg = payload
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+                        let disposal =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                drop(payload)
+                            }));
+                        if let Err(second_payload) = disposal {
+                            // The opaque second payload may itself panic on drop; dropping it here
+                            // could unwind past done.store and the live decrement. There is
+                            // nothing recoverable inside a Box<dyn Any>.
+                            std::mem::forget(second_payload);
+                            error!(
+                                subscription = %sub_name,
+                                target = %target,
+                                "follower loop panic payload disposal panicked"
+                            );
+                        }
+                        error!(
+                            subscription = %sub_name,
+                            target = %target,
+                            panic_msg = %msg,
+                            "follower loop panicked"
+                        );
+                        tok_loops_for_cancel.cancel();
+                        None
+                    }
+                };
                 #[cfg(test)]
                 if signal_other_exit {
                     if let Some(hook) = &exit_signal {
                         hook.exited.notify_one();
                     }
                 }
-                match loop_result {
-                    Ok(()) => {}
-                    Err(e @ ReplError::JournalGap { gap_at, .. })
-                    | Err(
-                        e @ ReplError::ApplyRejected {
-                            leader_version: gap_at,
-                            ..
-                        },
-                    ) => {
-                        let from_version = if let ReplError::JournalGap { from_version, .. } = &e {
-                            *from_version
-                        } else {
-                            gap_at
-                        };
-                        let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
-                        terminal::mark_with_retry(
-                            &local,
-                            &sub_name,
-                            "resync_required",
-                            &tok_exit,
-                            generation,
-                            || {
-                                let l = Arc::clone(&local_m);
-                                let n = name_m.clone();
-                                async move {
-                                    l.mark_subscription_resync_required_generation(
-                                        &n,
-                                        gap_at,
-                                        from_version,
-                                        generation,
-                                    )
-                                    .await
-                                }
+                if let Some(loop_result) = loop_result {
+                    match loop_result {
+                        Ok(()) => {}
+                        Err(e @ ReplError::JournalGap { gap_at, .. })
+                        | Err(
+                            e @ ReplError::ApplyRejected {
+                                leader_version: gap_at,
+                                ..
                             },
-                        )
-                        .await;
-                        warn!(
-                            subscription = %sub_name,
-                            error = %e,
-                            "follower loop terminated; subscription marked resync_required"
-                        );
-                    }
-                    Err(
-                        e @ (ReplError::IdentityMismatch { .. }
-                        | ReplError::Seed(
-                            SeedRefusal::WrongIdentity
-                            | SeedRefusal::WrongHistoryEpoch
-                            | SeedRefusal::MissingIdentity
-                            | SeedRefusal::WrongSchema,
-                        )),
-                    ) => {
-                        // S5c-X PR8 chunk 4 — SERVER FENCES: an identity/epoch
-                        // fence trip means the leader is not the incarnation
-                        // this subscription recorded. QUARANTINE the follower
-                        // (state = "resync_required") so the split is visible
-                        // and the loop stays stopped, exactly like the
-                        // journal-gap path. The fence fires BEFORE decode/
-                        // apply, so nothing was applied and the gap metadata
-                        // is 0/0 (no version was reached).
-                        let skip_quarantine = cfg!(test)
-                            && identity_fence::checks::SKIP_FENCE_QUARANTINE_FOR_TEST
-                                .load(Ordering::Relaxed);
-                        if skip_quarantine {
+                        ) => {
+                            let from_version =
+                                if let ReplError::JournalGap { from_version, .. } = &e {
+                                    *from_version
+                                } else {
+                                    gap_at
+                                };
+                            let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
+                            #[cfg(test)]
+                            terminal::mark_gate_wait(tok_gate.clone()).await;
+                            terminal::mark_with_retry(
+                                &local,
+                                &sub_name,
+                                "resync_required",
+                                &tok_exit,
+                                generation,
+                                || {
+                                    let l = Arc::clone(&local_m);
+                                    let n = name_m.clone();
+                                    async move {
+                                        l.mark_subscription_resync_required_generation(
+                                            &n,
+                                            gap_at,
+                                            from_version,
+                                            generation,
+                                        )
+                                        .await
+                                    }
+                                },
+                            )
+                            .await;
+                            #[cfg(test)]
+                            terminal::mark_gate_complete();
                             warn!(
                                 subscription = %sub_name,
                                 error = %e,
-                                "identity fence tripped; quarantine disabled by test seam"
+                                "follower loop terminated; subscription marked resync_required"
                             );
-                            // Negative control: the UNPROTECTED pre-quarantine
-                            // path (generic terminal mapping), still retried.
-                            terminal::persist_terminal_with_retry(
-                                &local, &sub_name, &e, generation, &tok_exit,
-                            )
-                            .await;
-                        } else {
-                            // Same catalogue state the gap path persists via
-                            // `mark_subscription_resync_required_generation`
-                            // (state = "resync_required"), but the message
-                            // keeps the TYPED fence reason plus the recorded
-                            // and observed identities instead of gap text —
-                            // there is no gap; nothing was applied.
+                        }
+                        Err(
+                            e @ (ReplError::IdentityMismatch { .. }
+                            | ReplError::Seed(
+                                SeedRefusal::WrongIdentity
+                                | SeedRefusal::WrongHistoryEpoch
+                                | SeedRefusal::MissingIdentity
+                                | SeedRefusal::WrongSchema,
+                            )),
+                        ) => {
+                            // S5c-X PR8 chunk 4 — SERVER FENCES: an identity/epoch
+                            // fence trip means the leader is not the incarnation
+                            // this subscription recorded. QUARANTINE the follower
+                            // (state = "resync_required") so the split is visible
+                            // and the loop stays stopped, exactly like the
+                            // journal-gap path. The fence fires BEFORE decode/
+                            // apply, so nothing was applied and the gap metadata
+                            // is 0/0 (no version was reached).
+                            let skip_quarantine = cfg!(test)
+                                && identity_fence::checks::SKIP_FENCE_QUARANTINE_FOR_TEST
+                                    .load(Ordering::Relaxed);
+                            if skip_quarantine {
+                                warn!(
+                                    subscription = %sub_name,
+                                    error = %e,
+                                    "identity fence tripped; quarantine disabled by test seam"
+                                );
+                                // Negative control: the UNPROTECTED pre-quarantine
+                                // path (generic terminal mapping), still retried.
+                                terminal::persist_terminal_with_retry(
+                                    &local, &sub_name, &e, generation, &tok_exit,
+                                )
+                                .await;
+                            } else {
+                                // Same catalogue state the gap path persists via
+                                // `mark_subscription_resync_required_generation`
+                                // (state = "resync_required"), but the message
+                                // keeps the TYPED fence reason plus the recorded
+                                // and observed identities instead of gap text —
+                                // there is no gap; nothing was applied.
+                                let (local_m, name_m, msg_m) =
+                                    (Arc::clone(&local), sub_name.clone(), e.to_string());
+                                terminal::mark_with_retry(
+                                    &local,
+                                    &sub_name,
+                                    "resync_required (identity fence)",
+                                    &tok_exit,
+                                    generation,
+                                    || {
+                                        let l = Arc::clone(&local_m);
+                                        let n = name_m.clone();
+                                        let msg = msg_m.clone();
+                                        async move {
+                                            l.mark_subscription_terminal_generation(
+                                                &n,
+                                                "resync_required",
+                                                &msg,
+                                                Some(generation),
+                                            )
+                                            .await
+                                        }
+                                    },
+                                )
+                                .await;
+                                metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                                warn!(
+                                    subscription = %sub_name,
+                                    error = %e,
+                                    "identity fence tripped; subscription marked resync_required"
+                                );
+                            }
+                        }
+                        Err(e @ ReplError::FollowerStateRefused { .. }) => {
+                            // S5c-X PR6b-3 — TERMINAL: the follower repo's durable
+                            // state is unsupported (no migration exists). Same
+                            // quarantine family as the identity fence, WITHOUT
+                            // the identity-fence test seam: always quarantined.
+                            // Round 12 F3: loop-originated -> generation-fenced.
+                            if let Err(mark_err) = local
+                                .mark_subscription_terminal_generation(
+                                    &sub_name,
+                                    "resync_required",
+                                    &e.to_string(),
+                                    Some(generation),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    subscription = %sub_name,
+                                    error = %mark_err,
+                                    "supervisor: failed to persist resync_required after follower-state refusal"
+                                );
+                            }
+                            metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                            warn!(
+                                subscription = %sub_name,
+                                error = %e,
+                                "follower state refused; subscription marked resync_required (reseed required)"
+                            );
+                        }
+                        Err(e @ ReplError::AtomicBatchUnsupported { .. }) => {
+                            // S5c-X PR6b-3 R7-2(ii) — TERMINAL: the destination
+                            // backend cannot host the receipt pipeline (no atomic
+                            // batches). Same quarantine family as the
+                            // follower-state refusal: persist the typed terminal
+                            // status ONCE with the remedy in the message; the loop
+                            // never retries it.
+                            // Round 12 F3: loop-originated -> generation-fenced.
+                            if let Err(mark_err) = local
+                                .mark_subscription_terminal_generation(
+                                    &sub_name,
+                                    "resync_required",
+                                    &e.to_string(),
+                                    Some(generation),
+                                )
+                                .await
+                            {
+                                warn!(
+                                    subscription = %sub_name,
+                                    error = %mark_err,
+                                    "supervisor: failed to persist resync_required after atomic-batch refusal"
+                                );
+                            }
+                            metrics::counter!("shamir_repl_resync_required_total").increment(1);
+                            warn!(
+                                subscription = %sub_name,
+                                error = %e,
+                                "atomic batches unsupported on destination; subscription marked resync_required (re-create the repo raw)"
+                            );
+                        }
+                        Err(e @ ReplError::ReopenRequired { .. }) => {
+                            // Generation-aware: a replaced binding outlives the
+                            // stale task's reopen mark. Round-5 B3: bounded,
+                            // cancellation-aware retry.
                             let (local_m, name_m, msg_m) =
                                 (Arc::clone(&local), sub_name.clone(), e.to_string());
                             terminal::mark_with_retry(
                                 &local,
                                 &sub_name,
-                                "resync_required (identity fence)",
+                                "reopen_required",
                                 &tok_exit,
                                 generation,
                                 || {
@@ -470,7 +623,7 @@ impl SubscriptionSupervisor {
                                     async move {
                                         l.mark_subscription_terminal_generation(
                                             &n,
-                                            "resync_required",
+                                            "reopen_required",
                                             &msg,
                                             Some(generation),
                                         )
@@ -479,112 +632,26 @@ impl SubscriptionSupervisor {
                                 },
                             )
                             .await;
-                            metrics::counter!("shamir_repl_resync_required_total").increment(1);
-                            warn!(
-                                subscription = %sub_name,
-                                error = %e,
-                                "identity fence tripped; subscription marked resync_required"
-                            );
                         }
-                    }
-                    Err(e @ ReplError::FollowerStateRefused { .. }) => {
-                        // S5c-X PR6b-3 — TERMINAL: the follower repo's durable
-                        // state is unsupported (no migration exists). Same
-                        // quarantine family as the identity fence, WITHOUT
-                        // the identity-fence test seam: always quarantined.
-                        // Round 12 F3: loop-originated -> generation-fenced.
-                        if let Err(mark_err) = local
-                            .mark_subscription_terminal_generation(
-                                &sub_name,
-                                "resync_required",
-                                &e.to_string(),
-                                Some(generation),
+                        Err(e) => {
+                            terminal::persist_terminal_with_retry(
+                                &local, &sub_name, &e, generation, &tok_exit,
                             )
-                            .await
-                        {
-                            warn!(
-                                subscription = %sub_name,
-                                error = %mark_err,
-                                "supervisor: failed to persist resync_required after follower-state refusal"
-                            );
+                            .await;
+                            warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                         }
-                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
-                        warn!(
-                            subscription = %sub_name,
-                            error = %e,
-                            "follower state refused; subscription marked resync_required (reseed required)"
-                        );
-                    }
-                    Err(e @ ReplError::AtomicBatchUnsupported { .. }) => {
-                        // S5c-X PR6b-3 R7-2(ii) — TERMINAL: the destination
-                        // backend cannot host the receipt pipeline (no atomic
-                        // batches). Same quarantine family as the
-                        // follower-state refusal: persist the typed terminal
-                        // status ONCE with the remedy in the message; the loop
-                        // never retries it.
-                        // Round 12 F3: loop-originated -> generation-fenced.
-                        if let Err(mark_err) = local
-                            .mark_subscription_terminal_generation(
-                                &sub_name,
-                                "resync_required",
-                                &e.to_string(),
-                                Some(generation),
-                            )
-                            .await
-                        {
-                            warn!(
-                                subscription = %sub_name,
-                                error = %mark_err,
-                                "supervisor: failed to persist resync_required after atomic-batch refusal"
-                            );
-                        }
-                        metrics::counter!("shamir_repl_resync_required_total").increment(1);
-                        warn!(
-                            subscription = %sub_name,
-                            error = %e,
-                            "atomic batches unsupported on destination; subscription marked resync_required (re-create the repo raw)"
-                        );
-                    }
-                    Err(e @ ReplError::ReopenRequired { .. }) => {
-                        // Generation-aware: a replaced binding outlives the
-                        // stale task's reopen mark. Round-5 B3: bounded,
-                        // cancellation-aware retry.
-                        let (local_m, name_m, msg_m) =
-                            (Arc::clone(&local), sub_name.clone(), e.to_string());
-                        terminal::mark_with_retry(
-                            &local,
-                            &sub_name,
-                            "reopen_required",
-                            &tok_exit,
-                            generation,
-                            || {
-                                let l = Arc::clone(&local_m);
-                                let n = name_m.clone();
-                                let msg = msg_m.clone();
-                                async move {
-                                    l.mark_subscription_terminal_generation(
-                                        &n,
-                                        "reopen_required",
-                                        &msg,
-                                        Some(generation),
-                                    )
-                                    .await
-                                }
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        terminal::persist_terminal_with_retry(
-                            &local, &sub_name, &e, generation, &tok_exit,
-                        )
-                        .await;
-                        warn!(subscription = %sub_name, error = %e, "follower loop terminated");
                     }
                 }
                 // ---- exit housekeeping: shared by every loop return path.
                 // The apply guard is dropped before this point; decrement the
                 // shared count, and let only the last loop invalidate/remove.
+                #[cfg(test)]
+                if let Some(gate) = &housekeeping_gate {
+                    if gate.repo.as_deref().is_some_and(|r| r == cfg_repo) {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
                 done.store(true, Ordering::Release);
                 if live.fetch_sub(1, Ordering::AcqRel) == 1 {
                     #[cfg(test)]
@@ -612,6 +679,8 @@ impl SubscriptionSupervisor {
                         teardown_done.notify_one();
                     }
                 }
+                #[cfg(test)]
+                accounted.notify_one();
             });
             joins.push(join);
             dones.push(done_flag);
@@ -637,6 +706,15 @@ impl SubscriptionSupervisor {
         // we just spawned rather than leak them.
         if let Err((_, handle)) = self.registry.insert_sync(sub.name.clone(), handle) {
             handle.stop();
+            for join in handle.joins {
+                if let Err(join_error) = join.await {
+                    error!(
+                        subscription = %sub.name,
+                        error = %join_error,
+                        "supervisor: follower wrapper join failed after registration conflict"
+                    );
+                }
+            }
         } else {
             // The last exit may have run before this insert (a follower born
             // cancelled exits at its first cancellation checkpoint): it

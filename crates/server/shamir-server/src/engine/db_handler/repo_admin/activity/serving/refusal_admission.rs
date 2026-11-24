@@ -15,14 +15,6 @@ use super::{
     SATURATED,
 };
 
-/// Outcome of the single bucket-locked admission decision. Refusal accounting
-/// and logging are performed only after the bucket callback returns.
-enum ShareAdmission {
-    Reserved,
-    ShareFull,
-    GlobalRefused(GlobalRefusal),
-}
-
 #[derive(Clone, Copy)]
 enum GlobalRefusal {
     Closed,
@@ -31,6 +23,19 @@ enum GlobalRefusal {
     ObservabilityFull,
     RetryLimit,
 }
+
+#[derive(Clone, Copy)]
+enum AdmissionDecision {
+    Reserved,
+    ShareFull,
+    Global(GlobalRefusal),
+    RetryLimit,
+}
+
+/// Opaque refusal verdict: decided under the queue's guards, accounted and logged
+/// by [`CancelRefusalAudit::log_refusal`] after the caller dropped them.
+#[derive(Clone, Copy)]
+pub(super) struct Refusal(AdmissionDecision);
 
 impl CancelRefusalAudit {
     /// Reserve one slot of `principal`'s share (for `Observability` also of its
@@ -53,93 +58,103 @@ impl CancelRefusalAudit {
     /// A principal entry therefore always implies a reserved slot, so the map
     /// can never hold more live entries than `CANCEL_AUDIT_CAPACITY` (the bound
     /// its doc states).
+    #[cfg(test)]
     pub(super) fn try_reserve(
         self: &Arc<Self>,
         principal: &str,
         class: AuditEventClass,
     ) -> Option<CancelAuditSlot> {
-        // READ-ONLY pre-check: an already-capped principal is refused without
-        // reaching the map update at all. It decides nothing (the same share
-        // test runs under the bucket lock below); it only spares the saturated
-        // case one state CAS and one entry lookup.
+        match self.reserve_verdict(principal, class) {
+            Ok(slot) => Some(slot),
+            Err(verdict) => {
+                self.log_refusal(verdict, class);
+                None
+            }
+        }
+    }
+
+    /// Decide admission without accounting or logging; callers holding the
+    /// spawn gate must release it before processing a refusal.
+    pub(super) fn reserve_verdict(
+        self: &Arc<Self>,
+        principal: &str,
+        class: AuditEventClass,
+    ) -> Result<CancelAuditSlot, Refusal> {
         if self.share_is_full(principal, class) {
-            self.refuse_share_full(class);
-            return None;
+            return Err(Refusal(AdmissionDecision::ShareFull));
         }
         #[cfg(test)]
         fire_share_decision_probe();
-        if !self.reserve_share_and_global(principal, class) {
-            return None;
+        match self.reserve_share_and_global(principal, class) {
+            AdmissionDecision::Reserved => Ok(CancelAuditSlot {
+                queue: Arc::clone(self),
+                principal: principal.to_owned(),
+                class,
+                appended: false,
+            }),
+            verdict => Err(Refusal(verdict)),
         }
-        Some(CancelAuditSlot {
-            queue: Arc::clone(self),
-            principal: principal.to_owned(),
-            class,
-            appended: false,
-        })
+    }
+
+    pub(super) fn log_refusal(&self, verdict: Refusal, class: AuditEventClass) {
+        match verdict.0 {
+            AdmissionDecision::ShareFull => self.refuse_share_full(class),
+            AdmissionDecision::Global(reason) => self.refuse_global(reason, class),
+            AdmissionDecision::RetryLimit => self.refuse_retry_limit(class),
+            AdmissionDecision::Reserved => unreachable!("reserved is not a refusal"),
+        }
     }
 
     /// Read-only share test: creates no entry and takes no slot.
     fn share_is_full(&self, principal: &str, class: AuditEventClass) -> bool {
-        self.principals
-            .read_sync(principal, |_, held| held.is_full(class))
-            .unwrap_or(false)
+        match self.principals.try_entry(principal.to_owned()) {
+            Some(scc::hash_map::Entry::Occupied(entry)) => entry.get().is_full(class),
+            Some(scc::hash_map::Entry::Vacant(_)) | None => false,
+        }
     }
 
     /// Take one slot of `principal`'s share AND one global slot in ONE
-    /// bucket-locked decision, or refuse without waiting.
-    ///
-    /// The share tests, the global CAS and the increment run inside the same
-    /// `update_sync`, so no global slot is ever held by a request that the
-    /// share check then refuses. Exact per NAME: two principals never share a
-    /// counter and the count cannot drift from the live slots.
-    fn reserve_share_and_global(&self, principal: &str, class: AuditEventClass) -> bool {
+    /// bucket-locked decision, or refuse without waiting. `try_entry` returns
+    /// immediately when the scc 3.8 bucket is busy; each occupied/vacant
+    /// decision is one bounded entry operation.
+    fn reserve_share_and_global(
+        &self,
+        principal: &str,
+        class: AuditEventClass,
+    ) -> AdmissionDecision {
         for _ in 0..ADMISSION_RETRY_LIMIT {
-            match self.principals.update_sync(principal, |_, held| {
-                if held.is_full(class) {
-                    return ShareAdmission::ShareFull;
-                }
-                match self.reserve_global_slot(class) {
-                    Ok(()) => {
-                        held.total += 1;
-                        if class == AuditEventClass::Observability {
-                            held.observability += 1;
-                        }
-                        ShareAdmission::Reserved
+            match self.principals.try_entry(principal.to_owned()) {
+                Some(scc::hash_map::Entry::Occupied(mut entry)) => {
+                    let held = entry.get_mut();
+                    if held.is_full(class) {
+                        return AdmissionDecision::ShareFull;
                     }
-                    Err(reason) => ShareAdmission::GlobalRefused(reason),
+                    match self.reserve_global_slot(class) {
+                        Ok(()) => {
+                            held.total += 1;
+                            if class == AuditEventClass::Observability {
+                                held.observability += 1;
+                            }
+                            return AdmissionDecision::Reserved;
+                        }
+                        Err(reason) => return AdmissionDecision::Global(reason),
+                    }
                 }
-            }) {
-                Some(ShareAdmission::Reserved) => return true,
-                Some(ShareAdmission::ShareFull) => {
-                    self.refuse_share_full(class);
-                    return false;
+                Some(scc::hash_map::Entry::Vacant(entry)) => {
+                    if let Err(reason) = self.reserve_global_slot(class) {
+                        return AdmissionDecision::Global(reason);
+                    }
+                    let held = PrincipalHeld {
+                        total: 1,
+                        observability: usize::from(class == AuditEventClass::Observability),
+                    };
+                    entry.insert_entry(held);
+                    return AdmissionDecision::Reserved;
                 }
-                Some(ShareAdmission::GlobalRefused(reason)) => {
-                    // First-touch failures leave a zero-count placeholder. Retire
-                    // it only if no concurrent admission has made it live.
-                    self.principals
-                        .remove_if_sync(principal, |held| held.total == 0);
-                    self.refuse_global(reason, class);
-                    return false;
-                }
-                None => {
-                    // Publish an empty entry first. The subsequent bucket-locked
-                    // update is the sole admission decision for both paths.
-                    let _ = self.principals.insert_sync(
-                        principal.to_owned(),
-                        PrincipalHeld {
-                            total: 0,
-                            observability: 0,
-                        },
-                    );
-                }
+                None => std::hint::spin_loop(),
             }
         }
-        self.principals
-            .remove_if_sync(principal, |held| held.total == 0);
-        self.refuse_retry_limit(class);
-        false
+        AdmissionDecision::RetryLimit
     }
 
     fn refuse_retry_limit(&self, class: AuditEventClass) {
