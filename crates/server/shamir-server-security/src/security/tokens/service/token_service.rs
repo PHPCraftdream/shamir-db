@@ -650,12 +650,18 @@ impl TokenService {
                 tokio::select! { biased; _ = stop.cancelled() => break, _ = shutdown.cancelled() => break, _ = interval.tick() => { let _ = gc.collect().await; } }
             }
         };
-        // The guard wraps the collector from outside: the awaited collector (and
-        // the store handles it captured) is destroyed before the guard counts
-        // the task out, on a normal return, a panic and an abort alike.
+        // Collector and guard are ONE value whose fields drop in declaration
+        // order, so the collector (and the store handles it captured) is
+        // destroyed before the guard counts the task out: on a normal return, a
+        // panic, an abort, and for a task that is dropped without ever being
+        // polled. `let guarded = guarded;` makes the block capture it whole.
+        let guarded = GuardedCollector {
+            collector,
+            _live: live,
+        };
         *task = Some(tokio::spawn(async move {
-            let _live = live;
-            collector.await;
+            let guarded = guarded;
+            guarded.collector.await;
         }));
         // Only after the spawn succeeded: a spawn that panicked leaves the
         // "never started" answer intact.
@@ -668,7 +674,9 @@ impl TokenService {
     /// the collector may still run, and a restart spawns a new one. The slot
     /// lock makes the answer one snapshot against `start_gc`: a first start can
     /// not land between the started flag and the stop-token reads. A handle that
-    /// is still in the slot must also report finished, as before.
+    /// is still in the slot must also report finished, as before. The promise is
+    /// async-task completion: a storage pass already handed to the blocking pool
+    /// keeps its own store clones until that job returns.
     pub async fn gc_task_finished(&self) -> bool {
         let slot = self.gc_task.lock().await;
         if self.gc_spawned.load(std::sync::atomic::Ordering::Acquire) {
@@ -693,6 +701,12 @@ impl TokenService {
             Arc::clone(&self.clock),
         )
     }
+}
+/// A collector future with its live-count guard. The field order is the drop
+/// order: the collector goes first, the guard last.
+struct GuardedCollector<F> {
+    collector: F,
+    _live: LiveCollector,
 }
 /// Counts one collector task out when it is dropped: a normal return, a panic
 /// and an abort all end it.

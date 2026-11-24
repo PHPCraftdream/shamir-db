@@ -176,6 +176,16 @@ async fn the_first_collector_ending_does_not_finish_a_live_second_one() {
     clock.service.start_gc(CancellationToken::new()).await;
     clock.await_parked(1);
 
+    // Abandon the second join too, so both handles are detached and the slot is
+    // empty when the answer is read: only the live count can then speak (an
+    // attached unfinished handle would hide a stale exit flag).
+    let abandoned_second =
+        tokio::time::timeout(Duration::from_millis(200), clock.service.shutdown_gc()).await;
+    assert!(
+        abandoned_second.is_err(),
+        "a parked collector cannot be joined"
+    );
+
     // Independent witness that the first collector's task is really gone while
     // the second is still parked: the runtime's alive-task count drops by one.
     assert_eq!(
