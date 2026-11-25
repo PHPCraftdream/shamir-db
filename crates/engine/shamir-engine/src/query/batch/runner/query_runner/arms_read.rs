@@ -507,11 +507,13 @@ impl<'a> QueryRunner<'a> {
                 // replacing the old msgpack round-trip — F5) — collected into
                 // a List, one entry per iteration (ADR Decision 2).
                 if self.scope.enforce_result_size() {
-                    // Charge the shell with iteration 0's results so a refusal
-                    // in iteration 0 surfaces before byte-limit failure; large
-                    // results still report their distinct byte-limit error.
+                    // Charge the container shell with iteration 0's results so
+                    // a refusal in iteration 0 surfaces before byte-limit
+                    // failure; large results still report their distinct
+                    // byte-limit error. An empty loop pays it below.
                     let shell = if iterations.is_empty() {
-                        ResultSize::SHELL
+                        ResultSize::result(&QueryResult::default())
+                            .saturating_add(ResultSize::SHELL)
                     } else {
                         0
                     };
@@ -528,6 +530,11 @@ impl<'a> QueryRunner<'a> {
                 iterations.push(value);
             }
 
+            if iterations.is_empty() && self.scope.enforce_result_size() {
+                self.scope.charge_bytes(
+                    ResultSize::result(&QueryResult::default()).saturating_add(ResultSize::SHELL),
+                )?;
+            }
             return Ok(QueryResult::with_value(QueryValue::List(iterations)));
         }
         unreachable!("op was matched as ForEach above");

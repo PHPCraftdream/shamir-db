@@ -1,11 +1,10 @@
+#[cfg(feature = "fjall")]
 use futures::StreamExt;
 use shamir_query_builder::batch::{Batch, Isolation};
 use shamir_query_builder::write::{self, doc};
 use shamir_query_types::batch::BatchError;
 use shamir_types::access::Actor;
 
-#[cfg(feature = "fjall")]
-use super::super::support::insert_order_body;
 use super::super::support::TxTestResolver;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::TableRef;
@@ -71,6 +70,7 @@ impl crate::query::batch::BatchResolver for CommitConflictResolver {
 }
 
 /// Count the rows durably present in `orders`.
+#[cfg(feature = "fjall")]
 async fn count_orders(repo: &RepoInstance) -> usize {
     let table = repo.get_table("orders").await.expect("orders table");
     let stream = table.list_stream(64);
@@ -174,7 +174,9 @@ async fn transactional_sub_batch_aborted_commit_fails_the_container_not_empty_su
     }
 }
 
+#[cfg(feature = "fjall")]
 struct SegmentCapEnvGuard(Option<std::ffi::OsString>);
+#[cfg(feature = "fjall")]
 impl Drop for SegmentCapEnvGuard {
     fn drop(&mut self) {
         if let Some(value) = self.0.take() {
@@ -231,8 +233,15 @@ async fn transactional_sub_batch_indeterminate_commit_reports_typed_reopen_with_
     // Transactional child whose forced WAL seal failure leaves its commit
     // outcome indeterminate; the outer batch carries a later alias that must
     // never run once the child's outcome is unknown.
-    let mut body = insert_order_body("uid");
-    body.transactional = true;
+    // A literal insert: a body with an unbound `$param` would abort during
+    // substitution and never reach the armed seal fault.
+    let mut child = Batch::new();
+    child.transactional();
+    child.insert(
+        "ins",
+        write::insert("orders").row(doc().set("user_id", 1_i64).unwrap()),
+    );
+    let body = child.build();
     let mut outer = Batch::new();
     outer.id("outer");
     outer.sub_batch_no_bind("sub", body);
