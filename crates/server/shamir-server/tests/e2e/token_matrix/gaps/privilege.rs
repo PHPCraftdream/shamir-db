@@ -224,7 +224,7 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
     assert!(!batches.is_empty(), "batch fixtures are complete");
     assert_eq!(
         batches.len(),
-        66,
+        69,
         "one fixture for each current admin BatchOp arm"
     );
 
