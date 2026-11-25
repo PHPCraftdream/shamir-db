@@ -88,7 +88,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("shamir_gate_pending_versions",samples)
         for child in ("bucket","count","sum"): self.assertIn("shamir_query_duration_seconds_"+child,samples)
         doc=mi.documented(mi.ROOT/"docs/guide-docs/guide/07-operations.md"); self.assertIn("shamir_login_http_begin_duration_seconds_bucket",doc)
-        text=(mi.ROOT/"docs/guide-docs/guide/07-operations.md").read_text(encoding="utf-8"); lt=(mi.ROOT/"crates/server/shamir-server-security/src/security/observability/login_histogram.rs").read_text(encoding="utf-8"); buckets_code=re.findall(r"\d+(?:\.\d+)?",lt.split("const BUCKETS",1)[1].split("];",1)[0]); row_guide=next(l for l in text.splitlines() if "shamir_login_http_begin_duration_seconds_bucket{le}" in l); self.assertEqual(sorted(map(float,buckets_code)),sorted(map(float,re.findall(r"\d+(?:\.\d+)?",row_guide))))
+        text=(mi.ROOT/"docs/guide-docs/guide/07-operations.md").read_text(encoding="utf-8"); lt=(mi.ROOT/"crates/server/shamir-server-security/src/security/observability/login_histogram.rs").read_text(encoding="utf-8"); buckets_code=re.findall(r"\d+(?:\.\d+)?",lt.split("const BUCKETS",1)[1].split("= &[",1)[1].split("];",1)[0]); row_guide=next(l for l in text.splitlines() if "shamir_login_http_begin_duration_seconds_bucket{le}" in l); self.assertEqual(sorted(map(float,buckets_code)),sorted(map(float,re.findall(r"\d+(?:\.\d+)?",row_guide.split("границы",1)[1].split("секунд",1)[0]))))
         rules,_=mi.load_rules(mi.ROOT/"deploy/alerts/shamir.rules.yml"); alerts=[r for g in rules["groups"] for r in g["rules"]]
         self.assertEqual(len(alerts),19); self.assertFalse(any("node_filesystem" in r.get("expr","") for r in alerts))
 
