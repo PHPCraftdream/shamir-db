@@ -5,6 +5,7 @@ use std::sync::Arc;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::argon2_semaphore::Argon2Permit;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
@@ -17,8 +18,10 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 use shamir_query_types::batch::{BatchLimits, BatchRequest};
+use shamir_query_types::filter::FilterValue;
 use shamir_query_types::hmac as canon;
 use shamir_query_types::wire::{DbRequest, DbResponse};
+use tempfile::TempDir;
 
 use crate::byte_budget::{
     run_with_guard_slot, take_stashed_guard, take_stashed_serialized_response, ByteBudget,
@@ -619,4 +622,200 @@ async fn create_user_argon2_busy_stays_server_busy_under_one_byte_result_limit()
     drop(held);
     drop(guard);
     assert_eq!(budget.used(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// B6: the nested-container paths (SubBatch child, ForEach body) must reach
+// the same Argon2 busy convergence as the top-level CreateUser above.
+// ---------------------------------------------------------------------------
+
+/// Shared setup for the nested busy-refusal tests: a one-permit Argon2 gate
+/// whose only permit is already HELD by the test, plus a handler wired to the
+/// real Fjall user directory. `held` borrows `gate`, which the caller keeps
+/// alive; `_tempdir` is a field so the directory outlives the handler.
+struct BusyFixture<'a> {
+    handler: ShamirDbHandler,
+    session: Session,
+    held: Argon2Permit<'a>,
+    budget: ByteBudget,
+    _tempdir: TempDir,
+}
+
+async fn busy_fixture(gate: &Arc<ScramDerivationGate>) -> BusyFixture<'_> {
+    let temp = tempfile::tempdir().expect("user directory tempdir");
+    let user_dir = Arc::new(FjallUserDirectory::open(temp.path().join("users")).unwrap());
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    db.create_db("app").await.expect("create app");
+    let (port, resolver) = DirectoryPorts::new(user_dir.clone(), KdfParams::DEFAULT, gate.clone())
+        .into_trait_objects();
+    let db = Arc::new(
+        db.with_user_admin_port(port)
+            .with_principal_resolver(resolver),
+    );
+    let budget = ByteBudget::new(Some(4608));
+    let handler = ShamirDbHandler::with_admin(
+        db,
+        crate::db_handler::AdminGlue {
+            user_dir,
+            kdf: KdfParams::DEFAULT,
+            tables_registry: None,
+            derivation_gate: gate.clone(),
+        },
+    )
+    .with_query_limits(QueryLimitsCap {
+        max_result_size_bytes: 8192,
+        ..QueryLimitsCap::UNLIMITED
+    })
+    .with_byte_budget(budget.clone());
+    let session = Session::new(
+        [0xAB; 16],
+        "root".into(),
+        SessionPermissions::from_roles(vec!["superuser".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        UnixNanos::now().as_u64(),
+    );
+    let held = gate
+        .semaphore()
+        .try_acquire()
+        .expect("the one Argon2 permit is initially free");
+    BusyFixture {
+        handler,
+        session,
+        held,
+        budget,
+        _tempdir: temp,
+    }
+}
+
+/// The hmac-tagged CreateUser op shared by both nested tests. The canonical
+/// form is over the op itself; `check_destructive_hmacs` walks the whole batch
+/// tree via `BatchTreeVisitor` and canonicalizes every nested op the same way,
+/// so one computation covers both the SubBatch child and the ForEach body.
+fn busy_create_user_op(session: &Session) -> shamir_query_types::batch::BatchOp {
+    let op =
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "held_permit_user".into(),
+            password: "fixture password".into(),
+            roles: Vec::new(),
+            database: None,
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &session.hmac_key(),
+        &canon::canonical_batch_op("app", &op).expect("canonical CreateUser"),
+    );
+    shamir_query_builder::ddl::create_user("held_permit_user", "fixture password")
+        .hmac(&tag)
+        .build()
+        .expect("build CreateUser")
+}
+
+/// Dispatch a nested CreateUser under a 1-byte caller result cap while the
+/// only Argon2 permit is held, and assert the fixed server-owned busy refusal
+/// survives encoding.
+async fn assert_nested_busy(
+    fixture: &BusyFixture<'_>,
+    batch: BatchRequest,
+) -> (Vec<u8>, crate::byte_budget::ByteBudgetGuard) {
+    let request = DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".into(),
+        batch,
+    };
+    let request_bytes = rmp_serde::to_vec_named(&request).expect("encode Execute");
+    let (reply_bytes, guard) = run_with_guard_slot(async {
+        let reply = fixture
+            .handler
+            .handle(
+                &fixture.session,
+                &request_bytes,
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .expect("Execute response encoding");
+        let guard = take_stashed_guard().expect("converged response retains its writer guard");
+        (reply, guard)
+    })
+    .await;
+    let response: DbResponse = rmp_serde::from_slice(&reply_bytes).expect("decode response");
+    assert!(
+        matches!(&response, DbResponse::Error { code, message }
+            if code == "server_busy" && message == "server_busy"),
+        "nested CreateUser must return the fixed server-owned busy refusal: {response:?}",
+    );
+    assert!(
+        reply_bytes.len() <= 1 + 512,
+        "busy refusal fits fixed allowance"
+    );
+    (reply_bytes, guard)
+}
+
+/// A CreateUser inside a SubBatch child must still surface the Argon2 busy
+/// refusal as the canonical `server_busy` envelope under a 1-byte caller cap.
+///
+/// Mutants killed: the engine's nested wrappers used to rebuild the typed
+/// empty-alias refusal with the CONTAINER alias, so the server missed
+/// `is_typed_server_busy_refusal` and the 1-byte caller cap rewrote the
+/// envelope to `result_too_large` (fixed in this working tree's engine
+/// change).
+#[tokio::test]
+async fn create_user_busy_inside_sub_batch_child_stays_server_busy_under_one_byte_result_limit() {
+    let gate = Arc::new(ScramDerivationGate::new(Arc::new(
+        shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(1),
+    )));
+    let fixture = busy_fixture(&gate).await;
+
+    let mut child = Batch::new();
+    child.create_user("create", busy_create_user_op(&fixture.session));
+    let mut outer = Batch::new();
+    outer.limits(BatchLimits {
+        max_result_size: 1,
+        ..BatchLimits::default()
+    });
+    outer.sub_batch_no_bind("child", child.build());
+
+    let (reply_bytes, guard) = assert_nested_busy(&fixture, outer.build()).await;
+    assert_eq!(fixture.budget.used(), guard.bytes_reserved());
+    assert_eq!(guard.bytes_reserved(), reply_bytes.len());
+    drop(fixture.held);
+    drop(guard);
+    assert_eq!(fixture.budget.used(), 0);
+}
+
+/// A CreateUser inside a ForEach body must behave identically: the loop is
+/// planned once, but its tagged body op still reaches the Argon2 gate.
+///
+/// Mutants killed: the container-alias rebuild above (same as the SubBatch
+/// test), plus the ForEach byte meter charging the result shell before
+/// iteration 0, which masked the refusal with `result_too_large` (both fixed
+/// in this working tree's engine change).
+#[tokio::test]
+async fn create_user_busy_inside_for_each_body_stays_server_busy_under_one_byte_result_limit() {
+    let gate = Arc::new(ScramDerivationGate::new(Arc::new(
+        shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(1),
+    )));
+    let fixture = busy_fixture(&gate).await;
+
+    let mut body = Batch::new();
+    body.create_user("create", busy_create_user_op(&fixture.session));
+    let mut outer = Batch::new();
+    outer.limits(BatchLimits {
+        max_result_size: 1,
+        ..BatchLimits::default()
+    });
+    outer.for_each(
+        "loop",
+        FilterValue::Array(vec![FilterValue::Int(1)]),
+        "row",
+        body.build(),
+    );
+
+    let (reply_bytes, guard) = assert_nested_busy(&fixture, outer.build()).await;
+    assert_eq!(fixture.budget.used(), guard.bytes_reserved());
+    assert_eq!(guard.bytes_reserved(), reply_bytes.len());
+    drop(fixture.held);
+    drop(guard);
+    assert_eq!(fixture.budget.used(), 0);
 }
