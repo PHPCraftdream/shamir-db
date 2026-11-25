@@ -327,6 +327,10 @@ impl SubscriptionSupervisor {
                 // so the supervisor can never observe them via the loop's
                 // return value).
                 .with_subscription(sub.name.clone());
+            // Online logical-export enrolment: clone the boot-installed
+            // server-wide maintenance gate into the loop's config; the loop
+            // awaits it before every apply (see `run_follower_loop`).
+            cfg.maintenance_gate = self.maintenance_gate.clone();
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }
@@ -379,6 +383,7 @@ impl SubscriptionSupervisor {
             let join = tokio::spawn(async move {
                 // Retry terminal marking after the loop returns.
                 let tok_exit = tok_exit_for_wrapper;
+                let exit_gate = cfg.maintenance_gate.clone();
                 let target = format!("{}/{}", cfg.db, cfg.repo);
                 let loop_result = match std::panic::AssertUnwindSafe(run_follower_loop(
                     local.clone(),
@@ -427,9 +432,33 @@ impl SubscriptionSupervisor {
                         hook.exited.notify_one();
                     }
                 }
+                // Online-export enrolment for the exit path: the terminal
+                // callbacks below persist durable `resync_required` /
+                // `reopen_required` quarantine states, which alter
+                // exported-scope eligibility (`read_quarantine_reason`), so
+                // they must hold the server-wide maintenance gate's counted
+                // writer when configured. Only errors need admission. Bias
+                // the wait toward cancellation so reconcile can still join.
+                let admission = match (matches!(loop_result, Some(Err(_))), &exit_gate) {
+                    (true, Some(gate)) => {
+                        tokio::select! {
+                            biased;
+                            _ = tok_exit.cancelled() => {
+                                debug!(
+                                    subscription = %sub_name,
+                                    "terminal persistence skipped: cancelled before maintenance admission"
+                                );
+                                Err(())
+                            }
+                            guard = gate.wait_for_mutation() => Ok(Some(guard)),
+                        }
+                    }
+                    (true, None) | (false, _) => Ok(None),
+                };
                 if let Some(loop_result) = loop_result {
                     match loop_result {
                         Ok(()) => {}
+                        Err(_) if admission.is_err() => {}
                         Err(e @ ReplError::JournalGap { gap_at, .. })
                         | Err(
                             e @ ReplError::ApplyRejected {
@@ -642,8 +671,9 @@ impl SubscriptionSupervisor {
                         }
                     }
                 }
+                drop(admission);
                 // ---- exit housekeeping: shared by every loop return path.
-                // The apply guard is dropped before this point; decrement the
+                // The maintenance guard is dropped before this point; decrement the
                 // shared count, and let only the last loop invalidate/remove.
                 #[cfg(test)]
                 if let Some(gate) = &housekeeping_gate {

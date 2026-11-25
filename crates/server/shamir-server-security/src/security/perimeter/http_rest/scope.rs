@@ -272,6 +272,10 @@ fn classify_batch(
             // tokens must not list activity or cancel an execution,
             // transaction or cursor by ID.
             | BatchOp::ListActivity(_)
+            // Export admin ops — same superuser surface as backup.
+            | BatchOp::StartExport(_)
+            | BatchOp::ExportStatus(_)
+            | BatchOp::CancelExport(_)
             // Shape statistics are a SCRAM-session surface: tokens may neither list nor wipe them.
             | BatchOp::ListShapeStats(_)
             | BatchOp::ResetShapeStats(_)

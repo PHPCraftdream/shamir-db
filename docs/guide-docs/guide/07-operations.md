@@ -408,7 +408,7 @@ WAL is not proof that writes are absent and is reported as
 `status: "indeterminate"`. `transaction.reason` is not uniformly debug text:
 `skip_aborted` is the one plan-abort special case that is written into
 `reason` as its own code
-(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`),
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:240-245`),
 and commit-time classifications also populate `abort_code` now — `tx_conflict`,
 `unique_violation`, `version_conflict`, `table_migrating`,
 `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`,
@@ -418,7 +418,16 @@ Inside `for_each`, a transactional body's `indeterminate` outcome stops the
 loop with `wal_requires_reopen` (the iteration may have committed, so the
 prefix is unknown and must be reconciled, not retried), while a committed
 prefix is NOT rolled back when a later iteration fails
-(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`).
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:35-94`,
+ForEach call site `crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-499`).
+A transactional `Batch` sub-batch surfaces its aborted or indeterminate commit
+the same way instead of an empty child value; the sub-batch caller has no
+committed-prefix knowledge, so an abort is always reported as
+`transaction_aborted` with its cause in the text
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:170-178`).
+A child that commits but fails the required sync keeps its committed receipt
+(with the sync error) in the nested results and does not fail the container
+(`crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:170-181`).
 No value-only transaction convenience
 hides these outcomes.
 
@@ -906,9 +915,9 @@ intent для алерта — неограниченный рост без но
    истечение permit-бюджета или сбой часов дают `server_busy` до KDF. Это
    описывает отказ самого gate и НЕ гарантирует, что он сохранится через
    внешний `Call` stored function. Не повторяйте смешанный батч по этому коду.
-2. Стабильный код отказавшей операции в строгом транзакционном батче читается из `transaction.abort_code`, а не из `transaction.reason`: у отклонённого `CreateUser` там будет `server_busy` (`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`). `reason` парсингу не подлежит, но и не всегда является debug-текстом: `skip_aborted` — единственный план-аборт, который записывается в `reason` собственным кодом (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:155-161`), а commit-time классификации теперь тоже заполняют `abort_code` — `tx_conflict`, `unique_violation`, `version_conflict`, `table_migrating`, `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`, `cancelled` (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`). Поля `abort_code` может не быть вовсе — когда у аборта нет стабильного слова (`Storage` без собственного `code`, `Expired`; `crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`), — поэтому полагаться на код в каждом аборте нельзя. Внутри `for_each` первая неуспешная итерация останавливает цикл. Уже независимо закоммиченный префикс сохраняется; повтор всего внешнего `ForEach` не эквивалентен повтору только упавшей итерации и может дублировать префикс. `indeterminate` у тела останавливает цикл с `wal_requires_reopen` (итерация могла закоммититься — сначала reconcile, не слепой повтор; `crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-539`). TS SDK помечает `tx_conflict` как retryable для новой транзакции, но автоматически запрос не повторяет.
+2. Стабильный код отказавшей операции в строгом транзакционном батче читается из `transaction.abort_code`, а не из `transaction.reason`: у отклонённого `CreateUser` там будет `server_busy` (`crates/engine/shamir-engine/src/query/batch/exec/batch_execute/transactional.rs:300-307`). `reason` парсингу не подлежит, но и не всегда является debug-текстом: `skip_aborted` — единственный план-аборт, который записывается в `reason` собственным кодом (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:240-245`), а commit-time классификации теперь тоже заполняют `abort_code` — `tx_conflict`, `unique_violation`, `version_conflict`, `table_migrating`, `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`, `cancelled` (`crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/entry.rs:398-463`). Поля `abort_code` может не быть вовсе — когда у аборта нет стабильного слова (`Storage` без собственного `code`, `Expired`; `crates/query/shamir-query-types/src/ops/batch/req/transaction_info.rs:25-31`), — поэтому полагаться на код в каждом аборте нельзя. Внутри `for_each` первая неуспешная итерация останавливает цикл. Уже независимо закоммиченный префикс сохраняется; повтор всего внешнего `ForEach` не эквивалентен повтору только упавшей итерации и может дублировать префикс. `indeterminate` у тела останавливает цикл с `wal_requires_reopen` (итерация могла закоммититься — сначала reconcile, не слепой повтор; `crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:35-94`, вызов в `crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs:488-499`). TS SDK помечает `tx_conflict` как retryable для новой транзакции, но автоматически запрос не повторяет.
 3. Внешний `Call` хранимой функции несёт стабильный код отказа, который классифицировал шлюз БД на вызове `db_execute` или другого `db_*` (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:47-65`). Код пишет только сервер (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:14-19`), поэтому гость не может его подделать: текст guest-trap, лишь упоминающий кодовое слово, кодом не становится. Если шлюз отказ не классифицировал, стабильного кода у `Call` нет, и судить о причине по тексту ошибки нельзя. Вложенный хранимый вызов (функция вызывает функцию), внутри которого транзакционный `db_execute` абортится, кода наружу не передаёт: абортированный `BatchResponse` — это успех на шлюзе (данные, которые разбирает гость), а транзакционная проверка гостя поднимает общий abort без кода (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:23-32`; `crates/wasm/shamir-lang/src/back/emit/support/db/tx.rs:254-300`), тогда как код наружного `Call` берётся только из ускользнувшего отказа шлюза (`crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:45-62`). `DbGatewayError::code()` классифицирует только `not_found` и `access_denied`, поэтому отказ на ЧТЕНИЕ таблицы по ACL даёт наружному `Call` вообще без стабильного кода (не `unknown_table`): `unknown_table` намеренно не имеет ветки и попадает в общий `ExecutionSource` (`crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:208-238`), а сам `code()` возвращает код лишь для этих двух классов (`crates/wasm/shamir-wasm-host/src/gateway/db_gateway.rs:67-82`).
-4. Фиксированный серверный конверт отказа доходит до клиента со своим кодом при любом клиентском `limits.max_result_size`, но таких случаев три: `cancelled`, типизированный `unknown_table` (текст `table is unavailable`) и типизированный `server_busy` с пустым алиасом (отказ Argon2-gate прямого `CreateUser`). Их байты резервируются заранее (`FIXED_ERROR_ALLOWANCE`), предел для них — серверный `max_result_size_bytes`. Любой ДРУГОЙ ответ, включая ошибки с контекстными полями (`resync_required`, `read_only_replica`, `permission_denied`, `AsOfVisibilityTimeout`), выше клиентского лимита заменяется на `result_too_large`. Отказ `server_busy` внутри дочернего `Batch` или `ForEach` получает непустой алиас и не входит в исключение: под очень малым клиентским лимитом он тоже станет `result_too_large` (`crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs:426-435,452-484,520-533`).
+4. Фиксированный серверный конверт отказа доходит до клиента со своим кодом при любом клиентском `limits.max_result_size`, но таких случаев четыре: `cancelled`, типизированный `unknown_table` (текст `table is unavailable`), типизированный `server_busy` с пустым алиасом (отказ Argon2-gate прямого `CreateUser`) и типизированный `WalOutcomeUnknown` (текст `WAL outcome indeterminate` с указанием `commit_version`). Их байты резервируются заранее (`FIXED_ERROR_ALLOWANCE`), предел для них — серверный `max_result_size_bytes`. Любой ДРУГОЙ ответ, включая ошибки с контекстными полями (`resync_required`, `read_only_replica`, `permission_denied`, `AsOfVisibilityTimeout`), выше клиентского лимита заменяется на `result_too_large`. Типизированный отказ `server_busy` с пустым алиасом теперь проходит через вложенные оболочки `Batch`/`ForEach` неизменным (`crates/engine/shamir-engine/src/query/batch/runner/query_runner/helpers.rs:10-33`) и доходит до клиента своим фиксированным конвертом `server_busy` при любом клиентском лимите, если конверт укладывается в серверный `max_result_size_bytes` (`crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs:265-276,469-487`). Код говорит только о занятости: отказ после уже опубликованных эффектов того же батча (ранние итерации, предыдущие операции дочернего батча) приходит тем же конвертом, поэтому смешанный батч по нему не повторяют. При включённом счётчике результата предел меньше оболочки контейнера `ForEach` отклоняется как `result_too_large` ещё до первой итерации. В множество фиксированных отказов входит и типизированный `WalOutcomeUnknown` — bounded server-owned текст с указанием попытанного `commit_version`, код `wal_requires_reopen` сохраняется при любом клиентском лимите (`crates/server/shamir-server/src/engine/db_handler/repo_admin/execute.rs:430-443,539-541`).
 
 Если создание было отклонено до записи, повторите после паузы только обычный нетранзакционный `CreateScramUser`, не весь батч. Стабильный код теперь и есть ответ гейта, но он не обещает, что повтор пройдёт: `server_busy` утверждает занятость, а не успех, и клиент не может вывести из кода ничего сверх того, что код сам утверждает.
 
@@ -1710,6 +1719,10 @@ backup: {
 Очереди и немедленных повторов нет. Планировщик работает локально от имени системы, без сессии;
 ограничения superuser/follower для ручных операций не меняются.
 
+#### Секция `schedule` в `BackupStatus`
+
+В superuser-only ответе `BackupStatus` ключ `schedule` присутствует только пока работает задача планировщика: состояние устанавливается при её запуске и очищается её же завершением (штатным, при unwind или при отмене задачи). Отсутствие ключа означает, что расписание не запущено. Это чтение уже сохранённого состояния, оно не выполняет запись метрик. Секция содержит `enabled` (bool, всегда `true`), `interval_seconds` (int), `window` (строка `HH:MM-HH:MM`, только если настроено дневное окно), `keep_last` (int), `run_on_start` (bool) и `next_run_unix_ns` (десятичная строка, если запланирован следующий запуск). После завершения планового запуска появляется `last_run` — его собственная итоговая запись, публикуемая в конце запуска: `started_at_unix_ns` (десятичная строка), `result` (`completed`, `failed` или `cancelled`; `cancelled` означает только типизированный исход отмены), `stage` (стабильное имя стадии; при успехе `done`) и, если есть, `reason` (стабильная причина без путей). Вложенная карта `runs` содержит целочисленные счётчики `scheduled_started`, `scheduled_skipped_busy`, `scheduled_skipped_window`, `scheduled_failed`, `scheduled_completed`, `failure_streak`, `retention_deleted` и `retention_failed`. `last_run` — итоговая запись последнего планового запуска, дошедшего до нормальной финальной публикации; запуск, потерянный из-за сбоя потока планировщика копии (ошибка запуска потока или unwind), счётчики `runs.*` увеличивает, но `last_run` не обновляет — остаётся предыдущая запись. При замене планировщика внутри одного процесса (встраивание, тесты) завершившийся запуск прежнего планировщика может записать свою итоговую запись в состояние нового расписания; в одном сервере планировщик один. `next_run_unix_ns` — оценка следующего тика, а не обещание копии: окно, занятость и остановка могут не допустить запуск; ключ `schedule` описывает установленного владельца состояния (он появляется при запуске задачи и может показать тик, который при остановке уже не будет выполнен). `last_run` может отсутствовать вовсе, а не только оставаться прежним. Счётчики `runs.*` — метрики времени жизни процесса, читаются независимо и не образуют согласованный снимок одного расписания; `failure_streak` — gauge.
+
 Ручные и плановые копии используют один реестр и один допуск: `running` в статусе удерживается до полного
 завершения обработки хранения, поэтому ручной запуск и следующий тик отклоняются и во время очистки; сам
 `BackupPermit` (допуск на копирование) освобождается до её начала. Исключение — путь unwind: `RunGuard`
@@ -2361,6 +2374,170 @@ const repos = ddl.listRepos('app2');           // после --as-db
 const tables = ddl.listTables('app2', 'archive');
 const described = ddl.describeRepo('app2.archive');
 ```
+
+### Online export job: экспорт на живом сервере
+
+Онлайн-задание создаёт согласованный снимок работающей базы в том же
+переносимом формате, что и `logical-export`. Сервер включает запуск только
+в обычном режиме **ReadWrite**, с настроенным приватным `security.export_root`
+и отключённым `enable_experimental_migration_api` (экспериментальные миграции
+хранилища). Когда онлайн-запуск недоступен, используйте офлайн-команду
+с эксклюзивным владением каталогом данных.
+
+**Конфигурация: `security.export_root`.** Сервер проверяет и открывает
+настроенный корень при загрузке.
+В Ktav-конфиге секция `security` содержит ключ `export_root` — абсолютный путь к
+owner-private каталогу артефактов:
+
+* путь **абсолютный**; родительский каталог должен существовать, создаётся
+  не более одного недостающего листа — и только через secure-хелпер
+  (owner-only права, Windows DACL «только текущий пользователь»);
+* каталог не может быть **внутри** `data_dir`, быть самим `data_dir` или его
+  **предком** (корень очистки никогда не накрывает каталог данных); leaf не
+  может быть symlink/reparse point — проверки идут по каноническим путям;
+* при старте сервер берёт **эксклюзивный lock-файл**
+  `.shamir-export-root.lock` внутри корня: второй процесс на том же корне
+  не может использовать этот экспортный корень (ошибка занятости), а
+  устаревшие этапные каталоги сбойнувших заданий удаляются при загрузке —
+  **только** имена вида `.shamir-export-` + ровно 6 ASCII-алфаномерных
+  символов; финальные артефакты, lock-файл и посторонние файлы не трогаются.
+
+Отказ «не там» зависит от того, установлен ли сервис задания при загрузке.
+На сервере **без настроенного корня** `security.export_root` сервиса нет
+вовсе, и все три операции отказывают одним стабильным кодом
+`online_export_not_configured` (конфигурация клиенту не раскрывается).
+При настроенном корне корректный `StartExport` от SCRAM-суперпользователя
+возвращает `online_export_unavailable` в режиме только для чтения, при
+включённых экспериментальных миграциях хранилища или если транспорт не
+позволяет привязать отмену к времени жизни соединения. Если запуск отключён
+на сервере при настроенном корне, `ExportStatus` и `CancelExport` не находят
+видимого задания (`online_export_not_found`).
+
+**Maintenance gate.** Runner заранее прогревает
+выбранную область, затем общий gate дожидается уже допущенных изменений и
+ставит в очередь новые записи, DDL, изменения идентичностей и ACL, применение
+репликации и обслуживание, меняющее состояние. Чтения продолжаются, но
+холодное открытие, требующее допуска на запись, ждёт освобождения gate.
+На drain и работу writer действует общий дедлайн **590 с** внутри потолка
+**600 с**. При исчерпании бюджета задание сворачивается с `timed_out`,
+если артефакт ещё не опубликован. Синхронный системный вызов нельзя прервать:
+если он завис, gate может оставаться занятым и после 600 с, до возврата вызова.
+Внутренний фоновый сброс и вытеснение буфера хранилища по таймеру gate не
+останавливает: заморозка охватывает перечисленные операции, но не этот
+внутренний источник.
+
+**Протокол.** Операции — `StartExport` / `ExportStatus` / `CancelExport`;
+валидна **ровно одна** форма: standalone, нетранзакционный, top-level батч
+с одной операцией. У `StartExport` поле `database` должно совпадать с базой
+в конверте запроса; у `ExportStatus` и `CancelExport` своего поля базы нет.
+Неверная форма даёт атомарный отказ `online_export_invalid_form`. Требуется
+SCRAM-сессия суперюзера. Runner сверяет полномочия суперюзера с текущим
+каталогом и проверяет `Read` и `Manage` обычного `Actor` на включённых базе,
+репозиториях и таблицах — до freeze и повторно под freeze. Для сохранённых
+метаданных `Root` и пространства имён функций проверяется только `Read`,
+не `Manage`; неявные настройки по умолчанию в дамп не записываются.
+
+**Квитанции и отмена.** `ExportStartReceipt`
+возвращает `export_id`. `ExportStatusReceipt` содержит тот же идентификатор,
+фазу (`WaitingForGate`, `Exporting`, `Verifying`, `Done`, `Failed`, `Cancelled`),
+счётчики `sections`, `items`, `bytes`, имя артефакта только при `Done` и
+типизированную причину только при `Failed`. Статус и отмена доступны только
+сессии-владельцу на той же базе. Реестр хранит одно текущее или последнее
+задание до следующего принятого старта. Разрыв соединения, вытеснение сессии
+из реестра сессий (eviction) и остановка сервера сигнализируют отмену.
+`ExportCancelReceipt` с `cancelled = true` подтверждает сигнал, а не завершение:
+терминальную фазу проверяют через `ExportStatus`. До публикации отмена
+сворачивает задание, освобождает gate и удаляет этап; опубликованный файл
+не отзывается. При потерянном ответе на старт проверяйте `ExportStatus` в той же
+сессии, не повторяйте `StartExport` вслепую. Устаревший или пустой ответ
+(`Done` прежнего задания, `online_export_not_found`) ничего не решает: старт
+мог быть ещё в подготовке и не занять слот. Пока живо любое задание, новый
+старт получает `online_export_already_running`.
+
+**Область экспорта.** Вся база, `repo` или `repo` + `table` (`table` без `repo`
+отклоняется); `schema_only` исключает записи, но не проверки. `include_artifacts`
+отклоняется: guest-артефакты не поддерживаются.
+
+**Артефакт.** Сервер пишет во временном каталоге
+внутри `export_root`, полностью проверяет файл тем же верификатором, что и
+офлайн-экспорт, затем публикует его атомарным переименованием без замены
+существующего файла (no-replace rename). Это поддерживается на Linux, macOS
+и Windows; на остальных платформах публикация завершается отказом.
+Сбой или отмена до публикации удаляют этап по возможности (сбой удаления не
+сообщается, остаток убирает очистка устаревших этапов при открытии корня
+экспорта); ошибка синхронизации каталога
+после переименования оставляет готовый верифицированный артефакт — проверьте
+его, не повторяйте старт вслепую. Сервер **никогда не
+передаёт артефакты по протоколу** и не принимает путей: путь артефакта
+задаётся только конфигом `export_root`, задание возвращает лишь **opaque
+имя** (`timestamp + process sequence`, без пользовательских строк);
+забирает и удаляет артефакт оператор. В статусах и ошибках нет ни путей вне
+имени корня, ни секретов, ни peer-текста — только фиксированные строки и
+замкнутый набор типизированных причин.
+
+Порядок работы клиентом (typed builder'ы, никакого ручного wire-JSON):
+
+```rust
+use shamir_query_builder::ddl;
+use shamir_query_types::admin::ExportPhase;
+use shamir_sync::replication_seed::verify_dump_file;
+
+// старт: вся база, либо .repo(...), .repo(...).table(...), .schema_only(true)
+client.start_export("app", ddl::start_export("app").repo("archive")).await?;
+
+// опрос статуса: не чаще ~раз в 20 ms (лимит 500 req/s на сессию)
+let receipt = loop {
+    let st = client.export_status("app").await?;
+    // При необходимости отмены во время задания:
+    // let cancel = client.cancel_export("app").await?;
+    // Даже при cancel.cancelled продолжайте опрашивать статус до терминальной фазы.
+    match st.phase {
+        ExportPhase::Done => break st,
+        ExportPhase::Failed | ExportPhase::Cancelled => {
+            panic!("export phase {:?}, failure {:?}", st.phase, st.failure);
+        }
+        _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+    }
+};
+
+// верификация артефакта оператором — библиотечный верификатор, без открытия базы
+let path = export_root.join(receipt.artifact_name.expect("Done carries the name"));
+verify_dump_file(&path)?;
+// затем офлайн-импорт: shamir-server --config db.ktav logical-import --input <path> ...
+```
+
+|| Код | Когда |
+||---|---|
+|| `permission_denied` | Не SCRAM-сессия или не суперюзер (проверяется до всего остального). |
+|| `online_export_not_configured` | Экспортный корень не настроен. |
+|| `online_export_invalid_form` | Не standalone/нетранзакционный/одно-операционный батч или несовпадение `database` с конвертом. |
+|| `online_export_already_running` | На сервере уже живёт задание (любой владелец) или уже поднят freeze intent. |
+|| `export_scope_denied` | Текущее состояние каталога не подтверждает суперюзера или включённый объект не прошёл Read/Manage ACL. |
+|| `online_export_invalid_scope` | Некорректный scope: пустые/чрезмерные имена, `table` без `repo`, `__system__`, неразрешённые имена. |
+|| `online_export_unsupported` | Опции/инвентарь вне возможностей формата этой фазы (в т.ч. `include_artifacts`). |
+|| `online_export_scope_unavailable` | Scope временно неэкспортируем (карантин `resync_required`, rename in doubt) или ошибка чтения каталога при прогреве. |
+|| `online_export_not_found` | У этой сессии на этой базе нет видимого задания (status/cancel). |
+|| `online_export_unavailable` | Запуск отключён при настроенном корне либо транспорт не позволяет привязать отмену к соединению. |
+|| `server_shutting_down` | Сервер выключается; задание не принимается. |
+|| `internal_error` | Невозможная ошибка кодирования ответа; деталей не несёт. |
+
+Для запущенного задания терминальные причины в статусе — замкнутый набор:
+`timed_out` (исчерпан бюджет времени), `unsupported_content`, `io` (ошибка I/O),
+`verification` (файл не прошёл проверку), `internal`.
+
+К онлайн-заданию применяются перечисленные выше ограничения формата, в том
+числе отказ для функций и их исходников. Дополнительно live-экспорт явно
+отклоняет **любую строку журнала миграций схемы на всём сервере**, даже вне
+выбранной базы, и сохранённые `fn_namespace_meta`. Офлайн-экспорт может записать
+`fn_namespace_meta`, но неизменённый импортёр пока отклоняет такой дамп.
+Режима data-only нет; импорт только офлайн в новый или пустой каталог,
+без слияния или перезаписи.
+
+Из консервативных отказов снят один: таблица с **успешно завершённым
+переименованием** экспортируется (провенанс `rename_from` /
+`rename_from_store_id` валидируется и в дамп не попадает — portable-элемент
+несёт только текущее имя). Переименование **in doubt** по-прежнему
+отказывается, как и раньше.
 
 ## 9. Capacity planning
 

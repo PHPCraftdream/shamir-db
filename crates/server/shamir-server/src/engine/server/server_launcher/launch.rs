@@ -17,6 +17,7 @@ use shamir_connect::server::session::SessionStore;
 
 use shamir_tunables::runtime::RuntimeTunables;
 
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
@@ -47,8 +48,6 @@ use super::http::BootGuard;
 use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
 use super::load_metrics::bind_load_source;
 
-#[path = "support/durable_stores.rs"]
-mod durable_stores;
 #[path = "support/rollback_cleanup.rs"]
 mod rollback_cleanup;
 
@@ -145,7 +144,7 @@ impl ServerLauncher {
         let mut boot_guard = BootGuard::new(shutdown_token.clone());
         let conn_tasks = ConnTasks::new(shutdown_token.clone());
 
-        let durable_stores::DurableStores {
+        let super::durable_stores::DurableStores {
             data_dir_lock,
             format_stamp,
             meta,
@@ -156,7 +155,7 @@ impl ServerLauncher {
             audit_chain,
             kdf_for_bootstrap,
             observed_format_epoch,
-        } = durable_stores::open(&config, &bootstrap).await?;
+        } = super::durable_stores::open(&config, &bootstrap).await?;
 
         // 3. In-memory stores.
         //
@@ -292,18 +291,48 @@ impl ServerLauncher {
         // wired to this server's root shutdown token: each run takes a
         // child token, so shutdown cancels the in-flight run while an
         // admin `CancelBackup` cancels only the child (never the server).
-        let online_backup_registry = Arc::new(OnlineBackupRegistry::new_with_shutdown(
-            Arc::clone(&shamir),
-            config.data_dir.clone(),
-            tokio::runtime::Handle::current(),
-            shutdown_token.clone(),
-        ));
+        // R3-2b boot integration: when a logical-export root is configured,
+        // construct the shared server-wide maintenance gate. It is cloned
+        // into the online-backup registry, the wire handler, the replication
+        // supervisor and the scheduler so a logical-export freeze drains all
+        // of them through the SAME gate instance. When no root is configured
+        // (`export_root = None`) no gate exists and every consumer keeps its
+        // existing no-root behaviour unchanged.
+        let maintenance_gate = config
+            .security
+            .export_root
+            .as_ref()
+            .map(|_| MaintenanceGate::default());
+
+        let online_backup_registry = {
+            let registry = OnlineBackupRegistry::new_with_shutdown(
+                Arc::clone(&shamir),
+                config.data_dir.clone(),
+                tokio::runtime::Handle::current(),
+                shutdown_token.clone(),
+            );
+            Arc::new(match maintenance_gate.as_ref() {
+                Some(gate) => registry.with_maintenance_gate(gate.clone()),
+                None => registry,
+            })
+        };
         // Staleness evidence survives restarts: seed the gauge from the durable
         // rows and arm the schedule clock only when a schedule is configured
         // (`backup.is_some()`); `metrics::note_success` re-persists the
         // last-success row at every copy success.
         install_backup_meta_store(Arc::clone(&meta), backup.is_some());
         shamir.set_online_backup_admin_port(online_backup_registry.clone());
+
+        // R3-2b — online logical-export job (support/export_boot.rs).
+        let online_export = super::export_boot::maybe_online_export(
+            &config,
+            maintenance_gate.as_ref(),
+            Arc::clone(&shamir),
+            Arc::clone(&user_dir),
+            shutdown_token.clone(),
+            node_mode,
+            Arc::clone(&session_store),
+        )?;
 
         // F-15: opt into the experimental online storage-migration API when
         // the operator explicitly set `security.enable_experimental_migration_api`
@@ -423,42 +452,47 @@ impl ServerLauncher {
         // the first refusal.
         shamir.set_node_read_only(node_mode == crate::db_handler::NodeMode::ReadOnly);
 
-        let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
-            ShamirDbHandler::with_admin(
-                shamir.clone(),
-                AdminGlue {
-                    user_dir: user_dir.clone(),
-                    kdf: kdf_for_bootstrap,
-                    tables_registry: Some(tables_registry.clone()),
-                    derivation_gate: derivation_gate.clone(),
-                },
-            )
-            .with_audit_writer(audit_writer.clone())
-            .with_slow_query(SlowQueryConfig::from_ms(
-                config.logging.slow_query_threshold_ms,
-            ))
-            .with_query_limits(QueryLimitsCap::from(&config.security.query_limits))
-            .with_transactions(config.transactions.clone())
-            .with_tx_limits(TxLimitsCap {
-                max_tx_bytes: config.security.tx.max_tx_bytes,
-            })
-            .with_cursor_limits(CursorLimitsCap {
-                max_cursors_per_session: config.security.cursors.max_cursors_per_session,
-                idle_timeout_secs: config.security.cursors.idle_timeout_secs,
-                max_cursor_page_size: config.security.cursors.max_cursor_page_size,
-            })
-            .with_byte_budget(byte_budget.clone())
-            .with_session_store(session_store.clone())
-            .with_node_mode(node_mode)
-            .with_token_service(token_service.clone(), config.tokens.allow_self_service)
-            .with_operator_boot(
-                started_at,
-                observed_format_epoch,
-                format_stamp,
-                config.replication.as_ref().and_then(|r| r.node_id.clone()),
-            ),
+        let mut handler_builder = ShamirDbHandler::with_admin(
+            shamir.clone(),
+            AdminGlue {
+                user_dir: user_dir.clone(),
+                kdf: kdf_for_bootstrap,
+                tables_registry: Some(tables_registry.clone()),
+                derivation_gate: derivation_gate.clone(),
+            },
+        )
+        .with_audit_writer(audit_writer.clone())
+        .with_slow_query(SlowQueryConfig::from_ms(
+            config.logging.slow_query_threshold_ms,
+        ))
+        .with_query_limits(QueryLimitsCap::from(&config.security.query_limits))
+        .with_transactions(config.transactions.clone())
+        .with_tx_limits(TxLimitsCap {
+            max_tx_bytes: config.security.tx.max_tx_bytes,
+        })
+        .with_cursor_limits(CursorLimitsCap {
+            max_cursors_per_session: config.security.cursors.max_cursors_per_session,
+            idle_timeout_secs: config.security.cursors.idle_timeout_secs,
+            max_cursor_page_size: config.security.cursors.max_cursor_page_size,
+        })
+        .with_byte_budget(byte_budget.clone())
+        .with_session_store(session_store.clone())
+        .with_node_mode(node_mode)
+        .with_token_service(token_service.clone(), config.tokens.allow_self_service)
+        .with_operator_boot(
+            started_at,
+            observed_format_epoch,
+            format_stamp,
+            config.replication.as_ref().and_then(|r| r.node_id.clone()),
         );
+        if let Some(gate) = maintenance_gate.as_ref() {
+            handler_builder = handler_builder.with_maintenance_gate(gate.clone());
+        }
+        let handler_builder =
+            super::export_boot::wire_handler(handler_builder, online_export.as_ref());
+        let handler_concrete: Arc<ShamirDbHandler> = Arc::new(handler_builder);
         let cancel_refusal_audit = handler_concrete.cancel_refusal_audit();
+        let handler_owned_tracker = handler_concrete.owned_mutation_tasks();
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete.clone();
@@ -490,10 +524,13 @@ impl ServerLauncher {
                     as Arc<dyn crate::replication::ReplSource>
             })
         });
-        let supervisor = Arc::new(
+        let supervisor_builder =
             crate::replication::SubscriptionSupervisor::new(shamir.clone(), repl_factory, node_id)
-                .with_validate_replicated_payload(repl_cfg.validate_replicated_payload),
-        );
+                .with_validate_replicated_payload(repl_cfg.validate_replicated_payload);
+        let supervisor = Arc::new(match maintenance_gate.as_ref() {
+            Some(gate) => supervisor_builder.with_maintenance_gate(gate.clone()),
+            None => supervisor_builder,
+        });
 
         // Phase B Stage 6 — background reaper for interactive txs that
         // outlive their idle TTL or absolute deadline. Shares the root
@@ -542,7 +579,7 @@ impl ServerLauncher {
         );
 
         // 8. Scheduler.
-        let scheduler = Scheduler::spawn(
+        let scheduler = Scheduler::spawn_with_maintenance(
             SchedulerInputs {
                 counters: counters.clone(),
                 lockout: lockout.clone(),
@@ -555,6 +592,7 @@ impl ServerLauncher {
                 identity: identity.clone(),
             },
             SchedulerConfig::default_for_production(),
+            maintenance_gate.clone(),
         );
 
         // 9-10. TLS material, then bind every listener and spawn its accept
@@ -826,6 +864,8 @@ impl ServerLauncher {
             meta_snapshot_task,
             interactive_tx_reaper,
             cursor_reaper,
+            online_export,
+            owned_mutation_tasks: Some(handler_owned_tracker),
             repl_supervisor: supervisor,
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,

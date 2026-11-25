@@ -660,6 +660,28 @@ impl SystemStore {
         .await
     }
 
+    /// Capture online after the server freeze has drained and the service has
+    /// reauthorized the warmed scope. `live` must contain all durable live
+    /// databases, including `db`. Keep the facade alive through publication.
+    /// The system repository remains private to this bridge.
+    ///
+    /// cancel-safe: yes — delegates to the engine's RAII capture.
+    #[doc(hidden)]
+    pub async fn capture_online_logical_export<'a>(
+        &self,
+        db: &DbInstance,
+        live: &[DbInstance],
+        guard: &'a crate::engine::db_instance::logical_export::MaintenanceGuard,
+    ) -> DbResult<crate::engine::db_instance::logical_export::LogicalExport<'a>> {
+        crate::engine::db_instance::logical_export::LogicalExport::capture_online(
+            db,
+            live,
+            &self.system_repo()?,
+            guard,
+        )
+        .await
+    }
+
     /// Resolve the SYSTEM_REPO [`RepoInstance`].
     ///
     /// F5a: system-store DELETEs route through the repo's implicit-tx

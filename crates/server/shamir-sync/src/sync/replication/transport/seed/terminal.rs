@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shamir_collections::TMap;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::query::admin::ReplStream;
 use shamir_db::query::read::{QueryResult, ReadQuery};
 use shamir_db::repl_binding::SubscriptionBinding;
@@ -245,6 +246,31 @@ pub(crate) async fn validate_target(
     Ok(())
 }
 
+// Wait before the DB method takes replication_control, and cancel only the
+// wait, not an in-progress write. Reconcile may cancel and join this loop
+// while holding a counted writer that a pending freeze is draining.
+async fn persist_live_status(
+    local: (&ShamirDb, Option<&MaintenanceGate>, &CancellationToken),
+    name: &str,
+    message: &str,
+    generation: u64,
+) -> Option<DbResult<()>> {
+    let (db, gate, cancel) = local;
+    let _writer = if let Some(gate) = gate {
+        Some(tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return None,
+            writer = gate.wait_for_mutation() => writer,
+        })
+    } else {
+        None
+    };
+    Some(
+        db.set_subscription_status_message(name, message, generation)
+            .await,
+    )
+}
+
 /// PR6b-3 stall visibility: once [`STALL_VISIBILITY_THRESHOLD`] consecutive
 /// swallowed failures accumulate without durable-bookmark progress, persist
 /// a `status_message` on the subscription row so operators (and tests) can
@@ -275,7 +301,7 @@ pub(crate) async fn validate_target(
 /// it and self-deadlocks on the quiesce barrier). Guard-held loop arms
 /// defer the call until after the guard is dropped.
 pub(crate) async fn note_swallowed_failure(
-    db: &ShamirDb,
+    local: (&ShamirDb, Option<&MaintenanceGate>, &CancellationToken),
     node_id: &str,
     subscription: Option<&str>,
     generation: u64,
@@ -301,10 +327,10 @@ pub(crate) async fn note_swallowed_failure(
     // R7-5: the latch is set ONLY after a SUCCESSFUL persistence — on Err it
     // stays clear so the NEXT failure retries the write (a failed write must
     // never silence the stall permanently).
-    match db
-        .set_subscription_status_message(name, &message, generation)
-        .await
-    {
+    let Some(result) = persist_live_status(local, name, &message, generation).await else {
+        return;
+    };
+    match result {
         Ok(()) => {
             *stall_reported = true;
             warn!(
@@ -330,7 +356,7 @@ pub(crate) async fn note_swallowed_failure(
 /// F1/F2); the same lock constraint applies: never call while an apply-gate
 /// read guard is held.
 pub(crate) async fn clear_stall(
-    db: &ShamirDb,
+    local: (&ShamirDb, Option<&MaintenanceGate>, &CancellationToken),
     node_id: &str,
     subscription: Option<&str>,
     bookmark: u64,
@@ -342,10 +368,10 @@ pub(crate) async fn clear_stall(
         return;
     };
     let message = format!("replication progress restored; durable bookmark at {bookmark}");
-    if let Err(e) = db
-        .set_subscription_status_message(name, &message, generation)
-        .await
-    {
+    let Some(result) = persist_live_status(local, name, &message, generation).await else {
+        return;
+    };
+    if let Err(e) = result {
         warn!(
             node_id = %node_id,
             subscription = %name,

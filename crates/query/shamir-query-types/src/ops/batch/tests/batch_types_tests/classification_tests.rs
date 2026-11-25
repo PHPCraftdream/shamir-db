@@ -740,3 +740,118 @@ fn activity_name_vocabulary_is_pinned() {
     let backup = roundtrip_op(mpack!({"backup_status": true}));
     assert_eq!(backup.activity_name(), "admin:backup_status");
 }
+
+// ========================================================================
+// Online logical-export admin ops (R3 step 2b) ---------------------------
+// ========================================================================
+//
+// Same classification as the backup trio: admin ops with no database
+// target (`required_access == None`); the superuser check is enforced in
+// `shamir-db`'s admin handler today, but the included-scope read/manage
+// checks of design §4.1 are NOT yet configured there — that branch is a
+// future check, not an already-enforced one. `ExportStatus` is read-only;
+// `StartExport` and `CancelExport` are writes.
+
+#[test]
+fn export_ops_are_admin_and_node_local() {
+    let start = roundtrip_op(mpack!({
+        "start_export": true,
+        "database": "appdb",
+        "repo": "main",
+        "schema_only": true,
+        "include_artifacts": true
+    }));
+    let BatchOp::StartExport(op) = &start else {
+        panic!("expected StartExport, got {start:?}");
+    };
+    assert_eq!(op.database, "appdb");
+    assert_eq!(op.repo.as_deref(), Some("main"));
+    assert_eq!(op.table, None);
+    assert!(op.schema_only);
+    assert!(op.include_artifacts);
+    assert!(start.is_admin());
+    assert!(start.is_write());
+    assert_eq!(start.required_access("appdb"), None);
+
+    let status = roundtrip_op(mpack!({"export_status": true}));
+    assert!(matches!(status, BatchOp::ExportStatus(_)));
+    assert!(status.is_admin());
+    assert!(!status.is_write());
+    assert_eq!(status.required_access("appdb"), None);
+
+    let cancel = roundtrip_op(mpack!({"cancel_export": true}));
+    assert!(matches!(cancel, BatchOp::CancelExport(_)));
+    assert!(cancel.is_admin());
+    assert!(cancel.is_write());
+    assert_eq!(cancel.required_access("appdb"), None);
+}
+
+#[test]
+fn export_receipts_round_trip_typed_payloads() {
+    let started = crate::admin::ExportStartReceipt {
+        export_id: "exp-1".to_string(),
+    };
+    let encoded = rmp_serde::to_vec_named(&started).expect("encode start receipt");
+    let decoded: crate::admin::ExportStartReceipt =
+        rmp_serde::from_slice(&encoded).expect("decode start receipt");
+    assert_eq!(decoded, started);
+
+    let status = crate::admin::ExportStatusReceipt {
+        export_id: "exp-1".to_string(),
+        phase: crate::admin::ExportPhase::Done,
+        sections: 12,
+        items: 3456,
+        bytes: 789_012,
+        artifact_name: Some("export-exp-1.dump".to_string()),
+        failure: None,
+    };
+    let encoded = rmp_serde::to_vec_named(&status).expect("encode status receipt");
+    let decoded: crate::admin::ExportStatusReceipt =
+        rmp_serde::from_slice(&encoded).expect("decode status receipt");
+    assert_eq!(decoded, status);
+
+    let failed = crate::admin::ExportStatusReceipt {
+        export_id: "exp-2".to_string(),
+        phase: crate::admin::ExportPhase::Failed,
+        sections: 3,
+        items: 10,
+        bytes: 256,
+        artifact_name: None,
+        failure: Some(crate::admin::ExportFailure::TimedOut),
+    };
+    let encoded = rmp_serde::to_vec_named(&failed).expect("encode failed receipt");
+    let decoded: crate::admin::ExportStatusReceipt =
+        rmp_serde::from_slice(&encoded).expect("decode failed receipt");
+    assert_eq!(decoded, failed);
+    assert_eq!(decoded.failure, Some(crate::admin::ExportFailure::TimedOut));
+
+    let cancel = crate::admin::ExportCancelReceipt { cancelled: true };
+    let encoded = rmp_serde::to_vec_named(&cancel).expect("encode cancel receipt");
+    let decoded: crate::admin::ExportCancelReceipt =
+        rmp_serde::from_slice(&encoded).expect("decode cancel receipt");
+    assert_eq!(decoded, cancel);
+}
+
+#[test]
+fn export_phase_and_failure_names_are_snake_case() {
+    // rmp-serde's default enum config (no explicit variant-encoding
+    // override) emits a unit variant as a MessagePack *string*, i.e. the
+    // variant name plus the msgpack str header byte — never bare UTF-8.
+    // Decode through QueryValue (like `repl_nested_enums_wire_shape`
+    // above) and assert the literal snake_case name instead of comparing
+    // raw bytes.
+    let phase_bytes =
+        rmp_serde::to_vec_named(&crate::admin::ExportPhase::WaitingForGate).expect("encode phase");
+    let phase: QueryValue = rmp_serde::from_slice(&phase_bytes).expect("decode phase");
+    assert_eq!(phase.as_str(), Some("waiting_for_gate"));
+
+    let phase_bytes =
+        rmp_serde::to_vec_named(&crate::admin::ExportPhase::Done).expect("encode phase");
+    let phase: QueryValue = rmp_serde::from_slice(&phase_bytes).expect("decode phase");
+    assert_eq!(phase.as_str(), Some("done"));
+
+    let failure_bytes = rmp_serde::to_vec_named(&crate::admin::ExportFailure::UnsupportedContent)
+        .expect("encode failure");
+    let failure: QueryValue = rmp_serde::from_slice(&failure_bytes).expect("decode failure");
+    assert_eq!(failure.as_str(), Some("unsupported_content"));
+}

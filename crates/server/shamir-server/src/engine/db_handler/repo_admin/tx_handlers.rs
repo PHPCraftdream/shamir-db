@@ -99,6 +99,14 @@ impl ShamirDbHandler {
             Err(()) => return server_busy_response(),
         };
 
+        // R3-2b — maintenance-gate enrollment for TxBegin. BEGIN can trigger
+        // lazy recovery / fresh snapshot registration on the engine side, so
+        // it enrolls unconditionally: admission is taken AFTER the version
+        // check and the in-flight registration (a server-busy reject never
+        // queues behind the gate) and BEFORE `db.tx_begin_as` touches any
+        // transaction state; the guard is retained to the end of the call.
+        let _maintenance = self.maintenance_admission().await;
+
         // RV-SERVER-C73466A7: TxBegin is NOT mode-gated — opening a
         // snapshot transaction is read-capable and a read-only replica must
         // keep serving reads inside interactive transactions. Writes are
@@ -186,6 +194,9 @@ impl ShamirDbHandler {
     /// (version, limits cap, admin, destructive-HMAC), then threads the
     /// parked `TxContext` through the engine glue.
     ///
+    /// After a maintenance-admitted batch is handed off, dropping the request
+    /// stops waiting for the reply, not execution or registry cleanup.
+    ///
     /// R4b-1 — the batch is registered in the in-flight activity table
     /// (RAII guard) after every cheap fast-reject gate and BEFORE the
     /// registry acquire and the ctx-lock wait, so an execute stuck waiting
@@ -209,6 +220,31 @@ impl ShamirDbHandler {
             return DbResponse::Error {
                 code: "unsupported_query_version".into(),
                 message: e.to_string(),
+            };
+        }
+
+        // R3-2b — an online-export operation is NEVER valid inside an
+        // interactive transaction. Reject EVERY form (standalone, mixed
+        // with other ops, or nested inside a Batch/ForEach body at any
+        // depth) HERE, before the read-only gate, before the in-flight
+        // registration and before any admission lock or partial mutation —
+        // and reject unauthorized callers before reporting the invalid form.
+        if BatchTreeVisitor::new(&batch.queries).any(|visit| {
+            matches!(
+                visit.entry.op,
+                shamir_query_types::batch::BatchOp::StartExport(_)
+                    | shamir_query_types::batch::BatchOp::ExportStatus(_)
+                    | shamir_query_types::batch::BatchOp::CancelExport(_)
+            )
+        }) {
+            if let Some(refusal) = super::export_gate::scram_superuser_refusal(session) {
+                return refusal;
+            }
+            return DbResponse::Error {
+                code: "online_export_invalid_form".into(),
+                message: "online export operations require a standalone, \
+                          nontransactional, top-level single-operation batch"
+                    .into(),
             };
         }
 
@@ -305,6 +341,18 @@ impl ShamirDbHandler {
             };
         }
 
+        // Take admission after preflight and before acquiring the tx context.
+        // Share the leaf classification with stateless Execute, not its
+        // backup-control exemption: TxExecute previously enrolled CancelBackup.
+        // Commit takes its own admission when staged writes land.
+        let maintenance = if BatchTreeVisitor::new(&batch.queries)
+            .any(|visit| super::execute::op_needs_maintenance_admission(&visit.entry.op))
+        {
+            self.maintenance_admission().await
+        } else {
+            None
+        };
+
         // R4b-1 — in-flight registration, one insert + one RAII removal
         // (the guard owns the entry AND the per-session request slot),
         // after every cheap gate (visibility, admin/auth, HMAC) and
@@ -379,68 +427,96 @@ impl ShamirDbHandler {
             }
         }
 
+        let slot = if maintenance.is_some() {
+            match self.try_owned_mutation_slot() {
+                Ok(slot) => Some(slot),
+                Err(()) => return server_busy_response(),
+            }
+        } else {
+            None
+        };
+        let spawn_owned = slot.is_some();
         let actor = super::handler::session_actor(session);
-        let exec = {
-            let mut guard = it.ctx().lock().await;
-            match guard.as_mut() {
-                Some(tx) => {
-                    let repo_observer = self.audit.as_ref().map(|audit| {
-                        super::repo_audit::repo_audit_observer(audit.clone(), session)
-                    });
-                    let r = self
-                        .db
-                        .tx_execute_with_policy_and_budget_and_repo_observer(
-                            actor,
-                            db_name,
-                            &batch,
-                            tx,
-                            self.execution_policy(),
-                            Some(it.remaining_lifetime()),
-                            repo_observer,
-                        )
-                        .await;
-                    // Measure staged size INSIDE the same lock as the engine call.
-                    r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
-                }
-                // The context is gone: an operator cancel (or a commit that
-                // already took it) won the race. Same typed answer as a fresh
-                // lookup of the removed handle.
-                None => {
-                    return DbResponse::Error {
-                        code: "tx_not_found".into(),
-                        message: format!("no open transaction for handle {}", tx_handle),
+        let repo_observer = self
+            .audit
+            .as_ref()
+            .map(|audit| super::repo_audit::repo_audit_observer(audit.clone(), session));
+        let db = Arc::clone(&self.db);
+        let tx_registry = Arc::clone(&self.tx_registry);
+        let policy = self.execution_policy();
+        let max_tx_bytes = self.tx_limits.max_tx_bytes;
+        let execute = async move {
+            let (_slot, _maintenance, _in_flight, _lease) = (slot, maintenance, _in_flight, _lease);
+            let exec = {
+                let mut guard = it.ctx().lock().await;
+                match guard.as_mut() {
+                    Some(tx) => {
+                        let r = db
+                            .tx_execute_with_policy_and_budget_and_repo_observer(
+                                actor,
+                                it.db(),
+                                &batch,
+                                tx,
+                                policy,
+                                Some(it.remaining_lifetime()),
+                                repo_observer,
+                            )
+                            .await;
+                        // Measure staged size INSIDE the same lock as the engine call.
+                        r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                     }
+                    None => {
+                        return DbResponse::Error {
+                            code: "tx_not_found".into(),
+                            message: format!("no open transaction for handle {}", tx_handle),
+                        }
+                    }
+                }
+            };
+            match exec {
+                Ok((response, staged_bytes)) => {
+                    if staged_bytes > max_tx_bytes {
+                        // Abort: drop the handle (RAII rollback of TxContext +
+                        // SnapshotGuard via the Arc) and surface the cap to the
+                        // client.
+                        tx_registry.remove_owned(tx_handle, &it);
+                        drop(it);
+                        return DbResponse::Error {
+                            code: "tx_too_large".into(),
+                            message: format!(
+                                "interactive transaction exceeded max_tx_bytes ({} > {})",
+                                staged_bytes, max_tx_bytes
+                            ),
+                        };
+                    }
+                    DbResponse::TxBatch { response }
+                }
+                Err(e) => {
+                    if matches!(
+                        &e,
+                        BatchError::ExecutionTimedOut { .. } | BatchError::LimitExceeded { .. }
+                    ) {
+                        tx_registry.remove_owned(tx_handle, &it);
+                        drop(it);
+                    }
+                    super::cursor_handlers::error_response(&e)
                 }
             }
         };
-        match exec {
-            Ok((response, staged_bytes)) => {
-                if staged_bytes > self.tx_limits.max_tx_bytes {
-                    // Abort: drop the handle (RAII rollback of TxContext +
-                    // SnapshotGuard via the Arc) and surface the cap to the
-                    // client.
-                    self.tx_registry.remove_owned(tx_handle, &it);
-                    drop(it);
-                    return DbResponse::Error {
-                        code: "tx_too_large".into(),
-                        message: format!(
-                            "interactive transaction exceeded max_tx_bytes ({} > {})",
-                            staged_bytes, self.tx_limits.max_tx_bytes
-                        ),
-                    };
-                }
-                DbResponse::TxBatch { response }
-            }
-            Err(e) => {
-                if matches!(
-                    &e,
-                    BatchError::ExecutionTimedOut { .. } | BatchError::LimitExceeded { .. }
-                ) {
-                    self.tx_registry.remove_owned(tx_handle, &it);
-                    drop(it);
-                }
-                super::cursor_handlers::error_response(&e)
-            }
+
+        if spawn_owned {
+            // Admin can write directly, not just stage changes. The task owns
+            // admission and the bounded slot through execution and cleanup.
+            // fire-and-forget: detached by design if the reply waiter is dropped.
+            self.owned_mutation_tasks()
+                .spawn(execute)
+                .await
+                .unwrap_or_else(|_| DbResponse::Error {
+                    code: "internal_error".into(),
+                    message: "cannot complete database request".into(),
+                })
+        } else {
+            execute.await
         }
     }
 
@@ -465,6 +541,18 @@ impl ShamirDbHandler {
         tx_handle: u64,
         wait: Option<VisibilityWait>,
     ) -> DbResponse {
+        // R3-2b — maintenance-gate enrollment for TxCommit. A commit can
+        // land staged writes, and whether it did cannot be known without
+        // taking the ctx lock, so the admission is taken UNCONDITIONALLY at
+        // the top — before `get_owned`, `begin_commit` or any ctx lock —
+        // and retained through the commit pipeline (the guard drops at the
+        // end of this fn, after `tx_commit_as_with_options` returned). A
+        // snapshot-only commit therefore also queues behind a freeze; the
+        // wait is bounded by the export job's ceiling and the tx's own
+        // absolute lifetime (INTERACTIVE_TX_MAX_LIFETIME) still bounds the
+        // parked handle on the registry side.
+        let _maintenance = self.maintenance_admission().await;
+
         let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
             Ok(it) => it,
             Err(TxRegistryError::TxNotFound) => {

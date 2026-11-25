@@ -335,7 +335,12 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         | CancelCursorAdmin(_)
         | StartBackup(_)
         | BackupStatus(_)
-        | CancelBackup(_) => HmacPolicy::NotGated,
+        | CancelBackup(_)
+        // R3 2b: online logical-export ops likewise; nothing destructive,
+        // superuser-only admin classification enforced at the handler.
+        | StartExport(_)
+        | ExportStatus(_)
+        | CancelExport(_) => HmacPolicy::NotGated,
     }
 }
 /// Canonical bytes for a whole operation; every applicable DTO is destructured without `..`.

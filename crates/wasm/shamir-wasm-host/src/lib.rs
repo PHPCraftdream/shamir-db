@@ -55,6 +55,16 @@ pub use wasm::{
 // name `CompileOptions` without a direct dependency on the compiler crate.
 pub use shamir_lang::{CompileOptions, Stage as ShamirStage};
 
+/// Deliberately hidden re-export of the shared owner-private directory
+/// primitive. The server's online-export root validation reuses the exact
+/// create/verify semantics of the wasm compile-cache directory (owner-only
+/// DACL / 0700, symlink-refusing) without adding a new server →
+/// `shamir-private-dir` dependency edge: the server already depends on
+/// `shamir-db`, which re-exports this crate as `engine::function`.
+/// All public APIs of that crate are safe; no unsafe is introduced.
+#[doc(hidden)]
+pub use shamir_private_dir::{create_private_dir, verify_private_dir};
+
 #[cfg(test)]
 pub(crate) use wasm::test_linker_and_store;
 

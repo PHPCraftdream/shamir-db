@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod client;
 pub mod interner;
+#[path = "visibility/logical_export/mod.rs"]
+pub mod logical_export;
 pub mod receipts;
 #[path = "visibility/repo_admin/mod.rs"]
 pub mod repo_admin;

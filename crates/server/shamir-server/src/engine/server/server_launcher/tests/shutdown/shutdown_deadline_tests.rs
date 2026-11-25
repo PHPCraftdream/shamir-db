@@ -56,6 +56,7 @@ use crate::server::server_launcher::audit_teardown::arm_teardown_probe;
 use crate::server::{release_stores, BootstrapMode, ReleaseOutcome, ServerLauncher};
 
 mod late_budget;
+mod owned_mutation_join;
 
 const TEST_NAME: &str = "shutdown_deadline_does_not_abandon_the_scheduled_worker";
 const PUBLIC_TEST: &str = "public_shutdown_bounds_meta_snapshot_join_without_outer_deadline";

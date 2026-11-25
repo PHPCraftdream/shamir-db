@@ -1,4 +1,4 @@
-//! Per-variant access, table, admin, and write classification for [`BatchOp`].
+//! Per-variant classification impls for [`BatchOp`].
 
 use shamir_types::access::{Action, ResourcePath};
 
@@ -123,6 +123,9 @@ impl BatchOp {
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
             | BatchOp::ListActivity(_)
+            | BatchOp::StartExport(_)
+            | BatchOp::ExportStatus(_)
+            | BatchOp::CancelExport(_)
             | BatchOp::CancelRequest(_)
             | BatchOp::CancelTx(_)
             | BatchOp::CancelCursorAdmin(_)
@@ -242,6 +245,9 @@ impl BatchOp {
                 | BatchOp::BackupStatus(_)
                 | BatchOp::CancelBackup(_)
                 | BatchOp::ListActivity(_)
+                | BatchOp::StartExport(_)
+                | BatchOp::ExportStatus(_)
+                | BatchOp::CancelExport(_)
                 | BatchOp::CancelRequest(_)
                 | BatchOp::CancelTx(_)
                 | BatchOp::CancelCursorAdmin(_)
@@ -294,6 +300,11 @@ impl BatchOp {
             // Online-backup admin ops: status is pure introspection; start
             // and cancel change persistent node-side backup state (R2a 3a).
             BatchOp::BackupStatus(_) | BatchOp::ListActivity(_) => false,
+            // Online logical-export admin ops (R3 step 2b): status is pure
+            // introspection; start and cancel change export-job state.
+            BatchOp::ExportStatus(_) => false,
+            BatchOp::StartExport(_) => true,
+            BatchOp::CancelExport(_) => true,
             // Cooperative cancellation only changes transient execution state.
             // Operator cancellation likewise only changes transient state.
             BatchOp::CancelRequest(_) => false,

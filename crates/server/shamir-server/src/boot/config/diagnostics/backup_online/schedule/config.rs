@@ -61,6 +61,16 @@ pub struct DailyWindow {
 }
 
 impl DailyWindow {
+    pub fn label(&self) -> String {
+        format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            self.start / 60,
+            self.start % 60,
+            self.end / 60,
+            self.end % 60
+        )
+    }
+
     pub fn contains(&self, minute: u32) -> bool {
         if minute >= 24 * 60 {
             return false;

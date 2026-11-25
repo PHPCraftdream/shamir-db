@@ -2,10 +2,12 @@
 mod activity;
 mod config;
 mod cursor_handlers;
-#[path = "repo_admin/cursor_support.rs"]
+#[path = "repo_admin/support/cursor_support.rs"]
 mod cursor_support;
 #[path = "repo_admin/execute.rs"]
 mod execute;
+#[path = "repo_admin/support/export_gate.rs"]
+mod export_gate;
 mod handler;
 mod handlers;
 #[path = "repo_admin/native_handler.rs"]

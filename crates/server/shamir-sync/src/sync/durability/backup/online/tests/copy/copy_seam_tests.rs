@@ -350,7 +350,7 @@ fn source_deleted_after_its_own_copy_leaves_a_stale_destination_refused_at_verif
 /// agree. DOCUMENTED ACTUAL RESULT: `run_copy_pass` does NOT fail the
 /// pass on a persistent mismatch (its doc text says it does) — it
 /// records the final re-pass hash, and the divergence surfaces at the
-/// step-F self-verification as `Verify("<path>: hash mismatch")`,
+/// step-F self-verification as `Verify("checksum mismatch for <path>: ..")`,
 /// failing the run at Verifying with full R4 cleanup. The
 /// doc-versus-behaviour divergence is reported to the orchestrator.
 #[test]
@@ -388,7 +388,10 @@ fn persistent_re_pass_hash_mismatch_surfaces_at_self_verification() {
         panic!("the failure must be a typed self-verification error, got {failure:?}");
     };
     assert!(
-        message.contains("repos/alpha/store.bin") && message.contains("hash mismatch"),
+        // The verifier's ChecksumMismatch display carries the file path
+        // with platform separators; normalise before matching.
+        message.replace('\\', "/").contains("repos/alpha/store.bin")
+            && message.contains("checksum mismatch"),
         "the verify failure must name the mismatching file, got: {message}"
     );
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
@@ -497,7 +500,7 @@ fn cancel_at_the_c_to_d_boundary_reports_copying_and_cleans_up() {
 }
 
 /// Cancellation raised after successful self-verification (F→G): the
-/// seam fires in `protocol.rs` between `self_verify` and the success
+/// seam fires in `protocol.rs` between the self-verification and the success
 /// return, and there is DELIBERATELY no cancellation check there (no
 /// production change — documented behaviour). The run still ends Done:
 /// valid published output on disk, pins released, source untouched —

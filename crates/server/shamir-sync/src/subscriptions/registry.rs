@@ -5,6 +5,7 @@ use shamir_collections::THasher;
 use shamir_tunables::instance_defaults::MAX_SUBSCRIPTIONS_PER_CONNECTION;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// An active subscription with its bridge task handle.
 ///
@@ -42,6 +43,10 @@ pub struct SubscriptionRegistry {
     /// (finding 2b-i) without a full traversal on the hot subscribe path.
     active: AtomicUsize,
     closed: AtomicBool,
+    /// Fired (cancelled) by [`Self::close_all`] when the connection exits
+    /// (`CloseSubscriptionsOnDrop` in `request_loop.rs` guarantees that call).
+    /// Online workers observe it to shut down without polling.
+    closed_signal: CancellationToken,
     /// Maximum concurrently-active subscriptions this connection may hold.
     cap: usize,
 }
@@ -53,6 +58,7 @@ impl Default for SubscriptionRegistry {
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
+            closed_signal: CancellationToken::new(),
             cap: MAX_SUBSCRIPTIONS_PER_CONNECTION,
         }
     }
@@ -70,6 +76,7 @@ impl SubscriptionRegistry {
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
+            closed_signal: CancellationToken::new(),
             cap,
         }
     }
@@ -196,6 +203,12 @@ impl SubscriptionRegistry {
         }
     }
 
+    /// A token cancelled by [`Self::close_all`] (connection teardown).
+    /// Clone it to observe connection exit without polling.
+    pub fn connection_closed(&self) -> CancellationToken {
+        self.closed_signal.clone()
+    }
+
     /// Cancel all subscriptions (connection teardown).
     pub fn close_all(&self) {
         self.closed.store(true, Ordering::Release);
@@ -203,6 +216,7 @@ impl SubscriptionRegistry {
             self.release_reservation();
             false
         });
+        self.closed_signal.cancel();
     }
 
     /// Number of currently-active subscriptions (O(1)).

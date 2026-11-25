@@ -101,6 +101,8 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
+use shamir_db::engine::table::writer_drain_barrier::WriterDrainGuard;
 use shamir_db::ShamirDb;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
@@ -113,31 +115,34 @@ use crate::sync::durability::backup::online::protocol::{
     run_online_backup, stage_and_io_reason, BackupPermit, OnlineBackupError,
 };
 
-use super::adapter::{EngineBackupPort, PortRunState};
-use super::metrics as backup_metrics;
-use super::progress_attribution::{
+use super::super::adapter::{EngineBackupPort, PortRunState};
+#[path = "guard.rs"]
+mod guard;
+use self::guard::RunGuard;
+use super::super::metrics as backup_metrics;
+use super::super::progress_attribution::{
     final_per_repo_progress, final_per_repo_progress_bytes, full_error_chain, live_repo_count,
     unix_nanos,
 };
-use super::schedule::destination::{scheduled_preflight, validate_destination};
-use super::schedule::retention_pass::{
+use super::super::schedule::destination::{scheduled_preflight, validate_destination};
+use super::super::schedule::retention_pass::{
     bounded_manifest_bytes, manifest_capture, scheduled_retention_pass, MarkerProvisioning,
     PendingAdoptions,
 };
 
-pub(crate) use super::progress_attribution::production_seal_cap;
-pub use super::progress_attribution::BackupStatusSnapshot;
+pub(crate) use super::super::progress_attribution::production_seal_cap;
+pub use super::super::progress_attribution::BackupStatusSnapshot;
 
 #[cfg(test)]
-pub(crate) use super::schedule::online_backup_step_hooks::{
+pub(crate) use super::super::schedule::online_backup_step_hooks::{
     arm_backup_step, install_test_step_hook, set_thread_step_callback, BackupStepCallback,
 };
 #[cfg(test)]
-use super::schedule::retention_pass::fire_post_publication_panic;
+use super::super::schedule::retention_pass::fire_post_publication_panic;
 #[cfg(test)]
-pub(crate) use super::schedule::retention_pass::set_scheduled_retention_end as arm_scheduled_retention_end;
+pub(crate) use super::super::schedule::retention_pass::set_scheduled_retention_end as arm_scheduled_retention_end;
 #[cfg(test)]
-pub(crate) use super::schedule::retention_pass::set_scheduled_retention_pause as arm_scheduled_retention_pause;
+pub(crate) use super::super::schedule::retention_pass::set_scheduled_retention_pause as arm_scheduled_retention_pause;
 
 /// Failure causes of a `start`.
 #[derive(Debug, thiserror::Error)]
@@ -198,14 +203,11 @@ pub struct OnlineBackupRegistry {
     /// per-thread state; no process-global arming.
     #[cfg(test)]
     pending_step_callback: Mutex<Option<BackupStepCallback>>,
-    /// Test-only (R2d-FIX-C): a one-shot post-run callback the NEXT
-    /// `start` moves onto its runner thread, invoked once after a
-    /// SUCCESSFUL protocol return and before the guard stamp, the
-    /// completion capture and the retention pass — fixture surgery (e.g.
-    /// renaming the published child to a fixed name) with no production
-    /// seam.
+    /// Test-only callback after successful protocol return.
     #[cfg(test)]
     pending_post_run_callback: Mutex<Option<TestPostRunCallback>>,
+    /// Shared mutation gate; backup runs are enrolled for their full lifetime.
+    maintenance: Option<MaintenanceGate>,
 }
 
 /// Test-only post-run callback: given the protocol's published snapshot
@@ -257,7 +259,17 @@ impl OnlineBackupRegistry {
             pending_step_callback: Mutex::new(None),
             #[cfg(test)]
             pending_post_run_callback: Mutex::new(None),
+            maintenance: None,
         }
+    }
+
+    /// R3-2b: install the shared server-wide maintenance gate (`shamir_db::
+    /// engine::db_instance::logical_export::MaintenanceGate`). Must be the
+    /// SAME instance the write paths admit through, so the online backup's
+    /// mutation admission participates in a logical-export freeze drain.
+    pub fn with_maintenance_gate(mut self, gate: MaintenanceGate) -> Self {
+        self.maintenance = Some(gate);
+        self
     }
 
     fn fresh_record(data_dir: &Path) -> RunRecord {
@@ -283,7 +295,7 @@ impl OnlineBackupRegistry {
     }
 
     /// Admit a scheduled run without filesystem work on the scheduler task.
-    pub(super) fn start_scheduled(
+    pub(in crate::boot::config::diagnostics::backup_online) fn start_scheduled(
         &self,
         destination: PathBuf,
         owner: String,
@@ -334,7 +346,7 @@ impl OnlineBackupRegistry {
             Some(root) => CancelFlag::from_shutdown(root),
             None => CancelFlag::default(),
         };
-        {
+        let maintenance = {
             let mut record = self.record.lock();
             if scheduled.is_some() && cancel.is_cancelled() {
                 return Err(StartBackupError::Io(io::Error::new(
@@ -345,6 +357,19 @@ impl OnlineBackupRegistry {
             if record.running {
                 return Err(StartBackupError::AlreadyRunning);
             }
+            // R3-2b: one mutation admission per run, taken here at the
+            // registry level BEFORE admitting the run, so a freeze that
+            // already raised intent refuses promptly with the existing
+            // `AlreadyRunning` (`CancelBackup`/`BackupStatus` stay served —
+            // they never touch the gate). `enter_mutation` is non-blocking;
+            // the guard is then handed to the runner thread.
+            let maintenance = match &self.maintenance {
+                Some(gate) => Some(
+                    gate.enter_mutation()
+                        .map_err(|_| StartBackupError::AlreadyRunning)?,
+                ),
+                None => None,
+            };
             // Provenance outlives the single-run record slot.
             let pending_adoptions = std::mem::take(&mut record.pending_adoptions);
             *record = RunRecord {
@@ -360,6 +385,7 @@ impl OnlineBackupRegistry {
                 pending_adoptions,
             };
             *self.backup_id.lock() = Some(backup_id.clone());
+            maintenance
         };
         // Test-only: take a pending per-run step callback (see
         // `arm_runner_step_callback`) onto this run's job, along with the
@@ -381,6 +407,7 @@ impl OnlineBackupRegistry {
             record: Arc::clone(&self.record),
             #[cfg(test)]
             step_callback,
+            maintenance,
             #[cfg(test)]
             post_run_callback,
         };
@@ -482,9 +509,9 @@ struct ScheduledRun {
 /// once the run is fully over (final record publication, defensive refusal, or
 /// the unwind path after the failed record). A runner panic closes `outcome`
 /// without a value and resolves `finished`, so the drain never hangs.
-pub(super) struct ScheduledRunSignals {
-    pub(super) outcome: oneshot::Receiver<bool>,
-    pub(super) finished: oneshot::Receiver<()>,
+pub(in crate::boot::config::diagnostics::backup_online) struct ScheduledRunSignals {
+    pub(in crate::boot::config::diagnostics::backup_online) outcome: oneshot::Receiver<bool>,
+    pub(in crate::boot::config::diagnostics::backup_online) finished: oneshot::Receiver<()>,
 }
 
 /// The sender halves [`ScheduledRunSignals`] hands to the run's guard.
@@ -511,14 +538,19 @@ struct RunJob {
     /// guard stamp and the completion capture.
     #[cfg(test)]
     post_run_callback: Option<TestPostRunCallback>,
+    /// R3-2b: the registry-level mutation admission, held for the whole run
+    /// — protocol, cleanup and every error/cancel/panic exit (a panic on
+    /// this thread unwinds through `run`, dropping the guard).
+    maintenance: Option<WriterDrainGuard>,
 }
 
 impl RunJob {
     /// The blocking-thread body: permit, protocol, record update. Never
     /// holds the record lock across the protocol call. `guard` is a
     /// parameter on purpose: parameters drop after the body's locals, so
-    /// on an unwind the permit (and the protocol's own pins/seals RAII,
-    /// deeper still) is released BEFORE the guard publishes the failure.
+    /// on an unwind the permit and maintenance admission (and the protocol's
+    /// own pins/seals RAII, deeper still) are released BEFORE the guard
+    /// publishes the failure.
     fn run(self, mut guard: RunGuard) {
         guard.armed = true;
         let Self {
@@ -533,6 +565,7 @@ impl RunJob {
             record,
             #[cfg(test)]
             step_callback,
+            maintenance,
             #[cfg(test)]
             post_run_callback,
         } = self;
@@ -550,6 +583,7 @@ impl RunJob {
             // Defensive: the registry gate makes this unreachable today;
             // record a clean failure instead of racing the protocol. A
             // SCHEDULED run stores the path-free `preparing: busy`.
+            drop(maintenance);
             let mut record = record.lock();
             record.last_error = Some(if scheduled_run {
                 OnlineBackupError::Busy.stage_and_reason()
@@ -683,8 +717,11 @@ impl RunJob {
         } else {
             live_repo_count(&db, &runtime).saturating_sub(snapshot_count)
         };
+        // Release the mutation admission and runner-owned handles before
+        // taking the record lock to publish idle.
         drop(port);
         drop(db);
+        drop(maintenance);
         // §4.8 metrics hook values, prepared BEFORE the record lock: run
         // counters, copied bytes (the protocol's hashed-byte counters)
         // and the last run duration; the failure stage is where the
@@ -789,14 +826,6 @@ impl RunJob {
         }
         // Final record publication, `running = false` LAST (the record stayed
         // `running` — admission refused — through retention).
-        // A failed SCHEDULED outcome is logged ONCE here with the same
-        // path-free stage/reason vocabulary it stores: never the raw error.
-        if let (Err(error), true) = (&outcome, scheduled_run) {
-            let rendered = error.stage_and_reason();
-            if let Some((stage, reason)) = rendered.split_once(": ") {
-                tracing::warn!(stage, reason, "scheduled backup run failed");
-            }
-        }
         let mut record = record.lock();
         record.progress = progress;
         record.repos_created_during = repos_created_during;
@@ -806,182 +835,16 @@ impl RunJob {
             (Err(error), false) => Some(full_error_chain(error)),
             (Ok(_), _) => None,
         };
+        // The scheduled run's LAST-RUN record publishes at the final
+        // publication, before `running = false`: the run's own typed outcome
+        // (completed / typed-cancelled / failed) with the stable path-free
+        // vocabulary; a failure keeps the ONCE log with identical fields.
+        if scheduled_run {
+            backup_metrics::note_scheduled_run_outcome(&outcome, record.started_at_unix_ns);
+        }
         record.running = false;
         drop(record);
         guard.disarm();
-    }
-}
-
-/// Unwind guard of one registered run (R2a-4 defect 4): a panic on the
-/// detached runner thread must not leave the record `running` or the §4.8
-/// metrics with `shamir_backup_active` stuck at 1. Created in `start`
-/// (disarmed — the runner body arms it, so a failed spawn drops it
-/// inertly), moved into the spawn closure, and on the unwind path it
-/// publishes a failed record and closes the metrics. The body sets the
-/// guard's `completed_dir` the moment the protocol returns `Ok` (the
-/// exact verified snapshot path), so the guard at unwind distinguishes a
-/// COMPLETED, self-verified snapshot — recorded, never deleted — from a
-/// partial output (already removed by the protocol's unwind cleanup;
-/// the message never promises a removal that may have failed).
-/// Publication ordering makes partial state impossible: the body publishes
-/// the copy outcome at protocol completion, stays armed across retention,
-/// then publishes the final record with `running = false` LAST and disarms —
-/// the guard re-publishes nothing. A panic in the published window (the
-/// `outcome` sender is already taken) accounts ONE retention failure for a
-/// scheduled run, never a second copy counter.
-struct RunGuard {
-    record: Arc<Mutex<RunRecord>>,
-    /// The run's live stage hint, read at unwind time (before the permit
-    /// drops, the adapter's port-call hints are still consistent).
-    run_state: Arc<PortRunState>,
-    started_at_unix_ns: u128,
-    /// The OPERATOR destination root (the snapshot child is created by
-    /// the protocol under it).
-    destination: PathBuf,
-    /// SCHEDULED run: its unwind message is rendered path-free.
-    scheduled: bool,
-    /// Set by the runner body IMMEDIATELY after the protocol returned
-    /// `Ok` — the exact, atomically created `<to>/<timestamp>` snapshot
-    /// directory the protocol verified and kept. No filesystem probing
-    /// at unwind time: an unrelated `manifest.json` under the operator
-    /// root must never be mistaken for a completed run.
-    completed_dir: Option<PathBuf>,
-    started_at: Instant,
-    armed: bool,
-    /// Whether the body already accounted the COPY outcome (`note_finished`):
-    /// an explicit flag, because a MANUAL run has no sender at all and
-    /// `outcome.is_none()` could not tell "published" from "never published".
-    copy_accounted: bool,
-    // Field drop closes the channel on unwind only after Drop publishes
-    // the failure; normal completion sends explicitly, before retention.
-    outcome: Option<oneshot::Sender<bool>>,
-    // The LATE signal: sent exactly once when the run is fully over (final
-    // record published, defensive refusal, or the unwind path). Never early.
-    finished: Option<oneshot::Sender<()>>,
-}
-
-impl RunGuard {
-    fn new(
-        record: Arc<Mutex<RunRecord>>,
-        run_state: Arc<PortRunState>,
-        started_at_unix_ns: u128,
-        destination: PathBuf,
-        scheduled: bool,
-        outcome: Option<oneshot::Sender<bool>>,
-        finished: Option<oneshot::Sender<()>>,
-    ) -> Self {
-        Self {
-            record,
-            run_state,
-            started_at_unix_ns,
-            destination,
-            scheduled,
-            completed_dir: None,
-            started_at: Instant::now(),
-            armed: false,
-            copy_accounted: false,
-            outcome,
-            finished,
-        }
-    }
-
-    /// Publish the COPY outcome at protocol completion; does NOT disarm (the
-    /// guard must stay live across retention so a later panic still records).
-    fn publish_outcome(&mut self, verified: bool) {
-        // The accounting is done for EVERY run here; only a scheduled one has a sender.
-        self.copy_accounted = true;
-        if let Some(outcome) = self.outcome.take() {
-            let _ = outcome.send(verified);
-        }
-    }
-
-    /// Send the late FINISHED signal exactly once.
-    fn send_finished(&mut self) {
-        if let Some(finished) = self.finished.take() {
-            let _ = finished.send(());
-        }
-    }
-
-    /// Disarm after the final record publication (`running = false`) and send
-    /// the late FINISHED signal; the run is fully over.
-    fn disarm(&mut self) {
-        self.armed = false;
-        self.send_finished();
-    }
-}
-
-impl Drop for RunGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let stage = self.run_state.stage();
-        // `publish_outcome` marks the accounting done, so this covers the
-        // scheduled post-publication window AND a manual run (which has no
-        // sender) — the latter must still be counted as ONE copy failure.
-        let copy_published = self.copy_accounted;
-        let error = match (&self.completed_dir, self.scheduled) {
-            (Some(_), true) => String::from(
-                "online-backup runner panicked after the protocol completed; \
-                 the self-verified snapshot was KEPT — run `verify` before use",
-            ),
-            (None, true) => format!(
-                "online-backup runner panicked before publishing a result (stage hint {stage:?}); \
-                 any files the protocol may have left must be re-verified with `verify` before use"
-            ),
-            (Some(dir), false) => format!(
-                "online-backup runner panicked after the protocol completed; the self-verified \
-                 snapshot under {} is KEPT — run `verify` before use",
-                dir.display()
-            ),
-            (None, false) => format!(
-                "online-backup runner panicked before publishing a result (stage hint {stage:?}); \
-                 any files the protocol may have left under {} must be re-verified with `verify` \
-                 before use",
-                self.destination.display()
-            ),
-        };
-        let mut record = self.record.lock();
-        if record.started_at_unix_ns != self.started_at_unix_ns {
-            // A replacement run (or the failed-spawn reset in `start`)
-            // owns the record: nothing of THIS run may be published. The
-            // late signal still resolves — this run IS over.
-            drop(record);
-            self.send_finished();
-            return;
-        }
-        if !record.running {
-            // The body fully published under the record lock (metrics
-            // first, `running = false` LAST) before disarming: a final
-            // record is atomic, so nothing is missing here and no
-            // counter may be re-advanced.
-            drop(record);
-            self.send_finished();
-            return;
-        }
-        // The guard finalizes the record: failed stage, the verified
-        // snapshot's exact path recorded and never deleted (a partial
-        // output was already removed by the protocol's unwind cleanup —
-        // if that removal failed the message still only directs to
-        // `verify`, it does not promise a removal that did not happen).
-        record.progress.record_failure(stage, &error);
-        record.dest_dir = self.completed_dir.clone();
-        record.last_error = Some(error);
-        if copy_published {
-            // The copy outcome was already published at protocol completion:
-            // a panic here is ONE retention failure for a SCHEDULED run (what
-            // the module doc promises) and no counter at all for a MANUAL one,
-            // which has no retention pass. The copy counters, `active`
-            // included, are never touched twice.
-            if self.scheduled {
-                backup_metrics::note_retention(0, 1, None);
-            }
-        } else {
-            backup_metrics::note_finished(true, stage, 0, self.started_at.elapsed());
-        }
-        record.running = false;
-        drop(record);
-        self.send_finished();
     }
 }
 
@@ -995,5 +858,5 @@ impl Drop for RunGuard {
 // `schedule::tests`, and every call path is unchanged.
 
 #[cfg(test)]
-#[path = "schedule/tests/registry_seams.rs"]
+#[path = "../schedule/tests/registry_seams.rs"]
 mod registry_seams;

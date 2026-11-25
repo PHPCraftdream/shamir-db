@@ -663,7 +663,7 @@ fn f_self_verify_hash_mismatch_removes_output_and_leaves_source_untouched() {
         &progress,
         BackupStage::Verifying,
         &error,
-        "hash mismatch",
+        "checksum mismatch",
     );
     assert!(
         matches!(failure, OnlineBackupFailure::Verify(_)),

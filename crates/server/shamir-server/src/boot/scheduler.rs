@@ -20,6 +20,7 @@ use shamir_connect::server::rate_limit::RateLimiter;
 use shamir_connect::server::resume::ConsumedCounterStore;
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
@@ -141,8 +142,31 @@ fn tick_now_or_skip(task: &'static str) -> Option<u64> {
 }
 
 impl Scheduler {
-    /// Spawn all six periodic tasks. Returns immediately; tasks are now live.
+    /// Spawn all six periodic tasks with no maintenance gate enrolled.
+    ///
+    /// Equivalent to [`Self::spawn_with_maintenance`] with `maintenance:
+    /// None`. Boot should prefer [`Self::spawn_with_maintenance`] so the
+    /// identity-finalize tick participates in online-export admission.
     pub fn spawn(inputs: SchedulerInputs, config: SchedulerConfig) -> Self {
+        Self::spawn_with_maintenance(inputs, config, None)
+    }
+
+    /// Spawn all six periodic tasks, enrolling the shared online-export
+    /// [`MaintenanceGate`] when one is supplied.
+    ///
+    /// Only the periodic server-identity overlap finalization (task 6) is a
+    /// state-mutating background job from the gate's perspective; the GC,
+    /// token and audit tasks are admitted unconditionally. The finalize tick
+    /// takes a **nonblocking** `enter_mutation()`: if the gate is frozen
+    /// (logical export / maintenance in progress) the tick is skipped and the
+    /// next periodic tick retries. The returned drain guard is retained
+    /// across `try_finalize` and released only after the RCU state mutation
+    /// completes — no async lock, no waiting, no parking.
+    pub(crate) fn spawn_with_maintenance(
+        inputs: SchedulerInputs,
+        config: SchedulerConfig,
+        maintenance: Option<MaintenanceGate>,
+    ) -> Self {
         // Capacity 1 is enough — we only ever send a single shutdown message.
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let mut handles = Vec::with_capacity(6);
@@ -265,6 +289,7 @@ impl Scheduler {
         // 6. Identity rotation finalize.
         {
             let identity = inputs.identity.clone();
+            let gate = maintenance;
             let rx = shutdown_tx.subscribe();
             let period = config.identity_finalize_period;
             handles.push(tokio::spawn(async move {
@@ -274,10 +299,32 @@ impl Scheduler {
                         None => return,
                     };
                     let identity = identity.clone();
+                    let gate = gate.clone();
                     safe_run("identity_finalize", move || {
+                        // Nonblocking admission (spec 56-r3-2b): if the gate
+                        // is frozen for an in-progress online export, skip
+                        // this finalize tick entirely — the next hourly tick
+                        // retries. Never wait or park here.
+                        let guard = match gate.as_ref() {
+                            Some(gate) => match gate.enter_mutation() {
+                                Ok(guard) => Some(guard),
+                                Err(error) => {
+                                    tracing::debug!(
+                                        %error,
+                                        "identity_finalize skipped: maintenance gate frozen"
+                                    );
+                                    return;
+                                }
+                            },
+                            None => None,
+                        };
+                        // Retain the drain guard across `try_finalize` so
+                        // the whole RCU state mutation is covered by the
+                        // admission; released at the end of this closure.
                         if identity.try_finalize(now_ns) {
                             tracing::info!("identity_finalize cleared previous keypair");
                         }
+                        drop(guard);
                     });
                 })
                 .await;

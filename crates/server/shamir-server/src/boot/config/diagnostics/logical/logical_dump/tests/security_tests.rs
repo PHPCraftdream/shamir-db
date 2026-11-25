@@ -83,5 +83,6 @@ fn verifier_io_checks_cancellation_instead_of_reading_successfully() {
     assert!(reader.read(&mut [0; 1]).is_err());
     let mut writer = CheckedIo::new(Vec::new(), &cancel, CheckedIo::<File>::deadline());
     assert!(writer.write_all(b"partial frame").is_err());
-    assert!(writer.into_inner().is_empty());
+    let (inner, _) = writer.into_parts();
+    assert!(inner.is_empty());
 }

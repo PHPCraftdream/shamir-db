@@ -458,6 +458,10 @@ pub(super) fn admin_batch_cases() -> Vec<(BatchOp, &'static str)> {
             "CancelCursorAdmin",
         ),
         (ddl::replication_status(), "ReplicationStatus"),
+        // R3 2b: online-export admin ops are superuser-surface for tokens.
+        (ddl::start_export("deny").build(), "StartExport"),
+        (ddl::export_status(), "ExportStatus"),
+        (ddl::cancel_export(), "CancelExport"),
         // R4b-4: shape statistics are a SCRAM-session surface; a token must
         // never reach the listing or the registry wipe.
         (

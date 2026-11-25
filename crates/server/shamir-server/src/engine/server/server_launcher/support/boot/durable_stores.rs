@@ -24,7 +24,7 @@ use crate::server::bootstrap_mode::BootstrapMode;
 use crate::server_meta::ServerMetaStore;
 use crate::user_directory::FjallUserDirectory;
 
-use super::super::helpers::{
+use super::helpers::{
     bind_backup_owner, boot_now_ns, kdf_from_config, log_bootstrap_outcome, resolve_backup,
 };
 

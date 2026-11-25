@@ -3,16 +3,19 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::time::Duration;
 
 use shamir_db::{ShamirDb, ShutdownReport};
 use shamir_tunables::runtime::RuntimeTunables;
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::TaskTracker;
+
+#[cfg(test)]
+use super::shutdown_probes::{fire_repo_flush_probe, fire_scheduled_join_probe};
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::boot::config::diagnostics::logical::export_online::OnlineExport;
 use crate::db_handler::CancelRefusalAudit;
 use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
@@ -75,15 +78,15 @@ const ERR_OBS_POLLER_RUNNING: &str =
 /// stop signal is the shared root `shutdown_token` (cancelled by
 /// [`ServerHandle::shutdown`] before this handle is awaited), so no per-task
 /// stop channel is needed.
-pub(super) struct MetaSnapshotTask {
-    pub(super) handle: JoinHandle<()>,
+pub(in crate::engine::server) struct MetaSnapshotTask {
+    pub(in crate::engine::server) handle: JoinHandle<()>,
 }
 
 /// Handle for the periodic follower-replication reconcile-tick task (386-c).
 /// Stopped via the shared root `shutdown_token`; the `JoinHandle` is awaited
 /// on shutdown so the task drops its `Arc<SubscriptionSupervisor>` reference.
 pub struct ReplSupervisorTask {
-    pub(super) handle: JoinHandle<()>,
+    pub(in crate::engine::server) handle: JoinHandle<()>,
 }
 
 /// R4b-1 gauge-binding test seam (`cfg(test)` only — the field is absent
@@ -135,16 +138,16 @@ pub struct ServerHandle {
     /// for all others.
     pub bound_ipc_paths: Vec<Option<String>>,
     /// HTTP REST gate maintenance workers, retained until connections have drained.
-    pub(super) http_gates: Vec<Arc<RestGate>>,
+    pub(in crate::engine::server) http_gates: Vec<Arc<RestGate>>,
     /// Per-listener accept-loop join handles.
-    pub(super) listener_tasks: Vec<JoinHandle<()>>,
+    pub(in crate::engine::server) listener_tasks: Vec<JoinHandle<()>>,
     /// Background task scheduler.
-    pub(super) scheduler: Scheduler,
+    pub(in crate::engine::server) scheduler: Scheduler,
     /// Audit-log appender (drained on shutdown).
-    pub(super) audit_appender: Arc<FjallAuditAppender>,
-    pub(super) cancel_refusal_audit: Arc<CancelRefusalAudit>,
+    pub(in crate::engine::server) audit_appender: Arc<FjallAuditAppender>,
+    pub(in crate::engine::server) cancel_refusal_audit: Arc<CancelRefusalAudit>,
     #[cfg(test)]
-    pub(super) refusal_drain_pending: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(in crate::engine::server) refusal_drain_pending: Option<tokio::sync::oneshot::Sender<()>>,
     /// Cancellation token signalling shutdown to every accept loop.
     ///
     /// Why CancellationToken, not `Notify::notify_waiters`: Notify is
@@ -156,48 +159,55 @@ pub struct ServerHandle {
     /// on this codebase. CancellationToken sets a persistent flag; any
     /// future `.cancelled().await` resolves immediately if cancel was
     /// already set, so the race is closed by construction.
-    pub(super) shutdown_token: CancellationToken,
+    pub(in crate::engine::server) shutdown_token: CancellationToken,
     /// Dropping the handle also signals this task; only graceful shutdown joins it.
-    pub(super) backup_schedule_task: Option<(DropGuard, JoinHandle<()>)>,
+    pub(in crate::engine::server) backup_schedule_task: Option<(DropGuard, JoinHandle<()>)>,
     /// Optional observability HTTP server.
-    pub(super) observability: Option<crate::observability::ObservabilityHandle>,
+    pub(in crate::engine::server) observability: Option<crate::observability::ObservabilityHandle>,
     /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
     /// state). One 60s tick persists BOTH the lockout store and the
     /// rate-limiter buckets. Awaited on shutdown so the fjall `server_meta`
     /// store lock is released cleanly before a same-data-dir restart can succeed.
-    pub(super) meta_snapshot_task: Option<MetaSnapshotTask>,
+    pub(in crate::engine::server) meta_snapshot_task: Option<MetaSnapshotTask>,
     /// Phase B Stage 6 — periodic reaper for expired interactive txs.
     /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
     /// task drops and any lingering open txs are dropped (RAII abort).
-    pub(super) interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
+    pub(in crate::engine::server) interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
     /// FG-5b — periodic reaper for idle-timeout-expired result cursors.
     /// Drained on shutdown so the `Arc<CursorRegistry>` reference held by
     /// the task drops and any lingering open cursors release their pinned
     /// `SnapshotGuard`s (RAII unpin of MVCC GC).
-    pub(super) cursor_reaper: Option<crate::cursor_registry::CursorReaperTask>,
+    pub(in crate::engine::server) cursor_reaper: Option<crate::cursor_registry::CursorReaperTask>,
+    /// R3-2b — the online logical-export job service, when a root is
+    /// configured. Held until shutdown: the export root's exclusive lock
+    /// must outlive every job, and `shutdown_with_report` waits (bounded)
+    /// for a draining worker BEFORE the store flush (a freeze holds the
+    /// gate). `None` without a configured root.
+    pub(in crate::engine::server) online_export: Option<Arc<OnlineExport>>,
+    pub(in crate::engine::server) owned_mutation_tasks: Option<Arc<TaskTracker>>,
     /// Follower-replication supervisor (386-c). Held here so its follower
     /// loops survive past boot (dropping it would kill every loop). On
     /// shutdown `stop_all()` cancels every running loop before the tasks are
     /// joined.
-    pub(super) repl_supervisor: Arc<crate::replication::SubscriptionSupervisor>,
+    pub(in crate::engine::server) repl_supervisor: Arc<crate::replication::SubscriptionSupervisor>,
     /// Periodic reconcile-tick task driving [`Self::repl_supervisor`]. Cancelled
     /// by the root `shutdown_token` and joined on shutdown.
-    pub(super) repl_supervisor_task: Option<ReplSupervisorTask>,
+    pub(in crate::engine::server) repl_supervisor_task: Option<ReplSupervisorTask>,
     /// ShamirDb reference — needed on shutdown to drain all repo
     /// MemBuffers to durable backing, closing the ~500 ms buffered-
     /// commit loss window on graceful stop.
-    pub(super) shamir: Arc<ShamirDb>,
+    pub(in crate::engine::server) shamir: Arc<ShamirDb>,
     /// Data dir the stores live under — scanned by the shutdown barrier that
     /// waits for their directory locks to be released.
-    pub(super) data_dir: PathBuf,
+    pub(in crate::engine::server) data_dir: PathBuf,
     /// Live-connection tracker: shutdown waits on it until every connection
     /// task (told to end through `shutdown_token`) has dropped its handler
     /// context and, with it, its references to the stores.
-    pub(super) conn_tasks: crate::connection::ConnTasks,
+    pub(in crate::engine::server) conn_tasks: crate::connection::ConnTasks,
     /// Outcome of the boot-time format-stamp check (release-1 R1a,
     /// design 3.2): what the check did to `data_dir` before any store
     /// opened (created / adopted / unchanged / version-updated).
-    pub(super) format_stamp: shamir_sync::format_stamp::StampOutcome,
+    pub(in crate::engine::server) format_stamp: shamir_sync::format_stamp::StampOutcome,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -206,7 +216,7 @@ pub struct ServerHandle {
     /// fjall stores. Do NOT explicitly unlock — drop is the release.
     /// `None` once [`ServerHandle::take_shutdown_owner`] moved it out for the
     /// embedding path.
-    pub(super) data_dir_lock: Option<std::fs::File>,
+    pub(in crate::engine::server) data_dir_lock: Option<std::fs::File>,
     /// Instance-level runtime tunables. Initialized from `instance_defaults`
     /// consts — reads are a single atomic load (instant, non-blocking).
     /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
@@ -269,127 +279,8 @@ pub(crate) async fn drain_connections(
 /// unclean; it only bounds the audit/repository teardown.
 pub(crate) struct ShutdownOwner {
     schedule_task: Option<(DropGuard, JoinHandle<()>)>,
+    owned_mutation_tasks: Option<Arc<TaskTracker>>,
     data_dir_lock: Option<std::fs::File>,
-}
-
-/// One-shot probe fired immediately before the owner starts awaiting the
-/// scheduled worker's completion signal. Test-only: a shutdown test that
-/// parks the worker waits for this marker instead of guessing how long the
-/// earlier teardown stages take, so "shutdown must not return while the
-/// worker is parked" can never pass vacuously on a slow runner.
-#[cfg(test)]
-static SCHEDULED_JOIN_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
-
-/// Clears an unfired [`arm_scheduled_join_probe`] on drop; a probe that fires
-/// removes itself from the slot.
-#[cfg(test)]
-pub(crate) struct ScheduledJoinProbeGuard;
-
-#[cfg(test)]
-impl Drop for ScheduledJoinProbeGuard {
-    fn drop(&mut self) {
-        *SCHEDULED_JOIN_PROBE.lock().expect("scheduled join probe") = None;
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn arm_scheduled_join_probe(
-    probe: impl FnOnce() + Send + 'static,
-) -> ScheduledJoinProbeGuard {
-    *SCHEDULED_JOIN_PROBE.lock().expect("scheduled join probe") = Some(Box::new(probe));
-    ScheduledJoinProbeGuard
-}
-
-#[cfg(test)]
-fn fire_scheduled_join_probe() {
-    let probe = SCHEDULED_JOIN_PROBE
-        .lock()
-        .expect("scheduled join probe")
-        .take();
-    if let Some(probe) = probe {
-        probe();
-    }
-}
-
-/// One-shot marker for the post-deadline fallback join in `ShutdownOwner::drain`.
-#[cfg(test)]
-static FALLBACK_DRAIN_JOIN_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) struct FallbackDrainJoinProbeGuard;
-
-#[cfg(test)]
-impl Drop for FallbackDrainJoinProbeGuard {
-    fn drop(&mut self) {
-        *FALLBACK_DRAIN_JOIN_PROBE
-            .lock()
-            .expect("fallback drain join probe") = None;
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn arm_fallback_drain_join_probe(
-    probe: impl FnOnce() + Send + 'static,
-) -> FallbackDrainJoinProbeGuard {
-    *FALLBACK_DRAIN_JOIN_PROBE
-        .lock()
-        .expect("fallback drain join probe") = Some(Box::new(probe));
-    FallbackDrainJoinProbeGuard
-}
-
-#[cfg(test)]
-fn fire_fallback_drain_join_probe() {
-    let probe = FALLBACK_DRAIN_JOIN_PROBE
-        .lock()
-        .expect("fallback drain join probe")
-        .take();
-    if let Some(probe) = probe {
-        probe();
-    }
-}
-
-/// Mark entry into the post-expiry owner drain (test-only).
-#[cfg(test)]
-pub(crate) fn mark_fallback_drain_join() {
-    fire_fallback_drain_join_probe();
-}
-
-/// One-shot probe fired immediately BEFORE the ordered shutdown's REAL
-/// repository flush call (`ShamirDb::flush_all_report`) — never at the point
-/// the flush would have started, so a SKIPPED flush leaves the probe unfired
-/// and cannot look like an entered one. A shutdown test compares its order with
-/// [`arm_scheduled_join_probe`]: the scheduled worker and its in-flight run are
-/// joined BEFORE the flush, so the join marker must fire first (mutant: the
-/// worker awaited after the flush).
-#[cfg(test)]
-static REPO_FLUSH_PROBE: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
-
-/// Clears an unfired [`arm_repo_flush_probe`]; a probe that fires removes
-/// itself.
-#[cfg(test)]
-pub(crate) struct RepoFlushProbeGuard;
-
-#[cfg(test)]
-impl Drop for RepoFlushProbeGuard {
-    fn drop(&mut self) {
-        *REPO_FLUSH_PROBE.lock().expect("repo flush probe") = None;
-    }
-}
-
-/// Arm ONE repository-flush probe.
-#[cfg(test)]
-pub(crate) fn arm_repo_flush_probe(probe: impl FnOnce() + Send + 'static) -> RepoFlushProbeGuard {
-    *REPO_FLUSH_PROBE.lock().expect("repo flush probe") = Some(Box::new(probe));
-    RepoFlushProbeGuard
-}
-
-/// Fire and consume the repository-flush probe, if any.
-#[cfg(test)]
-fn fire_repo_flush_probe() {
-    let probe = REPO_FLUSH_PROBE.lock().expect("repo flush probe").take();
-    if let Some(probe) = probe {
-        probe();
-    }
 }
 
 impl ShutdownOwner {
@@ -428,6 +319,18 @@ impl ShutdownOwner {
     /// is released afterwards, never before.
     pub(crate) async fn drain(mut self, report: &mut ShutdownReport) {
         self.join_schedule(report).await;
+        if let Some(tracker) = &self.owned_mutation_tasks {
+            tracker.close();
+            let (deadline, budget) = early_stage_bound(None, REPO_FLUSH_BUDGET);
+            if tokio::time::timeout_at(deadline, tracker.wait())
+                .await
+                .is_err()
+            {
+                report.add_error(format!(
+                    "owned mutation workers still running after the shutdown bound; repository flush skipped ({budget:?})"
+                ));
+            }
+        }
         // Released here, after the scheduled worker finished — never
         // explicitly unlocked (drop is the release).
         drop(self.data_dir_lock.take());
@@ -476,7 +379,10 @@ fn report_unsubmitted_release_probe(report: &mut ShutdownReport, reason: &str) {
 }
 
 #[cfg(test)]
-pub(super) fn report_unsubmitted_release_probe_for_test(report: &mut ShutdownReport, reason: &str) {
+pub(in crate::engine::server) fn report_unsubmitted_release_probe_for_test(
+    report: &mut ShutdownReport,
+    reason: &str,
+) {
     report_unsubmitted_release_probe(report, reason);
 }
 
@@ -520,6 +426,7 @@ impl ServerHandle {
     pub(crate) fn take_shutdown_owner(&mut self) -> ShutdownOwner {
         ShutdownOwner {
             schedule_task: self.backup_schedule_task.take(),
+            owned_mutation_tasks: self.owned_mutation_tasks.clone(),
             data_dir_lock: self.data_dir_lock.take(),
         }
     }
@@ -753,6 +660,34 @@ impl ServerHandle {
             #[cfg(test)]
             fire_scheduled_join_probe();
             owner.join_schedule(report).await;
+        }
+        tracing::debug!(stage = "mutation_worker_join", "shutdown stage");
+        if let Some(tracker) = &self.owned_mutation_tasks {
+            tracker.close();
+            let (mutation_deadline, _) = early_stage_bound(early_cutoff, REPO_FLUSH_BUDGET);
+            if tokio::time::timeout_at(mutation_deadline, tracker.wait())
+                .await
+                .is_err()
+            {
+                report.add_error(
+                    "owned mutation workers still running after the shutdown bound; repository flush skipped"
+                        .to_string(),
+                );
+                quiesced = false;
+            }
+        }
+        // 3b. R3-2b — wait (bounded, the writer's own drain bound) for a
+        //     still-draining online-export worker on EVERY shutdown path,
+        //     before the connection-dependent flush decision below.
+        let export_idle = match self.online_export {
+            Some(service) => service.wait_idle().await,
+            None => true,
+        };
+        quiesced &= export_idle;
+        if !export_idle {
+            report.add_error(
+                "online export worker still draining after the shutdown bound".to_string(),
+            );
         }
         // 4. Flush all repo MemBuffers to durable backing so buffered
         //    commits in the last ~500 ms window are not lost on graceful

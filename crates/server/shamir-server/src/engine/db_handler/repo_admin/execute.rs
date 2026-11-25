@@ -6,9 +6,17 @@ use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::admin::activity::{ListActivityReq, RequestExecId};
 use shamir_query_types::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
+use shamir_query_types::admin::types::schema_migration::SchemaMigrationAdminOp;
 use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::read::QueryResult;
 use shamir_query_types::wire::CursorId;
 use shamir_query_types::wire::DbResponse;
+use shamir_sync::subscriptions::SubscriptionRegistry;
+use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+
+use crate::boot::config::diagnostics::logical::export_online::ServiceError;
+use crate::tables_registry::TablesRegistry;
 
 use super::activity::server_busy_response;
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
@@ -20,9 +28,46 @@ use super::repo_audit;
 use super::subscribe_handler;
 use super::ShamirDbHandler;
 
+/// Maintenance admission includes operations that can write durable state
+/// even when the protocol classifies them as reads.
+pub(super) fn op_needs_maintenance_admission(op: &BatchOp) -> bool {
+    // Status and plan can backfill the migration identity, persisting the
+    // system interner and WAL. Keep this separate from read-only policy.
+    op.is_write()
+        || matches!(
+            op,
+            BatchOp::ApplicationSchema(
+                SchemaMigrationAdminOp::ApplicationSchemaStatus(_)
+                    | SchemaMigrationAdminOp::ApplicationSchemaPlan(_)
+            )
+        )
+}
+
+/// Stateless Execute admits batches with a mutating leaf, except when every
+/// leaf is backup status/cancel. Cancel must remain callable while export
+/// drains an active backup. Container operations are not leaves, and export
+/// operations are dispatched before this check.
+fn batch_needs_maintenance_admission(batch: &BatchRequest) -> bool {
+    let mut needs_admission = false;
+    let mut pure_backup_control = true;
+    for visit in BatchTreeVisitor::new(&batch.queries) {
+        let op = &visit.entry.op;
+        if matches!(op, BatchOp::Batch(_) | BatchOp::ForEach(_)) {
+            continue;
+        }
+        if op_needs_maintenance_admission(op) {
+            needs_admission = true;
+        }
+        if !matches!(op, BatchOp::BackupStatus(_) | BatchOp::CancelBackup(_)) {
+            pure_backup_control = false;
+        }
+    }
+    needs_admission && !pure_backup_control
+}
+
 impl ShamirDbHandler {
-    /// Run the version check + admin gate, then forward to
-    /// the database executor on the current Tokio worker.
+    /// Run the version and admin checks, then execute the batch. Only
+    /// maintenance-enrolled batches move execution to an owned task.
     ///
     /// R4b-1 — the batch is registered in the in-flight activity table
     /// (RAII) after every cheap fast-reject gate and BEFORE the RI-15
@@ -53,8 +98,34 @@ impl ShamirDbHandler {
             };
         }
 
-        // A control op must be standalone and nontransactional. Validate its
-        // form during the same walk as visibility waits and op-kind summary.
+        // R3-2b — online-export dispatch (replaces the fail-closed
+        // refusal). Atomic wire preflight in `repo_admin/export_gate.rs`:
+        // SCRAM + superuser first (a non-privileged caller learns nothing
+        // about form or configuration), then the standalone form check,
+        // then the envelope equality — all BEFORE any admission, budget
+        // or maintenance interaction. `Err` is an atomic static refusal;
+        // `Ok(Some(dispatch))` is a valid standalone export request, run
+        // by the standalone worker below and never enrolled in the
+        // maintenance gate or the response-byte budget (start/status/
+        // cancel must stay callable while the gate is held — `start`
+        // arbitrates the gate itself, inside the service).
+        match super::export_gate::export_dispatch(session, &batch, db_name) {
+            Err(refusal) => return *refusal,
+            Ok(Some(dispatch)) => {
+                return self
+                    .dispatch_online_export(session, db_name, &batch, dispatch, conn)
+                    .await
+            }
+            Ok(None) => {}
+        }
+
+        // R4b-1 — form validation for the `ListActivity` operation. A
+        // listing is ONLY valid as a standalone, nontransactional
+        // single-op batch; every other form is rejected here, in the same
+        // single pre-execution visitor pass that resolves nested
+        // visibility waits AND derives the batch's op-kind summary —
+        // BEFORE admission, the budget wait and any writes, and without
+        // scanning the tree a second time.
         enum PreFlightError {
             Db(shamir_db::DbError),
             ActivityForm(&'static str, &'static str),
@@ -365,17 +436,65 @@ impl ShamirDbHandler {
                     .audit
                     .as_ref()
                     .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
-                let exec_result = self
-                    .db
-                    .execute_with_policy_and_repo_observer_and_cancel(
-                        actor.clone(),
-                        db_name,
-                        &batch,
-                        self.execution_policy(),
-                        repo_observer,
-                        Some(cancel.clone()),
-                    )
-                    .await;
+                let maintenance_enrolled =
+                    self.maintenance.is_some() && batch_needs_maintenance_admission(&batch);
+                let exec_result = if maintenance_enrolled {
+                    // Acquire before spawning, then move both permits into the
+                    // detachable worker so disconnect cannot admit overlapping writes.
+                    let Ok(slot) = self.try_owned_mutation_slot() else {
+                        return server_busy_response();
+                    };
+                    let Some(maintenance) = self.maintenance_admission().await else {
+                        return server_busy_response();
+                    };
+                    let db = self.db.clone();
+                    let worker_db_name = db_name.to_owned();
+                    let worker_batch = batch.clone();
+                    let worker_actor = actor.clone();
+                    let worker_policy = self.execution_policy();
+                    let worker_cancel = std::sync::Arc::clone(cancel);
+                    let worker = self.owned_mutation_tasks().spawn(
+                        async move {
+                            let _slot = slot;
+                            let _maintenance = maintenance;
+                            db.execute_with_policy_and_repo_observer_and_cancel(
+                                worker_actor,
+                                &worker_db_name,
+                                &worker_batch,
+                                worker_policy,
+                                repo_observer,
+                                Some(worker_cancel),
+                            )
+                            .await
+                        }
+                        .in_current_span(),
+                    );
+                    match worker.await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::error!(
+                                panicked = error.is_panic(),
+                                request_exec_id = exec_id.0,
+                                "mutation worker failed",
+                            );
+                            return static_error(
+                                "internal_error",
+                                "cannot complete database request",
+                            );
+                        }
+                    }
+                } else {
+                    self.db
+                        .execute_with_policy_and_repo_observer_and_cancel(
+                            actor.clone(),
+                            db_name,
+                            &batch,
+                            self.execution_policy(),
+                            repo_observer,
+                            Some(cancel.clone()),
+                        )
+                        .await
+                };
                 if !in_flight.finish() {
                     error_response(&BatchError::Cancelled)
                 } else {
@@ -405,7 +524,13 @@ impl ShamirDbHandler {
                                     "slow query",
                                 );
                             }
-                            self.persist_table_lifecycle(db_name, &batch);
+                            persist_table_lifecycle(
+                                self.admin
+                                    .as_ref()
+                                    .and_then(|admin| admin.tables_registry.as_deref()),
+                                db_name,
+                                &batch,
+                            );
                             let activation_failed = subscribe_handler::activate_subscriptions(
                                 conn,
                                 &self.db,
@@ -430,6 +555,17 @@ impl ShamirDbHandler {
                             } else if is_typed_server_busy_refusal(&e) {
                                 typed_canonical_refusal = true;
                                 server_busy_response()
+                            } else if let BatchError::WalOutcomeUnknown { commit_version, .. } = &e
+                            {
+                                // Preserve the typed outcome so its stable code survives caller caps;
+                                // bounded server-owned text fits fixed headroom and claims only the attempted version.
+                                typed_canonical_refusal = true;
+                                DbResponse::Error {
+                                    code: "wal_requires_reopen".to_string(),
+                                    message: format!(
+                                        "WAL outcome indeterminate (commit_version {commit_version}); repository must be reopened",
+                                    ),
+                                }
                             } else {
                                 error_response(&e)
                             }
@@ -487,30 +623,94 @@ impl ShamirDbHandler {
         final_response
     }
 
-    /// Walk through `batch.queries` and record CreateTable/DropTable ops in
-    /// the persistent registry. No-op when `AdminGlue::tables_registry` is
-    /// `None`. Failures here are logged but never break the request — the
-    /// in-memory state already reflects the change; the registry is just a
-    /// boot-replay aid.
-    pub(super) fn persist_table_lifecycle(&self, db_name: &str, batch: &BatchRequest) {
-        let Some(admin) = &self.admin else { return };
-        let Some(reg) = &admin.tables_registry else {
-            return;
+    /// R3-2b — the standalone online-export worker. Reached only through
+    /// [`super::export_gate::export_dispatch`] (a valid standalone,
+    /// nontransactional, top-level single-op export batch from a SCRAM
+    /// superuser); runs OUTSIDE the maintenance gate and the response-byte
+    /// budget: status/cancel must stay callable while a freeze drains, and
+    /// `start` arbitrates the gate itself inside the service (a busy gate
+    /// is a typed receipt-time refusal, not a queue). The receipt travels
+    /// as a typed result under the batch's own alias (the existing batch
+    /// convention — see the export-gate module docs).
+    async fn dispatch_online_export(
+        &self,
+        session: &Session,
+        db_name: &str,
+        batch: &BatchRequest,
+        dispatch: super::export_gate::ExportDispatch<'_>,
+        conn: &ConnectionServices,
+    ) -> DbResponse {
+        let Some(service) = self.online_export.as_ref() else {
+            // Stable no-configured code — the same static refusal for
+            // start, status and cancel (never a configuration detail).
+            return super::export_gate::not_configured_refusal();
         };
-        for entry in batch.queries.values() {
-            match &entry.op {
-                BatchOp::CreateTable(op) => {
-                    if let Err(e) = reg.add(db_name, &op.repo, &op.create_table) {
-                        tracing::warn!(?e, "tables_registry add failed");
-                    }
+        // The single entry's alias (the form validator guaranteed exactly
+        // one top-level entry); the receipt result is keyed under it.
+        let alias = BatchTreeVisitor::new(&batch.queries)
+            .next()
+            .map(|visit| visit.alias);
+        match dispatch {
+            super::export_gate::ExportDispatch::Start(op) => {
+                // The supervisor binds the job's cancellation to the
+                // session's connection lifetime. A transport without the
+                // production lifetime source refuses with a static code
+                // (test seams construct the registry directly).
+                let Some(connection_closed) = connection_closed_token(conn) else {
+                    return static_error(
+                        "online_export_unavailable",
+                        "online export requires a connection-scoped lifetime, \
+                         unavailable on this transport",
+                    );
+                };
+                match service.start(session, op.clone(), connection_closed).await {
+                    Ok(receipt) => receipt_response(batch, alias, &receipt),
+                    Err(e) => service_error_response(e),
                 }
-                BatchOp::DropTable(op) => {
-                    if let Err(e) = reg.remove(db_name, &op.repo, &op.drop_table) {
-                        tracing::warn!(?e, "tables_registry remove failed");
-                    }
-                }
-                _ => {}
             }
+            super::export_gate::ExportDispatch::Status => {
+                match service.status_for(session, db_name) {
+                    Some(receipt) => receipt_response(batch, alias, &receipt),
+                    None => static_error(
+                        "online_export_not_found",
+                        "no online export job is visible for this session",
+                    ),
+                }
+            }
+            super::export_gate::ExportDispatch::Cancel => {
+                match service.cancel_for(session, db_name) {
+                    Some(receipt) => receipt_response(batch, alias, &receipt),
+                    None => static_error(
+                        "online_export_not_found",
+                        "no online export job is visible for this session",
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// Record top-level table lifecycle operations in the optional boot-replay
+/// registry. Preserve the existing best-effort semantics on registry errors.
+pub(in crate::engine::db_handler) fn persist_table_lifecycle(
+    registry: Option<&TablesRegistry>,
+    db_name: &str,
+    batch: &BatchRequest,
+) {
+    let Some(reg) = registry else { return };
+    for entry in batch.queries.values() {
+        match &entry.op {
+            BatchOp::CreateTable(op) => {
+                if let Err(e) = reg.add(db_name, &op.repo, &op.create_table) {
+                    tracing::warn!(?e, "tables_registry add failed");
+                }
+            }
+            BatchOp::DropTable(op) => {
+                if let Err(e) = reg.remove(db_name, &op.repo, &op.drop_table) {
+                    tracing::warn!(?e, "tables_registry remove failed");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -548,5 +748,95 @@ impl ShamirDbHandler {
     ) -> DbResponse {
         self.execute_with_rid(session, query_version, db_name, batch, conn, None)
             .await
+    }
+}
+
+/// R3-2b — the session's connection-lifetime token, extracted from the
+/// connection's extension surface (the subscription registry installed it
+/// there at accept time). `None` on transports without the production
+/// lifetime source: `StartExport` refuses with a static code (the
+/// supervisor would otherwise have nothing to bind the job's cancellation
+/// to); status/cancel never consult this.
+fn connection_closed_token(conn: &ConnectionServices) -> Option<CancellationToken> {
+    conn.extensions
+        .as_ref()?
+        .downcast_ref::<SubscriptionRegistry>()
+        .map(|registry| registry.connection_closed())
+}
+
+/// A fixed error carrying no alias, database name, or peer text.
+fn static_error(code: &str, message: &str) -> DbResponse {
+    DbResponse::Error {
+        code: code.to_string(),
+        message: message.to_string(),
+    }
+}
+
+/// R3-2b — typed mapping of [`ServiceError`] onto stable wire codes.
+/// Only the missing `online_export` option (the caller's early return)
+/// maps onto `online_export_not_configured`; a runtime `Disabled`
+/// refusal surfaces as `online_export_unavailable`. Every variant is a
+/// fixed code/message pair with no path, secret or peer text.
+fn service_error_response(e: ServiceError) -> DbResponse {
+    let (code, message) = match e {
+        ServiceError::Disabled => (
+            "online_export_unavailable",
+            "the online export job is disabled on this server",
+        ),
+        ServiceError::Shutdown => ("server_shutting_down", "the server is shutting down"),
+        ServiceError::AlreadyRunning => (
+            "online_export_already_running",
+            "an online export job is already running on this server",
+        ),
+        ServiceError::Denied => ("export_scope_denied", "the export scope was denied"),
+        ServiceError::InvalidScope => (
+            "online_export_invalid_scope",
+            "the requested export scope is invalid",
+        ),
+        ServiceError::Unsupported => (
+            "online_export_unsupported",
+            "the requested export scope is not supported",
+        ),
+        ServiceError::Unavailable => (
+            "online_export_scope_unavailable",
+            "the export scope is temporarily unavailable",
+        ),
+    };
+    static_error(code, message)
+}
+
+/// R3-2b — encode an export receipt DTO as the single result of the
+/// standalone batch: the typed receipt travels via the wire msgpack codec
+/// (`export_gate::receipt_value`) under the query's own alias (the
+/// existing batch result convention — see the export-gate module docs).
+/// Encoding failures surface as the fixed `internal_error` refusal.
+fn receipt_response<T: serde::Serialize>(
+    batch: &BatchRequest,
+    alias: Option<&str>,
+    receipt: &T,
+) -> DbResponse {
+    let value = match super::export_gate::receipt_value(receipt) {
+        Ok(v) => v,
+        Err(refusal) => return *refusal,
+    };
+    let alias = alias.unwrap_or_default();
+    let mut results = shamir_collections::TMap::default();
+    results.insert(
+        alias.to_string(),
+        QueryResult {
+            records: vec![shamir_query_types::read::QueryRecord::Direct(value)],
+            ..QueryResult::default()
+        },
+    );
+    DbResponse::Batch {
+        response: shamir_query_types::batch::BatchResponse {
+            id: batch.id.clone(),
+            results,
+            execution_plan: vec![vec![alias.to_string()]],
+            edge_provenance: shamir_collections::TMap::default(),
+            execution_time_us: 0,
+            transaction: None,
+            interner_delta: shamir_collections::TMap::default(),
+        },
     }
 }

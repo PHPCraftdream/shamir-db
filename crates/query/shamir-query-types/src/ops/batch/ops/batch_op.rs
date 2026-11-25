@@ -10,19 +10,19 @@ use crate::admin::types::schema_migration::SchemaMigrationAdminOp;
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp,
     AlterRepoOp, AlterSubscriptionOp, BackupStatusOp, BindValidatorOp, CancelBackupOp,
-    ChangesSinceOp, CheckFunctionOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
-    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreatePublicationOp,
-    CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
-    CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp, DescribeTableOp, DropDbOp,
-    DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp, DropReplicationProfileOp,
-    DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp, ExportFunctionOp,
-    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListActivityReq, ListOp,
-    ListPublicationsOp, ListShapeStatsReq, ListSubscriptionsOp, ListValidatorsOp,
-    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp,
-    RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp, RenameIndexOp, RenameRepoOp,
-    RenameTableOp, RenameValidatorOp, ReplicationStatusOp, RequestExecId, ResetShapeStatsReq,
-    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartBackupOp,
-    StartMigrationOp, UnbindValidatorOp,
+    CancelExportOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp,
+    CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp,
+    CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp,
+    CreateTableOp, CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp, DescribeTableOp,
+    DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
+    DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
+    ExportFunctionOp, ExportStatusOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
+    InternerTouchOp, ListActivityReq, ListOp, ListPublicationsOp, ListShapeStatsReq,
+    ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp,
+    RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp,
+    RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp, ReplicationStatusOp,
+    RequestExecId, ResetShapeStatsReq, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
+    SetTableSchemaOp, StartBackupOp, StartExportOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -204,13 +204,21 @@ pub enum BatchOp {
 
     /// Node-local online-backup admin ops (R2a step 3a). Superuser-only and
     /// node-local (not database-scoped): authorization is enforced inside
-    /// `shamir-db`'s admin handler, so `required_access` returns `None`.
+    /// `shamir-server`'s admin handler, so `required_access` returns `None`.
     /// `BackupStatus` is read-only; `StartBackup` / `CancelBackup` are writes.
     StartBackup(StartBackupOp),
     BackupStatus(BackupStatusOp),
     CancelBackup(CancelBackupOp),
     /// Operator activity-view listing (read-only, R4b step 1).
     ListActivity(ListActivityReq),
+    /// Online logical-export admin ops (R3 step 2b), bound to the database in
+    /// the request envelope. The wire handler requires a SCRAM superuser;
+    /// the export runner checks included-scope read/manage ACLs.
+    /// `required_access` returns `None`. `ExportStatus` is read-only;
+    /// `StartExport` / `CancelExport` are writes.
+    StartExport(StartExportOp),
+    ExportStatus(ExportStatusOp),
+    CancelExport(CancelExportOp),
     /// Cancel an in-flight batch by its server-minted execution id (R4b step 2).
     CancelRequest(RequestExecId),
     /// Operator cancellation of an open interactive transaction by its
@@ -354,6 +362,9 @@ impl Serialize for BatchOp {
             BatchOp::BackupStatus(op) => op.serialize(serializer),
             BatchOp::CancelBackup(op) => op.serialize(serializer),
             BatchOp::ListActivity(op) => op.serialize(serializer),
+            BatchOp::StartExport(op) => op.serialize(serializer),
+            BatchOp::ExportStatus(op) => op.serialize(serializer),
+            BatchOp::CancelExport(op) => op.serialize(serializer),
             BatchOp::ListShapeStats(op) => op.serialize(serializer),
             BatchOp::ResetShapeStats(op) => op.serialize(serializer),
             BatchOp::CancelRequest(id) => {
@@ -620,6 +631,15 @@ impl<'de> Deserialize<'de> for BatchOp {
                     }
                     OpKind::ListActivity => {
                         ListActivityReq::deserialize(value).map(BatchOp::ListActivity)
+                    }
+                    OpKind::StartExport => {
+                        StartExportOp::deserialize(value).map(BatchOp::StartExport)
+                    }
+                    OpKind::ExportStatus => {
+                        ExportStatusOp::deserialize(value).map(BatchOp::ExportStatus)
+                    }
+                    OpKind::CancelExport => {
+                        CancelExportOp::deserialize(value).map(BatchOp::CancelExport)
                     }
                     OpKind::ListShapeStats => {
                         ListShapeStatsReq::deserialize(value).map(BatchOp::ListShapeStats)

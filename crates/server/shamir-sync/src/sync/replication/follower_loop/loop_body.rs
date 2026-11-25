@@ -142,6 +142,7 @@ pub(super) async fn run_follower_loop_internal(
         max_iterations,
         subscription,
         lease,
+        maintenance_gate,
         #[cfg(test)]
         apply_park,
         #[cfg(test)]
@@ -270,6 +271,7 @@ pub(super) async fn run_follower_loop_internal(
     let mut iter = 0usize;
     // Rule (round 13 G2): unsupervised loop (lease: None) = never writes; supervised loop = writes with its lease generation; tests driving a supervised loop must attach the row's REAL binding_generation (no 0 special-case in production — 0 is fenced out as stale).
     let lease_generation = lease.as_ref().map_or(0, |l| l.generation);
+    let status_local = (db.as_ref(), maintenance_gate.as_ref(), &cancel);
     // PR6b-3 stall visibility: consecutive swallowed failures and the last
     // durable bookmark observed. Progress = the bookmark advancing beyond
     // the previous iteration's value; any progress resets the counter.
@@ -326,7 +328,7 @@ pub(super) async fn run_follower_loop_internal(
                 // `continue` before the apply guard exists), so the status
                 // writer's control lock may be taken directly.
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -358,7 +360,7 @@ pub(super) async fn run_follower_loop_internal(
                     consecutive_failures = 0;
                     if stall_reported {
                         clear_stall(
-                            &db,
+                            status_local,
                             &node_id,
                             subscription,
                             v,
@@ -381,7 +383,7 @@ pub(super) async fn run_follower_loop_internal(
                 warn!(node_id = %node_id, error = %re, "follower_loop: bookmark read failed");
                 consecutive_failures += 1;
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -426,7 +428,7 @@ pub(super) async fn run_follower_loop_internal(
                 warn!(node_id = %node_id, error = %e, "follower_loop: pull failed, backing off");
                 consecutive_failures += 1;
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -534,7 +536,7 @@ pub(super) async fn run_follower_loop_internal(
                 );
                 consecutive_failures += 1;
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -593,7 +595,7 @@ pub(super) async fn run_follower_loop_internal(
                 warn!(node_id = %node_id, error = %re, "follower_loop: decode failed, backing off");
                 consecutive_failures += 1;
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -623,7 +625,7 @@ pub(super) async fn run_follower_loop_internal(
                     if stall_reported {
                         // Guard-free arm (before the apply guard exists): direct call.
                         clear_stall(
-                            &db,
+                            status_local,
                             &node_id,
                             subscription,
                             bookmark,
@@ -635,7 +637,7 @@ pub(super) async fn run_follower_loop_internal(
                 }
                 consecutive_failures += 1;
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,
@@ -664,6 +666,26 @@ pub(super) async fn run_follower_loop_internal(
         // the WRITE gate under the control lock and waits for this apply to
         // finish. The loop NEVER takes the control lock while holding this
         // guard.
+        // Server-wide maintenance gate (online logical-export enrolment):
+        // BEFORE the lease read, wait for any raised export freeze to thaw.
+        // `biased;` gives cancellation deterministic priority so a loop
+        // stopped while a freeze is held never waits forever. The returned
+        // counted writer is retained through the live apply below and
+        // dropped with `_apply_guard` BEFORE the post-apply control-lock
+        // updates, so the export's writer-drain observes this apply end to
+        // end and the lock order stays (control lock ← gate guard).
+        let maintenance_guard = match &maintenance_gate {
+            Some(gate) => {
+                let guard = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Ok(()),
+                    guard = gate.wait_for_mutation() => guard,
+                };
+                Some(guard)
+            }
+            None => None,
+        };
+
         let _apply_guard = match &lease {
             Some(l) => {
                 let g = l.apply_gate.read().await;
@@ -696,6 +718,7 @@ pub(super) async fn run_follower_loop_internal(
         // (control lock → apply_gate.write()) and self-deadlock on the lease
         // quiesce.
         let mut pending_stall: Option<PendingStall> = None;
+        let mut backoff_after_apply = false;
         match shamir_db::engine::tx::apply_replicated::apply_replicated_batch(
             repo_instance.core(),
             &events,
@@ -782,16 +805,30 @@ pub(super) async fn run_follower_loop_internal(
                 consecutive_failures += 1;
                 // Guard-held: DEFERRED — persisted after the guard drop below.
                 pending_stall = Some(PendingStall::Note(e.to_string()));
-                sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
+                if maintenance_guard.is_some() {
+                    // A retry sleep must not delay the export's writer drain.
+                    backoff_after_apply = true;
+                } else {
+                    // Preserve the ungated loop's original lease/backoff order.
+                    sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
+                }
             }
         }
         drop(_apply_guard);
+        // Gate guard goes with the apply guard, BEFORE the pending
+        // stall/clear persistence below (which takes the replication
+        // control lock): the exported-drain view of this apply is complete
+        // and a pending status write acquires its own admission.
+        drop(maintenance_guard);
+        if backoff_after_apply {
+            sleep_backoff(&cancel, &mut backoff_ms, &stream_metrics).await;
+        }
         // Round 12 F1: the guard is gone — persistence may now safely take
         // the replication control lock inside the status writer.
         match pending_stall {
             Some(PendingStall::Clear(progress_bookmark)) => {
                 clear_stall(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     progress_bookmark,
@@ -802,7 +839,7 @@ pub(super) async fn run_follower_loop_internal(
             }
             Some(PendingStall::Note(detail)) => {
                 note_swallowed_failure(
-                    &db,
+                    status_local,
                     &node_id,
                     subscription,
                     lease_generation,

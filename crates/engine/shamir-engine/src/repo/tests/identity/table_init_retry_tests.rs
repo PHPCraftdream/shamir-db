@@ -1,7 +1,7 @@
 //! B09: setup failure/cancellation must not strand MVCC publication.
 //! The hook belongs immediately before unwrap/create setup (after the old
-//! registration point). Restoring early registration strands an entry in
-//! the first two tests and prevents init2 from completing in the race test.
+//! registration point). Restoring early registration exposes an entry in
+//! the failure and cancellation tests and prevents replacement in the race test.
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -11,7 +11,9 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::time::timeout;
 
 /// Per-instance, one-shot setup seam; Notify has one waiter per direction.
 /// `notify_one` stores a permit even if the receiver has not polled yet.
@@ -89,18 +91,61 @@ async fn setup_failure_retries_with_coherent_mvcc() {
 }
 
 #[tokio::test]
-async fn cancelled_setup_retries_with_coherent_mvcc() {
+async fn cold_open_completes_through_a_blocking_sync_bridge() {
+    // One runtime thread is blocked by the bridge: the open must not wait for
+    // another task of this runtime to make progress.
+    let repo = make_repo();
+    let table = futures::executor::block_on(repo.get_table("orders")).unwrap();
+    assert_coherent(&repo, &table);
+    let unfenced = futures::executor::block_on(repo.core.get_table_unfenced("orders")).unwrap();
+    assert!(Arc::ptr_eq(
+        &table.mvcc_store().unwrap(),
+        &unfenced.mvcc_store().unwrap(),
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_caller_keeps_cold_open_admitted_until_publication() {
+    const DEADLINE: Duration = Duration::from_secs(120);
     let repo = make_repo();
     let hook = TableInitHook::new(false);
     repo.core.table_init_hook.store(Some(Arc::clone(&hook)));
     let worker_repo = repo.clone();
     let worker = tokio::spawn(async move { worker_repo.get_table("orders").await });
-    hook.entered.notified().await;
+    timeout(DEADLINE, hook.entered.notified()).await.unwrap();
     worker.abort();
-    assert!(matches!(worker.await, Err(error) if error.is_cancelled()));
+    let outcome = timeout(DEADLINE, worker).await.unwrap();
+    assert!(matches!(outcome, Err(error) if error.is_cancelled()));
+
+    let mut next_admission = Box::pin(repo.write_domain().admit());
+    assert!(
+        futures::poll!(next_admission.as_mut()).is_pending(),
+        "caller cancellation must not release the cold open's permit"
+    );
     assert_unregistered(&repo);
-    let table = repo.get_table("orders").await.unwrap();
+    assert!(repo.core.catalog.initialized_table("orders").is_none());
+
+    hook.resume.notify_one();
+    let permit = timeout(DEADLINE, next_admission).await.unwrap().unwrap();
+    // No retry has run yet: the cancelled caller's open must have published
+    // a coherent manager before releasing admission.
+    let published = repo
+        .core
+        .catalog
+        .initialized_table("orders")
+        .expect("cold open must publish before releasing admission");
+    assert_coherent(&repo, &published);
+    drop(permit);
+
+    let table = timeout(DEADLINE, repo.get_table("orders"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_coherent(&repo, &table);
+    assert!(Arc::ptr_eq(
+        &published.mvcc_store().unwrap(),
+        &table.mvcc_store().unwrap(),
+    ));
 }
 
 #[tokio::test]

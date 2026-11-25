@@ -73,10 +73,15 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
+use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
+use shamir_db::engine::table::writer_drain_barrier::WriterDrainGuard;
 use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_types::hmac as canon;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::TaskTracker;
 
+use crate::boot::config::diagnostics::logical::export_online::OnlineExport;
 use crate::byte_budget::ByteBudget;
 use crate::security::tokens::TokenService;
 
@@ -89,24 +94,28 @@ pub use shamir_query_types::wire::{DbRequest, DbResponse};
 use crate::cursor_registry::CursorRegistry;
 use crate::tx_registry::TxRegistry;
 
-use super::activity::ActivityRequests;
-use super::activity::CancelCounters;
-use super::admin::{
+use super::super::activity::ActivityRequests;
+use super::super::activity::CancelCounters;
+use super::super::admin::{
     change_password_challenge, change_password_verify, create_scram_user, set_replicator,
     set_superuser, AdminGlue,
 };
-use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
-use super::cursor_handlers::error_response;
-use super::cursor_support::{authorize_cursor_read, resolve_repo};
-use super::handlers::token_admin;
-use super::operator_state::table_unavailable_response;
-use super::repo_audit::CancelRefusalAudit;
+use super::super::config::{
+    CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap,
+};
+use super::super::cursor_handlers::error_response;
+use super::super::cursor_support::{authorize_cursor_read, resolve_repo};
+use super::super::handlers::token_admin;
+use super::super::operator_state::table_unavailable_response;
+use super::super::repo_audit::CancelRefusalAudit;
+use super::OperatorBootContext;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
 /// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
 /// Mirrors the engine's `DEFAULT_MAX_TX_LIFETIME` (5 min); the commit path's
 /// own `is_expired` check is the final backstop.
-pub(super) const INTERACTIVE_TX_MAX_LIFETIME: Duration = Duration::from_secs(300);
+pub(in crate::engine::db_handler) const INTERACTIVE_TX_MAX_LIFETIME: Duration =
+    Duration::from_secs(300);
 
 // --------------------------------------------------------------------------
 // Wire schema
@@ -132,7 +141,7 @@ pub(super) const INTERACTIVE_TX_MAX_LIFETIME: Duration = Duration::from_secs(300
 /// username — so a dropped-and-recreated account gets a fresh id even if it
 /// reuses the same name (closes the identity-inheritance-on-recreate bug,
 /// design doc §1.1 finding 3).
-pub(super) fn session_actor(session: &Session) -> Actor {
+pub(in crate::engine::db_handler) fn session_actor(session: &Session) -> Actor {
     let id = shamir_types::access::principal64(session.user_id);
     if session.permissions.is_superuser {
         Actor::Admin(id)
@@ -153,57 +162,57 @@ pub(super) fn session_actor(session: &Session) -> Actor {
 /// `execute_batch_with_permissions`.
 #[derive(Clone)]
 pub struct ShamirDbHandler {
-    pub(super) db: Arc<ShamirDb>,
+    pub(in crate::engine::db_handler) db: Arc<ShamirDb>,
     /// Per-connection audit writer, attached by the request boundary.
-    pub(super) audit: Option<Arc<AuditChainWriter>>,
-    pub(super) cancel_refusal_audit: Arc<CancelRefusalAudit>,
-    pub(super) transactions: crate::config::TransactionsConfig,
+    pub(in crate::engine::db_handler) audit: Option<Arc<AuditChainWriter>>,
+    pub(in crate::engine::db_handler) cancel_refusal_audit: Arc<CancelRefusalAudit>,
+    pub(in crate::engine::db_handler) transactions: crate::config::TransactionsConfig,
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
-    pub(super) admin: Option<AdminGlue>,
+    pub(in crate::engine::db_handler) admin: Option<AdminGlue>,
     /// Slow-query log threshold. Default disabled for unit tests; the
     /// boot path sets this from the operator's config.
-    pub(super) slow_query: SlowQueryConfig,
+    pub(in crate::engine::db_handler) slow_query: SlowQueryConfig,
     /// Test-only seam: pins the exact `elapsed_us` the slow-query decision
     /// sees, so a WARN assertion never depends on how long the real read
     /// happened to take. `None` in production (a `#[cfg(...)]` field — no
     /// runtime cost, no production surface).
     #[cfg(any(test, feature = "test-util"))]
-    pub(super) slow_query_elapsed_override: Option<u64>,
+    pub(in crate::engine::db_handler) slow_query_elapsed_override: Option<u64>,
     /// Server-side hard caps on per-batch resources.
-    pub(super) query_limits: QueryLimitsCap,
+    pub(in crate::engine::db_handler) query_limits: QueryLimitsCap,
     /// Server-side hard cap on per-interactive-tx staged bytes.
-    pub(super) tx_limits: TxLimitsCap,
+    pub(in crate::engine::db_handler) tx_limits: TxLimitsCap,
     /// RI-15 — global cap on the SUM of in-flight response bytes across
     /// every concurrently-executing batch/connection. Default
     /// [`ByteBudget::unbounded`] (matches pre-RI-15 behavior: only the
     /// per-batch `query_limits.max_result_size_bytes` cap applies).
-    pub(super) byte_budget: ByteBudget,
+    pub(in crate::engine::db_handler) byte_budget: ByteBudget,
     /// Read/write mode of this node. `ReadOnly` rejects client writes
     /// (they must go to the leader). Default `ReadWrite`; until R1 this
     /// is always `ReadWrite` so behaviour is unchanged.
-    pub(super) node_mode: NodeMode,
+    pub(in crate::engine::db_handler) node_mode: NodeMode,
     /// Leader epoch for VR-style fencing (REPLICATION §5.2). Every
     /// `ReplResponse` carries this value so followers can detect a
     /// regression (stale leader). Default `1`; persistence + bump-on-
     /// promote land in R3.
-    pub(super) leader_epoch: u64,
+    pub(in crate::engine::db_handler) leader_epoch: u64,
     /// Phase B — registry of open interactive (multi-call) transactions,
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
-    pub(super) tx_registry: Arc<TxRegistry>,
+    pub(in crate::engine::db_handler) tx_registry: Arc<TxRegistry>,
     /// FG-5b — registry of open server-side result cursors, shared across
     /// all clones of the handler (`Arc`), so a `FetchNext`/`CancelCursor`
     /// on one dispatch finds the cursor a prior `CreateCursor` parked.
-    pub(super) cursor_registry: Arc<CursorRegistry>,
+    pub(in crate::engine::db_handler) cursor_registry: Arc<CursorRegistry>,
     /// FG-5b — server-side hard caps on result cursors (per-session count,
     /// idle-timeout eviction).
-    pub(super) cursor_limits: CursorLimitsCap,
+    pub(in crate::engine::db_handler) cursor_limits: CursorLimitsCap,
     /// FG-5b — monotonic source of fresh `CursorId` values. A plain
     /// `AtomicU64` (not the tx registry's `RepoTxGate::fresh_tx_id`,
     /// which is per-repo and async) since cursor ids are a
     /// server-handler-scoped concept, not an engine one.
-    pub(super) next_cursor_id: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::engine::db_handler) next_cursor_id: Arc<std::sync::atomic::AtomicU64>,
     /// `SessionStore` access for ops that must kill OTHER live sessions of
     /// the calling user (currently only `ChangePasswordVerify`'s spec
     /// §12.5.3 session-kill step). `None` means the handler was built
@@ -218,11 +227,11 @@ pub struct ShamirDbHandler {
     /// construction time so this handler can reach it too, without
     /// restructuring `dispatch_request_view`'s signature or the
     /// `RequestHandler` trait.
-    pub(super) session_store: Option<Arc<SessionStore>>,
+    pub(in crate::engine::db_handler) session_store: Option<Arc<SessionStore>>,
     /// Shared server token service; absent in handlers constructed without token administration.
-    pub(super) token_service: Option<Arc<TokenService>>,
+    pub(in crate::engine::db_handler) token_service: Option<Arc<TokenService>>,
     /// Whether users may create their own tokens. Listing and revocation remain allowed.
-    pub(super) allow_self_service: bool,
+    pub(in crate::engine::db_handler) allow_self_service: bool,
     /// R4b-1 — in-flight request table backing the activity view's
     /// `Requests` rows and the `shamir_active_requests` gauge. Shared
     /// across all clones of the handler (`Arc`). One insert + one RAII
@@ -233,21 +242,43 @@ pub struct ShamirDbHandler {
     /// (`Session::try_acquire_request_slot` — R4b-1 follow-up). See
     /// `super::activity::requests` for the bounding argument and the
     /// privacy rule.
-    pub(super) activity_requests: Arc<ActivityRequests>,
+    pub(in crate::engine::db_handler) activity_requests: Arc<ActivityRequests>,
+    /// R3-2b — shared server-wide maintenance gate for the running server's
+    /// logical-export freeze (design §0.3, §4.1). `None` (both
+    /// constructors) means the handler runs unenrolled — every
+    /// `wait_for_mutation` fast-paths; the boot path installs the
+    /// process-wide instance via [`Self::with_maintenance_gate`] so that
+    /// ALL clones of the handler share the SAME gate (`MaintenanceGate` is
+    /// internally `Arc`-backed and `Clone`). Enrollment covers only this
+    /// native/REST request boundary: `Execute` writes, `TxBegin`, mutating
+    /// `TxExecute`, `TxCommit` and the top-level identity/token mutations.
+    pub(in crate::engine::db_handler) maintenance: Option<MaintenanceGate>,
+    // Bound owned mutation tasks across all connection clones, even when
+    // the response byte budget is unbounded or reserves zero bytes.
+    owned_mutation_slots: Arc<Semaphore>,
+    owned_mutation_tasks: Arc<TaskTracker>,
     /// Counts requests decoded by the raw native request path only; token REST and WebSocket decode separately and are not counted. Production has no reader; cost is one Relaxed add per native request.
-    pub(super) decoded_requests: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::engine::db_handler) decoded_requests: Arc<std::sync::atomic::AtomicU64>,
     /// R4b-3 — per-server cancellation outcome counters (one fixed slot
     /// per `CancelOutcome`), backing the `shamir_cancellations_total`
     /// family. Shared across all clones of the handler (`Arc`).
-    pub(super) cancel_counters: Arc<CancelCounters>,
+    pub(in crate::engine::db_handler) cancel_counters: Arc<CancelCounters>,
     /// R4b-1 — monotonic source of fresh [`RequestExecId`] values, minted
     /// when a BATCH is admitted (same shape as `next_cursor_id`). The
     /// client's optional `rid` is carried alongside, never replaced.
-    pub(super) next_request_exec_id: Arc<std::sync::atomic::AtomicU64>,
+    pub(in crate::engine::db_handler) next_request_exec_id: Arc<std::sync::atomic::AtomicU64>,
+    /// R3-2b — the online logical-export job service (StartExport /
+    /// ExportStatus / CancelExport). `None` (both constructors) means the
+    /// export surface refuses with the stable
+    /// `online_export_not_configured` code; the launcher installs the
+    /// process-wide instance via [`Self::with_online_export`] after the
+    /// admission audit has enrolled every mutation source in the shared
+    /// gate. Shared across all clones of the handler (`Arc`).
+    pub(in crate::engine::db_handler) online_export: Option<Arc<OnlineExport>>,
     /// Operator boot metadata captured by `ServerLauncher` and attached
     /// via [`Self::with_operator_boot`]. `None` for handlers built
     /// outside the server boot path (unit tests).
-    pub(super) operator_boot: Option<OperatorBootContext>,
+    pub(in crate::engine::db_handler) operator_boot: Option<OperatorBootContext>,
     /// Test-only seam: parks `reset_shape_stats` at the commit claim so a
     /// test can race a cancellation against it. `None` in production (a
     /// `#[cfg(test)]` field — no runtime cost, no production surface).
@@ -256,28 +287,11 @@ pub struct ShamirDbHandler {
         Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
     #[cfg(test)]
     pub(in crate::engine::db_handler) cancel_authorized_pause: Option<(
-        super::activity::CancelPauseTarget,
+        super::super::activity::CancelPauseTarget,
         u64,
         Arc<tokio::sync::Barrier>,
         Arc<tokio::sync::Barrier>,
     )>,
-}
-
-/// Boot metadata captured at server launch (see `with_operator_boot`).
-/// `pub(super)` on purpose (= `pub(in crate::engine::db_handler)`): only
-/// the launcher attaches it and only the `operator_state` handler reads
-/// it — no wider surface is needed (admin-shell PR3 review: minimal
-/// visibility).
-#[derive(Clone)]
-pub(super) struct OperatorBootContext {
-    /// `Instant::now()` at the very start of `launch_inner`.
-    pub(super) started_at: std::time::Instant,
-    /// Format epoch observed in the data directory at boot.
-    pub(super) observed_format_epoch: u64,
-    /// What the format-stamp check did (created/adopted/unchanged/...).
-    pub(super) format_stamp: shamir_sync::format_stamp::StampOutcome,
-    /// Configured replication node id, if any.
-    pub(super) node_id: Option<String>,
 }
 
 impl ShamirDbHandler {
@@ -346,6 +360,12 @@ impl ShamirDbHandler {
             decoded_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            maintenance: None,
+            owned_mutation_slots: Arc::new(Semaphore::new(
+                shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
+            )),
+            owned_mutation_tasks: Arc::new(TaskTracker::new()),
+            online_export: None,
             operator_boot: None,
             #[cfg(test)]
             shape_reset_pause: None,
@@ -381,6 +401,12 @@ impl ShamirDbHandler {
             decoded_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cancel_counters: Arc::new(CancelCounters::new()),
             next_request_exec_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            maintenance: None,
+            owned_mutation_slots: Arc::new(Semaphore::new(
+                shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
+            )),
+            owned_mutation_tasks: Arc::new(TaskTracker::new()),
+            online_export: None,
             operator_boot: None,
             #[cfg(test)]
             shape_reset_pause: None,
@@ -389,63 +415,9 @@ impl ShamirDbHandler {
         }
     }
 
-    /// Attach operator boot metadata (launch instant, observed format
-    /// epoch, stamp outcome, replication node id). Called once from the
-    /// server boot path; `pub(crate)` so only the launcher can attach it.
-    pub(crate) fn with_operator_boot(
-        mut self,
-        started_at: std::time::Instant,
-        observed_format_epoch: u64,
-        format_stamp: shamir_sync::format_stamp::StampOutcome,
-        node_id: Option<String>,
-    ) -> Self {
-        self.operator_boot = Some(OperatorBootContext {
-            started_at,
-            observed_format_epoch,
-            format_stamp,
-            node_id,
-        });
-        self
-    }
-
-    /// Attach the shared token service and configure self-service creation.
-    pub fn with_token_service(
-        mut self,
-        service: Arc<TokenService>,
-        allow_self_service: bool,
-    ) -> Self {
-        self.token_service = Some(service);
-        self.allow_self_service = allow_self_service;
-        self
-    }
-
-    /// Set the slow-query threshold (use [`SlowQueryConfig::from_ms`]).
-    /// Returns `self` so the call can be chained after `with_admin`.
-    pub fn with_slow_query(mut self, slow_query: SlowQueryConfig) -> Self {
-        self.slow_query = slow_query;
-        self
-    }
-
-    /// Test-only: pin the `elapsed_us` the slow-query decision sees, so a
-    /// WARN assertion never depends on how long the real read happened to
-    /// take (see [`Self::slow_query_elapsed`]).
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn with_slow_query_elapsed(mut self, elapsed_us: u64) -> Self {
-        self.slow_query_elapsed_override = Some(elapsed_us);
-        self
-    }
-
-    /// The `elapsed_us` every slow-query decision compares and logs: the
-    /// pinned test seam when present, the measured value otherwise. The
-    /// `#[cfg]` lives here alone so production has no seam surface.
-    pub(super) fn slow_query_elapsed(&self, measured: u64) -> u64 {
-        #[cfg(any(test, feature = "test-util"))]
-        if let Some(pinned) = self.slow_query_elapsed_override {
-            return pinned;
-        }
-        measured
-    }
-
+    /// R3-2b — install the online-export job service (launcher-only, after
+    /// the admission audit). The service is shared `Arc`-backed, so every
+    /// clone of the handler reaches the same registry and root.
     /// Set server-side hard caps on per-batch resources.
     pub fn with_query_limits(mut self, query_limits: QueryLimitsCap) -> Self {
         self.query_limits = query_limits;
@@ -521,15 +493,44 @@ impl ShamirDbHandler {
         Arc::clone(&self.cursor_registry)
     }
 
+    /// R3-2b — maintenance-gate admission for one request. `None` when no
+    /// gate is installed (unenrolled handler) or the caller chose not to
+    /// enroll this op; `Some(guard)` when the request was admitted: the
+    /// guard MUST be retained until the request's last mutation has landed
+    /// (RAII drop releases the writer-drain slot). While an online-export
+    /// freeze is raised this awaits the drain and returns only after the
+    /// freeze is released — reads stay available throughout, only
+    /// mutations queue here. Cancel-safe: the future may be dropped while
+    /// parked (the caller's request future is the only holder).
+    pub(in crate::engine::db_handler) async fn maintenance_admission(
+        &self,
+    ) -> Option<WriterDrainGuard> {
+        let gate = self.maintenance.as_ref()?;
+        Some(gate.wait_for_mutation().await)
+    }
+
+    pub(crate) fn owned_mutation_tasks(&self) -> Arc<TaskTracker> {
+        Arc::clone(&self.owned_mutation_tasks)
+    }
+
+    // Reject overload before maintenance admission or spawning any work.
+    pub(in crate::engine::db_handler) fn try_owned_mutation_slot(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, ()> {
+        Arc::clone(&self.owned_mutation_slots)
+            .try_acquire_owned()
+            .map_err(|_| ())
+    }
+
     /// FG-5b — mint a fresh, process-unique cursor id.
-    pub(super) fn next_cursor_id(&self) -> u64 {
+    pub(in crate::engine::db_handler) fn next_cursor_id(&self) -> u64 {
         self.next_cursor_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// R4b-1 — mint a fresh, process-unique request-exec id for an
     /// admitted BATCH (handler-local `AtomicU64`, like `next_cursor_id`).
-    pub(super) fn next_request_exec_id(&self) -> u64 {
+    pub(in crate::engine::db_handler) fn next_request_exec_id(&self) -> u64 {
         self.next_request_exec_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
@@ -642,12 +643,17 @@ impl ShamirDbHandler {
                 self.execute_with_rid(session, query_version, &db, batch, conn, client_rid)
                     .await
             }
+            // R3-2b — identity mutations are enrolled: admission is taken
+            // around the handler call and retained through it, so an
+            // online-export freeze drains pending user/superuser/
+            // replicator changes before the freeze's logical instant.
             DbRequest::CreateScramUser {
                 name,
                 password,
                 roles,
                 hmac,
             } => {
+                let _maintenance = self.maintenance_admission().await;
                 create_scram_user(
                     self.admin.as_ref(),
                     session,
@@ -660,6 +666,7 @@ impl ShamirDbHandler {
                 .await
             }
             DbRequest::SetSuperuser { user, on, hmac } => {
+                let _maintenance = self.maintenance_admission().await;
                 set_superuser(
                     self.admin.as_ref(),
                     session,
@@ -671,6 +678,7 @@ impl ShamirDbHandler {
                 .await
             }
             DbRequest::SetReplicator { user, on, hmac } => {
+                let _maintenance = self.maintenance_admission().await;
                 set_replicator(
                     self.admin.as_ref(),
                     session,
@@ -735,7 +743,10 @@ impl ShamirDbHandler {
             DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
                 change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
             }
+            // R3-2b — `ChangePasswordVerify` writes the credential row and
+            // (with a session store) kills other sessions: enrolled.
             DbRequest::ChangePasswordVerify(secrets) => {
+                let _maintenance = self.maintenance_admission().await;
                 change_password_verify(
                     self.admin.as_ref(),
                     self.session_store.as_ref(),
@@ -748,10 +759,24 @@ impl ShamirDbHandler {
                 .await
             }
 
+            // R3-2b — token administration: only the MUTATING ops
+            // (`CreateApiToken`, `RevokeApiToken`, `RevokeUserTokens`) are
+            // enrolled; `ListApiTokens` is a read and stays available
+            // during a freeze.
             DbRequest::CreateApiToken { .. }
             | DbRequest::ListApiTokens { .. }
             | DbRequest::RevokeApiToken { .. }
             | DbRequest::RevokeUserTokens { .. } => {
+                let _maintenance = if matches!(
+                    &request,
+                    DbRequest::CreateApiToken { .. }
+                        | DbRequest::RevokeApiToken { .. }
+                        | DbRequest::RevokeUserTokens { .. }
+                ) {
+                    self.maintenance_admission().await
+                } else {
+                    None
+                };
                 token_admin::handle(self, session, &request, top_level_canonical.as_deref()).await
             }
 
@@ -823,7 +848,7 @@ impl ShamirDbHandler {
 /// the commit-admission codes `wal_requires_reopen` /
 /// `wal_retention_exceeded`), that code is returned verbatim. Unclassified
 /// errors fall back to heuristic string-matching for backward compat.
-pub(super) fn error_code(e: &BatchError) -> &str {
+pub(in crate::engine::db_handler) fn error_code(e: &BatchError) -> &str {
     match e {
         BatchError::LimitExceeded { kind, .. } => match kind {
             shamir_query_types::batch::LimitKind::PageSize

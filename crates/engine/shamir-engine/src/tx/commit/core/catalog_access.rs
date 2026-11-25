@@ -9,7 +9,10 @@ use crate::table::table_manager::table_token_for;
 use crate::table::{table_store_names, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{fully_unwrap_store, Repo as _, Store};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::OnceCell;
 
 impl RepoCore {
@@ -18,9 +21,8 @@ impl RepoCore {
     /// pipeline (Phases 1, 2.6, 5b–5d) while holding the per-repo
     /// `commit_lock`.
     ///
-    /// cancel-safe: yes — one `scc::HashMap` read plus a single
-    /// `get_table_unfenced` call. Cancellation leaves no state mutated
-    /// (apart from the cancel-safe `get_table_unfenced` OnceCell init).
+    /// Cancelling the lookup stops waiting; an admitted cold open continues
+    /// under the repository permit (see `get_table_unfenced`).
     ///
     /// O(1) (III.1): resolves through the `token_names` reverse index that
     /// `add_table` maintains, instead of scanning every config and
@@ -60,6 +62,7 @@ impl RepoCore {
     }
 
     /// Resolve a token while the caller already holds this repository's permit.
+    /// Cold setup runs inline; do not cancel while recovery may still be running.
     pub(crate) async fn table_by_token_admitted(
         &self,
         token: u64,
@@ -85,10 +88,9 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
-    /// inside the init closure, the cell remains empty so subsequent
-    /// calls retry; no partial table is exposed. The clone of the cell
-    /// value is in-memory.
+    /// Cancelling the lookup stops waiting; a cold open already started moves to
+    /// a runtime task that keeps the repository permit through recovery and
+    /// publication.
     pub(crate) async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         self.rename_fence.check_table_rename_fence(table_name)?;
         if let Some(table) = self.catalog.initialized_table(table_name) {
@@ -101,20 +103,16 @@ impl RepoCore {
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
         self.rename_fence.check_table_rename_fence(table_name)?;
-        // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
-        // cold-init chain inline (`create_table_context` →
-        // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
-        // Pinning it — exactly like the admitted twin below — keeps that
-        // await state on the heap instead of widening this fn's future,
-        // which is embedded inline in every catalogue read/write along the
-        // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
+        self.open_cold_table(table_name, permit).await
     }
 
     /// Admitted twin of `get_table`: requires the caller to hold THIS
     /// repository's write-admission permit; the permit is checked
-    /// (`debug_check_permit`) and threaded into table construction. Otherwise
-    /// identical semantics to `get_table`.
+    /// (`debug_check_permit`) and threaded into table construction. Cold setup
+    /// runs inline; do not cancel while recovery may still be running.
     pub(crate) async fn get_table_admitted(
         &self,
         table_name: &str,
@@ -129,10 +127,9 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
-    /// inside the init closure, the cell remains empty so subsequent
-    /// calls retry; no partial table is exposed. The clone of the cell
-    /// value is in-memory.
+    /// Cancelling the lookup stops waiting; a cold open already started moves to
+    /// a runtime task that keeps the repository permit through recovery and
+    /// publication.
     pub(crate) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         if let Some(table) = self.catalog.initialized_table(table_name) {
             return Ok(table);
@@ -143,7 +140,24 @@ impl RepoCore {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
-        Box::pin(self.get_table_ctx(table_name, &permit)).await
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
+        self.open_cold_table(table_name, permit).await
+    }
+
+    async fn open_cold_table(
+        &self,
+        table_name: &str,
+        permit: RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        let core = self.clone();
+        let table_name = table_name.to_owned();
+        // Runs on the caller's task (a sync-over-async caller keeps working);
+        // the permit moves with the work if the caller is dropped.
+        // The deep cold-init future stays boxed as in the inline admitted paths.
+        HandoffOnDrop::new(async move { Box::pin(core.get_table_ctx(&table_name, &permit)).await })
+            .await
     }
 
     /// Admitted twin of `get_table`: requires the caller to
@@ -230,8 +244,8 @@ impl RepoCore {
             })
     }
 
-    /// cancel-safe: yes — all awaits precede MVCC publication. After insert,
-    /// only synchronous ownership checks and builders remain.
+    /// All awaits precede MVCC publication, but open-time recovery can already
+    /// mutate storage. Keep the admission permit until recovery has returned.
     async fn create_table_context(
         &self,
         table_name: &str,
@@ -361,5 +375,57 @@ impl RepoCore {
     /// `RepoInstance::fk_reverse_cache` delegate.
     pub(crate) fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
         &self.fk_reverse_cache
+    }
+}
+
+/// Polls a cold open on the awaiting task. A caller dropped mid-open hands the
+/// rest to a runtime task, so blocking recovery still ends under its permit.
+struct HandoffOnDrop<T: Send + 'static> {
+    work: Option<Pin<Box<dyn Future<Output = T> + Send>>>,
+    started: bool,
+    polling: bool,
+}
+
+impl<T: Send + 'static> HandoffOnDrop<T> {
+    fn new(work: impl Future<Output = T> + Send + 'static) -> Self {
+        Self {
+            work: Some(Box::pin(work)),
+            started: false,
+            polling: false,
+        }
+    }
+}
+
+impl<T: Send + 'static> Future for HandoffOnDrop<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let this = self.get_mut();
+        this.started = true;
+        this.polling = true;
+        let Some(work) = this.work.as_mut() else {
+            unreachable!("cold open polled after completion");
+        };
+        let polled = work.as_mut().poll(cx);
+        this.polling = false;
+        if polled.is_ready() {
+            this.work = None;
+        }
+        polled
+    }
+}
+
+impl<T: Send + 'static> Drop for HandoffOnDrop<T> {
+    fn drop(&mut self) {
+        // Never started: nothing ran. Unwinding out of a poll: do not resume.
+        if !self.started || self.polling {
+            return;
+        }
+        let Some(work) = self.work.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(work));
+        }
     }
 }

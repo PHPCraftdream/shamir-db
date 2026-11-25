@@ -206,6 +206,10 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "scope": "all",
             "kind": "all"
         }),
+        OpKind::StartExport => json!({
+            "database": "appdb"
+        }),
+        OpKind::ExportStatus | OpKind::CancelExport => json!({}),
         OpKind::ListShapeStats | OpKind::ResetShapeStats => json!({
             "repo": "main"
         }),
@@ -231,6 +235,9 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::BackupStatus
         | OpKind::CancelBackup
         | OpKind::ListActivity
+        | OpKind::StartExport
+        | OpKind::ExportStatus
+        | OpKind::CancelExport
         | OpKind::ListShapeStats
         | OpKind::ResetShapeStats => json!(true),
         OpKind::ChangesSince
@@ -394,6 +401,9 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::BackupStatus(_) => OpKind::BackupStatus,
         BatchOp::CancelBackup(_) => OpKind::CancelBackup,
         BatchOp::ListActivity(_) => OpKind::ListActivity,
+        BatchOp::StartExport(_) => OpKind::StartExport,
+        BatchOp::ExportStatus(_) => OpKind::ExportStatus,
+        BatchOp::CancelExport(_) => OpKind::CancelExport,
         BatchOp::ListShapeStats(_) => OpKind::ListShapeStats,
         BatchOp::ResetShapeStats(_) => OpKind::ResetShapeStats,
         BatchOp::CancelRequest(_) => OpKind::CancelRequest,

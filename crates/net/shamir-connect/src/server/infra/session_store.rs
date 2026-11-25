@@ -428,6 +428,13 @@ impl SessionStore {
         projection_snapshot(&self.activity_projection)
     }
 
+    /// Check the stored generation's handle without touching its TTL.
+    #[doc(hidden)]
+    pub fn matches_activity_handle(&self, sid: &Sid, handle: u64) -> bool {
+        let stored = self.by_sid.get(sid);
+        handle != 0 && stored.is_some_and(|s| s.activity_handle() == handle)
+    }
+
     /// Number of sessions currently held for a user. Reads the per-user
     /// index — O(cap).
     pub fn count_for_user(&self, user_id: &[u8; 16]) -> usize {
