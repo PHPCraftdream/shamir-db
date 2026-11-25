@@ -296,6 +296,29 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
     .await;
     let resolver = TxTestResolver { repo: repo.clone() };
 
+    let mut baseline = Batch::new();
+    baseline.id("indeterminate-baseline");
+    baseline.transactional();
+    baseline.insert(
+        "ins",
+        write::insert("orders").row(doc().set("user_id", 0_i64).unwrap()),
+    );
+    let baseline_response = execute_batch(
+        &baseline.build(),
+        &resolver,
+        None,
+        None,
+        Actor::System,
+        "test",
+    )
+    .await
+    .expect("baseline transaction must commit");
+    let v0 = baseline_response
+        .transaction
+        .expect("baseline response must include transaction info")
+        .commit_version
+        .expect("baseline commit must have a version");
+
     let big = format!("fe-wal-{}", "p".repeat(512));
     // Keep the loop input within BatchLimits::default()'s 50-item cap; the
     // first transaction's forced WAL seal failure still exercises the
@@ -323,11 +346,24 @@ async fn transactional_body_indeterminate_commit_stops_the_loop_with_wal_require
     );
     match err {
         BatchError::WalOutcomeUnknown { commit_version, .. } => {
-            assert!(
-                commit_version > 0,
-                "the indeterminate outcome must carry its attempted commit version, got: {commit_version}"
+            assert_eq!(
+                commit_version,
+                v0 + 1,
+                "the indeterminate outcome must carry the exact attempted version"
             );
         }
         other => panic!("expected typed WalOutcomeUnknown error, got: {other:?}"),
     }
+
+    let table = repo.get_table("orders").await.unwrap();
+    let stream = table.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut rows = Vec::new();
+    while let Some(batch) = stream.next().await {
+        rows.extend(batch.unwrap());
+    }
+    assert!(
+        rows.len() <= 2,
+        "only the baseline and iteration 0 may have inserted; later iterations must not run"
+    );
 }

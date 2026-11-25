@@ -5,7 +5,9 @@ use super::runner::{DataArm, QueryRunner};
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use super::helpers::effective_max_iterations;
+use super::helpers::{
+    effective_max_iterations, is_typed_refusal, transactional_body_outcome_error,
+};
 use super::nested::run_nested_body_in_outer_tx;
 use crate::query::batch::batch_execute::{
     execute_batch_impl, execute_planned_batch_impl, plan_and_validate_batch,
@@ -15,17 +17,6 @@ use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::read_budget::ReadByteMeter;
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
-
-fn is_canonical_table_unavailable(error: &BatchError) -> bool {
-    matches!(
-        error,
-        BatchError::QueryError {
-            code: Some(code),
-            alias,
-            message,
-        } if code == "unknown_table" && alias.is_empty() && message == "table is unavailable"
-    )
-}
 
 impl<'a> QueryRunner<'a> {
     pub(super) async fn run_sub_batch_arm(
@@ -116,7 +107,7 @@ impl<'a> QueryRunner<'a> {
         // top-level outcome, identical to a timeout detected at any
         // outer checkpoint.
         let wrap_sub_batch_err = |e: BatchError| match e {
-            e if is_canonical_table_unavailable(&e) => e,
+            e if is_typed_refusal(&e) => e,
             limit_error @ (BatchError::ExecutionTimedOut { .. }
             | BatchError::TooManyQueries { .. }
             | BatchError::TooManyIterations { .. }
@@ -152,7 +143,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(wrap_sub_batch_err)?
             }
             None => {
-                execute_batch_impl(
+                let response = execute_batch_impl(
                     &sub.batch,
                     self.resolver,
                     self.admin,
@@ -165,7 +156,7 @@ impl<'a> QueryRunner<'a> {
                 )
                 .await
                 .map_err(|e| match e {
-                    e if is_canonical_table_unavailable(&e) => e,
+                    e if is_typed_refusal(&e) => e,
                     limit_error @ (BatchError::ExecutionTimedOut { .. }
                     | BatchError::TooManyQueries { .. }
                     | BatchError::TooManyIterations { .. }
@@ -177,8 +168,16 @@ impl<'a> QueryRunner<'a> {
                         message: format!("sub-batch '{}' failed: {}", alias, e),
                         code: e.code().map(str::to_owned),
                     },
-                })?
-                .results
+                })?;
+                // An aborted/indeterminate transactional sub-batch must never
+                // look like an empty success. This caller has no committed-prefix
+                // knowledge, so an abort is always transaction_aborted with its cause.
+                if let Some(info) = &response.transaction {
+                    if let Some(e) = transactional_body_outcome_error(alias, info, None) {
+                        return Err(e);
+                    }
+                }
+                response.results
             }
         };
 
@@ -364,7 +363,7 @@ impl<'a> QueryRunner<'a> {
             // reused (via a fresh `&mut` reborrow) by every iteration below.
             self.scope.check()?;
             let wrap_for_each_body_err = |e: BatchError| match e {
-                e if is_canonical_table_unavailable(&e) => e,
+                e if is_typed_refusal(&e) => e,
                 limit_error @ (BatchError::ExecutionTimedOut { .. }
                 | BatchError::TooManyQueries { .. }
                 | BatchError::TooManyIterations { .. }
@@ -384,11 +383,6 @@ impl<'a> QueryRunner<'a> {
                 .await
                 .map_err(wrap_for_each_body_err)?;
 
-            if self.scope.enforce_result_size() {
-                self.scope.charge_bytes(
-                    ResultSize::result(&QueryResult::default()).saturating_add(ResultSize::SHELL),
-                )?;
-            }
             let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
             for element in elements {
                 // #666 checkpoint: once per iteration, BEFORE recursing into
@@ -449,7 +443,7 @@ impl<'a> QueryRunner<'a> {
                     )
                     .await
                     .map_err(|e| match e {
-                        e if is_canonical_table_unavailable(&e) => e,
+                        e if is_typed_refusal(&e) => e,
                         limit_error @ (BatchError::ExecutionTimedOut { .. }
                         | BatchError::TooManyQueries { .. }
                         | BatchError::TooManyIterations { .. }
@@ -482,7 +476,7 @@ impl<'a> QueryRunner<'a> {
                         )
                         .await
                         .map_err(|e| match e {
-                            e if is_canonical_table_unavailable(&e) => e,
+                            e if is_typed_refusal(&e) => e,
                             limit_error @ (BatchError::ExecutionTimedOut { .. }
                             | BatchError::TooManyQueries { .. }
                             | BatchError::TooManyIterations { .. }
@@ -496,100 +490,12 @@ impl<'a> QueryRunner<'a> {
                             },
                         })?;
                         if let Some(info) = tx_info {
-                            // Every commit outcome is handled explicitly: only
-                            // a COMMITTED body may contribute a value to the
-                            // loop's result list. `status` is the wire word
-                            // (`transaction_info.rs`) — the decision is made on
-                            // it, not on `reason`.
-                            match info.status.as_str() {
-                                // Nothing was committed: fail the iteration
-                                // with the abort's own stable code, falling
-                                // back to today's `transaction_aborted` only
-                                // when the abort carries no code.
-                                "aborted" => {
-                                    let reason = info
-                                        .reason
-                                        .as_deref()
-                                        .unwrap_or("transactional body aborted");
-                                    let code =
-                                        info.abort_code.as_deref().unwrap_or("transaction_aborted");
-                                    // Earlier iterations already committed
-                                    // independently and are NOT rolled back: the
-                                    // abort's own code (`tx_conflict` is
-                                    // retryable for clients) must not classify
-                                    // the whole request, because replaying the
-                                    // outer batch would repeat the committed
-                                    // prefix. The cause stays in the message.
-                                    if !iterations.is_empty() {
-                                        return Err(BatchError::query_coded(
-                                            alias.to_string(),
-                                            "transaction_aborted",
-                                            format!(
-                                                "{reason} (abort code {code}; {} earlier iteration(s) committed and are not rolled back)",
-                                                iterations.len()
-                                            ),
-                                        ));
-                                    }
-                                    return Err(BatchError::query_coded(
-                                        alias.to_string(),
-                                        code,
-                                        reason,
-                                    ));
-                                }
-                                // The body's commit outcome is UNKNOWN: the WAL
-                                // frame may or may not have reached the journal
-                                // (`transactional.rs`'s non-committed arm still
-                                // returns this metadata). The iteration MAY have
-                                // committed, so the loop MUST stop here:
-                                // continuing would present a result list whose
-                                // prefix is unknown, and appending the empty
-                                // result map would report a possibly-committed
-                                // iteration as an empty success. The caller has
-                                // to reconcile first (reopen the repo and let WAL
-                                // replay decide — the `wal_requires_reopen`
-                                // disposition); a blind retry could duplicate
-                                // the write.
-                                "indeterminate" => {
-                                    if let Some(commit_version) = info.commit_version {
-                                        return Err(BatchError::WalOutcomeUnknown {
-                                            alias: alias.to_string(),
-                                            commit_version,
-                                        });
-                                    }
-                                    return Err(BatchError::query_coded(
-                                        alias.to_string(),
-                                        "wal_requires_reopen",
-                                        info.reason.as_deref().or(info.error.as_deref()).unwrap_or(
-                                            "transactional body commit outcome is unknown",
-                                        ),
-                                    ));
-                                }
-                                // Committed: append the body's results, but a
-                                // failed required synced flush is not a silent
-                                // success. Keep the committed disposition in the
-                                // code so callers cannot mistake it for abort.
-                                "committed" if info.error.is_some() => {
-                                    return Err(BatchError::query_coded(
-                                        alias.to_string(),
-                                        "wal_durability",
-                                        info.error
-                                            .as_deref()
-                                            .unwrap_or("synced flush failed after commit"),
-                                    ));
-                                }
-                                "committed" => {}
-                                // Fail closed: an unrecognised status must never
-                                // be treated as a successful iteration.
-                                _ => {
-                                    return Err(BatchError::query_coded(
-                                        alias.to_string(),
-                                        "internal",
-                                        format!(
-                                            "transactional body returned unrecognised transaction status '{}'",
-                                            info.status
-                                        ),
-                                    ));
-                                }
+                            if let Some(e) = transactional_body_outcome_error(
+                                alias,
+                                &info,
+                                Some(iterations.len()),
+                            ) {
+                                return Err(e);
                             }
                         }
                         results
@@ -601,8 +507,18 @@ impl<'a> QueryRunner<'a> {
                 // replacing the old msgpack round-trip — F5) — collected into
                 // a List, one entry per iteration (ADR Decision 2).
                 if self.scope.enforce_result_size() {
+                    // Charge the shell with iteration 0's results so a refusal
+                    // in iteration 0 surfaces before byte-limit failure; large
+                    // results still report their distinct byte-limit error.
+                    let shell = if iterations.is_empty() {
+                        ResultSize::SHELL
+                    } else {
+                        0
+                    };
                     self.scope.charge_bytes(
-                        ResultSize::ENTRY.saturating_add(ResultSize::assembled(&inner_results)),
+                        ResultSize::ENTRY
+                            .saturating_add(ResultSize::assembled(&inner_results))
+                            .saturating_add(shell),
                     )?;
                 }
                 let value =

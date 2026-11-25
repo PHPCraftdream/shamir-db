@@ -430,6 +430,17 @@ impl ShamirDbHandler {
                             } else if is_typed_server_busy_refusal(&e) {
                                 typed_canonical_refusal = true;
                                 server_busy_response()
+                            } else if let BatchError::WalOutcomeUnknown { commit_version, .. } = &e
+                            {
+                                // Preserve the typed outcome so its stable code survives caller caps;
+                                // bounded server-owned text fits fixed headroom and claims only the attempted version.
+                                typed_canonical_refusal = true;
+                                DbResponse::Error {
+                                    code: "wal_requires_reopen".to_string(),
+                                    message: format!(
+                                        "WAL outcome indeterminate (commit_version {commit_version}); repository must be reopened",
+                                    ),
+                                }
                             } else {
                                 error_response(&e)
                             }

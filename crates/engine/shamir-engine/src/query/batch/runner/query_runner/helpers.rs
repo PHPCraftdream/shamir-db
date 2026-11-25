@@ -7,6 +7,91 @@ use crate::query::batch::{BatchError, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 
+pub(in crate::query::batch) fn is_typed_refusal(error: &BatchError) -> bool {
+    match error {
+        BatchError::WalOutcomeUnknown { .. } => true,
+        BatchError::QueryError {
+            alias,
+            message,
+            code,
+        } => {
+            alias.is_empty()
+                && match code.as_deref() {
+                    Some("unknown_table") => message == "table is unavailable",
+                    Some("server_busy") => true,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// Keep transactional body outcomes explicit across nested wrappers. The
+/// server classifies these by typed shape (empty alias / variant) and renders
+/// fixed server-owned text inside reserved headroom; rebuilding them with a
+/// container alias destroys that classification and lets a tiny client
+/// `max_result_size` mask them as `result_too_large`.
+pub(in crate::query::batch) fn transactional_body_outcome_error(
+    alias: &str,
+    info: &shamir_query_types::batch::TransactionInfo,
+    committed_iterations: Option<usize>,
+) -> Option<BatchError> {
+    match info.status.as_str() {
+        "aborted" => {
+            let reason = info
+                .reason
+                .as_deref()
+                .unwrap_or("transactional body aborted");
+            let code = info.abort_code.as_deref().unwrap_or("transaction_aborted");
+            match committed_iterations {
+                Some(n) if n > 0 => Some(BatchError::query_coded(
+                    alias,
+                    "transaction_aborted",
+                    format!(
+                        "{reason} (abort code {code}; {n} earlier iteration(s) committed and are not rolled back)"
+                    ),
+                )),
+                None => Some(BatchError::query_coded(
+                    alias,
+                    "transaction_aborted",
+                    format!("{reason} (abort code {code})"),
+                )),
+                _ => Some(BatchError::query_coded(alias, code, reason)),
+            }
+        }
+        "indeterminate" => Some(match info.commit_version {
+            Some(commit_version) => BatchError::WalOutcomeUnknown {
+                alias: alias.to_string(),
+                commit_version,
+            },
+            None => BatchError::query_coded(
+                alias,
+                "wal_requires_reopen",
+                info.reason
+                    .as_deref()
+                    .or(info.error.as_deref())
+                    .unwrap_or("transactional body commit outcome is unknown"),
+            ),
+        }),
+        "committed" if info.error.is_some() => Some(BatchError::query_coded(
+            alias,
+            "wal_durability",
+            info.error
+                .as_deref()
+                .unwrap_or("synced flush failed after commit"),
+        )),
+        "committed" => None,
+        _ => Some(BatchError::query_coded(
+            alias,
+            "internal",
+            format!(
+                "transactional body returned unrecognised transaction status '{}'",
+                info.status
+            ),
+        )),
+    }
+}
+
 /// Absolute, server-enforced ceiling on `ForEach` iteration count —
 /// independent of whatever a client-supplied `BatchLimits.max_iterations`
 /// claims. Closes a DoS gap: `max_iterations` is entirely client-supplied
