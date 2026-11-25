@@ -171,8 +171,14 @@ impl<'a> QueryRunner<'a> {
                 })?;
                 // An aborted/indeterminate transactional sub-batch must never
                 // look like an empty success. This caller has no committed-prefix
-                // knowledge, so an abort is always transaction_aborted with its cause.
-                if let Some(info) = &response.transaction {
+                // knowledge, so an abort is always transaction_aborted with its
+                // cause. A committed receipt (also one carrying a sync warning)
+                // stays in the nested results, as before.
+                if let Some(info) = response
+                    .transaction
+                    .as_ref()
+                    .filter(|info| info.status != "committed")
+                {
                     if let Some(e) = transactional_body_outcome_error(alias, info, None) {
                         return Err(e);
                     }
@@ -383,6 +389,11 @@ impl<'a> QueryRunner<'a> {
                 .await
                 .map_err(wrap_for_each_body_err)?;
 
+            if self.scope.enforce_result_size() {
+                self.scope.charge_bytes(
+                    ResultSize::result(&QueryResult::default()).saturating_add(ResultSize::SHELL),
+                )?;
+            }
             let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
             for element in elements {
                 // #666 checkpoint: once per iteration, BEFORE recursing into
@@ -507,20 +518,8 @@ impl<'a> QueryRunner<'a> {
                 // replacing the old msgpack round-trip — F5) — collected into
                 // a List, one entry per iteration (ADR Decision 2).
                 if self.scope.enforce_result_size() {
-                    // Charge the container shell with iteration 0's results so
-                    // a refusal in iteration 0 surfaces before byte-limit
-                    // failure; large results still report their distinct
-                    // byte-limit error. An empty loop pays it below.
-                    let shell = if iterations.is_empty() {
-                        ResultSize::result(&QueryResult::default())
-                            .saturating_add(ResultSize::SHELL)
-                    } else {
-                        0
-                    };
                     self.scope.charge_bytes(
-                        ResultSize::ENTRY
-                            .saturating_add(ResultSize::assembled(&inner_results))
-                            .saturating_add(shell),
+                        ResultSize::ENTRY.saturating_add(ResultSize::assembled(&inner_results)),
                     )?;
                 }
                 let value =
@@ -530,11 +529,6 @@ impl<'a> QueryRunner<'a> {
                 iterations.push(value);
             }
 
-            if iterations.is_empty() && self.scope.enforce_result_size() {
-                self.scope.charge_bytes(
-                    ResultSize::result(&QueryResult::default()).saturating_add(ResultSize::SHELL),
-                )?;
-            }
             return Ok(QueryResult::with_value(QueryValue::List(iterations)));
         }
         unreachable!("op was matched as ForEach above");
