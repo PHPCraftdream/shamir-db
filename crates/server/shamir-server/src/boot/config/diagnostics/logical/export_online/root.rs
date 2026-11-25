@@ -21,6 +21,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use shamir_db::engine::function::{create_private_dir, verify_private_dir};
@@ -296,7 +298,6 @@ fn remove_stale_stages(root: &Path) -> io::Result<()> {
 /// unsafe code and any new dependency.
 #[cfg(windows)]
 fn is_reparse_point(meta: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }

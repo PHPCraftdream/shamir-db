@@ -126,8 +126,9 @@ pub(crate) fn scram_superuser_refusal(session: &Session) -> Option<DbResponse> {
 /// Accepts exactly one shape: a nontransactional top-level batch with a
 /// single entry whose op is one of the three export operations and whose
 /// `database` field equals the request's target database (the wire
-/// payload must equal the envelope). Everything else — nested bodies,
-/// mixed batches, transactional batches, envelope mismatch — is one
+/// payload must equal the envelope, no `when` and no `after`). Everything
+/// else — nested bodies, mixed batches, transactional batches, envelope
+/// mismatch — is one
 /// atomic `online_export_invalid_form` refusal with a fixed message.
 fn export_dispatch_form<'a>(
     batch: &'a BatchRequest,
@@ -145,6 +146,11 @@ fn export_dispatch_form<'a>(
         }
         if dispatch.is_some() {
             // A second entry: mixed batch.
+            return Err(form_refusal());
+        }
+        if visit.entry.when.is_some() || !visit.entry.after.is_empty() {
+            // The direct dispatch bypasses the planner: a condition or a
+            // dependency would be ignored, not honoured.
             return Err(form_refusal());
         }
         dispatch = Some(match &visit.entry.op {

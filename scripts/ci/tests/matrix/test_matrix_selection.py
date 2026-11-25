@@ -164,8 +164,8 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs",
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs",
             "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/staging.rs",
-            "crates/server/shamir-server/src/engine/db_handler/repo_admin/export_gate.rs",
-            "crates/server/shamir-server/src/engine/server/server_launcher/support/export_boot.rs",
+            "crates/server/shamir-server/src/engine/db_handler/repo_admin/support/export_gate.rs",
+            "crates/server/shamir-server/src/engine/server/server_launcher/support/boot/export_boot.rs",
         ]
         for path in export_paths:
             owner = "shamir-client" if path.startswith("crates/client/") else "shamir-server"

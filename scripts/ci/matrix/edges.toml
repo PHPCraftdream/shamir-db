@@ -82,7 +82,7 @@ flags = ["node"]
 reason = "Node binding tests consume the TS schema-migration builder"
 
 [[edge]]
-paths = ["crates/client/shamir-client/src/client/session/mux/export.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/**", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/staging.rs", "crates/server/shamir-server/src/engine/db_handler/repo_admin/export_gate.rs", "crates/server/shamir-server/src/engine/server/server_launcher/support/export_boot.rs"]
+paths = ["crates/client/shamir-client/src/client/session/mux/export.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/export_online/**", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/driver.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/projection.rs", "crates/server/shamir-server/src/boot/config/diagnostics/logical/logical_dump/staging.rs", "crates/server/shamir-server/src/engine/db_handler/repo_admin/support/export_gate.rs", "crates/server/shamir-server/src/engine/server/server_launcher/support/boot/export_boot.rs"]
 crates = ["shamir-db"]
 propagate = "tests"
 reason = "shamir-sync owns the logical dump codec and verifier; shamir-db owns the logical source/load contract exercised by export and import round-trips. Changes to the online export service, gate and boot wiring, the offline driver and projection, live publication staging, or the client mux export API also run shamir-db tests: reverse dependency selection reaches server and e2e, but not db"
