@@ -121,7 +121,7 @@ fn commit_stage_link(stage_dir: &Path, output: &Path) -> Result<Result<()>> {
     fs::hard_link(stage_dir.join("dump"), output)
         .context("logical-export atomic no-replace publication")?;
     #[cfg(unix)]
-    return Ok(parent.sync_all());
+    return Ok(parent.sync_all().map_err(anyhow::Error::from));
     #[cfg(not(unix))]
     Ok(Ok(()))
 }
