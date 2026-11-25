@@ -32,10 +32,12 @@
 //! anchor never points past the captured log tail", which holds only because
 //! the residual pass captures `audit.log` after the anchor stores.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -44,9 +46,13 @@ use super::super::failure_injection_tests::{
     assert_source_untouched, run, snapshot_dir, write_file, Fixture, InjectPort,
 };
 use crate::sync::durability::backup::online::copy_engine::test_seams::{self, SeamGuard};
-use crate::sync::durability::backup::online::copy_engine::{run_copy_pass, CopyError, CopyOptions};
+use crate::sync::durability::backup::online::copy_engine::{
+    authenticate_dest, run_copy_pass, run_copy_pass_gated, CopyError, CopyOptions, SealGate,
+};
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
-use crate::sync::durability::backup::online::protocol::{OnlineBackupError, OnlineBackupFailure};
+use crate::sync::durability::backup::online::protocol::{
+    OnlineBackupError, OnlineBackupFailure, SealRecopyCap,
+};
 use crate::sync::durability::backup::verify_manifest;
 
 /// Shared cancelled-run assertions: typed cancellation at `stage`,
@@ -388,7 +394,10 @@ fn persistent_re_pass_hash_mismatch_surfaces_at_self_verification() {
         panic!("the failure must be a typed self-verification error, got {failure:?}");
     };
     assert!(
-        message.contains("repos/alpha/store.bin") && message.contains("hash mismatch"),
+        // The verifier's ChecksumMismatch display carries the file path
+        // with platform separators; normalise before matching.
+        message.replace('\\', "/").contains("repos/alpha/store.bin")
+            && message.contains("checksum mismatch"),
         "the verify failure must name the mismatching file, got: {message}"
     );
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
@@ -533,4 +542,58 @@ fn cancel_after_self_verify_still_ends_done_with_valid_published_output() {
     );
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     assert_source_untouched(&before, &source);
+}
+
+/// A GATED pass whose every file is preverified-identical (preauth
+/// digests match the source) writes no byte and creates no directory,
+/// so no destination directory entry can change and NO directory fsync
+/// is owed — every entry is already durable from the pass that created
+/// it. The `fsync_dir` seam counts real `fsync_dest_dir` calls for the
+/// destination subtree: zero for the skip pass, then >= 1 for a control
+/// pass that writes a changed file, proving the counter observes
+/// genuine fsyncs. Red on the parent commit: the skip pass fsynced
+/// every synced parent directory plus the destination root.
+#[test]
+fn gated_pass_that_writes_nothing_fsyncs_no_destination_directory() {
+    let source_dir = TempDir::new().expect("source tempdir");
+    let to_dir = TempDir::new().expect("destination tempdir");
+    let source = source_dir.path().to_path_buf();
+    let dest = to_dir.path().join("snap");
+    write_file(&source.join("store.bin"), b"payload-bytes");
+    let cancel = CancelFlag::default();
+    let options = CopyOptions::default();
+    // Ungated first pass fills the destination (and fsyncs before the
+    // counting seam is installed).
+    run_copy_pass(&source, &dest, &[], &[], &cancel, &options).expect("first pass");
+    let fsyncs = Arc::new(AtomicUsize::new(0));
+    let _fsync_guard: SeamGuard = test_seams::set_fsync_dir({
+        let fsyncs = Arc::clone(&fsyncs);
+        let dest = dest.clone();
+        Box::new(move |dir: &Path| -> Option<std::io::Result<()>> {
+            if dir.starts_with(&dest) {
+                fsyncs.fetch_add(1, Ordering::SeqCst);
+            }
+            None
+        })
+    });
+    // Skip pass: preauth authenticates the unchanged destination, so
+    // every file takes the preverified branch and nothing is written.
+    let preauth = authenticate_dest(&dest, &cancel, None).expect("authenticate destination");
+    let gate = SealGate::new(&SealRecopyCap::default(), Instant::now()).expect("gate");
+    run_copy_pass_gated(&source, &dest, &cancel, &options, &gate, &preauth).expect("skip pass");
+    assert_eq!(
+        fsyncs.load(Ordering::SeqCst),
+        0,
+        "a pass that writes nothing must not fsync destination directories"
+    );
+    // Control (the counter must be able to go red): a pass that DOES
+    // write a changed file still fsyncs.
+    write_file(&source.join("store.bin"), b"changed-bytes");
+    let gate = SealGate::new(&SealRecopyCap::default(), Instant::now()).expect("gate");
+    run_copy_pass_gated(&source, &dest, &cancel, &options, &gate, &BTreeMap::new())
+        .expect("write pass");
+    assert!(
+        fsyncs.load(Ordering::SeqCst) >= 1,
+        "a writing pass must still fsync destination directories"
+    );
 }
