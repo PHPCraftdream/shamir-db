@@ -194,7 +194,54 @@ pub fn boot(name: &str) -> ShellFixture {
     boot_with(name, false, Default::default(), |_| {}, |_| None).0
 }
 
-/// Boot the same fixture on a READ-ONLY node (a follower).
+/// Boot with a data directory and export root as sibling directories inside
+/// the fixture TempDir. ExportRoot creates the private `export-root` leaf.
+pub fn boot_export(name: &str) -> ShellFixture {
+    boot_with(
+        name,
+        false,
+        Default::default(),
+        |config| {
+            let fixture_dir = config.data_dir.clone();
+            let data_dir = fixture_dir.join("data");
+            std::fs::create_dir_all(&data_dir).expect("create nested fixture data dir");
+            config.data_dir = data_dir;
+            config.security.export_root = Some(fixture_dir.join("export-root"));
+        },
+        |_| None,
+    )
+    .0
+}
+
+/// Boot with an enabled scheduled backup. The data directory and the
+/// existing private `scheduled-backups` destination are sibling directories
+/// inside the fixture TempDir. A one-hour interval avoids a scheduler run
+/// during this projection-only probe.
+pub fn boot_scheduled_backup(name: &str) -> ShellFixture {
+    boot_with(
+        name,
+        false,
+        Default::default(),
+        |config| {
+            let fixture_dir = config.data_dir.clone();
+            let data_dir = fixture_dir.join("data");
+            std::fs::create_dir_all(&data_dir).expect("create nested fixture data dir");
+            let destination = fixture_dir.join("scheduled-backups");
+            create_private_dir(&destination).expect("create private scheduled-backup destination");
+            config.data_dir = data_dir;
+            config.backup = Some(shamir_server::config::BackupScheduleConfig {
+                destination,
+                interval: "1h".into(),
+                window: None,
+                run_on_start: false,
+                retention: Default::default(),
+            });
+        },
+        |_| None,
+    )
+    .0
+}
+
 pub fn boot_follower(name: &str) -> ShellFixture {
     boot_with(name, false, NodeMode::ReadOnly, |_| {}, |_| None).0
 }

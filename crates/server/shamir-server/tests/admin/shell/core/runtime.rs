@@ -57,11 +57,24 @@ impl TestRuntime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        self.run_timeout(RUNTIME_RUN_BOUND, future)
+    }
+
+    /// Drive a shell subprocess or interactive driver with its explicit bound.
+    pub fn run_timeout<F>(&self, timeout: Duration, future: F) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
         let (done_tx, done_rx) = mpsc::sync_channel::<F::Output>(1);
-        match self.sender().try_send(Box::pin(async move {
-            let value = future.await;
+        let job = async move {
+            let value = match tokio::time::timeout(timeout, future).await {
+                Ok(value) => value,
+                Err(_) => panic!("shell-test runtime job exceeded {timeout:?}"),
+            };
             let _ = done_tx.send(value);
-        })) {
+        };
+        match self.sender().try_send(Box::pin(job)) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 panic!("the shell-test runtime thread is gone")
@@ -70,10 +83,10 @@ impl TestRuntime {
                 panic!("the shell-test runtime job queue is full")
             }
         }
-        match done_rx.recv_timeout(RUNTIME_RUN_BOUND) {
+        match done_rx.recv_timeout(timeout) {
             Ok(value) => value,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                panic!("shell-test runtime job exceeded {RUNTIME_RUN_BOUND:?}")
+                panic!("shell-test runtime job exceeded {timeout:?}")
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => panic!(
                 "the runtime job panicked (its own panic is the real failure); \

@@ -67,12 +67,13 @@ use std::time::{Duration, Instant};
 
 use dashmap::mapref::entry::{Entry, OccupiedEntry};
 use dashmap::DashMap;
-use futures_util::future::BoxFuture;
 use scc::{Guard, HashIndex};
 use shamir_collections::THasher;
 use shamir_tx::{SnapshotGuard, TxContext};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+pub use super::tx_release_hook::TxAbortRelease;
 
 use super::tx_abort_release::spawn_abort_release;
 
@@ -89,12 +90,6 @@ pub const DEFAULT_INTERACTIVE_TX_IDLE_TTL: Duration = Duration::from_secs(30);
 /// Comfortably below the 30 s idle TTL so a tx that idles past its TTL is
 /// reaped within a few seconds of becoming reapable.
 pub const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Releases the Level-3 pessimistic record locks a parked transaction still holds when the
-/// LAST reference to its context goes away outside the commit pipeline. Receives the taken
-/// [`TxContext`]; the releaser ALREADY holds the repository resolved when the handle was parked, so
-/// `RenameDb` / `RenameRepo` between begin and end cannot make it resolve nothing.
-pub type TxAbortRelease = Arc<dyn Fn(TxContext) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// Phase B Stage 6 — handle for the periodic interactive-tx reaper task.
 /// Just the `JoinHandle<()>` — the stop signal is the shared root
@@ -379,7 +374,10 @@ pub struct InteractiveTx {
     db: String,
     /// Repo the handle is pinned to — the engine tx commits against one repo.
     repo: String,
-    /// Shared timing + lease state (also projected into the activity row).
+    /// Repository resolved at parking; commits target it, not a later name match.
+    /// None in test constructors (by-name fallback).
+    pub(super) bound_repo: Option<shamir_db::engine::repo::RepoInstance>,
+
     timing: Arc<TxTiming>,
 }
 
@@ -419,6 +417,7 @@ impl InteractiveTx {
             owner_user_id,
             db,
             repo,
+            bound_repo: None,
             timing: Arc::new(TxTiming::new(max_lifetime.as_nanos() as u64)),
         }
     }
@@ -455,6 +454,18 @@ impl InteractiveTx {
     /// Repo the handle is pinned to (every `TxExecute` must target it).
     pub fn repo(&self) -> &str {
         &self.repo
+    }
+
+    /// The repo the parked commit must target, if bound at parking.
+    pub fn bound_repo(&self) -> Option<&shamir_db::engine::repo::RepoInstance> {
+        self.bound_repo.as_ref()
+    }
+
+    /// Bind the repo resolved at parking time (production begin path).
+    #[must_use]
+    pub fn with_bound_repo(mut self, repo: shamir_db::engine::repo::RepoInstance) -> Self {
+        self.bound_repo = Some(repo);
+        self
     }
 
     /// Remaining absolute lifetime on the registry's monotonic clock.
@@ -497,15 +508,11 @@ impl Drop for InteractiveTx {
     }
 }
 
-/// How a registered handle currently sits in the authoritative `open` map.
-///
-/// `Committing` keeps the handle RESERVED while the commit pipeline runs: the identity
-/// can neither be re-registered (the entry is occupied) nor acquired/reaped (every
-/// executable path skips this variant). Only [`TxCommitGuard::drop`] removes it;
-/// `pub(super)` only so the operator-cancel module can share the teardown.
+/// `Committing` reserves the key against re-registration and executable paths;
+/// only [`TxCommitGuard::drop`] removes it under the shard guard.
 pub(super) enum Parked {
     Open(Arc<InteractiveTx>),
-    Committing,
+    Committing(Arc<InteractiveTx>),
 }
 
 /// The server-resident table of open interactive transactions.
@@ -647,7 +654,7 @@ impl TxRegistry {
             Some(entry) => match &*entry {
                 Parked::Open(arc) => Arc::clone(arc),
                 // Committing (or absent): not executable either way.
-                Parked::Committing => return Err(TxRegistryError::TxNotFound),
+                Parked::Committing(_) => return Err(TxRegistryError::TxNotFound),
             },
             None => return Err(TxRegistryError::TxNotFound),
         };
@@ -828,18 +835,10 @@ impl TxRegistry {
     /// obtained via [`Self::get_owned`] (identity-rechecked under the entry
     /// guard, the same discipline as the reaper).
     ///
-    /// The handle stays in the authoritative `open` map but transitions to
-    /// [`Parked::Committing`] UNDER the entry's own shard guard: the identity
-    /// is reserved (no re-register can take the key), yet no executable path
-    /// (`get_owned` / `acquire_owned`) and no reap can reach a `Committing`
-    /// reservation. The open gauge loses the row here; the projection row
-    /// stays visible as [`TxActivityState::AwaitingCommit`] until the
-    /// returned [`TxCommitGuard`] drops. The guard performs the single
-    /// authoritative teardown (open entry + projection row) under the same
-    /// shard guard. Returns `None` when the row was concurrently reaped.
-    ///
-    /// Requires `Arc<TxRegistry>` so the guard can complete the teardown by
-    /// itself even if the commit future is dropped mid-flight.
+    /// `Committing` reserves the identity: executable paths and reaping skip it.
+    /// Activity remains visible as AwaitingCommit until the guard drops. The guard
+    /// removes the entry and projection together under its shard guard; `None`
+    /// means the row was reaped. It survives cancellation of the commit future.
     pub fn begin_commit(
         self: &Arc<Self>,
         handle: u64,
@@ -850,7 +849,7 @@ impl TxRegistry {
                 if !matches!(slot.get(), Parked::Open(arc) if Arc::ptr_eq(arc, expected)) {
                     return None;
                 }
-                *slot.get_mut() = Parked::Committing;
+                *slot.get_mut() = Parked::Committing(Arc::clone(expected));
                 self.open_mirror.fetch_sub(1, Ordering::AcqRel);
                 self.by_session
                     .remove_if(&expected.owner_sid, |_, h| *h == handle);
@@ -860,6 +859,7 @@ impl TxRegistry {
                 Some(TxCommitGuard {
                     registry: Arc::clone(self),
                     handle,
+                    identity: Arc::clone(expected),
                 })
             }
             Entry::Vacant(_) => None,
@@ -925,21 +925,18 @@ impl TxRegistry {
 
 /// Completes the commit observation: dropping the guard removes the
 /// `Committing` `open` reservation AND the projection row — both under the
-/// entry's own shard guard, so a racing re-register of the same handle can
-/// never observe a half-torn state or lose its fresh projection row to this
-/// stale teardown. Held across the commit pipeline; survives even if the
-/// commit future is cancelled mid-await. The guard never touches a
-/// [`Parked::Open`] entry (defence in depth: only the verified owner may
-/// teardown).
+/// The guard owns teardown under the entry shard guard; it survives a
+/// cancelled commit future and cannot tear down a fresh reservation.
 pub struct TxCommitGuard {
     registry: Arc<TxRegistry>,
     handle: u64,
+    identity: Arc<InteractiveTx>,
 }
 
 impl Drop for TxCommitGuard {
     fn drop(&mut self) {
         if let Entry::Occupied(slot) = self.registry.open.entry(self.handle) {
-            if matches!(slot.get(), Parked::Committing) {
+            if matches!(slot.get(), Parked::Committing(tx) if Arc::ptr_eq(tx, &self.identity)) {
                 if self.registry.activity.remove_sync(&self.handle) {
                     self.registry.activity_mirror.fetch_sub(1, Ordering::AcqRel);
                 }

@@ -13,11 +13,17 @@
 //! `close()` is never spawned after the discard sweep.
 //! `tx_release_tests` — every end of an interactive transaction (owner rollback, reaper, session close, an in-flight request at session close) releases the Level-3 record locks it held; the release is idempotent and keyed by the transaction's own id.
 
+#[path = "cancellation/busy_reread_tests.rs"]
+mod busy_reread_tests;
 #[path = "cancellation/tail_tests.rs"]
 mod cancellation_tail_tests;
 #[path = "cancellation/legacy_tests.rs"]
 mod cancellation_tests;
+#[path = "cancellation/commit_cleanup_tests.rs"]
+mod commit_cleanup_tests;
 mod continuation_token_tests;
+#[path = "cancellation/cursor_removal_tests.rs"]
+mod cursor_removal_tests;
 mod paging_tests;
 mod refusal_close_race_tests;
 mod refusal_fairness_tests;

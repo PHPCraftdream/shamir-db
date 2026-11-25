@@ -89,6 +89,16 @@ pub(super) async fn fetch_offset_page(
 }
 
 impl ShamirDbHandler {
+    pub(in crate::engine::db_handler) async fn remove_cursor_identity(
+        &self,
+        id: u64,
+        cursor: &std::sync::Arc<crate::cursor_registry::Cursor>,
+    ) {
+        #[cfg(test)]
+        self.cursor_registry.pause_before_remove(id).await;
+        self.cursor_registry.remove_identity(id, cursor);
+    }
+
     /// FG-5b FETCH_NEXT — look up the cursor, re-run the pinned read at the
     /// current bookmark, advance the bookmark, reply with the page.
     ///
@@ -187,7 +197,7 @@ impl ShamirDbHandler {
 
         let mut state = cursor.state().lock().await;
         if state.exhausted {
-            self.cursor_registry.remove(cursor_id.0);
+            self.cursor_registry.remove_identity(cursor_id.0, &cursor);
             drop(state);
             return DbResponse::Error {
                 code: "cursor_not_found".into(),
@@ -240,7 +250,7 @@ impl ShamirDbHandler {
         if let Err(e) =
             authorize_cursor_read(&self.db, &actor, cursor.db(), cursor.repo(), &table_name).await
         {
-            self.cursor_registry.remove(cursor_id.0);
+            self.cursor_registry.remove_identity(cursor_id.0, &cursor);
             drop(state);
             if error_code(&e) == "unknown_table" {
                 return table_unavailable_response();
@@ -259,7 +269,7 @@ impl ShamirDbHandler {
             Err(parent) => return error_response(&parent),
         };
         if !repo.has_table(&table_name) {
-            self.cursor_registry.remove(cursor_id.0);
+            self.cursor_registry.remove_identity(cursor_id.0, &cursor);
             drop(state);
             return table_unavailable_response();
         }
@@ -270,7 +280,7 @@ impl ShamirDbHandler {
         // convention is the access-denied path above: the cursor is removed
         // (closed) before returning the error.
         if let Some(e) = quarantine_cursor_error(&self.db, cursor.db(), cursor.repo()) {
-            self.cursor_registry.remove(cursor_id.0);
+            self.cursor_registry.remove_identity(cursor_id.0, &cursor);
             drop(state);
             return error_response(&e);
         }
@@ -296,7 +306,7 @@ impl ShamirDbHandler {
             Err(e) => {
                 let wrapped = wrap_table_lookup_err(&self.db, cursor.db(), cursor.repo(), e);
                 if error_code(&wrapped) == "unknown_table" {
-                    self.cursor_registry.remove(cursor_id.0);
+                    self.cursor_registry.remove_identity(cursor_id.0, &cursor);
                     drop(state);
                     return table_unavailable_response();
                 }
@@ -626,7 +636,7 @@ impl ShamirDbHandler {
         cursor.bump_activity();
 
         if !has_more {
-            self.cursor_registry.remove(cursor_id.0);
+            self.remove_cursor_identity(cursor_id.0, &cursor).await;
         }
 
         // The SAME value already serialized above — not rebuilt, so it can
@@ -648,8 +658,7 @@ impl ShamirDbHandler {
             .cursor_registry
             .get_owned(cursor_id.0, &session.session_id)
         {
-            drop(cursor);
-            self.cursor_registry.remove(cursor_id.0);
+            self.remove_cursor_identity(cursor_id.0, &cursor).await;
         }
         DbResponse::CursorClosed { cursor_id }
     }

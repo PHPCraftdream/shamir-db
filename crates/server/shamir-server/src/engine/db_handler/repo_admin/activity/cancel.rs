@@ -249,12 +249,7 @@ impl ShamirDbHandler {
     ) -> DbResponse {
         let (target_user_id, target, committing_row) = match self.tx_registry.peek(tx_handle) {
             TxParkedState::Open(tx) => (*tx.owner_user_id(), Some(tx), None),
-            // A `Committing` reservation parks no `Arc`; its projection row is
-            // the only ownership record. Retain its identity across auth.
-            TxParkedState::Committing => match self.tx_registry.activity_row(tx_handle) {
-                Some(row) => (*row.user_id(), None, Some(row)),
-                None => return self.cancel_reply(CancelOutcome::AlreadyFinished),
-            },
+            TxParkedState::Committing(tx) => (*tx.owner_user_id(), None, Some(tx)),
             TxParkedState::Gone => return self.cancel_reply(CancelOutcome::AlreadyFinished),
         };
         if target_user_id != session.user_id && !self.may_manage_other_users_work(session).await {
@@ -267,11 +262,8 @@ impl ShamirDbHandler {
         }
         let outcome = match (target, committing_row) {
             (Some(tx), _) => self.cancel_parked_tx(tx_handle, tx).await,
-            (None, Some(row)) => match (
-                self.tx_registry.peek(tx_handle),
-                self.tx_registry.activity_row(tx_handle),
-            ) {
-                (TxParkedState::Committing, Some(current)) if Arc::ptr_eq(&row, &current) => {
+            (None, Some(tx)) => match self.tx_registry.peek(tx_handle) {
+                TxParkedState::Committing(current) if Arc::ptr_eq(&tx, &current) => {
                     CancelOutcome::AlreadyCommitting
                 }
                 _ => CancelOutcome::AlreadyFinished,
@@ -295,7 +287,10 @@ impl ShamirDbHandler {
             // transaction that is gone, or replaced by another one, is not a
             // request to leave alone: it answers `already_finished`.
             return match self.tx_registry.peek(tx_handle) {
-                TxParkedState::Committing => CancelOutcome::AlreadyCommitting,
+                TxParkedState::Committing(current) if Arc::ptr_eq(&current, &tx) => {
+                    CancelOutcome::AlreadyCommitting
+                }
+                TxParkedState::Committing(_) => CancelOutcome::AlreadyFinished,
                 TxParkedState::Open(current) if Arc::ptr_eq(&current, &tx) => {
                     CancelOutcome::NotCancellable
                 }
@@ -311,7 +306,10 @@ impl ShamirDbHandler {
                 }
                 None => CancelOutcome::AlreadyFinished,
             },
-            TxParkedState::Committing => CancelOutcome::AlreadyCommitting,
+            TxParkedState::Committing(current) if Arc::ptr_eq(&current, &tx) => {
+                CancelOutcome::AlreadyCommitting
+            }
+            TxParkedState::Committing(_) => CancelOutcome::AlreadyFinished,
             TxParkedState::Gone => CancelOutcome::AlreadyFinished,
         }
     }

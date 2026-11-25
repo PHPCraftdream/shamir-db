@@ -150,8 +150,7 @@ pub(in crate::engine::db_handler) fn session_actor(session: &Session) -> Actor {
     }
 }
 
-/// Bridge handler — routes wire requests to a shared [`ShamirDb`] instance.
-///
+/// Bridge handler — routes wire requests through `RequestHandler::handle`.
 /// # Permissions (v1)
 ///
 /// Admin / auth batch ops AND [`DbRequest::CreateScramUser`] require
@@ -292,16 +291,14 @@ pub struct ShamirDbHandler {
         Arc<tokio::sync::Barrier>,
         Arc<tokio::sync::Barrier>,
     )>,
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) commit_handoff_pause:
+        Arc<std::sync::Mutex<Option<super::test_seams::CommitPause>>>,
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) begin_pause: super::test_seams::BeginPause,
 }
 
 impl ShamirDbHandler {
-    /// Reads the raw-native-path decode counter (test-only reader).
-    #[cfg(test)]
-    pub(in crate::engine::db_handler) fn decoded_request_count(&self) -> u64 {
-        self.decoded_requests
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     pub(crate) fn cancel_refusal_audit(&self) -> Arc<CancelRefusalAudit> {
         Arc::clone(&self.cancel_refusal_audit)
     }
@@ -371,6 +368,10 @@ impl ShamirDbHandler {
             shape_reset_pause: None,
             #[cfg(test)]
             cancel_authorized_pause: None,
+            #[cfg(test)]
+            commit_handoff_pause: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            begin_pause: Default::default(),
         }
     }
 
@@ -412,6 +413,10 @@ impl ShamirDbHandler {
             shape_reset_pause: None,
             #[cfg(test)]
             cancel_authorized_pause: None,
+            #[cfg(test)]
+            commit_handoff_pause: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            begin_pause: Default::default(),
         }
     }
 
@@ -543,10 +548,9 @@ impl RequestHandler for ShamirDbHandler {
         req: &'a [u8],
         conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
-        // R4b-1 — the transport's rid-carrying variant with no transport
-        // request id: token-REST and any other caller without dispatch
-        // context fall back to `None` (the minted `RequestExecId` still
-        // identifies the batch in the activity view).
+        // R4b-1 — the raw native wire entry point has no transport request id and
+        // forwards `None`; token REST and token WebSocket reach the SAME execution
+        // through the already-decoded native handler (see `NativeDbHandler`).
         self.handle_with_request_id(session, req, conn, None)
     }
 
@@ -587,12 +591,10 @@ impl ShamirDbHandler {
         request: DbRequest,
         conn: &ConnectionServices,
     ) -> Result<Vec<u8>, String> {
-        // R4b-1 — direct callers (tests, `NativeDbHandler`) keep the old
-        // signature: no transport request id is available on this path.
+        // R4b-1 — compatibility path has no request id; rid callers use the variant below.
         self.handle_decoded_with_request_id(session, request, conn, None)
             .await
     }
-
     /// R4b-1 — rid-carrying variant of [`Self::handle_decoded`]. The
     /// client's OPTIONAL wire `rid` is carried alongside the minted
     /// [`RequestExecId`] into the in-flight activity entry; it never
