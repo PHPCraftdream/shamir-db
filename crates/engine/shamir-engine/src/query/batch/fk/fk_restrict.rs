@@ -111,10 +111,15 @@ pub(crate) async fn check_fk_restrict(
     let parent_values =
         collect_parent_values(parent_table, delete_where, ctx, &parent_ref_fields, tx)
             .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("fk_restrict: parent scan failed: {e}"),
-                code: Some("fk_restrict".to_string()),
+            .map_err(|e| {
+                if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                    return BatchError::Cancelled;
+                }
+                BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("fk_restrict: parent scan failed: {e}"),
+                    code: Some("fk_restrict".to_string()),
+                }
             })?;
 
     if parent_values.is_empty() {
@@ -148,10 +153,15 @@ pub(crate) async fn check_fk_restrict(
         let values: Vec<&QueryValue> = values_for_field.iter().collect();
         let exists = any_child_references(&child_table, &rref.child_field, &values, tx)
             .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("fk_restrict: child scan failed: {e}"),
-                code: Some("fk_restrict".to_string()),
+            .map_err(|e| {
+                if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                    return BatchError::Cancelled;
+                }
+                BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("fk_restrict: child scan failed: {e}"),
+                    code: Some("fk_restrict".to_string()),
+                }
             })?;
 
         if exists {

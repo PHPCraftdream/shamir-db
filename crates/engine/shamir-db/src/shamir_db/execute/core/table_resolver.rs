@@ -55,6 +55,12 @@ impl TableResolver for DbTableResolver {
 
 #[async_trait::async_trait]
 impl BatchResolver for DbTableResolver {
+    fn table_read_exists(&self, _db_name: &str, repo_name: &str, table_name: &str) -> Option<bool> {
+        self.db
+            .get_repo(repo_name)
+            .map(|repo| repo.has_table(table_name))
+    }
+
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<shamir_engine::tx::RepoCore> {
         let repo = self.db.get_repo(repo_name).ok_or_else(|| {
             crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))

@@ -2,6 +2,7 @@
 //! replication destination fail closed; status/DESCRIBE stay readable;
 //! healthy and non-replicated repos are unaffected.
 
+use super::validation::assert_absent_quarantined;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
@@ -328,8 +329,7 @@ async fn t6_quarantine_survives_restart() {
     );
 
     // Both subscriptions still quarantined across the restart.
-    let err = read_users(&shamir, "main").await.unwrap_err();
-    assert_eq!(err.code(), Some("resync_required"));
+    assert_absent_quarantined(&shamir, read_users(&shamir, "main").await, "testdb", "main").await;
     let err = resume_subscription(&shamir, 6, "sub2").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"));
 }
@@ -733,8 +733,7 @@ async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
 
     // Bound destination refuses reads with the typed code, and a plain
     // `Resume` is refused (no replacement seed yet). `side` stays readable.
-    let err = read_users(&shamir, "main").await.unwrap_err();
-    assert_eq!(err.code(), Some("resync_required"));
+    assert_absent_quarantined(&shamir, read_users(&shamir, "main").await, "testdb", "main").await;
     let err = resume_subscription(&shamir, 4, "sub").await.unwrap_err();
     assert_eq!(err.code(), Some("resync_required"));
     assert!(read_users(&shamir, "side").await.is_ok());
@@ -829,8 +828,8 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
             .unwrap();
 
         // Still refused in-process — the binding outlived the profile.
-        let err = read_users(&shamir, "main").await.unwrap_err();
-        assert_eq!(err.code(), Some("resync_required"), "{err}");
+        assert_absent_quarantined(&shamir, read_users(&shamir, "main").await, "testdb", "main")
+            .await;
     }
 
     // Reopen with the bounded fjall-lock retry (mirrors `durable_repo_tests`).
@@ -848,8 +847,7 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
 
     // After reopen the cache is rebuilt from the persisted rows' durable
     // bindings — the profile is gone, the refusal is not.
-    let err = read_users(&shamir, "main").await.unwrap_err();
-    assert_eq!(err.code(), Some("resync_required"), "{err}");
+    assert_absent_quarantined(&shamir, read_users(&shamir, "main").await, "testdb", "main").await;
 }
 
 /// Round 2 (C12, Unix-only): the durable reseed→reopen→Resume proof with
@@ -891,8 +889,8 @@ async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recover
         // on `testdb/main` comes from TWO single-destination subscriptions.
         quarantine(&shamir, "sub1", "prof", "main").await;
         quarantine(&shamir, "sub2", "prof2", "main").await;
-        let err = read_users(&shamir, "main").await.unwrap_err();
-        assert_eq!(err.code(), Some("resync_required"));
+        assert_absent_quarantined(&shamir, read_users(&shamir, "main").await, "testdb", "main")
+            .await;
 
         // Durable-sequence generations are monotonic (values unpredictable;
         // only ordering matters).

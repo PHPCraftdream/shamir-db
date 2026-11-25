@@ -298,6 +298,20 @@ impl ShamirDb {
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        // Round 7 (G3): refuse the rename of a table whose persisted binding
+        // record is IN DOUBT before anything is copied, recovered or committed.
+        // The rename copies the info store and installs a FRESH manager, so the
+        // flag — the only record that the doubt exists — is discarded. The
+        // copied envelope may be the previous one (the binding is intact, so the
+        // renamed table keeps validating) or the unreconciled forward one; the
+        // copied bytes cannot tell the two apart, and a later DROP no longer
+        // sees the doubt. Non-instantiating accessor, the same one the holder
+        // scan uses: a dormant or never-opened manager has no doubt state to
+        // lose, and an unknown table is reported by the existing checks below,
+        // in their own order.
+        if repo.table_validator_bindings_in_doubt(from) {
+            return Err(crate::engine::table::TableManager::binding_in_doubt_error());
+        }
         repo.check_rename_pair(from, to)?;
         let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
         let old = snapshot.get(from).cloned();

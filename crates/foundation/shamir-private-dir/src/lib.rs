@@ -25,9 +25,12 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
-pub use unix::{create_private_dir, verify_private_dir};
+pub use unix::{create_exclusive_private_dir, create_private_dir, verify_private_dir};
 #[cfg(windows)]
-pub use windows::{create_private_dir, verify_private_dir, OwnerOnlySecurityDescriptor};
+pub use windows::{
+    create_exclusive_private_dir, create_private_dir, verify_private_dir,
+    OwnerOnlySecurityDescriptor,
+};
 
 #[cfg(test)]
 mod tests;

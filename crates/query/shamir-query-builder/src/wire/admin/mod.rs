@@ -10,8 +10,14 @@
 
 #![warn(missing_docs)]
 
+mod cancel;
 mod list_activity;
+mod operator_state;
+mod shape_stats;
 
 pub mod token_admin;
 
+pub use cancel::{cancel_cursor_admin, cancel_request, cancel_tx};
 pub use list_activity::list_activity;
+pub use operator_state::{get_record, status};
+pub use shape_stats::{list_shape_stats, reset_shape_stats};

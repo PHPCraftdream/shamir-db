@@ -69,6 +69,7 @@ fn make_config_with_public_metrics(
             allow_public_metrics,
         },
         replication: None,
+        backup: None,
     }
 }
 

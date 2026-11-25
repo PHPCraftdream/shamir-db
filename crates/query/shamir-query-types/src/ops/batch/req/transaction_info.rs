@@ -13,11 +13,25 @@ pub struct TransactionInfo {
     /// Outcome: `"committed"`, `"aborted"`, or `"indeterminate"`.
     pub status: String,
 
-    /// Human-readable abort reason (null when committed; omitted for
+    /// Human-readable abort diagnostic (null when committed; omitted for
     /// indeterminate, whose `error` is `"wal_outcome_unknown"`).
-    /// E.g. `"tx_conflict"`, `"tx_cross_repo_not_supported"`.
+    ///
+    /// Legacy plan-error debug text is distinct from the literal
+    /// `"skip_aborted"` plan-level label; commit-time classifications may
+    /// also be retained here. Do not parse `reason` for a stable code:
+    /// [`Self::abort_code`] is authoritative when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+
+    /// Stable code of the operation that aborted the transaction (for
+    /// example `"call_in_tx_not_supported"` or `"skip_aborted"`).
+    /// Commit-time classifications use their stable label here when one
+    /// exists; this is the authoritative machine-readable abort code.
+    ///
+    /// Absent when the abort carries no stable code, and for committed and
+    /// indeterminate outcomes (neither aborts at the plan level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_code: Option<String>,
 
     /// Published commit error; does not change committed status or abort reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +79,7 @@ impl TransactionInfo {
             tx_id,
             status: "committed".into(),
             reason: None,
+            abort_code: None,
             error: None,
             snapshot_version: Some(snapshot_version),
             commit_version: Some(commit_version),
@@ -90,6 +105,7 @@ impl TransactionInfo {
             tx_id,
             status: "aborted".into(),
             reason: Some(reason.into()),
+            abort_code: None,
             error: None,
             snapshot_version: None,
             commit_version: None,
@@ -110,6 +126,7 @@ impl TransactionInfo {
             tx_id,
             status: "indeterminate".into(),
             reason: None,
+            abort_code: None,
             error: Some("wal_outcome_unknown".into()),
             snapshot_version: Some(snapshot_version),
             commit_version: Some(commit_version),
@@ -124,11 +141,24 @@ impl TransactionInfo {
         self
     }
 
+    /// Attach the stable code of the operation that aborted the transaction.
+    pub fn with_abort_code(mut self, code: impl Into<String>) -> Self {
+        self.abort_code = Some(code.into());
+        self
+    }
+
     pub fn is_visible(&self) -> bool {
         self.is_committed() && self.visibility == Some(VisibilityState::Visible)
     }
 
     /// Validate the v3 metadata contract, including sampled-prefix arithmetic.
+    ///
+    /// Enforced: a committed outcome requires `visibility` and no `reason`; an
+    /// aborted outcome requires no `visibility`; an indeterminate outcome
+    /// requires no `visibility`, no `reason`, and a `commit_version`.
+    /// `abort_code` is advisory metadata and never affects validity, so no
+    /// existing construction path (including old payloads without the field)
+    /// can fail this check because of it.
     pub fn validate(&self) -> Result<(), &'static str> {
         match (self.status.as_str(), self.visibility) {
             ("committed", Some(visibility)) if self.reason.is_none() => visibility.validate(),
@@ -158,6 +188,8 @@ impl<'de> Deserialize<'de> for TransactionInfo {
             tx_id: u64,
             status: String,
             reason: Option<String>,
+            #[serde(default)]
+            abort_code: Option<String>,
             error: Option<String>,
             snapshot_version: Option<u64>,
             commit_version: Option<u64>,
@@ -170,6 +202,7 @@ impl<'de> Deserialize<'de> for TransactionInfo {
             tx_id: fields.tx_id,
             status: fields.status,
             reason: fields.reason,
+            abort_code: fields.abort_code,
             error: fields.error,
             snapshot_version: fields.snapshot_version,
             commit_version: fields.commit_version,

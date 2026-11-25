@@ -4,16 +4,20 @@ use shamir_collections::TFxSet;
 use shamir_engine_query::query::filter::read_budget::{QueryMetrics, QueryOp};
 use shamir_query_types::batch::{ResultEncoding, VisibilityWait};
 use shamir_query_types::filter::Filter;
+use shamir_storage::error::DbError;
+use shamir_tx::CancelState;
 use shamir_types::access::{Actor, ResourcePath};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
+use crate::query::batch::authorized::table_unavailable;
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
+use crate::query::shapes::ShapeKey;
 use crate::query::TableRef;
 use crate::table::TableManager;
 
@@ -51,6 +55,11 @@ pub struct QueryRunner<'a> {
     /// checkpoints and borrowed by every nested `Batch`/`ForEach` body.
     /// The borrow is bounded by this runner's execution lifetime.
     pub scope: &'a ExecScope,
+    /// Canonical shape of the data op this runner executes, recorded once
+    /// the table and interner are resolved. Never cleared: both call sites
+    /// (`run` and `execute_plan`) construct one runner per op, so exactly one
+    /// execution reaches `observe_op`.
+    pub(crate) pending_shape: Option<[u8; 16]>,
 }
 /// Everything a per-op data arm (read / insert / update / delete / set)
 /// needs once `run_with_wait` has resolved the table: bundled so each arm
@@ -94,9 +103,14 @@ impl<'a> QueryRunner<'a> {
             _ => return,
         };
         if let Some(sink) = self.resolver.query_metrics(repo_name) {
-            sink.record_duration(op, elapsed.as_nanos().min(u64::MAX as u128) as u64);
+            let elapsed_ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+            let failed = error.is_some();
+            sink.record_duration(op, elapsed_ns);
             if let Some(error) = error {
                 sink.record_error(error.code());
+            }
+            if let Some(key) = self.pending_shape {
+                sink.record_shape(key, elapsed_ns, failed);
             }
         }
     }
@@ -137,6 +151,17 @@ impl<'a> QueryRunner<'a> {
                 sink.record_error(None);
             }
         }
+    }
+
+    /// Independent effects cannot be rolled back by the outer batch. Claim
+    /// the same state as the commit driver and keep it for the whole request.
+    fn protect_independent_effects(&self) -> Result<(), BatchError> {
+        if let Some(handle) = self.scope.cancel_handle() {
+            if !handle.try_commit() && handle.state() != CancelState::Committing {
+                return Err(BatchError::Cancelled);
+            }
+        }
+        Ok(())
     }
 
     /// Execute a single query entry.
@@ -187,7 +212,12 @@ impl<'a> QueryRunner<'a> {
         // Admin ops — delegate to AdminExecutor (no tx).
         if entry.op.is_admin() {
             return match self.admin {
-                Some(executor) => executor.execute_admin(&entry.op).await,
+                Some(executor) => {
+                    if entry.op.is_write() {
+                        self.protect_independent_effects()?;
+                    }
+                    executor.execute_admin(&entry.op).await
+                }
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Admin operations not supported in this context".to_string(),
@@ -216,7 +246,10 @@ impl<'a> QueryRunner<'a> {
                 ));
             }
             return match self.invoker {
-                Some(inv) => inv.invoke_call(call_op, &self.actor, resolved_refs).await,
+                Some(inv) => {
+                    self.protect_independent_effects()?;
+                    inv.invoke_call(call_op, &self.actor, resolved_refs).await
+                }
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Function calls not supported in this context".to_string(),
@@ -225,9 +258,31 @@ impl<'a> QueryRunner<'a> {
             };
         }
 
-        // Subscribe — validate sources exist, return a grant marker.
-        // Real activation happens in the server handler post-processing.
+        // Subscribe — validate every source before applying the single-repo
+        // feature gate, then return a grant marker. Authorization preflight
+        // has already classified source availability and READ access; this
+        // resolver check closes the execution-time race before the grant is
+        // constructed. Real activation happens in the server handler.
         if let BatchOp::Subscribe(op) = &entry.op {
+            for src in &op.subscribe {
+                if let Err(error) = self.resolver.resolve(&src.table).await {
+                    // One unavailable source refuses the whole op BEFORE the
+                    // grant map / subscription id below. Preserve missing
+                    // parent errors; a missing table within an existing repo
+                    // uses the canonical table refusal.
+                    if matches!(&error, DbError::NotFound(_))
+                        && self.resolver.resolve_repo(&src.table.repo).await.is_ok()
+                    {
+                        return Err(table_unavailable());
+                    }
+                    return Err(BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("table not found: {}", src.table),
+                        code: Some("table_not_found".to_string()),
+                    });
+                }
+            }
+
             let unique_repos: TFxSet<&str> =
                 op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
             if unique_repos.len() > 1 {
@@ -239,15 +294,6 @@ impl<'a> QueryRunner<'a> {
             }
 
             for src in &op.subscribe {
-                self.resolver
-                    .resolve(&src.table)
-                    .await
-                    .map_err(|_| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("table not found: {}", src.table),
-                        code: Some("table_not_found".to_string()),
-                    })?;
-
                 if let Some(ref filter) = src.filter {
                     if let Some(unsupported) = find_unsupported_subscription_filter(filter) {
                         return Err(BatchError::QueryError {
@@ -287,15 +333,27 @@ impl<'a> QueryRunner<'a> {
         };
         let resource = self.table_resource(table_ref);
 
-        let table = self
-            .resolver
-            .resolve(table_ref)
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: e.to_string(),
-                code: None,
-            })?;
+        let table = match self.resolver.resolve(table_ref).await {
+            Ok(table) => table,
+            Err(error) => {
+                // A READ whose table is absent answers the layer's ONE table
+                // refusal (never `code: None` + the raw engine text); a
+                // missing parent repository, or any non-read op, keeps
+                // today's shape. `resolve_repo` is the catalogue probe that
+                // tells the two apart without reading the error text.
+                if matches!(&entry.op, BatchOp::Read(_))
+                    && matches!(&error, DbError::NotFound(_))
+                    && self.resolver.resolve_repo(&table_ref.repo).await.is_ok()
+                {
+                    return Err(table_unavailable());
+                }
+                return Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: error.to_string(),
+                    code: None,
+                });
+            }
+        };
 
         let interner = table
             .interner()
@@ -316,6 +374,22 @@ impl<'a> QueryRunner<'a> {
                 ctx = ctx.with_read_overlay(&tx.interner_overlay);
             }
         }
+
+        // Only the five data ops reach this point: `run_with_wait` dispatches
+        // them above and rejects every other op as admin/unreachable.
+        debug_assert!(
+            matches!(
+                &entry.op,
+                BatchOp::Read(_)
+                    | BatchOp::Insert(_)
+                    | BatchOp::Update(_)
+                    | BatchOp::Delete(_)
+                    | BatchOp::Set(_)
+            ),
+            "only the five data operations may fold a shape key"
+        );
+        self.pending_shape =
+            Some(ShapeKey::fold(&entry.op, &table_ref.table, interner).into_bytes());
 
         let arm = DataArm {
             alias,
@@ -370,6 +444,7 @@ pub(in crate::query::batch) async fn execute_single_impl(
         params,
         result_encoding,
         scope,
+        pending_shape: None,
     };
     runner.run(alias, entry, resolved_refs).await
 }

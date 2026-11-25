@@ -65,9 +65,36 @@ impl shamir_engine::query::batch::AccessGate for BatchAccessGate<'_> {
             .authorize_access_in(actor, path, action, Some(&self.memo))
             .await
     }
+
+    fn table_probe_supported(&self) -> bool {
+        true
+    }
+
+    async fn table_read_exists(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> Result<Option<bool>, crate::access::AccessError> {
+        Ok(self
+            .db
+            .catalogue_table_exists(db_name, repo_name, table_name))
+    }
 }
 
 impl ShamirDb {
+    /// Catalogue membership probe for batch READ preflight; does not load table cells.
+    pub(crate) fn catalogue_table_exists(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> Option<bool> {
+        let db = self.get_db(db_name)?;
+        let repo = db.get_repo(repo_name)?;
+        Some(repo.has_table(table_name))
+    }
+
     pub(crate) async fn authorize_batch<'r>(
         &self,
         request: &'r BatchRequest,

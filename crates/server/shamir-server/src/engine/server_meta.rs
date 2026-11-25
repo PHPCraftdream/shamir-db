@@ -12,6 +12,9 @@
 //!   read on startup to rehydrate, written every 60s by a background task —
 //!   see `server::launch`)
 //! - Install / boot timestamps
+//! - Backup staleness evidence, restart-independent: the last successful
+//!   online-backup copy stamp and the schedule's FIRST arming stamp (one row
+//!   each, epoch seconds; feeds `shamir_backup_last_success_timestamp_seconds`)
 //!
 //! Layout: ONE fjall keyspace `server_meta_v1` mapping `&str` (key name) →
 //! `&[u8]` (msgpack-encoded value). Each setter performs an atomic write
@@ -35,7 +38,11 @@ use zeroize::Zeroizing;
 
 pub use shamir_sync::meta_port::{BootstrapTokenSnapshot, MetaError};
 
-use shamir_connect::common::crypto::try_random_bytes;
+/// One audit-chain anchor position: `(next_seq, prev_hmac)`.
+type AuditPosition = (u64, [u8; 32]);
+
+use crate::audit_appender::{AuditRecoveryError, FjallAuditAppender};
+use shamir_connect::common::crypto::{constant_time_eq, try_random_bytes};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
@@ -67,6 +74,17 @@ const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
 const KEY_TOKEN_KEY: &str = "token_key";
 /// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
+const KEY_BACKUP_OWNER_ID: &str = "backup_owner_id_v1";
+/// Durable evidence of the last successful online-backup copy, stored as
+/// epoch SECONDS to match the exported `last_success_timestamp_seconds`
+/// series. Written at copy success — before retention — so a real success
+/// survives a restart. With no success at all the armed-at row below is the
+/// restart-independent evidence instead.
+const KEY_BACKUP_LAST_SUCCESS_UNIX_SECS: &str = "backup_last_success_unix_secs_v1";
+/// Durable FIRST arming of the backup schedule (epoch SECONDS): written once
+/// when a schedule is configured, removed when none is, so restarts before the
+/// first interval tick keep the original staleness age. A scrape never writes it.
+const KEY_BACKUP_ARMED_AT_UNIX_SECS: &str = "backup_armed_at_unix_secs_v1";
 const LOGIN_LISTENER_ID_PREFIX: &str = "http_login_listener_id:";
 
 // ---------------------------------------------------------------------------
@@ -220,7 +238,11 @@ impl core::fmt::Debug for ServerMetaStore {
             .finish()
     }
 }
-
+#[path = "../boot/config/diagnostics/backup_online/adapter/open_existing.rs"]
+mod existing_open;
+pub(crate) use existing_open::open_existing;
+#[cfg(test)]
+pub(crate) use existing_open::rotate_meta_memtable_for_test;
 impl ServerMetaStore {
     /// Open existing store at `path`, or create-and-init with FRESH random
     /// material when the keyspace does not yet exist (or has no data yet).
@@ -377,8 +399,9 @@ impl ServerMetaStore {
     // -----------------------------------------------------------------
     // Getters (lock-free reads)
     // -----------------------------------------------------------------
-
-    /// Return one metadata value for migration regression tests.
+    // Raw metadata-row fixtures for the migration and strict-length regression tests:
+    // `blob_for_test` returns one value; set/remove the token-key row (removal recreates
+    // a legacy store); set the listener-ID row for `addr`; set any `key` row (undecodable).
     #[cfg(test)]
     pub(crate) fn blob_for_test(&self, key: &str) -> Option<Vec<u8>> {
         self.meta
@@ -387,30 +410,61 @@ impl ServerMetaStore {
             .flatten()
             .map(|value| value.to_vec())
     }
-
-    /// Set the token-key row for strict-length regression tests.
     #[cfg(test)]
     pub(crate) fn set_token_key_for_test(&self, bytes: &[u8]) {
         self.meta
             .insert(KEY_TOKEN_KEY.as_bytes(), bytes)
             .expect("set token_key test fixture");
     }
-
-    /// Remove the token key to recreate a legacy metadata store in tests.
     #[cfg(test)]
     pub(crate) fn remove_token_key_for_test(&self) {
         self.meta
             .remove(KEY_TOKEN_KEY.as_bytes())
             .expect("remove token_key test fixture");
     }
-
-    /// Set a listener-ID row for strict-length regression tests.
     #[cfg(test)]
     pub(crate) fn set_http_login_listener_id_for_test(&self, addr: &str, bytes: &[u8]) {
         let key = format!("{LOGIN_LISTENER_ID_PREFIX}{addr}");
         self.meta
             .insert(key.as_bytes(), bytes)
             .expect("set listener ID test fixture");
+    }
+    /// Set an arbitrary metadata row so a test can seed an undecodable value.
+    #[cfg(test)]
+    pub(crate) fn set_raw_row_for_test(&self, key: &str, bytes: &[u8]) {
+        self.meta
+            .insert(key.as_bytes(), bytes)
+            .expect("set raw meta row test fixture");
+    }
+
+    /// Read or durably create the nonsecret retention identity on schedule enablement.
+    pub(crate) fn backup_owner_id(&self) -> Result<[u8; 16], MetaError> {
+        let _guard = self.write_lock.lock();
+        if let Some(value) = self.meta.get(KEY_BACKUP_OWNER_ID.as_bytes())? {
+            return value[..].try_into().map_err(|_| {
+                MetaError::Encoding("backup_owner_id_v1 must contain exactly 16 bytes".into())
+            });
+        }
+        let mut id = [0u8; 16];
+        try_random_bytes(&mut id)?;
+        self.meta
+            .insert(KEY_BACKUP_OWNER_ID.as_bytes(), id.as_slice())?;
+        self.persist()?;
+        Ok(id)
+    }
+
+    /// Last successful online-backup copy stamp, if the row was ever written.
+    ///
+    /// `None` means "no durable evidence yet" — never zero. Epoch SECONDS; the
+    /// `_unix_ns` spelling is the shared accessor name, not the unit.
+    pub(crate) fn backup_last_success_unix_ns(&self) -> Result<Option<u64>, MetaError> {
+        self.get(KEY_BACKUP_LAST_SUCCESS_UNIX_SECS)
+    }
+
+    /// First arming of the backup schedule, if a schedule ever armed here
+    /// (`None` = never armed, never zero). Epoch SECONDS.
+    pub(crate) fn backup_armed_at_unix_secs(&self) -> Result<Option<u64>, MetaError> {
+        self.get(KEY_BACKUP_ARMED_AT_UNIX_SECS)
     }
 
     /// Get or durably create the random identity for one configured HTTP login listener.
@@ -469,7 +523,10 @@ impl ServerMetaStore {
         let p: PersistedAuditChain = self
             .read_blob(KEY_AUDIT_CHAIN)?
             .ok_or(MetaError::NotInitialised(KEY_AUDIT_CHAIN))?;
-        Ok(bytes32(&p.audit_chain_key))
+        p.audit_chain_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| MetaError::Encoding("audit chain key must be exactly 32 bytes".into()))
     }
 
     /// Current ticket key plus optional previous key (during rotation overlap).
@@ -527,9 +584,20 @@ impl ServerMetaStore {
     }
 
     /// Audit checkpoint: `(seq, hmac)` if any has ever been stored.
-    pub fn audit_checkpoint(&self) -> Option<(u64, [u8; 32])> {
+    pub fn audit_checkpoint(&self) -> Option<AuditPosition> {
         let p: PersistedAuditCheckpoint = self.read_blob(KEY_AUDIT_CHECKPOINT).ok().flatten()?;
         Some((p.last_audit_seq, bytes32(&p.last_audit_hmac)))
+    }
+
+    /// Boot recovery anchor read; corruption is absence never (`pub(super)`).
+    pub(super) fn audit_checkpoint_checked(&self) -> Result<Option<AuditPosition>, MetaError> {
+        let Some(p) = self.read_blob::<PersistedAuditCheckpoint>(KEY_AUDIT_CHECKPOINT)? else {
+            return Ok(None);
+        };
+        let hmac = p.last_audit_hmac.as_slice().try_into().map_err(|_| {
+            MetaError::Encoding("audit checkpoint HMAC must be exactly 32 bytes".into())
+        })?;
+        Ok(Some((p.last_audit_seq, hmac)))
     }
 
     /// Server install time (set once on first init).
@@ -789,18 +857,71 @@ impl ServerMetaStore {
     }
 
     /// Persist a fresh audit-checkpoint snapshot.
+    /// MONOTONIC (audit-chain review, finding 2): a write may never lower
+    /// the stored anchor — a regression or digest conflict (constant-time
+    /// compare) is a typed refusal; an identical write re-persists, healing
+    /// an earlier insert whose sync failed. Genesis is `(1, zero digest)`.
     pub fn store_audit_checkpoint(
         &self,
         next_seq: u64,
         prev_hmac: [u8; 32],
     ) -> Result<(), MetaError> {
         let _guard = self.write_lock.lock();
-        let next = PersistedAuditCheckpoint {
-            last_audit_seq: next_seq,
-            last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
-        };
-        self.put(KEY_AUDIT_CHECKPOINT, &next)?;
+        if next_seq == 0 {
+            return Err(MetaError::Encoding(
+                "audit checkpoint next sequence must be at least 1".into(),
+            ));
+        }
+        if next_seq == 1 && !constant_time_eq(&prev_hmac, &[0u8; 32]) {
+            return Err(MetaError::Encoding(
+                "audit checkpoint at next sequence 1 must carry the zero genesis digest".into(),
+            ));
+        }
+        if let Some((current_seq, current_hmac)) = self.audit_checkpoint_checked()? {
+            if next_seq < current_seq {
+                return Err(MetaError::Encoding(format!(
+                    "refusing to lower the audit anchor from next sequence {current_seq} to \
+                     {next_seq}"
+                )));
+            }
+            if next_seq == current_seq {
+                if !constant_time_eq(&prev_hmac, &current_hmac) {
+                    return Err(MetaError::Encoding(format!(
+                        "audit anchor digest conflict at next sequence {next_seq}"
+                    )));
+                }
+                // Identical write: persist anyway in case the first insert
+                // was visible but its sync failed.
+                return self.persist();
+            }
+        }
+        self.put(
+            KEY_AUDIT_CHECKPOINT,
+            &PersistedAuditCheckpoint {
+                last_audit_seq: next_seq,
+                last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
+            },
+        )?;
         self.persist()
+    }
+
+    /// Offline-CLI seam (audit-chain review, finding 2): authenticate the
+    /// durable audit history against BOTH trusted anchors (the appender
+    /// checkpoint and this store's anchor, read strictly) and return the
+    /// strict appender at the verified tail; a malformed meta anchor is a
+    /// refusal, never absence.
+    pub(crate) fn open_audit_recovered_strict(
+        &self,
+        data_dir: &Path,
+        audit_chain_key: &[u8; 32],
+    ) -> Result<(Arc<FjallAuditAppender>, AuditPosition), AuditRecoveryError> {
+        let anchor_meta = data_dir.join("server_meta");
+        let meta_err = |e: MetaError| AuditRecoveryError::Io {
+            path: anchor_meta.clone(),
+            source: std::io::Error::other(e),
+        };
+        let anchor = self.audit_checkpoint_checked().map_err(meta_err)?;
+        FjallAuditAppender::open_recovered_strict(data_dir, audit_chain_key, anchor)
     }
 
     /// Load the last persisted lockout snapshot, if any.
@@ -827,14 +948,35 @@ impl ServerMetaStore {
         self.persist()
     }
 
-    /// TEST-ONLY: overwrite the raw bytes stored under `KEY_BOOTSTRAP` with
-    /// garbage, bypassing the serde encode path (`put`) entirely, so the
-    /// next `read_blob::<PersistedBootstrap>` (and therefore
-    /// [`read_bootstrap_token_state`]) hits a REAL `rmp_serde::from_slice`
-    /// decode error — a genuine, reproducible metadata read failure, not a
-    /// mock. Used by the F-38 fault-injection test in
-    /// `src/tests/connection_tests.rs` to prove the fail-closed TTL gate
-    /// rejects a login when the underlying blob read errors.
+    /// Durably record the last successful online-backup copy stamp (epoch
+    /// SECONDS; [`Self::backup_last_success_unix_ns`] reads it at boot). Takes
+    /// `write_lock` like every other setter, keeping the one-`persist()` window.
+    pub(crate) fn store_backup_last_success_unix_ns(&self, unix_ns: u64) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.put(KEY_BACKUP_LAST_SUCCESS_UNIX_SECS, &unix_ns)?;
+        self.persist()
+    }
+
+    /// Durably record the schedule's FIRST arming stamp (epoch SECONDS); the
+    /// boot wiring writes it only while [`Self::backup_armed_at_unix_secs`] is absent.
+    pub(crate) fn store_backup_armed_at_unix_secs(&self, unix_secs: u64) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.put(KEY_BACKUP_ARMED_AT_UNIX_SECS, &unix_secs)?;
+        self.persist()
+    }
+
+    /// Drop the armed-at row (no schedule configured) so re-enabling starts a
+    /// fresh clock. An absent row is not an error.
+    pub(crate) fn remove_backup_armed_at_unix_secs(&self) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        self.meta.remove(KEY_BACKUP_ARMED_AT_UNIX_SECS.as_bytes())?;
+        self.persist()
+    }
+
+    /// TEST-ONLY: overwrite the raw bytes under `KEY_BOOTSTRAP` with garbage,
+    /// bypassing the `put` encode path, so the next
+    /// `read_blob::<PersistedBootstrap>` hits a REAL `rmp_serde` decode error.
+    /// Used by the F-38 fail-closed TTL-gate test.
     #[cfg(test)]
     pub(crate) fn corrupt_bootstrap_blob_for_test(&self) {
         self.meta
@@ -845,11 +987,7 @@ impl ServerMetaStore {
             .expect("corrupt_bootstrap_blob_for_test: keyspace insert must succeed");
     }
 }
-
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
-
 fn missing(key: &str) -> MetaError {
     MetaError::Encoding(format!("server_meta key missing: {key}"))
 }

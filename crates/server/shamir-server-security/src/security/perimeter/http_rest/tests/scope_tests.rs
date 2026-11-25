@@ -27,6 +27,74 @@ fn execute(op: impl IntoBatchOp, db: &str) -> DbRequest {
 }
 
 #[test]
+fn scoped_tokens_cannot_cancel_requests() {
+    let cancel =
+        shamir_query_builder::cancel_request(shamir_query_types::admin::activity::RequestExecId(1));
+    let direct = execute(cancel.clone(), "db");
+    let nested = execute(
+        BatchOp::Batch(shamir_query_types::batch::SubBatchOp {
+            batch: batch_with(cancel),
+            bind: new_map(),
+        }),
+        "db",
+    );
+    let allow = [String::from("db")];
+    for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+        for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+            for request in [&direct, &nested] {
+                assert_eq!(
+                    classify_request(request, mode, Some(&allow), endpoint),
+                    Decision::Denied("token_request_denied")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shape_statistics_are_denied_for_every_token_mode_channel_and_scope() {
+    // R4b-4: the shape-statistics surface is a SCRAM-session surface only.
+    // A scoped database allowlist must never admit the listing, and no
+    // token may wipe the registry, on either endpoint.
+    let ops = [
+        shamir_query_builder::wire::admin::list_shape_stats(
+            shamir_query_types::admin::shape_stats::ListShapeStatsReq {
+                repo: "main".into(),
+                limit: None,
+            },
+        ),
+        shamir_query_builder::wire::admin::reset_shape_stats(
+            shamir_query_types::admin::shape_stats::ResetShapeStatsReq {
+                repo: "main".into(),
+            },
+        ),
+    ];
+    let allow = [String::from("db")];
+    for op in ops {
+        let direct = execute(op.clone(), "db");
+        let nested = execute(
+            BatchOp::Batch(shamir_query_types::batch::SubBatchOp {
+                batch: batch_with(op),
+                bind: new_map(),
+            }),
+            "db",
+        );
+        for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+            for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+                for databases in [None, Some(allow.as_slice())] {
+                    for request in [&direct, &nested] {
+                        assert_eq!(
+                            classify_request(request, mode, databases, endpoint),
+                            Decision::Denied("token_request_denied")
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
     for request in [
         DbRequest::Ping,
@@ -321,6 +389,13 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
             user: None,
             hmac: None,
         },
+        shamir_query_builder::wire::admin::status(),
+        shamir_query_builder::wire::admin::get_record(
+            "db",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
     ];
     for request in requests {
         assert_eq!(
@@ -401,5 +476,42 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
             ),
             Decision::NotSupported("not_supported_over_rest")
         );
+    }
+}
+
+#[test]
+fn operator_status_and_point_read_are_denied_for_every_token_mode_channel_and_scope() {
+    // Admin-shell R5 PR3 (release design §3.3): the two new top-level
+    // variants are NOT in the token read-only subset. A scoped database
+    // allowlist must not override the refusal, whatever the payload's
+    // db is — inside or outside the allowlist.
+    let requests = [
+        shamir_query_builder::wire::admin::status(),
+        shamir_query_builder::wire::admin::get_record(
+            "db",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+        shamir_query_builder::wire::admin::get_record(
+            "outside",
+            "main",
+            "t",
+            shamir_types::types::record_id::RecordId::new(),
+        ),
+    ];
+    let allow = ["db".to_owned()];
+    let other = ["other".to_owned()];
+    for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+        for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+            for databases in [None, Some(allow.as_slice()), Some(other.as_slice())] {
+                for request in &requests {
+                    assert_eq!(
+                        classify_request(request, mode, databases, endpoint),
+                        Decision::Denied("token_request_denied")
+                    );
+                }
+            }
+        }
     }
 }

@@ -120,12 +120,17 @@ async fn build_handler() -> (ShamirDbHandler, Arc<FjallUserDirectory>) {
     let tmp = TempDir::new().unwrap();
     let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
+    // ARGON2-GATE fixture: roomy pool (64) so normal fixtures never refuse.
+    let gate = Arc::new(shamir_server::user_directory::ScramDerivationGate::new(
+        Arc::new(shamir_connect::server::argon2_semaphore::Argon2Semaphore::with_capacity(64)),
+    ));
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
         AdminGlue {
             user_dir: user_dir.clone(),
             kdf: fast_kdf(),
             tables_registry: None,
+            derivation_gate: gate,
         },
     );
     // Hold `tmp` alive for the test's lifetime by leaking it — the tempdir

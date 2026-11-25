@@ -23,6 +23,26 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates `path` (one level; the parent must exist) as a `0700` directory
+/// owned by the current euid, refusing when anything already occupies the
+/// path.
+///
+/// Race-free: the exclusive create and the private mode are the SAME
+/// `mkdir` call — [`fs::DirBuilder::create`] fails with
+/// [`io::ErrorKind::AlreadyExists`] if the path exists (including as a
+/// symlink), and there is no adopt path that could take over or delete a
+/// pre-existing directory. The post-create verification-failure cleanup is
+/// not practically testable: the mode is set atomically by that same mkdir;
+/// the empty-directory cleanup preserves the no-leak invariant regardless.
+pub fn create_exclusive_private_dir(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    if let Err(verify_error) = verify_private_dir(path) {
+        let _ = fs::remove_dir(path);
+        return Err(verify_error);
+    }
+    Ok(())
+}
+
 /// Verifies `path` is a real directory (no symlink component at the final
 /// component), owned by the current euid, with mode `& 0o077 == 0` — no
 /// group or other access at all. Any violation is

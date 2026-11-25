@@ -17,7 +17,8 @@ The response variant alone is not proof of success: inspect `status`, then
 |---|---|
 | `tx_id` | Repository transaction identifier. |
 | `status` | `"committed"`, `"aborted"`, or `"indeterminate"`. |
-| `reason` | Abort diagnostic; omitted when absent, not necessarily a stable code. Omitted for indeterminate outcomes (their `error` is `"wal_outcome_unknown"`). |
+| `reason` | Abort diagnostic; omitted when absent and for indeterminate outcomes (`error: "wal_outcome_unknown"`). Usually this is legacy plan-error debug text, not a stable code; `"skip_aborted"` is the literal plan-level exception. Commit-time classification labels may also appear in `reason`; use `abort_code` as the authoritative stable abort code when present. |
+| `abort_code` | **Additive, optional** stable code for an abort when available, including `skip_aborted` and commit classifications such as `tx_conflict`, `unique_violation`, `version_conflict`, `table_migrating`, `wal_retention_exceeded`, `commit_admission_refused`, `wal_requires_reopen`, and `cancelled`. Omitted when the abort has no stable code, and for committed/indeterminate outcomes. |
 | `error` | **Additive, optional** published-commit error; omitted when absent. Does not change `status` or set `reason`. |
 | `snapshot_version` | Read snapshot version; present for committed outcomes. |
 | `commit_version` | Published version for committed outcomes; the ATTEMPTED version (no success claim) for indeterminate outcomes; absent for aborted outcomes. |
@@ -46,6 +47,14 @@ and version. `wal_completion` distinguishes written-but-not-durable from
 not-written and indeterminate WAL outcomes; the commit pipeline reports
 `WalDurability` after publication/materialization, and `into_transaction_info`
 retains committed status (source: `crates/engine/shamir-engine/src/tx/commit.rs`).
+
+A later `durability: "synced"` flush is also post-execution. If a transactional
+batch already has a `TransactionInfo`, a flush failure does not replace that
+known disposition with a batch error. An existing `transaction.error` is
+preserved; otherwise the flush diagnostic is attached there. This does not
+revise commit status or make a known outcome unknown. Non-transactional batches
+have no transaction outcome metadata, so their synced-flush failure propagates
+as a batch error.
 
 The TS `db.tx()` helper resolves this committed outcome as a receipt containing
 `value`, `transaction` (the entire metadata object), and discriminated
@@ -90,8 +99,11 @@ code `validation` and message
 
 The query v4 option key `abort_on_skip` is omitted when false and present only
 when true. If such an entry would be skipped, the transaction aborts with
-`reason: "skip_aborted"`; this outcome is not retryable without changing the
-input or condition (see [Commit outcome reasons and retry decisions](#commit-outcome-reasons-and-retry-decisions)).
+`reason: "skip_aborted"` records the literal plan-level skip-abort outcome; it is
+not a commit-classification diagnostic. `abort_code` is the machine-readable
+stable code when available; do not infer it by parsing `reason`. This outcome is
+not retryable without changing the input or condition (see [Commit outcome
+reasons and retry decisions](#commit-outcome-reasons-and-retry-decisions)).
 
 The parser rejects unsupported requested query-language versions with
 `DbResponse::Error { code: "unsupported_query_version", message: ... }`.
@@ -312,6 +324,7 @@ allowlist of every operation-specific DDL/query code.
 | `validation` | `CircularDependency`, `UnknownAlias`, `AfterPathIgnored`, `InvalidWhenFilter`, `InvalidCondCondition` |
 | `timeout` | `Timeout` (distinct from the cooperative execution deadline) |
 | `lock_timeout` | `LockTimeout` |
+| `server_busy` | Server refused this operation. Examples (not exhaustive): bounded admission above `2 × argon2_concurrent_max`, permit-wait deadline expiry, or clock read/calculation failure; clock failure can also cause a refusal during permit acquisition. The Argon2 refusal counter counts these refusals. Post-auth per-session in-flight-slot refusal also uses `server_busy` but does not increment the Argon2 counter. The refused operation itself made no change; this does not establish that other operations in a mixed batch did not execute or mutate state. Retry only a known-refused, plain top-level `CreateScramUser` with backoff; a generic `query` error does not prove a busy refusal. |
 | `unknown_db` | Untagged `QueryError` with empty alias and message containing `not found` (legacy heuristic, can include repository lookup failures) |
 | `access_denied` | Untagged `QueryError` beginning `access denied:`; also forwarded when explicitly coded |
 | `query` | Other untagged `QueryError` |
@@ -390,13 +403,13 @@ Commit errors are mapped to transaction metadata, not necessarily to a top-level
 
 | Metadata value | Meaning / action |
 |---|---|
-| `reason: "tx_conflict"` | SSI, phantom, or wound-wait conflict. Retryable as a **new transaction**, re-reading state. |
-| `reason: "version_conflict"` | Commit-time CAS mismatch; also used by staging-time CAS errors. Re-read and refresh the expected version before retrying; do not blindly resend the stale expectation. |
-| `reason: "unique_violation"` | Unique constraint failure. Not retryable without changing input/state. |
-| `reason: "skip_aborted"` | A `QueryEntry` with `abort_on_skip: true` was skipped in a single-call transactional batch; the whole batch was aborted. Not retryable without changing the input. |
-| `reason: "table_migrating"` | Source table is frozen for migration. Wait for migration completion/cancellation and resolve the active table before submitting a new write. |
+| `abort_code: "tx_conflict"` | SSI, phantom, or wound-wait conflict. Retryable as a **new transaction**, re-reading state. TypeScript SDK labels this code retryable; it does not automatically retry. |
+| `abort_code: "version_conflict"` | Commit-time CAS mismatch; also used by staging-time CAS errors. Re-read and refresh the expected version before retrying; do not blindly resend the stale expectation. |
+| `abort_code: "unique_violation"` | Unique constraint failure. Not retryable without changing input/state. |
+| `abort_code: "skip_aborted"` | A `QueryEntry` with `abort_on_skip: true` was skipped in a single-call transactional batch; the whole batch was aborted. Not retryable without changing the input. |
+| `abort_code: "table_migrating"` | Source table is frozen for migration. Wait for migration completion/cancellation and resolve the active table before submitting a new write. |
 | `status: "indeterminate"` + `error: "wal_outcome_unknown"` | WAL outcome unknown AFTER the frame was queued; carries the ATTEMPTED `commit_version` (no success claim). Reopen and reconcile by reading first; never blind-retry and never treat as rolled back. Implicit single ops fail with the stable `wal_requires_reopen` code carrying the attempted commit_version as a typed field of the batch error. An admission refusal BEFORE admission is `status: "aborted"` with `reason: "wal_requires_reopen"`. |
-| `reason: "wal_retention_exceeded"` | Retained sealed WAL exceeded `durability.wal_retention_max_bytes` under `on_wal_retention_exceeded: refuse_writes`. Retryable: transient admission refusal; clears once the drainer truncates, then a retried commit succeeds. |
+| `abort_code: "wal_retention_exceeded"` | Retained sealed WAL exceeded `durability.wal_retention_max_bytes` under `on_wal_retention_exceeded: refuse_writes`. Retryable: transient admission refusal; clears once the drainer truncates, then a retried commit succeeds. |
 | `reason` beginning `storage: ` | Storage diagnostic, not a stable retry code. Investigate the underlying failure. |
 | `reason` beginning `tx expired: elapsed ` | Engine commit lifetime check failed; diagnostic includes elapsed/max durations, **not** the literal code `tx_expired`. Begin a new transaction. |
 | `error: "wal_durability"` with committed status | Published writes; **not retryable**, no rollback. |

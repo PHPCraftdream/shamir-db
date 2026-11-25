@@ -55,18 +55,39 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use shamir_tx::{CancelHandle, WaitState};
 use tokio::sync::Notify;
+
+#[cfg(test)]
+#[path = "tests/byte_budget_tests.rs"]
+mod tests;
 
 /// Shared state behind [`ByteBudget`]'s `Arc`. Split out so [`ByteBudget`]
 /// itself can be a cheap `Clone` (just bumps the `Arc` refcount).
 struct Inner {
     /// Bytes currently reserved by outstanding [`ByteBudgetGuard`]s.
     used: AtomicUsize,
+    waiters: AtomicUsize,
     /// Hard cap in bytes. `None` = unbounded (preserves pre-RI-15
     /// behavior: `acquire` always succeeds immediately).
     cap: Option<usize>,
     /// Wakes every waiter parked in `acquire` when bytes are released.
     notify: Notify,
+}
+
+struct WaiterGuard<'a>(&'a AtomicUsize);
+
+impl<'a> WaiterGuard<'a> {
+    fn new(waiters: &'a AtomicUsize) -> Self {
+        waiters.fetch_add(1, Ordering::Relaxed);
+        Self(waiters)
+    }
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Server-wide async byte accountant. Cheaply `Clone` (wraps an `Arc`).
@@ -87,6 +108,7 @@ impl ByteBudget {
         Self {
             inner: Arc::new(Inner {
                 used: AtomicUsize::new(0),
+                waiters: AtomicUsize::new(0),
                 cap,
                 notify: Notify::new(),
             }),
@@ -132,6 +154,8 @@ impl ByteBudget {
             return guard;
         }
 
+        // Count each contended acquire once, across retries and until return or drop.
+        let _waiter = WaiterGuard::new(&self.inner.waiters);
         loop {
             // Not enough room right now — register interest in the next
             // notification BEFORE re-checking the CAS one more time. This is
@@ -167,6 +191,52 @@ impl ByteBudget {
             // the whole loop: state may have changed again by the time we
             // wake, so we re-check rather than assume we now have room.
             notified.await;
+        }
+    }
+
+    /// Reserve bytes as in [`Self::acquire`], or return `None` if cancelled.
+    /// Cancellation observed before returning a reservation takes precedence:
+    /// any guard obtained in the race is dropped and its bytes released.
+    ///
+    /// cancel-safe: yes — the only suspension holds a waiter and a park
+    /// marker, but no reservation; dropping the future clears both.
+    pub async fn acquire_cancellable(
+        &self,
+        bytes: usize,
+        handle: &CancelHandle,
+    ) -> Option<ByteBudgetGuard> {
+        if handle.is_cancelled() {
+            return None;
+        }
+        let Some(cap) = self.inner.cap else {
+            return Some(ByteBudgetGuard {
+                inner: None,
+                bytes: 0,
+            });
+        };
+        if let Some(guard) = self.try_cas(bytes, cap) {
+            return (!handle.is_cancelled()).then_some(guard);
+        }
+
+        let _waiter = WaiterGuard::new(&self.inner.waiters);
+        loop {
+            if handle.is_cancelled() {
+                return None;
+            }
+            // Register before retrying so a racing release cannot be lost.
+            let notified = self.inner.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(guard) = self.try_cas(bytes, cap) {
+                return (!handle.is_cancelled()).then_some(guard);
+            }
+
+            let _park = handle.park(WaitState::Budget);
+            tokio::select! {
+                biased;
+                _ = handle.wait_cancelled() => return None,
+                _ = notified => {}
+            }
         }
     }
 
@@ -210,6 +280,11 @@ impl ByteBudget {
     /// Current reserved-byte count (0 if unbounded/no outstanding guards).
     pub fn used(&self) -> usize {
         self.inner.used.load(Ordering::Acquire)
+    }
+
+    /// Number of acquires on the contended path, for observability only.
+    pub(crate) fn waiters(&self) -> usize {
+        self.inner.waiters.load(Ordering::Relaxed)
     }
 
     /// Configured cap, or `None` if unbounded.

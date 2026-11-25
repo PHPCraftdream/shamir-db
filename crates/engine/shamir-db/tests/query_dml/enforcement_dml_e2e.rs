@@ -145,11 +145,7 @@ async fn restricted_table_owner_allowed_stranger_denied_read() {
         .execute_as(Actor::User(99), "testdb", &read_req)
         .await
         .expect_err("stranger should be denied read on 0o750 table");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("denied") || msg.contains("Denied"),
-        "error should mention denial, got: {msg}"
-    );
+    assert_unknown_table(Err::<(), _>(err), "User(99) read on restricted table");
 }
 
 #[tokio::test]
@@ -310,10 +306,9 @@ async fn tx_execute_as_enforces_table_acl() {
         .tx_execute_as(Actor::User(99), "testdb", &read_req, &mut tx_bad)
         .await
         .expect_err("stranger should be denied read in interactive tx on restricted table");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("denied") || msg.contains("Denied"),
-        "error should mention denial, got: {msg}"
+    assert_unknown_table(
+        Err::<(), _>(err),
+        "stranger read in interactive tx on restricted table",
     );
 }
 
@@ -375,6 +370,18 @@ async fn setup_with_secrets() -> ShamirDb {
     shamir
 }
 
+fn assert_unknown_table<T: std::fmt::Debug>(result: Result<T, impl std::fmt::Debug>, ctx: &str) {
+    let err = match result {
+        Ok(v) => panic!("{ctx}: expected unknown_table, got Ok({v:?})"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("unknown_table") && msg.contains("table is unavailable"),
+        "{ctx}: expected the canonical table refusal, got: {msg}"
+    );
+}
+
 fn assert_access_denied<T: std::fmt::Debug>(result: Result<T, impl std::fmt::Debug>, ctx: &str) {
     let err = match result {
         Ok(v) => panic!("{ctx}: expected access_denied, got Ok({v:?})"),
@@ -408,9 +415,9 @@ async fn execute_as_denies_forbidden_table_inside_top_level_for_each() {
         .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via top-level ForEach must be denied",
+        "User(2) reading forbidden `secrets` via top-level ForEach must be refused",
     );
 }
 
@@ -461,9 +468,9 @@ async fn execute_as_denies_forbidden_table_inside_top_level_batch() {
         .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via top-level Batch must be denied",
+        "User(2) reading forbidden `secrets` via top-level Batch must be refused",
     );
 }
 
@@ -501,9 +508,9 @@ async fn execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
         .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via Batch->ForEach->Batch must be denied",
+        "User(2) reading forbidden `secrets` via Batch->ForEach->Batch must be refused",
     );
 }
 
@@ -635,9 +642,9 @@ async fn tx_execute_as_denies_forbidden_table_inside_top_level_for_each() {
     let result = shamir
         .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
         .await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via top-level ForEach in tx_execute_as must be denied",
+        "User(2) reading forbidden `secrets` via top-level ForEach in tx_execute_as must be refused",
     );
 }
 
@@ -664,9 +671,9 @@ async fn tx_execute_as_denies_forbidden_table_inside_top_level_batch() {
     let result = shamir
         .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
         .await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via top-level Batch in tx_execute_as must be denied",
+        "User(2) reading forbidden `secrets` via top-level Batch in tx_execute_as must be refused",
     );
 }
 
@@ -706,9 +713,9 @@ async fn tx_execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
     let result = shamir
         .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
         .await;
-    assert_access_denied(
+    assert_unknown_table(
         result,
-        "User(2) reading forbidden `secrets` via nested Batch->ForEach->Batch in tx_execute_as must be denied",
+        "User(2) reading forbidden `secrets` via nested Batch->ForEach->Batch in tx_execute_as must be refused",
     );
 }
 

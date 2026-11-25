@@ -1,6 +1,6 @@
-//! Catalogue commands (design §4.3, PR1 subset): `db list`, `repo list`,
-//! `table list`, `index list`, `function list`, `table describe`,
-//! `table schema`. `repo describe` is PR2 and is intentionally absent.
+//! Catalogue commands (design §4.3, R5a): `db list`, `repo list`,
+//! `repo describe`, `table list`, `index list`, `function list`,
+//! `table describe`, `table schema`.
 //!
 //! Mapping evidence (all OBSERVED on this branch):
 //! - `db list`      → `ListOp::Databases`    — handler
@@ -8,6 +8,8 @@
 //!   (`List(Root)`; response key `databases`, `List` of `Str`).
 //! - `repo list`    → `ListOp::Repos`        — `admin_list.rs:39-55`
 //!   (`List(Database)`; key `repos`, `List` of `Str`).
+//! - `repo describe` → `DescribeRepo` — `admin_repo_durability.rs:182-278`
+//!   (superuser + `Read(repo)`; token refused before dispatch by the parser).
 //! - `table list`   → `ListOp::Tables`       — `admin_list.rs:57-75`
 //!   (`List(Store)`; keys `tables` (`List` of `Str`), `repo` (`Str`)).
 //! - `index list`   → `ListOp::Indexes`      — `admin_list.rs:113-177`
@@ -28,12 +30,9 @@
 //!   objects), `schema_version`).
 //!
 //! Builders only (no direct `BatchOp` construction); the wire batch goes
-//! through the existing `Client::execute(db, batch)`, the request built by
-//! `Batch::try_build` (client-side validation). Every repo-scoped builder
-//! gets an EXPLICIT `.repo(...)` — the builders default to `"main"`
-//! (`ddl/schema/list/tables.rs:11-13`,
-//! `ddl/schema/describe_table.rs:23-26`), which would silently target the
-//! wrong repository when the operator names another one.
+//! through `SessionClient::execute(db, batch)`, the request built by
+//! `Batch::try_build` (client-side validation). Table-scoped builders
+//! get an explicit `.repo(...)` to avoid silently targeting the default `main`.
 //!
 //! Errors: server failures route through
 //! `crate::shell::connect::request_error`, which maps only the typed
@@ -42,29 +41,29 @@
 //! `ClientError`: a builder-validation failure is `Usage`, and a response
 //! shape that does not match the observed contract above is `Server` —
 //! projected through typed allowlisting so a malicious peer cannot smuggle
-//! unexpected fields or shapes into the output, and peer text is never
-//! echoed.
+//! unexpected fields or shapes into the output. Authorized text is sanitized.
 
 use serde_json::Value;
 
 use super::super::output::{value, ShellError};
-use crate::shell::connect::request_error;
-use shamir_client::{BatchResponse, Client};
+use crate::shell::connect::{request_error, SessionClient};
+use shamir_client::BatchResponse;
 use shamir_collections::TMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
-    describe_table, get_table_schema, list_databases, list_functions, list_indexes, list_repos,
-    list_tables,
+    describe_repo, describe_table, get_table_schema, list_databases, list_functions, list_indexes,
+    list_repos, list_tables,
 };
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::read::QueryRecord;
 use shamir_types::types::value::QueryValue;
 
-/// PR1 catalogue commands.
+/// R5a catalogue commands.
 #[derive(Debug, Clone)]
 pub(in crate::shell) enum Catalogue {
     Databases,
     Repos,
+    DescribeRepo { repo: String },
     Tables { repo: String },
     Indexes { repo: String, table: String },
     Functions { folder: Option<String> },
@@ -78,6 +77,7 @@ impl Catalogue {
         match self {
             Catalogue::Databases => "db list",
             Catalogue::Repos => "repo list",
+            Catalogue::DescribeRepo { .. } => "repo describe",
             Catalogue::Tables { .. } => "table list",
             Catalogue::Indexes { .. } => "index list",
             Catalogue::Functions { .. } => "function list",
@@ -94,6 +94,7 @@ impl Catalogue {
             | Catalogue::Tables { .. }
             | Catalogue::Indexes { .. }
             | Catalogue::Functions { .. } => "List",
+            Catalogue::DescribeRepo { .. } => "DescribeRepo",
             Catalogue::Describe { .. } => "DescribeTable",
             Catalogue::Schema { .. } => "GetTableSchema",
         }
@@ -102,14 +103,16 @@ impl Catalogue {
     /// Execute against the routing database `db` (the batch permission
     /// floor, design §4 preamble). Authorization happens exclusively on the
     /// normal remote route; this code sends no privilege material.
+    /// cancel-safe: NO — a sent batch may still execute; do not retry on timeout.
     pub(in crate::shell) async fn execute(
         &self,
-        client: &Client,
+        client: &SessionClient,
         db: &str,
     ) -> Result<Value, ShellError> {
         let op = match self {
             Catalogue::Databases => list_databases(),
             Catalogue::Repos => list_repos(),
+            Catalogue::DescribeRepo { repo } => describe_repo(repo.clone()).repo(db).build(),
             Catalogue::Tables { repo } => list_tables().repo(repo.clone()).build(),
             Catalogue::Indexes { repo, table } => {
                 list_indexes(table.clone()).repo(repo.clone()).build()
@@ -132,18 +135,25 @@ impl Catalogue {
     }
 
     /// Send one single-op batch and project the single direct result.
-    async fn run(&self, client: &Client, db: &str, op: BatchOp) -> Result<Value, ShellError> {
+    async fn run(
+        &self,
+        client: &SessionClient,
+        db: &str,
+        op: BatchOp,
+    ) -> Result<Value, ShellError> {
         let mut batch = Batch::new();
         batch.insert(RESULT_ALIAS, op);
         // Client-side validation failure is a local usage problem, not a
         // server outcome — never forged into a `ClientError`.
         let request = batch.try_build().map_err(|_| ShellError::Usage)?;
         let response = client.execute(db, request).await.map_err(request_error)?;
-        self.extract(response)
+        let projected = self.extract(response, db)?;
+        client.check_catalogue_output(&projected)?;
+        Ok(projected)
     }
 
     /// Validate the response shape and project the allowlisted fields.
-    fn extract(&self, mut response: BatchResponse) -> Result<Value, ShellError> {
+    fn extract(&self, mut response: BatchResponse, db: &str) -> Result<Value, ShellError> {
         let result = response
             .results
             .get_mut(RESULT_ALIAS)
@@ -162,14 +172,13 @@ impl Catalogue {
                 _ => return Err(ShellError::Server),
             }
         };
-        self.project(qv)
+        self.project(qv, db)
     }
 
-    /// Typed field allowlisting per command (design §5: no arbitrary
-    /// peer-supplied maps are forwarded; only the documented PR1 fields
-    /// survive, each checked against the observed server shape) plus the
-    /// principal-id bit-pattern projection for `table describe`.
-    fn project(&self, qv: QueryValue) -> Result<Value, ShellError> {
+    /// Project the documented fields and check their observed server shapes.
+    /// Repo durability maps are allowlisted separately; table description
+    /// projects principal IDs from their wire bit patterns.
+    fn project(&self, qv: QueryValue, db: &str) -> Result<Value, ShellError> {
         let mut fields = match qv {
             QueryValue::Map(fields) => fields,
             _ => return Err(ShellError::Server),
@@ -182,6 +191,12 @@ impl Catalogue {
             Catalogue::Repos => {
                 keep(&mut fields, &["repos"])?;
                 require_str_list(&fields, "repos")?;
+            }
+            Catalogue::DescribeRepo { repo } => {
+                let budgets = project_repo(&mut fields, repo, db)?;
+                let mut json = value(&QueryValue::Map(fields))?;
+                write_budget_numbers(&mut json, budgets);
+                return Ok(json);
             }
             Catalogue::Tables { .. } => {
                 keep(&mut fields, &["tables", "repo"])?;
@@ -239,6 +254,118 @@ impl Catalogue {
             }
         }
         value(&QueryValue::Map(fields))
+    }
+}
+
+/// `DescribeRepo` calls the routing database `repo` in its response. Check
+/// both echoed labels against the request and expose that label as `db`.
+/// This view is for durability: omit the server-local path and the repository
+/// replication identity (`lineage_id` and `history_epoch`).
+fn project_repo(
+    fields: &mut TMap<String, QueryValue>,
+    repo: &str,
+    db: &str,
+) -> Result<(Option<u64>, Option<u64>), ShellError> {
+    keep(
+        fields,
+        &[
+            "describe_repo",
+            "repo",
+            "engine",
+            "durability",
+            "durability_override",
+        ],
+    )?;
+    if fields.get("describe_repo").and_then(QueryValue::as_str) != Some(repo)
+        || fields.get("repo").and_then(QueryValue::as_str) != Some(db)
+        || !matches!(
+            fields.get("engine").and_then(QueryValue::as_str),
+            Some("in_memory" | "fjall" | "fjall_raw" | "hybrid")
+        )
+    {
+        return Err(ShellError::Server);
+    }
+    let durability_budget = check_durability(fields, "durability", true)?;
+    let override_budget = check_durability(fields, "durability_override", false)?;
+    let db_label = fields.shift_remove("repo").ok_or(ShellError::Server)?;
+    fields.insert("db".into(), db_label);
+    Ok((durability_budget, override_budget))
+}
+
+/// `effective_durability_record` and `durability_to_record` share the same
+/// serializer. The configured override may be null or sparse. The effective
+/// policy requires the three enum leaves; a zero budget is omitted upstream.
+fn check_durability(
+    fields: &mut TMap<String, QueryValue>,
+    key: &str,
+    effective: bool,
+) -> Result<Option<u64>, ShellError> {
+    let policy = match fields.get_mut(key) {
+        Some(QueryValue::Map(policy)) => policy,
+        Some(QueryValue::Null) if !effective => return Ok(None),
+        _ => return Err(ShellError::Server),
+    };
+    const MODES: [(&str, &[&str]); 3] = [
+        ("wal_commit", &["buffered", "synced"]),
+        (
+            "on_wal_retention_exceeded",
+            &["refuse_writes", "declare_gap"],
+        ),
+        ("replication_serve", &["durable", "completed_reseed"]),
+    ];
+    const BUDGET: &str = "wal_retention_max_bytes";
+    policy.retain(|key, _| key == BUDGET || MODES.iter().any(|(name, _)| key == *name));
+    for (name, allowed) in MODES {
+        match policy.get(name) {
+            Some(QueryValue::Str(mode)) if allowed.contains(&mode.as_str()) => {}
+            None if !effective => {}
+            _ => return Err(ShellError::Server),
+        }
+    }
+    match policy.get(BUDGET) {
+        None => Ok(None),
+        // Big budgets arrive as a decimal string (wire MessagePack of
+        // `Big`, decoded as `Str`); ASCII digits only, checked — zero and
+        // overflowing text keep the typed error. The single parsed result
+        // is emitted as a JSON number by write_budget_numbers.
+        Some(QueryValue::Int(n)) if *n > 0 => Ok(Some(*n as u64)),
+        Some(QueryValue::Big(n)) => match n.to_string().parse::<u64>() {
+            Ok(parsed) if parsed > 0 => Ok(Some(parsed)),
+            _ => Err(ShellError::Server),
+        },
+        Some(QueryValue::Str(text)) if is_ascii_decimal(text) => {
+            // Digits-only input can only fail here on overflow.
+            let parsed: u64 = text.parse().map_err(|_| ShellError::Server)?;
+            if parsed == 0 {
+                Err(ShellError::Server)
+            } else {
+                Ok(Some(parsed))
+            }
+        }
+        Some(_) => Err(ShellError::Server),
+    }
+}
+
+/// Non-empty ASCII digits only (`u64::from_str` would admit `+`).
+fn is_ascii_decimal(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Write ONLY the parsed `wal_retention_max_bytes` budgets — the only u64
+/// fields of the description — as JSON numbers over the generic rendering.
+fn write_budget_numbers(json: &mut Value, budgets: (Option<u64>, Option<u64>)) {
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    for (key, parsed) in [
+        ("durability", budgets.0),
+        ("durability_override", budgets.1),
+    ] {
+        if let Some(parsed) = parsed {
+            if let Some(policy) = obj.get_mut(key).and_then(Value::as_object_mut) {
+                policy.insert("wal_retention_max_bytes".into(), Value::from(parsed));
+            }
+        }
     }
 }
 
@@ -396,3 +523,7 @@ fn principal(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/catalogue_budget_tests.rs"]
+mod catalogue_budget_tests;

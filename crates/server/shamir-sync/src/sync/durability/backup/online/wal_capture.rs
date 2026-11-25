@@ -113,9 +113,21 @@ pub trait OnlineBackupPort {
     /// server can publish the real phase `Copying`. Default: no-op.
     fn begin_copy(&self) {}
 
-    /// Called by the protocol at the start of step F (verify + manifest)
+    /// Called at the start of step F (verify + manifest)
     /// so the server can publish the real phase `Verifying`. Default: no-op.
     fn begin_verify(&self) {}
+
+    /// Validate copied mutable stores before publication. Implementations must
+    /// perform any recovery-capable open against a throw-away copy. This
+    /// validation is not cancellable mid-flight (its scratch clone is
+    /// proportional to `server_meta` plus the audit files); the protocol checks
+    /// cancellation after it returns.
+    fn validate_copied_data_dir(
+        &self,
+        _copied_data_dir: &std::path::Path,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
 
     /// Ends the seal hold for `repo` after that repo's seal re-copy
     /// (design 1d (a): the hold returned by `seal_point` keeps the stores

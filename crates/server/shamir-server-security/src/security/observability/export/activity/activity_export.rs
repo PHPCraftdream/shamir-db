@@ -25,6 +25,13 @@
 //! (privacy + cardinality, D3); no descriptors are registered with the
 //! global recorder, so the appended HELP/TYPE blocks can never duplicate
 //! a recorder-rendered descriptor.
+//!
+//! The `shamir_cancellations_total` counter family is per-server for the
+//! same reason as the gauges: the process-global Prometheus recorder is
+//! shared between servers in one process. It has exactly four fixed
+//! `result` label values and no per-user or per-session label
+//! (cardinality + privacy), and it is monotonic for the life of the
+//! server.
 
 use std::fmt;
 use std::sync::Arc;
@@ -32,6 +39,8 @@ use std::sync::Arc;
 /// Live mirror counts of one running server's activity registries,
 /// sampled by the per-state source at scrape time. Exact live mirrors:
 /// every counted row of the activity view corresponds to one gauge unit.
+/// The cancellation counters cover every cancellation operation:
+/// requests, interactive transactions and cursors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActivityMetricsSnapshot {
     /// Requests currently in flight (the handler's in-flight table).
@@ -43,6 +52,10 @@ pub struct ActivityMetricsSnapshot {
     pub transactions: u64,
     /// Currently open cursors (the cursor registry).
     pub cursors: u64,
+    /// Cancellation attempts, counted per result. Index order is FIXED and
+    /// shared with [`CANCEL_RESULT_LABELS`]: 0 `cancelled`, 1
+    /// `already_finished`, 2 `already_committing`, 3 `not_cancellable`.
+    pub cancellations: [u64; 4],
 }
 
 /// The four exported series in render order: `(name, help)`. Unlabeled:
@@ -64,6 +77,15 @@ pub(crate) const ACTIVITY_GAUGES: [(&str, &str); 4] = [
         "shamir_active_cursors",
         "Cursors currently open in this server's cursor registry",
     ),
+];
+
+/// The four `result` label values of `shamir_cancellations_total`, in the
+/// fixed index order of [`ActivityMetricsSnapshot::cancellations`].
+pub(crate) const CANCEL_RESULT_LABELS: [&str; 4] = [
+    "cancelled",
+    "already_finished",
+    "already_committing",
+    "not_cancellable",
 ];
 
 /// Per-server source closure installed on the owning server's
@@ -91,10 +113,11 @@ impl ActivitySource {
     }
 }
 
-/// Render the four unlabeled gauge series in Prometheus text format,
+/// Render the four unlabeled gauge series plus the four labelled
+/// `shamir_cancellations_total` counter series in Prometheus text format,
 /// ready to append after the global recorder's render output. Values come
 /// straight from the snapshot; zero-touch servers without an installed
-/// source render explicit zeros so scrapers see the family from the
+/// source render explicit zeros so scrapers see each family from the
 /// first scrape.
 pub(crate) fn render_activity_series(snapshot: &ActivityMetricsSnapshot) -> String {
     let values = [
@@ -107,6 +130,15 @@ pub(crate) fn render_activity_series(snapshot: &ActivityMetricsSnapshot) -> Stri
     for ((name, help), value) in ACTIVITY_GAUGES.into_iter().zip(values) {
         out.push_str(&format!(
             "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
+    }
+    out.push_str(
+        "# HELP shamir_cancellations_total Cancellation attempts by result\n\
+         # TYPE shamir_cancellations_total counter\n",
+    );
+    for (label, value) in CANCEL_RESULT_LABELS.into_iter().zip(snapshot.cancellations) {
+        out.push_str(&format!(
+            "shamir_cancellations_total{{result=\"{label}\"}} {value}\n"
         ));
     }
     out

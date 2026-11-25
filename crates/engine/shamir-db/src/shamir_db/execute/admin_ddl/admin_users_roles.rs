@@ -61,7 +61,10 @@ impl ShamirAdminExecutor {
             op.database.clone(),
         )
         .await
-        .map_err(|e| err_code("query", e.to_string()))?;
+        .map_err(|e| match e.kind() {
+            PortErrorKind::ServerBusy => err_code("server_busy", e.to_string()),
+            _ => err_code("query", e.to_string()),
+        })?;
         Ok(admin_result(mpack!({
             "created_user": @(QueryValue::Str(op.create_user.clone())),
         })))

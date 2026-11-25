@@ -82,6 +82,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

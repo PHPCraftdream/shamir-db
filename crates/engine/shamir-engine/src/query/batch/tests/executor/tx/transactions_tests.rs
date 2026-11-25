@@ -144,6 +144,21 @@ fn rv_types_2eb39dfd_interner_quota_storage_error_keeps_typed_abort_reason() {
     let info = error.into_transaction_info(13, 100);
     assert_eq!(info.status, "aborted");
     assert_eq!(info.reason.as_deref(), Some("interner_quota_exceeded"));
+    assert_eq!(info.abort_code.as_deref(), Some("interner_quota_exceeded"));
+}
+
+#[test]
+fn uncoded_storage_abort_has_no_abort_code() {
+    let info = crate::tx::CommitError::Storage(shamir_storage::error::DbError::Validation(
+        "invalid value".into(),
+    ))
+    .into_transaction_info(14, 100);
+    assert_eq!(info.status, "aborted");
+    assert_eq!(
+        info.reason.as_deref(),
+        Some("storage: Validation error: invalid value")
+    );
+    assert_eq!(info.abort_code, None);
 }
 
 #[test]

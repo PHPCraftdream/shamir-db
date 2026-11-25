@@ -323,6 +323,16 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         // R4b-1: activity listing is read-only introspection of server-owned
         // state, not destructive; it is permission-checked at the handler.
         | ListActivity(_)
+        // R4b-4: shape-statistics introspection and the local telemetry
+        // wipe are permission-checked at the handler, not destructive to
+        // stored data.
+        | ListShapeStats(_)
+        | ResetShapeStats(_)
+        | CancelRequest(_)
+        // R4b-3: both operator cancellation ops act on transient server state,
+        // not destructive; they are permission-checked at the handler.
+        | CancelTx(_)
+        | CancelCursorAdmin(_)
         | StartBackup(_)
         | BackupStatus(_)
         | CancelBackup(_)

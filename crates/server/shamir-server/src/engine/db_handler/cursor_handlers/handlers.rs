@@ -11,6 +11,7 @@ use crate::cursor_registry::{Cursor, CursorActivity, CursorRegistryError, Pagina
 
 use super::budget::{
     enforce_page_budget, error_response, reserve_page_budget_upfront, wrap_engine_err,
+    wrap_table_lookup_err,
 };
 use super::keyset::{
     build_filter_context, order_by_column_contains_null, order_by_column_is_schema_typed_scalar,
@@ -40,11 +41,41 @@ impl ShamirDbHandler {
             };
         }
 
-        // CR-A3: reject page_size == 0 (would make has_more's
-        // `page.records.len() as u64 >= page_size as u64` compute
-        // `0 >= 0 → true` forever, looping the client indefinitely) and
-        // page_size above the configured cap (unbounded materialize/
-        // serialize hazard) up front — before any registry/engine work.
+        let repo_name = query.from.repo.clone();
+        let table_name = query.from.table.clone();
+
+        let actor = session_actor(session);
+        if let Err(e) = self
+            .db
+            .authorize_access(
+                &actor,
+                &shamir_db::access::ResourcePath::Database {
+                    db: db_name.to_string(),
+                },
+                shamir_db::access::Action::Read,
+            )
+            .await
+        {
+            return error_response(&BatchError::query_coded("", "access_denied", e.to_string()));
+        }
+
+        let repo = match resolve_repo(&self.db, db_name, &repo_name) {
+            Ok(r) => r,
+            Err(e) => return error_response(&e),
+        };
+        // Check registration without opening a manager/cell. Absent tables
+        // share the fixed refusal used by table-Read ACL denials.
+        if repo.table_config(&table_name).is_none() {
+            return error_response(&crate::db_handler::operator_state::table_unavailable_error());
+        }
+        if let Err(e) =
+            authorize_cursor_read(&self.db, &actor, db_name, &repo_name, &table_name).await
+        {
+            return error_response(&e);
+        }
+
+        // CR-A3: reject page_size == 0 and over-cap requests only after the
+        // target table has passed the availability and Read-ACL gates.
         let max_page_size = self.cursor_limits.max_cursor_page_size;
         if page_size == 0 || page_size > max_page_size {
             return error_response(&BatchError::InvalidPageSize {
@@ -52,49 +83,19 @@ impl ShamirDbHandler {
                 max: max_page_size,
             });
         }
-
-        // Scope cut (FG-5b): only Temporal::Latest cursors are supported.
-        // AsOf/History are rejected outright — never silently downgraded.
         if !matches!(query.temporal, Temporal::Latest) {
             return error_response(&BatchError::CursorTemporalNotSupported);
         }
-
-        // Scope cut (CR-B5, #771): a cursor's every internal read (this
-        // first page and every later `fetch_next`) rewrites `temporal` to
-        // `Temporal::AsOf { at: At::Version(pinned_version) }` below — and
-        // that read path hard-codes `versions: None` on its `QueryResult`
-        // (`TableManager::read_as_of` in `shamir-engine`'s
-        // `read_temporal.rs`). Honoring `with_version = true` here would
-        // therefore silently produce NO per-record versions, breaking the
-        // FG-2 optimistic-CAS contour a client might expect to still work
-        // after switching a `.withVersion()` read to a cursor. Reject
-        // outright rather than silently drop the flag — see
-        // `BatchError::CursorWithVersionNotSupported`'s doc comment.
         if query.with_version {
             return error_response(&BatchError::CursorWithVersionNotSupported);
         }
 
-        let repo_name = query.from.repo.clone();
-        let table_name = query.from.table.clone();
-
-        let actor = session_actor(session);
-        if let Err(e) =
-            authorize_cursor_read(&self.db, &actor, db_name, &repo_name, &table_name).await
-        {
-            return error_response(&e);
-        }
-
-        // S5c-X PR8b: a cursor must not be created over a quarantined
-        // (`resync_required`) repo — gated right after authorization and
-        // BEFORE any repo/engine work (resolve_repo, snapshot pinning).
+        // S5c-X PR8b: quarantine is checked after target-dependent request
+        // validation, but before opening a snapshot or resolving a manager.
         if let Some(e) = quarantine_cursor_error(&self.db, db_name, &repo_name) {
             return error_response(&e);
         }
 
-        let repo = match resolve_repo(&self.db, db_name, &repo_name) {
-            Ok(r) => r,
-            Err(e) => return error_response(&e),
-        };
         // F-1 (#792): `ShamirDb::get_table` (NOT `RepoInstance::get_table`)
         // is used here specifically because it injects the global
         // `ValidatorRegistry` (`table.set_validator_registry(...)`) into the
@@ -110,7 +111,12 @@ impl ShamirDbHandler {
         // change to what a cursor's read can see.
         let table = match self.db.get_table(db_name, &repo_name, &table_name).await {
             Ok(t) => t,
-            Err(e) => return error_response(&wrap_engine_err(e)),
+            // An absent table answers `unknown_table`, the SAME code the
+            // table-Read denial above answers for an existing closed table
+            // (`authorize_cursor_read`); parents keep `unknown_db`/`unknown_repo`.
+            Err(e) => {
+                return error_response(&wrap_table_lookup_err(&self.db, db_name, &repo_name, e));
+            }
         };
         let gate = match repo.tx_gate().await {
             Ok(g) => g,

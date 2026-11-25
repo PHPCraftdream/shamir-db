@@ -81,6 +81,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

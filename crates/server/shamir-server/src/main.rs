@@ -28,6 +28,9 @@ static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(AL
 mod bootstrap_cli_tests;
 #[path = "../../shamir-server-security/src/security/service/bootstrap_stdin.rs"]
 mod bootstrap_stdin;
+#[cfg(test)]
+#[path = "tests/security/cli_inline_subcommands.rs"]
+mod cli_inline_subcommands;
 #[path = "../shell/mod.rs"]
 mod shell;
 
@@ -37,8 +40,10 @@ use clap::{Parser, Subcommand};
 use zeroize::Zeroizing;
 
 use shamir_server::backup;
+use shamir_server::backup::BackupError as Failure;
 use shamir_server::config::Config;
 use shamir_server::doctor;
+use shamir_server::logging::sink_mode_for;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
@@ -222,6 +227,16 @@ enum Subcmd {
     /// subcommand. Must be the first argument: `shamir-server shell ...`.
     Shell,
 
+    /// Verify one offline snapshot against its `manifest.json` (read-only,
+    /// hashes every listed file). Dispatched before config load and without
+    /// `--config`; must be the first argument. Never boots the server and
+    /// never opens a data directory.
+    BackupVerify {
+        /// Snapshot directory (the one holding `manifest.json`).
+        #[arg(value_name = "SNAPSHOT")]
+        snapshot: PathBuf,
+    },
+
     /// Verify and optionally repair table integrity. **Offline only** — the
     /// server for this `data_dir` must be stopped first (opens the data
     /// directory directly via `ShamirDb::init`). Scans all tables (or a
@@ -293,18 +308,33 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run_main() -> anyhow::Result<u8> {
-    // Early `shell` dispatch, immediately before `Cli::parse()` (design §2,
-    // §9 PR1): the shell never touches server config or logging, so `--config`
-    // is not required. Match the first argument EXACTLY: any later `shell`
-    // token (e.g. `--config x shell`) goes through clap instead and is
-    // rejected below.
+    // Early `shell` / `backup-verify` dispatch, immediately before
+    // `Cli::parse()` (design §2, §4.7): neither needs server config, logging
+    // or a data directory, so `--config` is not required. Match the first
+    // argument EXACTLY: a later token goes through clap and is rejected below.
+    // A flag token (one starting with `--`) is never accepted as the
+    // `backup-verify` path: it is refused as a usage error instead.
     let mut raw_args = std::env::args_os();
     let _argv0 = raw_args.next();
-    if raw_args
-        .next()
-        .is_some_and(|arg| arg == std::ffi::OsStr::new("shell"))
-    {
+    let first = raw_args.next();
+    if first.as_deref() == Some(std::ffi::OsStr::new("shell")) {
         return Ok(shell::run(raw_args));
+    }
+    if first.as_deref() == Some(std::ffi::OsStr::new("backup-verify")) {
+        let mut rest = raw_args;
+        let Some(snapshot) = rest.next() else {
+            eprintln!("{BACKUP_VERIFY_USAGE}");
+            return Ok(1);
+        };
+        if snapshot.to_string_lossy().starts_with("--") {
+            eprintln!("{BACKUP_VERIFY_USAGE}");
+            return Ok(1);
+        }
+        if rest.next().is_some() {
+            eprintln!("{BACKUP_VERIFY_USAGE}");
+            return Ok(1);
+        }
+        return Ok(backup_verify(PathBuf::from(snapshot)));
     }
 
     let cli = Cli::parse();
@@ -313,6 +343,12 @@ fn run_main() -> anyhow::Result<u8> {
     // reject it before any configuration/logging/runtime work.
     if matches!(cli.command.as_ref(), Some(Subcmd::Shell)) {
         anyhow::bail!("`shell` must be the first argument: run `shamir-server shell ...`");
+    }
+
+    if matches!(cli.command.as_ref(), Some(Subcmd::BackupVerify { .. })) {
+        anyhow::bail!(
+            "`backup-verify` must be the first argument: run `shamir-server backup-verify SNAPSHOT`"
+        );
     }
 
     if let Some(Subcmd::FormatMigrate(args)) = cli.command.as_ref() {
@@ -345,7 +381,93 @@ fn run_main() -> anyhow::Result<u8> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    rt.block_on(run_async(cli))
+    let result = rt.block_on(run_async(cli));
+    if result.is_err() {
+        // A failed run can leave a detached blocking job (a stalled final
+        // snapshot): dropping the runtime would wait for it without a bound and
+        // the error would never be printed.
+        rt.shutdown_timeout(std::time::Duration::from_secs(5));
+    }
+    result
+}
+
+/// Fixed usage line for the standalone `backup-verify` command (stderr; the
+/// argv value is never echoed).
+const BACKUP_VERIFY_USAGE: &str = "usage: shamir-server backup-verify SNAPSHOT";
+
+/// Label column width of the `backup-verify` report.
+const BACKUP_VERIFY_LABEL_WIDTH: usize = 16;
+
+/// `backup-verify SNAPSHOT` (design `admin-shell.md` §4.7): the manual,
+/// read-only offline snapshot check. Nothing boots, no data directory is
+/// opened, no network is used and no config is read. It verifies
+/// `manifest.json` and hashes every listed file, so it is NOT cheap; it runs
+/// with the OS rights of the invoking user and modifies nothing. Exit codes:
+/// 0 verified, 1 usage, 5 the snapshot did not verify.
+fn backup_verify(snapshot: PathBuf) -> u8 {
+    match shamir_server::backup::verify_manifest(&snapshot) {
+        Ok(report) => {
+            report_line("result", "verified");
+            report_line("kind", backup_kind(report.kind));
+            report_line("files_checked", &report.files_checked.to_string());
+            report_line("total_bytes", &report.total_bytes.to_string());
+            if let Some(epoch) = report.format_epoch {
+                report_line("format_epoch", &epoch.to_string());
+            }
+            report_line(
+                "note",
+                "verification hashed every listed file; it is not a cheap check",
+            );
+            0
+        }
+        Err(error) => {
+            report_line("result", "failed");
+            report_line("error_class", backup_error_class(&error));
+            report_line(
+                "note",
+                "the snapshot must not be restored or trusted; nothing was modified",
+            );
+            5
+        }
+    }
+}
+
+/// One `label  value` report line on stdout, with a fixed label column.
+fn report_line(label: &str, value: &str) {
+    println!(
+        "{label:<width$}  {value}",
+        width = BACKUP_VERIFY_LABEL_WIDTH
+    );
+}
+
+/// The two manifest kinds the verifier distinguishes.
+fn backup_kind(kind: shamir_server::backup::online::manifest::BackupKind) -> &'static str {
+    match kind {
+        shamir_server::backup::online::manifest::BackupKind::Offline => "offline",
+        shamir_server::backup::online::manifest::BackupKind::Online => "online",
+    }
+}
+
+/// Bounded corruption class of one verification failure. The library's
+/// message text is never printed; a variant this build does not name reports
+/// the general `corrupt` class.
+fn backup_error_class(error: &shamir_server::backup::BackupError) -> &'static str {
+    match error {
+        Failure::Io(_) => "io",
+        Failure::SourceMissing(_) => "source_missing",
+        Failure::SourceNotDir(_) => "source_not_dir",
+        Failure::ManifestMissing(_) => "manifest_missing",
+        Failure::ManifestInvalid(_) => "manifest_invalid",
+        Failure::ChecksumMismatch { .. } => "checksum_mismatch",
+        Failure::UnmanifestedFile(_) => "unmanifested_file",
+        Failure::UnsupportedManifestFormatVersion { .. } => "unsupported_manifest_format_version",
+        Failure::UnsafeManifestPath(_) => "unsafe_manifest_path",
+        Failure::ManagedSnapshotNotExported(_) => "managed_snapshot",
+        Failure::CacheManifestPath(_) => "cache_manifest_path",
+        Failure::DuplicateManifestEntry(_) => "duplicate_manifest_entry",
+        Failure::WalSeqGap { .. } => "wal_sequence_gap",
+        _ => "corrupt",
+    }
 }
 
 async fn run_async(cli: Cli) -> anyhow::Result<u8> {
@@ -376,7 +498,45 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
             );
         }
     }
-    let _log_guard = shamir_server::logging::init(&config.logging);
+    // Offline subcommands take the data-directory lock (or refuse it) and must
+    // not create any file before their preconditions and their lock hold, so
+    // they get no file sink. `Run` / `None` are the server path.
+    //
+    // Exhaustive on purpose — no `_` arm and no `matches!`: a new `Subcmd`
+    // variant must state which sink it gets instead of silently inheriting
+    // one (a compile error is the point).
+    //
+    // The `FormatMigrate`, `Shell` and `BackupVerify` arms below are
+    // UNREACHABLE for this selection — all three return earlier in this
+    // function — and are listed only to keep the match exhaustive.
+    let offline = match cli.command {
+        Some(
+            Subcmd::Token { .. }
+            | Subcmd::Restore { .. }
+            | Subcmd::Backup { .. }
+            | Subcmd::LogicalExport(_)
+            | Subcmd::LogicalImport(_)
+            | Subcmd::ReplicationSeedExport { .. }
+            | Subcmd::ReplicationSeedInstall { .. }
+            | Subcmd::ReplicationSeedVerify { .. }
+            | Subcmd::AccessTree { .. }
+            | Subcmd::Service { .. }
+            | Subcmd::Doctor { .. }
+            | Subcmd::FormatMigrate(_)
+            | Subcmd::BackupVerify { .. }
+            | Subcmd::Shell,
+        ) => true,
+        Some(Subcmd::Run { .. }) | None => false,
+    };
+    // The ONE boot path for both server entries: it refuses a sink that would
+    // land in the audit-log namespace (nothing is opened for a refused sink),
+    // then installs the subscriber. `SinkMode::StdoutOnly` — every offline
+    // command — never validates, opens, creates or stat-s the path at all.
+    let _log_guard = shamir_server::logging::boot_logging(
+        &config.logging,
+        &config.data_dir,
+        sink_mode_for(offline),
+    )?;
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.
@@ -560,6 +720,11 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
         Some(Subcmd::Shell) => {
             anyhow::bail!("`shell` must be the first argument: run `shamir-server shell ...`")
         }
+        Some(Subcmd::BackupVerify { .. }) => {
+            anyhow::bail!(
+                "`backup-verify` must be the first argument: run `shamir-server backup-verify SNAPSHOT`"
+            )
+        }
         Some(Subcmd::Run { .. }) | None => {}
     }
 
@@ -613,6 +778,10 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
         })
     };
 
+    // The process exit code is this report's `exit_code()`; nothing forces the
+    // exit. The runtime is dropped normally after `serve` returned — which is
+    // why `serve` waits for the scheduled-backup worker and keeps the
+    // single-instance data-directory lock until that worker finished.
     shamir_server::runtime::serve(
         config,
         bootstrap,

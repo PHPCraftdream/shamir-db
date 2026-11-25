@@ -70,6 +70,18 @@ pub(super) fn admin_request_cases() -> Vec<(DbRequest, &'static str)> {
             token_admin::revoke_user_tokens().build(),
             "RevokeUserTokens",
         ),
+        // R5 PR3: these top-level requests are outside the token
+        // read-only subset and must be refused on the real token path.
+        (shamir_query_builder::wire::admin::status(), "Status"),
+        (
+            shamir_query_builder::wire::admin::get_record(
+                "default",
+                "main",
+                "items",
+                shamir_types::types::record_id::RecordId([0xAB; 16]),
+            ),
+            "GetRecord",
+        ),
     ]
 }
 
@@ -433,10 +445,41 @@ pub(super) fn admin_batch_cases() -> Vec<(BatchOp, &'static str)> {
         ),
         (ddl::list_publications(), "ListPublications"),
         (ddl::list_subscriptions(), "ListSubscriptions"),
+        // R4b-3: operator cancellation is a SCRAM-session surface; a token
+        // must never reach it, so the handles are deliberately unknown.
+        (
+            shamir_query_builder::wire::admin::cancel_tx(0xDEAD_BEEF_0000_0001),
+            "CancelTx",
+        ),
+        (
+            shamir_query_builder::wire::admin::cancel_cursor_admin(
+                shamir_query_types::wire::CursorId(0xDEAD_BEEF_0000_0002),
+            ),
+            "CancelCursorAdmin",
+        ),
         (ddl::replication_status(), "ReplicationStatus"),
         // R3 2b: online-export admin ops are superuser-surface for tokens.
         (ddl::start_export("deny").build(), "StartExport"),
         (ddl::export_status(), "ExportStatus"),
         (ddl::cancel_export(), "CancelExport"),
+        // R4b-4: shape statistics are a SCRAM-session surface; a token must
+        // never reach the listing or the registry wipe.
+        (
+            shamir_query_builder::wire::admin::list_shape_stats(
+                shamir_query_types::admin::shape_stats::ListShapeStatsReq {
+                    repo: "main".into(),
+                    limit: None,
+                },
+            ),
+            "ListShapeStats",
+        ),
+        (
+            shamir_query_builder::wire::admin::reset_shape_stats(
+                shamir_query_types::admin::shape_stats::ResetShapeStatsReq {
+                    repo: "main".into(),
+                },
+            ),
+            "ResetShapeStats",
+        ),
     ]
 }

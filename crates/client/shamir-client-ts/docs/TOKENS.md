@@ -130,6 +130,8 @@ Effective rights intersect current owner ordinary data rights and token scope; t
 | Push subscriptions | No push channel | Yes (`runLive`) |
 | DDL/access/token administration | Denied | Denied |
 
+`runLive` resolves only when the complete batch succeeds. If any subscription source is unavailable, the server refuses the whole request; `runLive` rejects its promise and returns no readable stream (including for otherwise readable sources in a mixed subscription).
+
 HTTP transactional batches are distinct from interactive multi-request transactions, which are WS-only. Token request allowlisting is deny-by-default. Only `list`, `access_tree`, `describe_table`, and `get_table_schema` are permitted introspection leaves, only top-level and subject to ordinary authorization. With an explicit database allowlist, requests that introspect databases/users (`List::Databases` and `List::Users`) are denied. Other list calls are not categorically denied; `AccessTree` must explicitly target an allowed database. Subscriptions must be top-level. The TS token path uses query version 4 and name-based builders; it does not use SCRAM interner-touch transport.
 
 HTTP applies request allowlisting, framing/content type, timeouts, and `max_request_body_bytes` (default 16 MiB, server-configurable). Oversize requests may return 413. Independently, the SDK caps response bodies at `MAX_TOKEN_RESPONSE_BYTES` (default WS frame limit, 16 MiB). HTTP has no push.

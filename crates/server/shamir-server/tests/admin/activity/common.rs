@@ -21,6 +21,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_types::admin::activity::ListActivityReq;
+use shamir_query_types::wire::CursorId;
 
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 use shamir_server::version::CURRENT_QUERY_LANG_VERSION;
@@ -159,7 +160,7 @@ pub(crate) async fn seed_committed_rows(handler: &ShamirDbHandler, admin: &Sessi
 // Request builders (shamir-query-builder only)
 // --------------------------------------------------------------------------
 
-fn execute(batch: shamir_query_builder::BatchRequest) -> DbRequest {
+pub(super) fn execute(batch: shamir_query_builder::BatchRequest) -> DbRequest {
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: DB.into(),
@@ -206,6 +207,28 @@ pub(crate) fn tx_insert_req(tx_handle: u64, value: i64) -> DbRequest {
     }
 }
 
+/// Commit an open interactive transaction, optionally acknowledging a
+/// visibility wait.
+pub(crate) fn tx_commit_req(
+    tx_handle: u64,
+    wait: Option<shamir_query_types::batch::VisibilityWait>,
+) -> DbRequest {
+    DbRequest::TxCommit {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        visibility_wait: wait,
+        db: DB.into(),
+        tx_handle,
+    }
+}
+
+/// Roll back an open interactive transaction.
+pub(crate) fn tx_rollback_req(tx_handle: u64) -> DbRequest {
+    DbRequest::TxRollback {
+        db: DB.into(),
+        tx_handle,
+    }
+}
+
 /// Open a one-row-page result cursor over the fixture table.
 pub(crate) fn create_cursor_req() -> DbRequest {
     DbRequest::CreateCursor {
@@ -225,4 +248,25 @@ pub(crate) fn list_activity_req(request: ListActivityReq) -> DbRequest {
         shamir_query_builder::wire::admin::list_activity(request),
     );
     execute(b.build())
+}
+
+/// Operator cancellation of an open interactive transaction, as the sole
+/// entry of a standalone non-transactional batch.
+pub(crate) fn cancel_tx_req(tx_handle: u64) -> DbRequest {
+    let mut batch = Batch::new();
+    batch.id("canceltx");
+    batch.op("cancel_tx", shamir_query_builder::cancel_tx(tx_handle));
+    execute(batch.build())
+}
+
+/// Operator cancellation of a result cursor, as the sole entry of a
+/// standalone non-transactional batch.
+pub(crate) fn cancel_cursor_admin_req(cursor_id: CursorId) -> DbRequest {
+    let mut batch = Batch::new();
+    batch.id("cancelcursor");
+    batch.op(
+        "cancel_cursor_admin",
+        shamir_query_builder::cancel_cursor_admin(cursor_id),
+    );
+    execute(batch.build())
 }

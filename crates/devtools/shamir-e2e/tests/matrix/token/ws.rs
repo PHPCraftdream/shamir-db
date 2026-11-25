@@ -10,6 +10,7 @@ use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use shamir_client::{
     ApiToken, AuthKind, Client, ClientError, CloseCause, TokenEndpoint, TokenWsOptions,
 };
+use shamir_query_types::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
 
 use super::common::{boot, read_batch, seed_batch, write_batch, TokenFixture};
 
@@ -204,6 +205,38 @@ async fn token_ws_refuses_admin_requests_locally() {
         .list_api_tokens(None)
         .await
         .expect_err("list_api_tokens must be refused");
+    let ClientError::Db { code, .. } = err else {
+        panic!("expected Db error, got {err:?}");
+    };
+    assert_eq!(code, "token_request_denied");
+
+    // R4b-4: the shape-statistics surface is a SCRAM-session surface only;
+    // the typed client refuses both calls for a token session before any
+    // request reaches the wire.
+    let err = client
+        .list_shape_stats(
+            "default",
+            ListShapeStatsReq {
+                repo: "main".into(),
+                limit: None,
+            },
+        )
+        .await
+        .expect_err("list_shape_stats must be refused");
+    let ClientError::Db { code, .. } = err else {
+        panic!("expected Db error, got {err:?}");
+    };
+    assert_eq!(code, "token_request_denied");
+
+    let err = client
+        .reset_shape_stats(
+            "default",
+            ResetShapeStatsReq {
+                repo: "main".into(),
+            },
+        )
+        .await
+        .expect_err("reset_shape_stats must be refused");
     let ClientError::Db { code, .. } = err else {
         panic!("expected Db error, got {err:?}");
     };

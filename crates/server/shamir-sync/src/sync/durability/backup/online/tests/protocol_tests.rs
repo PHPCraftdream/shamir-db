@@ -1,19 +1,10 @@
 //! Protocol state machine tests over a plain-directory port (CI only).
-
-use std::fmt::Write as _;
-use std::fs;
-use std::io::Write as _;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use sha2::{Digest, Sha256};
-
 use crate::sync::durability::backup::online::copy_engine::{
     test_seams::{self, SeamGuard},
     CopyOptions,
+};
+use crate::sync::durability::backup::online::manifest::{
+    self, BACKUP_META_FILE_NAME, MANIFEST_FORMAT_VERSION_V2,
 };
 use crate::sync::durability::backup::online::progress::{BackupProgress, BackupStage, CancelFlag};
 use crate::sync::durability::backup::online::protocol::{
@@ -23,7 +14,18 @@ use crate::sync::durability::backup::online::protocol::{
 use crate::sync::durability::backup::online::wal_capture::{
     CapturedPoint, OnlineBackupPort, PortError, RepoSource,
 };
-use crate::sync::durability::backup::verify_manifest;
+use crate::sync::durability::backup::{restore_with_probe, verify_manifest, MANIFEST_FILE_NAME};
+use sha2::{Digest, Sha256};
+use shamir_db::shamir_db::system_store::{SystemStore, SystemStoreConfig};
+use std::fmt::Write as _;
+use std::fs;
+use std::io::Write as _;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 /// Unique temp dir per test; cleaned up best-effort.
 fn temp_dir(name: &str) -> PathBuf {
@@ -52,7 +54,7 @@ type Events = Mutex<Vec<String>>;
 /// Port over plain directories; capture/seal hooks inject mid-protocol
 /// mutations and cancellations. Pin acquire/release are counted; seal and
 /// end_seal calls are recorded in order.
-struct TestPort {
+pub(super) struct TestPort {
     repos: Vec<RepoSource>,
     pins_held: AtomicUsize,
     pins_released: AtomicUsize,
@@ -63,14 +65,12 @@ struct TestPort {
 }
 
 impl TestPort {
-    fn single_repo(source: &Path) -> Self {
+    pub(super) fn single_repo(source: &Path) -> Self {
         Self::with_repos(source, &["alpha"])
     }
-
     fn two_repos(source: &Path) -> Self {
         Self::with_repos(source, &["alpha", "beta"])
     }
-
     fn with_repos(source: &Path, names: &[&str]) -> Self {
         Self {
             repos: names
@@ -89,7 +89,6 @@ impl TestPort {
             events: Mutex::new(Vec::new()),
         }
     }
-
     fn seal_events(&self) -> Vec<String> {
         self.events
             .lock()
@@ -99,23 +98,19 @@ impl TestPort {
             .cloned()
             .collect()
     }
-
     fn with_capture_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_capture.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
     fn with_seal_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_seal.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
     fn with_end_seal_hook(self, hook: impl Fn() + Send + 'static) -> Self {
         *self.on_end_seal.lock().expect("lock") = Some(Box::new(hook));
         self
     }
-
-    fn source_with_data(source: &Path) {
+    pub(super) fn source_with_data(source: &Path) {
         for name in ["alpha", "beta"] {
             write_file(
                 &source.join(format!("repos/{name}/store.bin")),
@@ -137,12 +132,10 @@ impl OnlineBackupPort for TestPort {
     fn catalogue(&self) -> Result<Vec<RepoSource>, PortError> {
         Ok(self.repos.clone())
     }
-
     fn acquire_pins(&self) -> Result<(), PortError> {
         self.pins_held.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-
     fn capture_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
         if let Some(hook) = self.on_capture.lock().expect("lock").as_ref() {
             hook();
@@ -153,11 +146,9 @@ impl OnlineBackupPort for TestPort {
             schema_version: 1,
         })
     }
-
     fn capture_system_store(&self) -> Result<u64, PortError> {
         Ok(1)
     }
-
     fn seal_point(&self, repo: &str) -> Result<CapturedPoint, PortError> {
         self.events
             .lock()
@@ -172,7 +163,6 @@ impl OnlineBackupPort for TestPort {
             schema_version: 1,
         })
     }
-
     fn end_seal(&self, repo: &str) {
         self.events
             .lock()
@@ -182,13 +172,12 @@ impl OnlineBackupPort for TestPort {
             hook();
         }
     }
-
     fn release_pins(&self) {
         self.pins_released.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-fn run(
+pub(super) fn run(
     port: &TestPort,
     source: &Path,
     to: &Path,
@@ -233,6 +222,115 @@ fn full_run_produces_a_verifiable_snapshot() {
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
+}
+
+/// Online restore opens a genuine Fjall catalogue even with no captured repos.
+fn init_empty_catalogue(source: &Path) {
+    let config = SystemStoreConfig::Fjall(source.join("shamir_db_meta.redb"));
+    let catalogue = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("catalogue runtime");
+            let store = runtime
+                .block_on(async {
+                    let init = Box::pin(SystemStore::init(config));
+                    tokio::time::timeout(Duration::from_secs(120), init).await
+                })
+                .expect("catalogue initialization timed out")
+                .expect("initialize persistent system catalogue");
+            drop(store);
+        })
+        .expect("spawn catalogue initializer");
+    if let Err(panic) = catalogue.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn online_backup_after_restore_omits_inherited_control_files() {
+    let workspace = TempDir::new().expect("workspace");
+    let source = workspace.path().join("source");
+    let seed_to = workspace.path().join("seed");
+    let next_to = workspace.path().join("next");
+    let restored = workspace.path().join("restored");
+    for to in [&seed_to, &next_to] {
+        fs::create_dir(to).expect("backup root");
+    }
+    write_file(&source.join("payload.bin"), b"restored payload");
+    init_empty_catalogue(&source);
+    let cancel = CancelFlag::default();
+    let port = TestPort::with_repos(&source, &[]);
+    let seed = run(&port, &source, &seed_to, &cancel).expect("create online seed");
+    let seed = seed.dest_dir;
+    write_file(
+        &seed.join(BACKUP_META_FILE_NAME),
+        br#"{
+            "encryption": "none",
+            "engine": "copy+wal-replay",
+            "scheduled_retention": {
+                "version": 1,
+                "owner": "test-schedule"
+            }
+        }"#,
+    );
+    restore_with_probe(&seed, &restored, false, |_| {
+        panic!("online restore must bypass the legacy liveness probe")
+    })
+    .expect("restore online seed to fresh target");
+    let controls = [MANIFEST_FILE_NAME, BACKUP_META_FILE_NAME];
+    for name in controls {
+        let original = fs::read(seed.join(name)).expect("seed root control file");
+        let restored_bytes = fs::read(restored.join(name)).expect("inherited control");
+        assert_eq!(restored_bytes, original, "{name}");
+    }
+    let inherited = controls.map(|name| restored.join(name));
+    let copied = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = std::rc::Rc::clone(&copied);
+    let _seam = test_seams::set_after_copy(Box::new(move |path| {
+        if inherited.iter().any(|root| root.as_path() == path) {
+            observed.set(true);
+        }
+    }));
+    let port = TestPort::with_repos(&restored, &[]);
+    let report = run(&port, &restored, &next_to, &cancel)
+        .expect("second online backup must not fail at Verifying on inherited root control files");
+    assert!(!copied.get(), "copied an inherited root control file");
+    let payload = fs::read(report.dest_dir.join("payload.bin")).expect("second backup payload");
+    assert_eq!(payload, b"restored payload");
+    let raw = fs::read_to_string(report.dest_dir.join(MANIFEST_FILE_NAME)).expect("manifest");
+    let decoded = manifest::decode(&raw).expect("decode second manifest");
+    assert_eq!(decoded.format_version, MANIFEST_FORMAT_VERSION_V2);
+    for name in controls {
+        let listed = decoded.files.iter().any(|entry| entry.path == name);
+        assert!(!listed, "listed root {name}");
+    }
+    verify_manifest(&report.dest_dir).expect("second snapshot must verify independently");
+}
+
+#[test]
+fn online_backup_preserves_nested_control_file_names_as_payload() {
+    let source = TempDir::new().expect("source");
+    let to = TempDir::new().expect("backup root");
+    let payloads: [(&str, &[u8]); 2] = [
+        ("payload/manifest.json", b"nested manifest payload"),
+        ("payload/backup.meta.json", b"nested sidecar payload"),
+    ];
+    for (path, bytes) in payloads {
+        write_file(&source.path().join(path), bytes);
+    }
+    let port = TestPort::with_repos(source.path(), &[]);
+    let report = run(&port, source.path(), to.path(), &CancelFlag::default()).expect("backup");
+    let raw = fs::read_to_string(report.dest_dir.join(MANIFEST_FILE_NAME)).expect("manifest");
+    let decoded = manifest::decode(&raw).expect("decode manifest");
+    for (path, bytes) in payloads {
+        let copied = fs::read(report.dest_dir.join(path)).expect("nested payload");
+        assert_eq!(copied, bytes, "{path}");
+        let listed = decoded.files.iter().any(|entry| entry.path == path);
+        assert!(listed, "missing {path}");
+    }
 }
 
 #[test]
@@ -286,17 +384,12 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
     let cancel = CancelFlag::default();
     cancel.cancel();
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Preparing
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Preparing);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
-
     // Hook cancels during the capture barrier.
     let source = temp_dir("cancel_cap_source");
     let to = temp_dir("cancel_cap_to");
@@ -307,17 +400,12 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
         cancel_for_hook.cancel();
     });
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Copying
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Copying);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     let _ = fs::remove_dir_all(&source);
     let _ = fs::remove_dir_all(&to);
-
     // Hook cancels during the seal barrier; the seal re-copy observes it.
     let source = temp_dir("cancel_seal_source");
     let to = temp_dir("cancel_seal_to");
@@ -328,12 +416,8 @@ fn cancellation_at_stage_boundaries_cleans_up_and_releases_pins() {
         cancel_for_hook.cancel();
     });
     let error = run(&port, &source, &to, &cancel).expect_err("must fail");
-    assert!(matches!(
-        error,
-        OnlineBackupError::Cancelled {
-            stage: BackupStage::Sealing
-        }
-    ));
+    assert_eq!(error.stage(), BackupStage::Sealing);
+    assert!(matches!(error, OnlineBackupError::Cancelled { .. }));
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
     assert_eq!(port.pins_released.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -400,13 +484,13 @@ fn byte_cap_exceeded_fails_closed_and_cleans_up() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "cap failure must be the source error"
@@ -485,7 +569,6 @@ fn clock_cap_exceeded_fails_closed() {
 // completed chunk write, including the gated seal re-copy). A test-local
 // `SealScope.active` flag scopes observation to the seal re-copy pass:
 // set by the seal hook, cleared by the end_seal hook.
-
 /// Copy-engine chunk size: every `after_first_write` fire is one chunk.
 const CHUNK: u64 = 1024 * 1024;
 
@@ -514,17 +597,14 @@ impl SealScope {
             writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
-
     fn set_active(&self) -> impl Fn() + Send + 'static {
         let active = Arc::clone(&self.active);
         move || active.store(true, Ordering::SeqCst)
     }
-
     fn clear_active(&self) -> impl Fn() + Send + 'static {
         let active = Arc::clone(&self.active);
         move || active.store(false, Ordering::SeqCst)
     }
-
     fn log(&self) -> Vec<String> {
         self.writes.lock().expect("lock").clone()
     }
@@ -598,18 +678,17 @@ fn seal_recopy_of_a_new_big_file_is_capped_during_the_second_chunk() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "cap failure must be the source error, got {failure:?}"
     );
-
     // First pass copied the unchanged WAL and store exactly once each.
     assert!(
         first_pass_store_unchanged.load(Ordering::SeqCst),
@@ -633,7 +712,6 @@ fn seal_recopy_of_a_new_big_file_is_capped_during_the_second_chunk() {
         1,
         "exactly the first chunk may be copied before the cap trips, log {log:?}"
     );
-
     // Fail-closed cleanup: no output, pins released, hold ended, and
     // the live source keeps the corrective delta untouched.
     assert_eq!(fs::read_dir(&to).expect("to dir").count(), 0);
@@ -703,7 +781,6 @@ fn wal_cut_staged_snapshot_excludes_frames_appended_after_end_seal() {
         });
     let cancel = CancelFlag::default();
     let report = run(&port, &source, &to, &cancel).expect("run must succeed");
-
     // The hold WAS live through the WAL re-copy pass: the staged
     // snapshot holds exactly the seal-barrier frames. If the re-copy
     // were skipped, the staged bytes would still be the first-pass F0.
@@ -795,13 +872,13 @@ fn clock_cap_trips_mid_copy_through_the_monotonic_seam() {
     };
     let error = run_with_cap(&port, &source, &to, &cancel, &cap).expect_err("must fail");
     let OnlineBackupError::Failed {
-        stage,
-        source: failure,
+        source: failure, ..
     } = &error
     else {
         panic!("expected Failed, got {error:?}");
     };
-    assert_eq!(*stage, BackupStage::Sealing);
+    let stage = error.stage();
+    assert_eq!(stage, BackupStage::Sealing);
     assert!(
         matches!(failure, OnlineBackupFailure::RecopyCap(_)),
         "the deadline must trip as RecopyCap mid-copy, got {failure:?}"

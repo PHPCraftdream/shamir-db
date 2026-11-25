@@ -56,6 +56,35 @@ fn visibility_contract_roundtrips_every_variant_and_u64_boundary() {
 }
 
 #[test]
+fn abort_code_is_optional_and_roundtrips_when_present() {
+    // An older payload without `abort_code` must still decode; the field
+    // defaults to `None` and does not affect validation.
+    let legacy = mpack!({
+        "tx_id": 7_i64,
+        "status": "aborted",
+        "reason": "call_in_tx_not_supported"
+    });
+    let bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy payload");
+    let info: TransactionInfo = rmp_serde::from_slice(&bytes).expect("decode legacy payload");
+    assert_eq!(info.abort_code, None);
+    assert_eq!(info.validate(), Ok(()));
+
+    // Present: it survives a full serde round trip alongside the reason.
+    let coded = TransactionInfo::aborted(7, "call_in_tx_not_supported")
+        .with_abort_code("call_in_tx_not_supported");
+    assert_eq!(
+        coded.abort_code.as_deref(),
+        Some("call_in_tx_not_supported")
+    );
+    assert_eq!(coded.validate(), Ok(()));
+    roundtrip(coded.clone());
+
+    // Committed and indeterminate outcomes never carry an abort code.
+    assert_eq!(TransactionInfo::committed(7, 40, 43, true).abort_code, None);
+    assert_eq!(TransactionInfo::indeterminate(7, 40, 43).abort_code, None);
+}
+
+#[test]
 fn wait_validation_preserves_zero_and_rejects_instead_of_clamping() {
     assert_eq!(
         VisibilityWait::Bounded { timeout_ms: 0 }.validate(0, false),

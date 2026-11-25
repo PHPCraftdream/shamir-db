@@ -65,7 +65,14 @@ pub enum Error {
         retry_after: u32,
     },
 
-    /// Server too busy (Argon2id semaphore exhausted, §14.3).
+    /// Server too busy (spec §14.3 wire variant, kept for protocol
+    /// compatibility). No live native auth-phase handler produces it: native
+    /// pre-auth throttling records `auth_attempts_total{result="rate_limited"}`
+    /// and closes without a body, and an ordinary SCRAM login derives no
+    /// server-side password key, so nothing on that path waits for a permit.
+    /// The HTTP login admission endpoint has its own `server_busy` 503 body, and
+    /// server-side password-derivation pressure surfaces as the `server_busy`
+    /// error code of a rejected user-creation operation (no `retry_after`).
     #[error("server_busy")]
     ServerBusy {
         /// Recommended retry delay.

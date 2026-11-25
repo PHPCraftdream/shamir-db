@@ -1,8 +1,10 @@
 //! Complete wire-discriminator coverage for batch dispatch.
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::{op_kind, OpKind, ALL};
+use crate::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
 use crate::batch::BatchOp;
 
 // Wire-format round-trip test: a query builder would bypass the wire shapes under test.
@@ -195,7 +197,11 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         OpKind::StartBackup => json!({
             "to": "/backups/snap-1"
         }),
-        OpKind::BackupStatus | OpKind::CancelBackup => json!({}),
+        OpKind::BackupStatus
+        | OpKind::CancelBackup
+        | OpKind::CancelRequest
+        | OpKind::CancelTx
+        | OpKind::CancelCursorAdmin => json!({}),
         OpKind::ListActivity => json!({
             "scope": "all",
             "kind": "all"
@@ -204,6 +210,9 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "database": "appdb"
         }),
         OpKind::ExportStatus | OpKind::CancelExport => json!({}),
+        OpKind::ListShapeStats | OpKind::ResetShapeStats => json!({
+            "repo": "main"
+        }),
     };
 
     let marker = match kind {
@@ -228,8 +237,14 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::ListActivity
         | OpKind::StartExport
         | OpKind::ExportStatus
-        | OpKind::CancelExport => json!(true),
-        OpKind::ChangesSince | OpKind::Unsubscribe => json!(1),
+        | OpKind::CancelExport
+        | OpKind::ListShapeStats
+        | OpKind::ResetShapeStats => json!(true),
+        OpKind::ChangesSince
+        | OpKind::Unsubscribe
+        | OpKind::CancelRequest
+        | OpKind::CancelTx
+        | OpKind::CancelCursorAdmin => json!(1),
         OpKind::Subscribe => json!([]),
         OpKind::List => json!("databases"),
         OpKind::Batch | OpKind::ForEach => json!({
@@ -389,6 +404,11 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::StartExport(_) => OpKind::StartExport,
         BatchOp::ExportStatus(_) => OpKind::ExportStatus,
         BatchOp::CancelExport(_) => OpKind::CancelExport,
+        BatchOp::ListShapeStats(_) => OpKind::ListShapeStats,
+        BatchOp::ResetShapeStats(_) => OpKind::ResetShapeStats,
+        BatchOp::CancelRequest(_) => OpKind::CancelRequest,
+        BatchOp::CancelTx(_) => OpKind::CancelTx,
+        BatchOp::CancelCursorAdmin(_) => OpKind::CancelCursorAdmin,
         BatchOp::Call(_) => OpKind::Call,
         BatchOp::ForEach(_) => OpKind::ForEach,
         BatchOp::Batch(_) => OpKind::Batch,
@@ -413,4 +433,168 @@ fn every_discriminator_decodes_and_round_trips_its_variant() {
         assert_eq!(variant_kind(&decoded), kind, "round-trip variant {key}");
         assert_eq!(decoded, op, "round-trip payload {key}");
     }
+}
+
+/// Malformed-wire cases: the raw map IS the subject under test, so these
+/// inputs are hand-built `Value`/serializer maps rather than builder output.
+fn decode_malformed<T: Serialize>(wire: &T) -> Result<BatchOp, rmp_serde::decode::Error> {
+    let bytes = rmp_serde::to_vec_named(wire).unwrap();
+    rmp_serde::from_slice(&bytes)
+}
+
+/// An ordered raw map: a `Value` map cannot hold duplicate keys, so a
+/// repeated discriminator is emitted at the serializer level. As with the
+/// other malformed-wire cases, the hand-built raw map IS the subject under
+/// test.
+struct RawMap(Vec<(&'static str, Value)>);
+
+impl Serialize for RawMap {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+#[test]
+fn cancel_tx_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `cancel_tx` arm of the duplicate guard in `batch_op.rs`
+    // => the second key overwrites the first and the op decodes.
+    let wire = RawMap(vec![("cancel_tx", json!(5)), ("cancel_tx", json!(6))]);
+    let error = decode_malformed(&wire).expect_err("duplicated cancel_tx must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn list_shape_stats_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `list_shape_stats` arm of the duplicate guard at
+    // `batch_op.rs:402-407` => the second key overwrites the first and the op
+    // decodes.
+    let wire = RawMap(vec![
+        ("repo", json!("main")),
+        ("list_shape_stats", json!(true)),
+        ("list_shape_stats", json!(true)),
+    ]);
+    let error = decode_malformed(&wire).expect_err("duplicated list_shape_stats must not decode");
+    let message = error.to_string();
+    assert!(
+        message.contains("duplicate field"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("list_shape_stats"),
+        "the refusal must name the discriminator: {message}"
+    );
+    // Control: the same flat payload with the repeat REMOVED is a valid
+    // request, so the repeated discriminator is the only defect above.
+    assert_eq!(
+        decode_malformed(&RawMap(vec![
+            ("repo", json!("main")),
+            ("list_shape_stats", json!(true)),
+        ]))
+        .expect("control decodes"),
+        BatchOp::ListShapeStats(ListShapeStatsReq {
+            repo: "main".into(),
+            limit: None,
+        })
+    );
+}
+
+#[test]
+fn reset_shape_stats_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `reset_shape_stats` arm of the duplicate guard at
+    // `batch_op.rs:402-407` => the second key overwrites the first and the op
+    // decodes.
+    let wire = RawMap(vec![
+        ("repo", json!("main")),
+        ("reset_shape_stats", json!(true)),
+        ("reset_shape_stats", json!(true)),
+    ]);
+    let error = decode_malformed(&wire).expect_err("duplicated reset_shape_stats must not decode");
+    let message = error.to_string();
+    assert!(
+        message.contains("duplicate field"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("reset_shape_stats"),
+        "the refusal must name the discriminator: {message}"
+    );
+    // Control: the same flat payload with the repeat REMOVED is a valid
+    // request, so the repeated discriminator is the only defect above.
+    assert_eq!(
+        decode_malformed(&RawMap(vec![
+            ("repo", json!("main")),
+            ("reset_shape_stats", json!(true)),
+        ]))
+        .expect("control decodes"),
+        BatchOp::ResetShapeStats(ResetShapeStatsReq {
+            repo: "main".into(),
+        })
+    );
+}
+
+#[test]
+fn cancel_tx_missing_payload_is_rejected() {
+    // mutant: accept a map-shaped `cancel_tx` payload (tolerating an absent
+    // handle) => `BatchOp::CancelTx` decodes out of an empty payload map.
+    decode_malformed(&json!({ "cancel_tx": {} }))
+        .expect_err("cancel_tx with an empty payload map must not decode");
+}
+
+#[test]
+fn cancel_tx_wrong_payload_type_is_rejected() {
+    // mutant: coerce the `cancel_tx` payload from a string => a string handle
+    // decodes instead of failing the `u64` newtype.
+    decode_malformed(&json!({ "cancel_tx": "not-a-number" }))
+        .expect_err("cancel_tx with a string handle must not decode");
+}
+
+#[test]
+fn cancel_tx_extra_field_is_rejected() {
+    // mutant: drop `deny_unknown_fields` from `CancelTxWire` => a payload with
+    // an extra field decodes.
+    decode_malformed(&json!({ "cancel_tx": 5, "extra": 1 }))
+        .expect_err("cancel_tx with an extra field must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_duplicate_discriminator_is_rejected() {
+    // mutant: drop the `cancel_cursor_admin` arm of the duplicate guard in
+    // `batch_op.rs` => the second key overwrites the first and the op decodes.
+    let wire = RawMap(vec![
+        ("cancel_cursor_admin", json!(7)),
+        ("cancel_cursor_admin", json!(8)),
+    ]);
+    let error =
+        decode_malformed(&wire).expect_err("duplicated cancel_cursor_admin must not decode");
+    assert!(
+        error.to_string().contains("duplicate field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn cancel_cursor_admin_missing_payload_is_rejected() {
+    // mutant: accept a map-shaped `cancel_cursor_admin` payload (tolerating an
+    // absent id) => `BatchOp::CancelCursorAdmin` decodes from an empty map.
+    decode_malformed(&json!({ "cancel_cursor_admin": {} }))
+        .expect_err("cancel_cursor_admin with an empty payload map must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_wrong_payload_type_is_rejected() {
+    // mutant: coerce the `cancel_cursor_admin` payload from a string => a
+    // string id decodes instead of failing the `CursorId` newtype.
+    decode_malformed(&json!({ "cancel_cursor_admin": "not-a-number" }))
+        .expect_err("cancel_cursor_admin with a string id must not decode");
+}
+
+#[test]
+fn cancel_cursor_admin_extra_field_is_rejected() {
+    // mutant: drop `deny_unknown_fields` from `CancelCursorAdminWire` => a
+    // payload with an extra field decodes.
+    decode_malformed(&json!({ "cancel_cursor_admin": 5, "extra": 1 }))
+        .expect_err("cancel_cursor_admin with an extra field must not decode");
 }

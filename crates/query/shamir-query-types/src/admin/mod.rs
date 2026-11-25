@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod activity;
+pub mod shape_stats;
 pub mod types;
 pub use types::schema_migration;
 
@@ -14,7 +15,10 @@ pub use access::{
 };
 pub use activity::{
     ActivityKind, ActivityPage, ActivityRequestState, ActivityRow, ActivityScope, ActivityTxState,
-    ListActivityReq, RequestExecId,
+    CancelOutcome, ListActivityReq, RequestExecId,
+};
+pub use shape_stats::{
+    ListShapeStatsReq, ResetShapeStatsReq, ShapeStatsPage, ShapeStatsRow, ShapeStatsTotals,
 };
 pub use types::{
     AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp, AlterRepoOp, AlterSubscriptionOp,

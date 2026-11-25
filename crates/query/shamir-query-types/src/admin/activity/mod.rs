@@ -7,11 +7,13 @@
 
 mod activity_page;
 mod activity_row;
+mod cancel_outcome;
 mod list_activity_req;
 mod op_name;
 
 pub use activity_page::ActivityPage;
 pub use activity_row::{ActivityRequestState, ActivityRow, ActivityTxState, RequestExecId};
+pub use cancel_outcome::CancelOutcome;
 pub use list_activity_req::{ActivityKind, ActivityScope, ListActivityReq};
 
 #[cfg(test)]

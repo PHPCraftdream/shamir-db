@@ -129,6 +129,11 @@ impl BatchOp {
             BatchOp::StartExport(_) => "admin:start_export",
             BatchOp::ExportStatus(_) => "admin:export_status",
             BatchOp::CancelExport(_) => "admin:cancel_export",
+            BatchOp::ListShapeStats(_) => "admin:list_shape_stats",
+            BatchOp::ResetShapeStats(_) => "admin:reset_shape_stats",
+            BatchOp::CancelRequest(_) => "admin:cancel_request",
+            BatchOp::CancelTx(_) => "admin:cancel_tx",
+            BatchOp::CancelCursorAdmin(_) => "admin:cancel_cursor_admin",
         }
     }
 }

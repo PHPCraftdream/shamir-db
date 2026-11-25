@@ -165,6 +165,7 @@ fn make_config(temp: &TempDir, export_root: PathBuf) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

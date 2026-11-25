@@ -12,6 +12,7 @@ use crate::error::ClientError;
 /// `ping`, `execute`, `wait_for_visibility` and `get_ddl_op_status`.
 pub struct TokenHttpClient {
     transport: TokenTransport,
+    validate_ping_payload: bool,
 }
 
 impl TokenHttpClient {
@@ -27,12 +28,68 @@ impl TokenHttpClient {
             opts.request_timeout,
         )
         .await?;
-        Ok(Self { transport })
+        Ok(Self {
+            transport,
+            validate_ping_payload: false,
+        })
+    }
+
+    /// Dials without authenticating until the first request, like [`Self::connect`],
+    /// but never opens a replacement connection or retries a request. Use
+    /// sequentially: a concurrent request cannot acquire the sole in-use sender.
+    /// Ping requires a typed `DbResponse::Pong` reply.
+    /// cancel-safe: NO — a cancelled dial abandons the sole connection attempt.
+    pub async fn connect_once(opts: TokenHttpOptions) -> Result<Self, ClientError> {
+        let header = opts.token.authorization_header()?;
+        let transport = TokenTransport::connect_once(
+            &opts.endpoint,
+            header,
+            opts.connect_timeout,
+            opts.request_timeout,
+        )
+        .await?;
+        Ok(Self {
+            transport,
+            validate_ping_payload: true,
+        })
+    }
+
+    /// [`Self::connect_once`] with an absolute deadline bounding ONLY the
+    /// TCP dial; `opts.connect_timeout` keeps its legacy meaning unchanged:
+    /// it caps the WHOLE establishment (TCP dial included) as an overall
+    /// relative limit, so the shorter of the two always wins and the
+    /// deadline never extends that cap. Use sequentially like
+    /// `connect_once`. cancel-safe: NO — a cancelled dial abandons the
+    /// sole connection attempt.
+    pub async fn connect_once_with_tcp_deadline(
+        opts: TokenHttpOptions,
+        tcp_deadline: tokio::time::Instant,
+    ) -> Result<Self, ClientError> {
+        let header = opts.token.authorization_header()?;
+        let transport = TokenTransport::connect_once_with_tcp_deadline(
+            &opts.endpoint,
+            header,
+            opts.connect_timeout,
+            opts.request_timeout,
+            Some(tcp_deadline),
+        )
+        .await?;
+        Ok(Self {
+            transport,
+            validate_ping_payload: true,
+        })
     }
 
     /// cancel-safe: NO — a cancelled call may leave a request in flight.
     pub async fn ping(&self) -> Result<(), ClientError> {
-        map_ping_reply(self.transport.get_ping().await?)
+        let reply = self.transport.get_ping().await?;
+        if !self.validate_ping_payload {
+            return map_ping_reply(reply);
+        }
+        match crate::visibility::map_response(map_reply(reply)?)? {
+            DbResponse::Pong => Ok(()),
+            _ => Err(ClientError::Protocol("expected Pong response".into())),
+        }
     }
 
     /// Sends one request; requests outside the token allowlist are refused

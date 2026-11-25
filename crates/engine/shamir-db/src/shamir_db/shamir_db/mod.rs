@@ -24,6 +24,8 @@ pub use core::{FunctionSource, ReplicationControlGuard, ShamirDb};
 #[cfg(test)]
 pub(crate) use db::classify_batch_error;
 pub(crate) use db::schema_management;
+pub(in crate::shamir_db) use db::validator::migration_admission::ValidatorRenameMigration;
 pub use db::{FunctionDescription, FunctionExport, FunctionState};
+pub(in crate::shamir_db) use db::{ValidatorRegistrationError, ValidatorTargetAdmission};
 #[cfg(test)]
 pub(in crate::shamir_db) use tests::pause_next_function_registration_for_test;

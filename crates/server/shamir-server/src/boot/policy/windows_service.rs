@@ -106,7 +106,14 @@ fn service_main_inner() -> anyhow::Result<()> {
             );
         }
     }
-    let _log_guard = crate::logging::init(&config.logging);
+    // The SAME boot path as the foreground server: refuse a sink that would
+    // land in the audit-log namespace, then install the subscriber. The
+    // service is always the server path, so it always honours `logging.file`.
+    let _log_guard = crate::logging::boot_logging(
+        &config.logging,
+        &config.data_dir,
+        crate::logging::SinkMode::Config,
+    )?;
 
     // Shutdown signal: the SCM control handler signals this Notify when
     // Stop or Shutdown is requested.
@@ -176,6 +183,10 @@ fn service_main_inner() -> anyhow::Result<()> {
     };
 
     // Run the server. On return (normal or error), ALWAYS report Stopped.
+    // `SERVICE_PROCESS_EXIT` mirrors the report's `exit_code()` and nothing
+    // forces the process exit: `set_service_status(Stopped)` is only reported
+    // after `serve` returned, which is why `serve` waits for the scheduled
+    // worker and keeps the data-directory lock until then.
     let result = rt.block_on(runtime::serve(config, bootstrap, shutdown, on_ready));
 
     SERVICE_PROCESS_EXIT.store(
@@ -212,6 +223,11 @@ fn service_main_inner() -> anyhow::Result<()> {
         tracing::info!("shamir-server service stopped cleanly");
     }
 
+    if result.is_err() {
+        // A failed run can leave a detached blocking job: dropping the runtime
+        // would wait for it without a bound and keep the process alive.
+        rt.shutdown_timeout(Duration::from_secs(5));
+    }
     result.map(|_| ())
 }
 

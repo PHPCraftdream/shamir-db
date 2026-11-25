@@ -4,13 +4,30 @@
 //! wire request); the ACTOR is the production builder path in
 //! `db_gateway.rs` (`request`/`read_query`/`table_ref`/`key_to_filter`).
 
-use super::FacadeDbGateway;
-use crate::engine::query::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding};
+use super::{classify_batch_error, FacadeDbGateway};
+use crate::engine::function::DbGatewayError;
+use crate::engine::query::batch::{
+    BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding,
+};
 use crate::engine::query::read::{Pagination, ReadQuery, Select, Temporal};
 use crate::engine::query::write::{InsertOp, InsertSelect};
 use crate::engine::query::{Filter, FilterValue};
 use crate::types::common::new_map;
 use crate::types::value::QueryValue;
+
+#[test]
+fn rv_b5_preserves_generic_server_batch_codes() {
+    for code in ["unknown_table", "server_busy"] {
+        let error = classify_batch_error(BatchError::query_coded("r", code, "server message"));
+        assert!(matches!(
+            error,
+            DbGatewayError::ExecutionSource {
+                code: Some(actual),
+                ..
+            } if actual == code
+        ));
+    }
+}
 
 fn legacy_request(alias: &str, id: &str, op: BatchOp) -> BatchRequest {
     let mut queries = new_map();

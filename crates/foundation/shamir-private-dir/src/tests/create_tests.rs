@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{create_private_dir, verify_private_dir};
+use crate::{create_exclusive_private_dir, create_private_dir, verify_private_dir};
 
 #[test]
 fn create_then_verify_roundtrip_on_a_temp_dir() {
@@ -22,6 +22,23 @@ fn create_is_idempotent_on_a_verified_directory() {
     create_private_dir(&target).unwrap();
     create_private_dir(&target).expect("second create on a verified dir must succeed");
     verify_private_dir(&target).unwrap();
+}
+
+#[test]
+fn exclusive_create_makes_a_private_directory_and_refuses_any_occupier() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("fresh");
+    create_exclusive_private_dir(&target).expect("a free path must be created private");
+    verify_private_dir(&target).expect("the created directory must verify");
+    let error = create_exclusive_private_dir(&target)
+        .expect_err("an existing private directory must NOT be adopted");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    let planted = dir.path().join("planted");
+    fs::create_dir_all(&planted).unwrap();
+    assert!(
+        create_exclusive_private_dir(&planted).is_err(),
+        "any pre-existing directory must be refused"
+    );
 }
 
 #[test]

@@ -10,13 +10,19 @@
 mod accept_loops;
 #[path = "support/audit.rs"]
 mod audit;
-#[path = "support/export_boot.rs"]
+#[path = "support/audit_teardown.rs"]
+pub(crate) mod audit_teardown;
+#[path = "support/boot/durable_stores.rs"]
+mod durable_stores;
+#[path = "support/boot/export_boot.rs"]
 mod export_boot;
 #[path = "support/helpers.rs"]
 mod helpers;
 mod http;
 mod launch;
 mod listeners;
+#[path = "support/load_metrics.rs"]
+mod load_metrics;
 #[path = "support/meta_port.rs"]
 mod meta_port;
 

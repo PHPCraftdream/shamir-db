@@ -182,10 +182,15 @@ pub(crate) async fn plan_fk_on_update(
         tx,
     )
     .await
-    .map_err(|e| BatchError::QueryError {
-        alias: alias.to_string(),
-        message: format!("fk_on_update: parent scan failed: {e}"),
-        code: Some("fk_on_update".to_string()),
+    .map_err(|e| {
+        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+            return BatchError::Cancelled;
+        }
+        BatchError::QueryError {
+            alias: alias.to_string(),
+            message: format!("fk_on_update: parent scan failed: {e}"),
+            code: Some("fk_on_update".to_string()),
+        }
     })?;
     if old_parent_values.values().all(|v| v.is_empty()) {
         return Ok(FkUpdatePlan {
@@ -273,10 +278,15 @@ pub(crate) async fn plan_fk_on_update(
                 let values: Vec<&QueryValue> = old_values.iter().copied().collect();
                 let exists = any_child_references(&child_table, child_field, &values, tx)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("fk_on_update: restrict child scan failed: {e}"),
-                        code: Some("fk_on_update".to_string()),
+                    .map_err(|e| {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return BatchError::Cancelled;
+                        }
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!("fk_on_update: restrict child scan failed: {e}"),
+                            code: Some("fk_on_update".to_string()),
+                        }
                     })?;
                 if exists {
                     return Err(BatchError::query_coded(
@@ -397,13 +407,16 @@ pub(crate) async fn plan_fk_on_update(
                     Ok(Some(b)) => b,
                     Ok(None) => continue,
                     Err(e) => {
+                        if crate::query::batch::exec_scope::is_request_cancelled(&e) {
+                            return Err(BatchError::Cancelled);
+                        }
                         return Err(BatchError::QueryError {
                             alias: alias.to_string(),
                             message: format!(
                                 "fk_on_update: child index fast-path re-read failed: {e}"
                             ),
                             code: Some("fk_on_update".to_string()),
-                        })
+                        });
                     }
                 };
                 classify_row_update(

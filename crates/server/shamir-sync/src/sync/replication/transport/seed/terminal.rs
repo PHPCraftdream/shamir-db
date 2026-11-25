@@ -15,6 +15,66 @@ use crate::replication::follower_loop::STALL_VISIBILITY_THRESHOLD;
 use crate::replication::source::ReplSource;
 use crate::replication::ReplError;
 
+#[cfg(test)]
+pub(crate) struct MarkGate {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+    pub(crate) loops_token: tokio_util::sync::CancellationToken,
+    pub(crate) completed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+static MARK_GATE: std::sync::Mutex<Option<std::sync::Arc<MarkGate>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct MarkGateGuard {
+    pub(crate) gate: std::sync::Arc<MarkGate>,
+}
+
+#[cfg(test)]
+impl Drop for MarkGateGuard {
+    fn drop(&mut self) {
+        *MARK_GATE.lock().expect("mark gate mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mark_gate_arm() -> MarkGateGuard {
+    let gate = std::sync::Arc::new(MarkGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        loops_token: tokio_util::sync::CancellationToken::new(),
+        completed: tokio::sync::Notify::new(),
+    });
+    *MARK_GATE.lock().expect("mark gate mutex poisoned") = Some(std::sync::Arc::clone(&gate));
+    MarkGateGuard { gate }
+}
+
+#[cfg(test)]
+pub(crate) async fn mark_gate_wait(loops: tokio_util::sync::CancellationToken) {
+    let gate = MARK_GATE
+        .lock()
+        .expect("mark gate mutex poisoned")
+        .as_ref()
+        .cloned();
+    if let Some(gate) = gate {
+        let observed = gate.loops_token.clone();
+        tokio::spawn(async move {
+            loops.cancelled().await;
+            observed.cancel();
+        });
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mark_gate_complete() {
+    if let Some(gate) = MARK_GATE.lock().expect("mark gate mutex poisoned").take() {
+        gate.completed.notify_one();
+    }
+}
+
 /// Round-6 item 2 currency check: read the CURRENT `system/subscriptions`
 /// row for `name` (server-side read, same path as
 /// `supervisor.rs::read_subscription_row`) and report whether it exists with

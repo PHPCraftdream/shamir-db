@@ -38,7 +38,7 @@ resume reject if binding_strength(now) < binding_strength(at_auth)
 | `transport=ws, profile=tls` (endpoint /shamir/v1) | `0x01` | TLS exporter |
 | `transport=ws, profile=tls_browser` (endpoint /shamir/v1/browser) | `0x02` | bytes(32) zeros |
 
-**MUST:** Server rejects auth_init с `binding_mode` не в listener policy **до** Argon2id (DoS-amp защита). Reject = silent close.
+**MUST:** Server rejects auth_init с `binding_mode` не в listener policy before challenge. Login proof verification не выполняет server-side password KDF. Reject = silent close.
 
 **Browser endpoint protection:** `/shamir/v1/browser` requires `Origin` header (browser always sends per WS spec, native typically не шлёт). Native client случайно/злонамеренно подключающийся к browser endpoint → 400.
 

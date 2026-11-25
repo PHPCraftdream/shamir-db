@@ -21,8 +21,11 @@ fn err_code(code: &str, msg: impl Into<String>) -> BatchError {
     }
 }
 
-fn err_access(e: shamir_types::access::AccessError) -> BatchError {
-    err_code("access_denied", e.to_string())
+/// A table-scoped introspection refusal that is IDENTICAL for an absent
+/// table and an existing-but-closed one, so a guest cannot distinguish
+/// them (read-refusal parity).
+fn err_table_unavailable() -> BatchError {
+    err_code("unknown_table", "table is unavailable")
 }
 
 fn err(msg: impl Into<String>) -> BatchError {
@@ -50,7 +53,7 @@ impl ShamirAdminExecutor {
                 Action::Read,
             )
             .await
-            .map_err(err_access)?;
+            .map_err(|_| err_table_unavailable())?;
 
         // ── 1. Schema ────────────────────────────────────────────────
         let rec = self
@@ -59,7 +62,7 @@ impl ShamirAdminExecutor {
             .load_table_record(db, repo, table)
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?
-            .ok_or_else(|| err_code("not_found", format!("table '{db}/{repo}/{table}'")))?;
+            .ok_or_else(err_table_unavailable)?;
 
         let interner_mgr = self
             .shamir

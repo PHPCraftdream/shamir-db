@@ -6,7 +6,7 @@ use std::sync::Arc;
 use shamir_collections::{TFxSet, THasher};
 use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::ShamirDb;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 use super::handle::StartRaceHook;
@@ -16,6 +16,14 @@ use crate::replication::error::ReplError;
 #[cfg(test)]
 use crate::replication::follower_loop::ApplyParkHook;
 use crate::replication::source;
+
+/// Test-only gate that parks a wrapper between its loop's return and its housekeeping.
+#[cfg(test)]
+pub(crate) struct HousekeepingGate {
+    pub(crate) repo: Option<String>,
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
 
 /// Supervises the lifecycle of follower loops driven by the declarative
 /// subscription catalogue. See the module docs.
@@ -49,9 +57,18 @@ pub struct SubscriptionSupervisor {
     pub(super) maintenance_gate: Option<MaintenanceGate>,
     // Cold catalogue lifecycle serialization; no follower write lock.
     reconcile_lock: tokio::sync::Mutex<()>,
+    /// Persistent stop admission, cancelled by [`Self::begin_stop`]. Every
+    /// follower's cancellation token is a CHILD of it, so one cancel reaches
+    /// every running follower without walking the registry, and a follower
+    /// started afterwards is born cancelled.
+    pub(super) stop: tokio_util::sync::CancellationToken,
     /// Test seam for replacing the row between lease-take and spawn.
     #[cfg(test)]
     pub(super) start_race_hook: Option<StartRaceHook>,
+    /// Test seam awaited after the follower tasks were spawned and before the
+    /// handle is registered: the window in which a follower can already exit.
+    #[cfg(test)]
+    pub(super) registration_hook: Option<StartRaceHook>,
     #[cfg(test)]
     pub(super) apply_park: Option<Arc<ApplyParkHook>>,
     #[cfg(test)]
@@ -60,6 +77,14 @@ pub struct SubscriptionSupervisor {
     pub(crate) teardown_count: Arc<AtomicUsize>,
     #[cfg(test)]
     pub(crate) teardown_done: Arc<tokio::sync::Notify>,
+    /// Signalled by the last exiting wrapper right before it waits for the
+    /// replication control lock: every loop returned and every done flag is set.
+    #[cfg(test)]
+    pub(crate) teardown_entered: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) accounted: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(crate) housekeeping_gate: Option<Arc<HousekeepingGate>>,
 }
 
 impl SubscriptionSupervisor {
@@ -83,8 +108,11 @@ impl SubscriptionSupervisor {
             validate_replicated_payload: false,
             maintenance_gate: None,
             reconcile_lock: tokio::sync::Mutex::new(()),
+            stop: tokio_util::sync::CancellationToken::new(),
             #[cfg(test)]
             start_race_hook: None,
+            #[cfg(test)]
+            registration_hook: None,
             #[cfg(test)]
             apply_park: None,
             #[cfg(test)]
@@ -93,6 +121,12 @@ impl SubscriptionSupervisor {
             teardown_count: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             teardown_done: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            teardown_entered: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            accounted: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            housekeeping_gate: None,
         }
     }
 
@@ -105,6 +139,15 @@ impl SubscriptionSupervisor {
         self
     }
 
+    /// Install a hook awaited after the follower tasks were spawned and before
+    /// their handle is registered (tests only): a follower can exit in that
+    /// window, before the exit path has anything to deregister.
+    #[cfg(test)]
+    pub fn with_registration_hook(mut self, hook: StartRaceHook) -> Self {
+        self.registration_hook = Some(hook);
+        self
+    }
+
     /// Test hook: park selected targets during apply and signal exits.
     #[cfg(test)]
     pub(crate) fn with_apply_park(mut self, hook: Arc<ApplyParkHook>) -> Self {
@@ -114,13 +157,29 @@ impl SubscriptionSupervisor {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_housekeeping_gate(mut self, gate: Arc<HousekeepingGate>) -> Self {
+        self.housekeeping_gate = Some(gate);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn teardown_count(&self) -> usize {
         self.teardown_count.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
+    pub(crate) fn accounted_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.accounted)
+    }
+
+    #[cfg(test)]
     pub(crate) fn teardown_signal(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.teardown_done)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn teardown_entered_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.teardown_entered)
     }
 
     /// Cap each loop at `n` iterations (tests only — avoids relying on
@@ -249,6 +308,9 @@ impl SubscriptionSupervisor {
             None => None,
         };
         let _lifecycle = self.reconcile_lock.lock().await;
+        if self.stop.is_cancelled() {
+            return;
+        }
         // Lock only the catalogue read; release before task stop/start callbacks.
         let control = self.local.lock_replication_control().await;
         let subs = match self.read_subscriptions().await {
@@ -308,7 +370,13 @@ impl SubscriptionSupervisor {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
                 for join in handle.joins {
-                    let _ = join.await;
+                    if let Err(join_error) = join.await {
+                        error!(
+                            subscription = %name,
+                            error = %join_error,
+                            "supervisor: follower wrapper join failed during reconcile"
+                        );
+                    }
                 }
                 info!(subscription = %name, "supervisor: stopped follower loop");
             }
@@ -338,6 +406,21 @@ impl SubscriptionSupervisor {
         }
     }
 
+    /// Shutdown, first step: latch the stop admission and cancel EVERY follower
+    /// (running now or started later) by cancelling the parent token their own
+    /// tokens derive from. No lifecycle lock, no registry walk, no await.
+    ///
+    /// A reconcile pass in flight holds [`Self::reconcile_lock`] across its
+    /// catalogue read, so a caller that abandons [`Self::stop_all`] while it
+    /// waits for the lock (a shutdown budget) would otherwise leave every
+    /// follower running. After this call no new pass starts a follower (a pass
+    /// already past its check can still spawn one, born cancelled). Followers
+    /// exit gracefully at their next cancellation checkpoint;
+    /// [`Self::stop_all`] then joins them.
+    pub fn begin_stop(&self) {
+        self.stop.cancel();
+    }
+
     /// Stop every running loop and clear the registry (shutdown).
     pub async fn stop_all(&self) {
         let _lifecycle = self.reconcile_lock.lock().await;
@@ -346,11 +429,23 @@ impl SubscriptionSupervisor {
             names.push(name.clone());
             true
         });
+        // Signal EVERY follower before awaiting any join: a wait abandoned by
+        // a shutdown budget must not leave later followers running.
+        let mut stopped = Vec::with_capacity(names.len());
         for name in names {
             if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
-                for join in handle.joins {
-                    let _ = join.await;
+                stopped.push((name, handle));
+            }
+        }
+        for (name, handle) in stopped {
+            for join in handle.joins {
+                if let Err(join_error) = join.await {
+                    error!(
+                        subscription = %name,
+                        error = %join_error,
+                        "supervisor: follower wrapper join failed during stop_all"
+                    );
                 }
             }
         }
@@ -365,7 +460,14 @@ impl SubscriptionSupervisor {
             return;
         };
         for join in handle.joins {
-            join.await.expect("subscription task panicked");
+            if let Err(join_error) = join.await {
+                error!(
+                    subscription = %name,
+                    error = %join_error,
+                    "supervisor: follower wrapper join failed while waiting for subscription"
+                );
+                panic!("subscription task panicked: {join_error}");
+            }
         }
     }
 }

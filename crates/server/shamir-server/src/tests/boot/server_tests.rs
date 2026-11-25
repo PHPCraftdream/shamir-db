@@ -60,6 +60,7 @@ async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     };
     let launcher = ServerLauncher {
         config,
@@ -143,6 +144,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     };
     let launcher = ServerLauncher {
         config,
@@ -184,7 +186,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
 ///    (release-on-drop).
 ///
 /// This tests the lock primitive directly on a tempfile. The wiring from
-/// `launch()` into `ServerHandle._data_dir_lock` is verified by compilation
+/// `launch()` into `ServerHandle.data_dir_lock` is verified by compilation
 /// (the field is populated in the `Ok(ServerHandle { ... })` constructor;
 /// removing it is a compile error).
 #[test]

@@ -58,7 +58,13 @@ pub(crate) fn classify_request(
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => None,
+        | DbRequest::RevokeUserTokens { .. }
+        // Status and GetRecord are non-batch admin-shell surfaces: they
+        // carry a db in their payload, but the token perimeter denies
+        // them outright, so they stay in the non-db group — a scoped
+        // database allowlist must never override the refusal.
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => None,
     };
     if endpoint == Endpoint::Rest
         && matches!(
@@ -130,7 +136,11 @@ pub(crate) fn classify_request(
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => Decision::Denied("token_request_denied"),
+        | DbRequest::RevokeUserTokens { .. }
+        // Admin-shell PR3: operator status and exact-key point reads
+        // are not token surfaces on any endpoint or mode.
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => Decision::Denied("token_request_denied"),
     }
 }
 
@@ -258,14 +268,20 @@ fn classify_batch(
             | BatchOp::StartBackup(_)
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
-            // R4b-1: activity listing is a SCRAM-session surface only — a
-            // token endpoint must not enumerate other sessions' activity
-            // (Own) or global operator activity (All).
+            // Activity control is a SCRAM-session surface only. Scoped
+            // tokens must not list activity or cancel an execution,
+            // transaction or cursor by ID.
             | BatchOp::ListActivity(_)
             // Export admin ops — same superuser surface as backup.
             | BatchOp::StartExport(_)
             | BatchOp::ExportStatus(_)
             | BatchOp::CancelExport(_)
+            // Shape statistics are a SCRAM-session surface: tokens may neither list nor wipe them.
+            | BatchOp::ListShapeStats(_)
+            | BatchOp::ResetShapeStats(_)
+            | BatchOp::CancelRequest(_)
+            | BatchOp::CancelTx(_)
+            | BatchOp::CancelCursorAdmin(_)
             | BatchOp::ReplicationStatus(_) => return Decision::Denied("token_request_denied"),
         }
     }

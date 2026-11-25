@@ -3,10 +3,15 @@
 //! and the bootstrap/identity logging + derivation utilities.
 
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_connect::common::crypto::Ed25519Keypair;
+use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -21,12 +26,76 @@ use shamir_transport_ws::browser::BrowserOriginPolicy;
 use shamir_db::access::Actor;
 use shamir_db::ShamirDb;
 
+use crate::config::{Config, ResolvedSchedule};
 use crate::connection::{ConnTasks, ConnectionContext};
 use crate::server::boot_error::BootError;
 use crate::server_meta::ServerMetaStore;
+use crate::sync::durability::backup::provision_snapshot_lease;
 use crate::user_directory::FjallUserDirectory;
 
 use crate::bootstrap::BootstrapOutcome;
+
+pub(super) fn resolve_backup(
+    config: &Config,
+) -> Result<Option<(ResolvedSchedule, PathBuf)>, BootError> {
+    let Some(backup) = &config.backup else {
+        return Ok(None);
+    };
+    let source = config.data_dir.canonicalize()?;
+    let resolved = backup.resolve(&source)?;
+    // R2d-FIX-C: the destination is canonical and verified private after
+    // `resolve`, so provision the reserved snapshot-lease marker now, before
+    // retention can ever consider a deletion. Best-effort: a transient
+    // provisioning failure must not fail server startup (and `resolve`
+    // already made the privacy of the root a hard boot requirement). READERS
+    // never create the marker (an absent marker means an unmanaged export,
+    // read lock-free): only the scheduler provisions it — here, and again
+    // before publishing every scheduled copy. Retention does NOT
+    // repair-and-continue any more: a provisioning failure fails the pass
+    // closed and counts as a retention failure (registry runner), so this
+    // warning is best-effort boot pre-provisioning only.
+    //
+    // DOCUMENTED WINDOW (by design): a reader that started on this root
+    // while the marker was ABSENT is unleased for its WHOLE read, and this
+    // provisioning (first startup or marker repair) can make its in-flight
+    // copy deletion-eligible. Finish or postpone manual verify/restore
+    // before the first startup or repair; after the first successful
+    // scheduled pass the guarantee holds for later readers that hold the
+    // lease while the marker remains.
+    if let Err(error) = provision_snapshot_lease(&resolved.destination) {
+        tracing::warn!(
+            root = %resolved.destination.display(),
+            %error,
+            "could not pre-provision the snapshot lease marker at boot; \
+             the scheduler provisions it before publishing each copy, and \
+             retention fails its pass until it exists"
+        );
+    }
+    Ok(Some((resolved, source)))
+}
+
+pub(super) fn bind_backup_owner(
+    backup: Option<(ResolvedSchedule, PathBuf)>,
+    meta: &ServerMetaStore,
+) -> Result<Option<(ResolvedSchedule, String)>, BootError> {
+    backup
+        .map(|(resolved, source)| backup_owner(meta, &source).map(|owner| (resolved, owner)))
+        .transpose()
+}
+
+/// Separate copied/relocated stores without binding retention to a rotating key.
+fn backup_owner(meta: &ServerMetaStore, source: &Path) -> Result<String, BootError> {
+    let id = meta
+        .backup_owner_id()
+        .map_err(|error| BootError::ServerMeta(error.to_string()))?;
+    let mut binding = b"shamir-backup-owner-v1\0".to_vec();
+    binding.extend_from_slice(&id);
+    #[cfg(unix)]
+    binding.extend_from_slice(source.as_os_str().as_bytes());
+    #[cfg(windows)]
+    binding.extend(source.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
+    Ok(hex::encode(sha256(&binding)))
+}
 
 /// Read the boot clock without substituting a timestamp on failure.
 pub(super) fn boot_now_ns() -> Result<u64, BootError> {

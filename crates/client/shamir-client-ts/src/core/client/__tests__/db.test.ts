@@ -392,6 +392,26 @@ describe('Db handle (unit)', () => {
     expect(ev.value.data).toEqual(new Uint8Array([1, 2, 3]));
   });
 
+  it('db.runLive: rejects the whole promise when the batch refuses a mixed subscription', async () => {
+    const router = new SubscriptionRouter();
+    const failure = new Error('unknown_table: table is unavailable');
+    const client = {
+      execute: async (): Promise<BatchResponse> => { throw failure; },
+      executeWithTouch: async (): Promise<BatchResponse> => { throw failure; },
+      get subscriptions(): SubscriptionRouter { return router; },
+    };
+    const db = new Db(client as unknown as import('../client.js').ShamirClient, 'live_db');
+
+    await expect(db.runLive(
+      db.batch('mixed-refusal').subscribe('mixed', [
+        { store: 'main', table: 'messages' },
+        { store: 'main', table: 'closed' },
+      ]),
+    )).rejects.toBe(failure);
+    expect(router).toBeDefined();
+  });
+
+
   it('db.runLive: aliases without a numeric sub are not turned into handles', async () => {
     const router = new SubscriptionRouter();
     const resp: BatchResponse = {

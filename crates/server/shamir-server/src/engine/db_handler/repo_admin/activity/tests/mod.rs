@@ -7,6 +7,18 @@
 //! (`list::select_window`) with duplicate ids, exact limits and
 //! continuation boundaries. No server harness — these exercise the same
 //! code the paging worker calls.
+//! `refusal_fairness_tests` — one principal cannot occupy the whole
+//! refusal-audit queue while another principal is still recorded.
+//! `refusal_close_race_tests` — a refusal that reserved a slot before
+//! `close()` is never spawned after the discard sweep.
+//! `tx_release_tests` — every end of an interactive transaction (owner rollback, reaper, session close, an in-flight request at session close) releases the Level-3 record locks it held; the release is idempotent and keyed by the transaction's own id.
 
+#[path = "cancellation/tail_tests.rs"]
+mod cancellation_tail_tests;
+#[path = "cancellation/legacy_tests.rs"]
+mod cancellation_tests;
 mod continuation_token_tests;
 mod paging_tests;
+mod refusal_close_race_tests;
+mod refusal_fairness_tests;
+mod tx_release_tests;

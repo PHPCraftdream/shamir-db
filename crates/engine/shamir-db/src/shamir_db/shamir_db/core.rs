@@ -51,9 +51,10 @@ pub(in crate::shamir_db) const SYSTEM_DB_NAME: &str = "__system__";
 
 use crate::engine::migration::MigrationCoordinator;
 use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
+use crate::shamir_db::execute::admin_db_schema_migration::FenceState;
 use crate::shamir_db::execute::ResyncQuarantineCache;
 use crate::shamir_db::system_store::{
-    ensure_database_identity, table_config_from_catalogue_record,
+    ensure_database_identity, table_config_from_catalogue_record, DatabaseIdentity,
 };
 
 use super::super::ports::{PrincipalResolver, UserAdminPort};
@@ -72,13 +73,7 @@ pub enum FunctionSource<'a> {
     Shamir(&'a str),
 }
 
-/// The caller-holds-proof newtype for `replication_control_lock` (round 5,
-/// A3). The constructor is `pub(crate)`, so code outside `shamir-db` cannot
-/// fabricate a guard — the compiler enforces the caller-holds-lock contract
-/// as far as crate boundaries go (no compile-fail evidence is available in
-/// this repo's CI: a counterexample simply does not compile). Every API that
-/// must run under the interlock takes `&ReplicationControlGuard` instead of
-/// a raw `tokio::sync::MutexGuard<()>`.
+/// Caller-holds-proof guard for `replication_control_lock`; its crate-private constructor prevents external fabrication.
 pub struct ReplicationControlGuard<'a> {
     guard: tokio::sync::MutexGuard<'a, ()>,
 }
@@ -88,9 +83,7 @@ impl<'a> ReplicationControlGuard<'a> {
         Self { guard }
     }
 
-    /// Monitoring seam: per-acquisition identity of the held interlock. The
-    /// guard's entire VALUE is its lifetime + Drop — dropping it releases
-    /// `replication_control_lock`.
+    /// Identity of the held interlock; dropping this guard releases the lock.
     pub fn interlock_id(&self) -> usize {
         std::ptr::from_ref(&*self.guard).addr()
     }
@@ -182,17 +175,14 @@ pub struct ShamirDb {
     pub(super) durability_policy: DurabilityPolicy,
     /// Shared by clones; serializes function-family migration runners server-wide.
     pub(in crate::shamir_db) function_family_migration_gate: Arc<std::sync::atomic::AtomicBool>,
-    /// R1c §4.3 — in-process per-database application-schema maintenance
-    /// fence: db name → held durable fence generation; absent entry = free.
-    /// Lock-free (`DashMap` entries, admin/DDL frequency only); the ONLY
-    /// accessors are in `execute/admin_db/schema_migration/fence.rs`.
-    pub(in crate::shamir_db) schema_migration_gate: Arc<DashMap<String, u64, THasher>>,
-    /// R1c step 2b-3b — open-time in-doubt fence marker: db name → durable
-    /// owned generation (ALWAYS known: corrupt journal damage fails the
-    /// whole startup with the typed journal error instead of leaving an
-    /// unknowable marker). In-memory only, not durable; accessors in
-    /// `execute/admin_db/schema_migration/fence.rs`.
-    pub(in crate::shamir_db) schema_migration_gate_in_doubt: Arc<DashMap<String, u64, THasher>>,
+    /// Round-3 finding 4: set while a migration-owned RenameValidator body
+    /// holds its foreign fence reservations (`validator/migration_admission.rs`).
+    pub(in crate::shamir_db) validator_rename_migration: Arc<std::sync::atomic::AtomicBool>,
+    /// R1c §4.3 — stable-identity fence state; vacant means free.
+    pub(in crate::shamir_db) schema_migration_fences:
+        Arc<DashMap<DatabaseIdentity, FenceState, THasher>>,
+    pub(in crate::shamir_db) schema_migration_fence_count: Arc<std::sync::atomic::AtomicUsize>,
+    pub(in crate::shamir_db) database_identities: Arc<DashMap<String, DatabaseIdentity, THasher>>,
     /// R1c §4.5 — engine-side read-only (follower) flag lowered by the server
     /// at launch (`set_node_read_only`); application-schema apply fails closed
     /// on it. One `AtomicBool`, written once at boot, read per admission.
@@ -377,8 +367,10 @@ impl ShamirDb {
             experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             durability_policy: durability,
             function_family_migration_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            schema_migration_gate: Arc::new(DashMap::with_hasher(THasher::default())),
-            schema_migration_gate_in_doubt: Arc::new(DashMap::with_hasher(THasher::default())),
+            validator_rename_migration: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            schema_migration_fences: Arc::new(DashMap::with_hasher(THasher::default())),
+            schema_migration_fence_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            database_identities: Arc::new(DashMap::with_hasher(THasher::default())),
             node_read_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resync_quarantine: Arc::new(ResyncQuarantineCache::new()),
             changelog_receivers: Arc::new(
@@ -420,21 +412,22 @@ impl ShamirDb {
         if seed {
             shamir.check_seed_catalogue().await?;
         }
-        // Load existing databases from system store
+        // Load existing databases; `__system__` is reserved internally.
         let db_records = shamir.system_store.load_databases().await?;
-        let mut db_identities = Vec::new();
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {
                 if name != SYSTEM_DB_NAME {
                     // Boxed: keeps the backfill future out of this large init future.
                     let identity =
                         Box::pin(ensure_database_identity(&shamir.system_store, name)).await?;
-                    db_identities.push((name.to_string(), identity));
+                    shamir
+                        .database_identities
+                        .insert(name.to_string(), identity);
                 }
             }
         }
         // R1c step 2b-3b: one-time open-time seed of the in-doubt marker.
-        Box::pin(shamir.seed_schema_migration_in_doubt(&db_identities)).await?;
+        Box::pin(shamir.seed_schema_migration_in_doubt()).await?;
         for record in &db_records {
             if let Some(name) = record["name"].as_str() {
                 if name != SYSTEM_DB_NAME {
@@ -904,7 +897,6 @@ impl ShamirDb {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     pub(super) fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
-        // Unavailable backends return None; recorded engine names remain intact.
         #[cfg(not(feature = "fjall"))]
         let _ = path;
         match engine {
@@ -923,13 +915,7 @@ impl ShamirDb {
         Self::storage_type_inner(factory, true).to_string()
     }
 
-    /// `top == true` labels the factory the catalogue will record: a RAW
-    /// `Fjall` variant at the top of the stack is an unbuffered repo and
-    /// must be recorded as `"fjall_raw"` so the boot path re-attaches it
-    /// raw (`supports_atomic_batch() == true`). A `Fjall` reached THROUGH
-    /// a wrapper is part of a buffered stack and must keep reporting the
-    /// wrapped kind `"fjall"` — relabeling it raw would make the boot path
-    /// drop the buffer layer on reopen.
+    /// Labels the top-level Fjall variant raw; wrapped Fjall keeps its wrapped kind.
     fn storage_type_inner(factory: &BoxRepoFactory, top: bool) -> &'static str {
         #[cfg(not(feature = "fjall"))]
         let _ = top;
@@ -945,9 +931,6 @@ impl ShamirDb {
             }
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Hybrid(_) => "hybrid",
-            // The buffer/cache layers don't have an identity of their own
-            // — recurse to the underlying backend so reflection sees the
-            // real engine, but as a WRAPPED (non-top) backend.
             BoxRepoFactory::MemBuffer(f) => Self::storage_type_inner(&f.inner, false),
             BoxRepoFactory::Cached(f) => Self::storage_type_inner(&f.inner, false),
         }
@@ -965,9 +948,6 @@ impl ShamirDb {
         }
     }
 
-    /// Canonical table-ref string for validator binding tracking.
-    /// Format: `"db/repo/table"` — matches the form used by
-    /// `ValidatorRegistry::add_binding` / `bound_tables`.
     pub(super) fn table_ref_str(db: &str, repo: &str, table: &str) -> String {
         format!("{}/{}/{}", db, repo, table)
     }

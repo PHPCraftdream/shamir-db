@@ -165,8 +165,11 @@ impl RepoCore {
 
     /// Admitted twin of `get_table`: requires the caller to
     /// hold THIS repository's write-admission permit; the permit is checked
-    /// (`debug_check_permit`) and threaded into table construction. Cold setup
-    /// runs inline; do not cancel while recovery may still be running.
+    /// (`debug_check_permit`) and threaded into table construction so the
+    /// produced `TableManager` is born already holding an admitted
+    /// capability. Otherwise identical semantics to `get_table` (single-init
+    /// `OnceCell`; an unconfigured name is refused before any catalogue cell
+    /// is allocated, and re-checked inside the init closure).
     pub(crate) async fn get_table_admitted_unfenced(
         &self,
         table_name: &str,
@@ -183,6 +186,18 @@ impl RepoCore {
         table_name: &str,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
+        // Refuse an unconfigured name BEFORE touching the cell map: a
+        // request naming a never-created table would otherwise leave an
+        // empty `OnceCell` behind forever, so N distinct unknown names
+        // grow `tables` without bound. The error text matches the
+        // init-closure refusal below exactly (callers see no difference).
+        if !self.catalog.has_table(table_name) {
+            return Err(DbError::NotFound(format!(
+                "Table '{}' is not configured in this repository",
+                table_name
+            )));
+        }
+
         // Clone the `Arc<OnceCell>` out of the DashMap and DROP the shard
         // guard BEFORE the init `.await`. DashMap shards are backed by a
         // synchronous `RwLock`; holding the `entry()` write guard across the
@@ -195,13 +210,13 @@ impl RepoCore {
         // shard lock only needs to protect the map insert, not the init.
         let cell = self.catalog.insert_table_cell(table_name);
 
-        // §B13: existence-check happens INSIDE the init closure, so it
-        // is serialized with the actual context construction. Doing the
-        // check up-front would race with concurrent `remove_table`
-        // between our `configs.contains_key` and the `tables.entry`
-        // install (two independent DashMaps). On a removed table the
-        // init returns Err and `OnceCell::get_or_try_init` leaves the
-        // cell empty so subsequent calls retry.
+        // §B13: the check above is not sufficient on its own — a concurrent
+        // `remove_table` can slip in between our `configs.contains_key` and
+        // the `tables.entry` install (two independent DashMaps), so the
+        // authoritative existence check stays INSIDE the init closure,
+        // serialized with the actual context construction. On a removed
+        // table the init returns Err and `OnceCell::get_or_try_init` leaves
+        // the cell empty so subsequent calls retry.
         let tbl = cell
             .get_or_try_init(|| async {
                 if !self.catalog.has_table(table_name) {

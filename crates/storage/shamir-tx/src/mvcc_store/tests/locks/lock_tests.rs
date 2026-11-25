@@ -1,10 +1,12 @@
 use crate::mvcc_store::tests::gc::helpers::make_mvcc;
 use crate::mvcc_store::LockMode;
+use crate::{CancelHandle, LockError, WaitState};
 use bytes::Bytes;
 use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // ----------------------------------------------------------------
 // S2 — Level-3 pessimistic locking (wound-wait).
@@ -806,6 +808,66 @@ async fn d1c20d85_cancelled_waiter_keeps_identity_until_release() {
         assert_eq!(mvcc.locks_len(), 1, "waiter must retain the old identity");
     }
     assert_eq!(mvcc.locks_len(), 0, "cancellation retires the final lease");
+}
+
+#[tokio::test]
+async fn cancel_wakes_parked_lock_wait() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let mvcc = make_mvcc();
+        let key = RecordKey::from_slice(b"cancel-parked-lock");
+        let owner = TxWound::new();
+        mvcc.lock_key(
+            key.clone(),
+            1,
+            owner.flag(),
+            owner.notify(),
+            LockMode::Exclusive,
+        )
+        .await
+        .unwrap();
+
+        let waiter = TxWound::new();
+        let cancel = CancelHandle::default();
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let cancel_waiter = async {
+            let waiting = mvcc.lock_key_with_cancel(
+                key.clone(),
+                2,
+                waiter.flag(),
+                waiter.notify(),
+                LockMode::Exclusive,
+                Some(&cancel),
+            );
+            tokio::pin!(waiting);
+            assert!(futures::poll!(waiting.as_mut()).is_pending());
+            assert_eq!(cancel.waiting(), WaitState::Lock);
+            parked_tx.send(()).unwrap();
+            assert!(matches!(waiting.await, Err(LockError::Cancelled)));
+            assert_eq!(cancel.waiting(), WaitState::None);
+        };
+        let issue_cancel = async {
+            parked_rx.await.unwrap();
+            assert_eq!(cancel.try_cancel(), Ok(()));
+        };
+        tokio::join!(cancel_waiter, issue_cancel);
+
+        // Cancellation must neither remove the older holder nor install the waiter.
+        assert_eq!(mvcc.locks_len(), 1);
+        let lock = mvcc
+            .locks
+            .get_sync(&key)
+            .map(|entry| Arc::clone(entry.get()))
+            .unwrap();
+        {
+            let state = lock.state.lock().await;
+            assert!(state.held_by(1));
+            assert!(!state.held_by(2));
+        }
+        mvcc.release_locks(1, &[key]).await;
+        assert_eq!(mvcc.locks_len(), 0, "no cancelled waiter lease remains");
+    })
+    .await
+    .expect("cancellation should wake the waiter without releasing the owner");
 }
 
 #[tokio::test]

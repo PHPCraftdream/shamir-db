@@ -1,14 +1,10 @@
-//! Per-variant classification impls for [`BatchOp`] (hosted in `core/`
-//! because `ops/` is at the 7-entry layout cap; moved out of
-//! `batch_op.rs` to keep that file under the 1000-line layout cap).
-//! Every `match` here stays exhaustive with no wildcard arm: adding a
-//! `BatchOp` variant fails compilation until the author classifies it.
+//! Per-variant classification impls for [`BatchOp`].
 
 use shamir_types::access::{Action, ResourcePath};
 
 use super::super::ops::batch_op::BatchOp;
 use crate::admin::types::schema_migration::SchemaMigrationAdminOp;
-use crate::batch::plan::tree_visitor::BatchTreeVisitor;
+use crate::batch::tree_visitor::BatchTreeVisitor;
 
 impl BatchOp {
     /// Returns the `(Action, ResourcePath)` this op must be authorized
@@ -126,12 +122,15 @@ impl BatchOp {
             | BatchOp::StartBackup(_)
             | BatchOp::BackupStatus(_)
             | BatchOp::CancelBackup(_)
-            // Online logical-export admin ops (R3 step 2b): scope ACLs are
-            // checked in the admin handler before the gate is taken.
+            | BatchOp::ListActivity(_)
             | BatchOp::StartExport(_)
             | BatchOp::ExportStatus(_)
             | BatchOp::CancelExport(_)
-            | BatchOp::ListActivity(_) => return None,
+            | BatchOp::CancelRequest(_)
+            | BatchOp::CancelTx(_)
+            | BatchOp::CancelCursorAdmin(_)
+            | BatchOp::ListShapeStats(_)
+            | BatchOp::ResetShapeStats(_) => return None,
         };
         let tref = self.table_ref()?;
         Some((
@@ -249,6 +248,11 @@ impl BatchOp {
                 | BatchOp::StartExport(_)
                 | BatchOp::ExportStatus(_)
                 | BatchOp::CancelExport(_)
+                | BatchOp::CancelRequest(_)
+                | BatchOp::CancelTx(_)
+                | BatchOp::CancelCursorAdmin(_)
+                | BatchOp::ListShapeStats(_)
+                | BatchOp::ResetShapeStats(_)
         )
     }
 
@@ -296,13 +300,23 @@ impl BatchOp {
             // Online-backup admin ops: status is pure introspection; start
             // and cancel change persistent node-side backup state (R2a 3a).
             BatchOp::BackupStatus(_) | BatchOp::ListActivity(_) => false,
-            BatchOp::StartBackup(_) => true,
-            BatchOp::CancelBackup(_) => true,
             // Online logical-export admin ops (R3 step 2b): status is pure
             // introspection; start and cancel change export-job state.
             BatchOp::ExportStatus(_) => false,
             BatchOp::StartExport(_) => true,
             BatchOp::CancelExport(_) => true,
+            // Cooperative cancellation only changes transient execution state.
+            // Operator cancellation likewise only changes transient state.
+            BatchOp::CancelRequest(_) => false,
+            BatchOp::CancelTx(_) | BatchOp::CancelCursorAdmin(_) => false,
+            // The shape registry is local in-memory telemetry; the listing is
+            // pure introspection.
+            BatchOp::ListShapeStats(_) => false,
+            // The reset destroys local statistics only, never stored data
+            // (audited as an admin op, see the server handler).
+            BatchOp::ResetShapeStats(_) => false,
+            BatchOp::StartBackup(_) => true,
+            BatchOp::CancelBackup(_) => true,
             // Application-schema migrations: the read-only status and plan
             // arms do not mutate state; the apply arm does (design §5.2).
             BatchOp::ApplicationSchema(

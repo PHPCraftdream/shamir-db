@@ -31,7 +31,11 @@ fn classify_request(request: &DbRequest) -> &'static str {
         | DbRequest::CreateApiToken { .. }
         | DbRequest::ListApiTokens { .. }
         | DbRequest::RevokeApiToken { .. }
-        | DbRequest::RevokeUserTokens { .. } => "admin-denied",
+        | DbRequest::RevokeUserTokens { .. }
+        // R5 PR3: the operator state snapshot and the exact-key point read
+        // are outside the token read-only subset (§3.3).
+        | DbRequest::Status
+        | DbRequest::GetRecord { .. } => "admin-denied",
     }
 }
 
@@ -124,6 +128,13 @@ fn classify_batch(op: &BatchOp) -> &'static str {
         // R4b-1: a token endpoint must not enumerate other sessions'
         // activity (Own) or global operator activity (All).
         | BatchOp::ListActivity(_)
+        | BatchOp::ListShapeStats(_)
+        | BatchOp::ResetShapeStats(_)
+        | BatchOp::CancelRequest(_)
+        // R4b-3: a token endpoint must not cancel another session's
+        // transaction or cursor.
+        | BatchOp::CancelTx(_)
+        | BatchOp::CancelCursorAdmin(_)
         | BatchOp::CancelBackup(_)
         | BatchOp::ReplicationStatus(_)
         // R3 2b: online-export admin ops are superuser-surface for tokens.
@@ -207,13 +218,13 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
     assert!(!cases.is_empty(), "request fixtures are complete");
     assert_eq!(
         cases.len(),
-        10,
+        12,
         "every current admin-denied DbRequest variant has one fixture"
     );
     assert!(!batches.is_empty(), "batch fixtures are complete");
     assert_eq!(
         batches.len(),
-        65,
+        66,
         "one fixture for each current admin BatchOp arm"
     );
 

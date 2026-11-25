@@ -3,12 +3,17 @@
 use std::time::Duration;
 
 use shamir_storage::error::DbError;
+use shamir_tx::CancelHandle;
 
 use crate::query::read::QueryRecord;
 
 /// Shared read-visibility budget of an enclosing execution.
 pub trait ReadVisibilityScope: Send + Sync {
     fn read_visibility_budget(&self) -> Duration;
+
+    fn cancel_handle(&self) -> Option<&CancelHandle> {
+        None
+    }
 }
 
 /// Policy-enabled per-read byte meter (result-size accounting).
@@ -77,4 +82,9 @@ pub trait QueryMetrics: Send + Sync {
     fn record_duration(&self, op: QueryOp, elapsed_ns: u64);
     fn record_error(&self, code: Option<&str>);
     fn record_rows(&self, viewed: u64, returned: u64);
+
+    /// Record one data-op execution under its canonical shape key.
+    ///
+    /// The default is a no-op for sinks that do not keep shapes.
+    fn record_shape(&self, _key: [u8; 16], _elapsed_ns: u64, _failed: bool) {}
 }

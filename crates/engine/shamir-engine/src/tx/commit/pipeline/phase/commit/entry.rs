@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use shamir_query_types::batch::TransactionInfo;
 use shamir_storage::error::DbError;
-use shamir_tx::TxContext;
+use shamir_tx::{CancelHandle, CancelState, TxContext};
 use shamir_wal::WalOpV2;
 
 use super::legacy_and_lockfree::{
@@ -312,6 +314,8 @@ pub(in crate::tx) async fn maybe_crash(_phase: &str, _repo: &RepoCore) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
+    #[error("request cancelled before commit")]
+    Cancelled,
     #[error("WAL outcome indeterminate; repository must be reopened")]
     WalRequiresReopen,
     /// Ticket came back Unknown/Indeterminate AFTER the frame was queued; the
@@ -383,12 +387,20 @@ pub enum TxError {
 
 impl TxError {
     /// Map commit errors without turning a published version into an abort.
+    ///
+    /// Every abort classification that already has a stable wire word keeps
+    /// that word in `reason` UNCHANGED *and* publishes it through
+    /// [`TransactionInfo::with_abort_code`], so a caller that must choose a
+    /// disposition (the `for_each` arm, which fails an iteration with this
+    /// code) never has to parse debug text. No code is invented here:
+    /// classifications with no stable word (`Storage` without a
+    /// [`DbError::code`], `Expired`) still leave `abort_code` absent.
     pub fn into_transaction_info(
         self,
         tx_id: u64,
         snapshot_version: u64,
     ) -> shamir_query_types::batch::TransactionInfo {
-        let reason = match self {
+        let (reason, abort_code): (String, Option<&'static str>) = match self {
             Self::WalDurability {
                 commit_version,
                 materialization,
@@ -403,28 +415,53 @@ impl TxError {
                 )
                 .with_visibility(visibility);
             }
-            Self::MigrationFrozen { .. } => "table_migrating".to_string(),
-            Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
-                "tx_conflict".to_string()
+            Self::MigrationFrozen { .. } => {
+                ("table_migrating".to_string(), Some("table_migrating"))
             }
-            Self::UniqueViolation { .. } => "unique_violation".to_string(),
+            Self::SsiConflict { .. } | Self::PhantomConflict { .. } | Self::Wounded { .. } => {
+                ("tx_conflict".to_string(), Some("tx_conflict"))
+            }
+            Self::UniqueViolation { .. } => {
+                ("unique_violation".to_string(), Some("unique_violation"))
+            }
             // FG-7: commit-time CAS failures retain the staging-time code.
-            Self::CasConflict { .. } => "version_conflict".to_string(),
-            Self::WalRequiresReopen => "wal_requires_reopen".to_string(),
+            Self::CasConflict { .. } => ("version_conflict".to_string(), Some("version_conflict")),
+            Self::WalRequiresReopen => (
+                "wal_requires_reopen".to_string(),
+                Some("wal_requires_reopen"),
+            ),
             Self::WalOutcomeUnknown { commit_version } => {
                 return TransactionInfo::indeterminate(tx_id, snapshot_version, commit_version);
             }
-            Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
-            Self::CommitAdmissionRefused => "commit_admission_refused".to_string(),
-            Self::Storage(e) => e
-                .code()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("storage: {}", e)),
-            Self::Expired { elapsed, max } => {
-                format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
-            }
+            Self::WalRetentionExceeded => (
+                "wal_retention_exceeded".to_string(),
+                Some("wal_retention_exceeded"),
+            ),
+            Self::CommitAdmissionRefused => (
+                "commit_admission_refused".to_string(),
+                Some("commit_admission_refused"),
+            ),
+            // Batch callers return cancellation on the error path instead.
+            Self::Cancelled => ("cancelled".to_string(), Some("cancelled")),
+            // Preserve a storage error's stable classification in both fields:
+            // `reason` remains byte-for-byte the existing diagnostic/code, while
+            // `abort_code` is populated only when DbError exposes a code.
+            Self::Storage(e) => (
+                e.code()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("storage: {}", e)),
+                e.code(),
+            ),
+            Self::Expired { elapsed, max } => (
+                format!("tx expired: elapsed {:?} > max {:?}", elapsed, max),
+                None,
+            ),
         };
-        TransactionInfo::aborted(tx_id, reason)
+        let info = TransactionInfo::aborted(tx_id, reason);
+        match abort_code {
+            Some(code) => info.with_abort_code(code),
+            None => info,
+        }
     }
 }
 
@@ -445,7 +482,9 @@ impl From<TxError> for DbError {
             error @ TxError::CasConflict { .. } => DbError::VersionConflict(error.to_string()),
             // DbError has no expiry category; retain the diagnostic without
             // misclassifying expiry as a retryable transaction conflict.
-            error @ TxError::Expired { .. } => DbError::Internal(error.to_string()),
+            error @ (TxError::Expired { .. } | TxError::Cancelled) => {
+                DbError::Internal(error.to_string())
+            }
         }
     }
 }
@@ -611,6 +650,7 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoCore) -> Result<TxOutcome, TxEr
 pub(in crate::tx) async fn commit_tx_inner(
     mut tx: TxContext,
     repo: &RepoCore,
+    cancel: Option<Arc<CancelHandle>>,
 ) -> Result<TxOutcome, TxError> {
     // Level-3 wound-wait: a tx wounded by an older (higher-priority) tx must
     // abort even if it finished all its statements. The check runs at commit
@@ -702,7 +742,7 @@ pub(in crate::tx) async fn commit_tx_inner(
     let PreLockResult {
         uwl_guards,
         drain_guards,
-    } = match pre_commit_prelock(&mut tx, repo).await {
+    } = match pre_commit_prelock(&mut tx, repo, cancel.as_deref()).await {
         Ok(r) => r,
         Err(e) => {
             release_pessimistic_locks(&tx, repo).await;
@@ -715,6 +755,22 @@ pub(in crate::tx) async fn commit_tx_inner(
     // the happy path; backpressure remains in the caller-only wrapper.
     crate::tx::CommitDriver::new(tx, repo, move |tx, repo| async move {
         let _tail = repo.commit_tail().enter();
+        // Implicit commits run serially within a request; later writes inherit
+        // the first commit's decision. Never reset the state from a driver tail.
+        // Both interactive commit routes arrive without an explicit handle.
+        // Use the request handle already owned by the context, if any. The
+        // driver owns the context even when the caller stops waiting.
+        match cancel.as_deref().or_else(|| tx.cancel_handle()) {
+            Some(cancel) if cancel.state() != CancelState::Committing && !cancel.try_commit() => {
+                release_pessimistic_locks(&tx, &repo).await;
+                return Err(if cancel.is_cancelled() {
+                    TxError::Cancelled
+                } else {
+                    DbError::Internal("commit requires an active request".into()).into()
+                });
+            }
+            _ => {}
+        }
         // AsyncIndex txs bypass group-commit: their post-commit tail is spawned
         // as a background task, which is incompatible with the leader processing
         // another tx's materialization. They always wait for the lock.

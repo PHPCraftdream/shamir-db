@@ -82,6 +82,11 @@ pub use crate::durability::DurabilityConfig;
 pub use crate::transactions_config::TransactionsConfig;
 pub use shamir_server_security::config::{LoggingConfig, TokensConfig};
 
+#[path = "config/diagnostics/backup_online/schedule/config.rs"]
+mod backup_schedule;
+#[cfg(test)]
+#[path = "config/tests/backup_schedule_tests.rs"]
+mod backup_schedule_tests;
 pub mod diagnostics;
 mod http_listener;
 mod http_mapping;
@@ -90,6 +95,10 @@ mod limits;
 mod login_listener;
 #[cfg(test)]
 mod tests;
+
+pub use backup_schedule::{
+    BackupRetentionConfig, BackupScheduleConfig, DailyWindow, ResolvedSchedule,
+};
 
 pub use http_listener::HttpListenerSettings;
 pub use http_mapping::to_http_server_config;
@@ -145,6 +154,8 @@ pub struct Config {
     /// break existing configs (that is why the field is optional).
     #[serde(default)]
     pub replication: Option<ReplicationConfig>,
+    #[serde(default)]
+    pub backup: Option<BackupScheduleConfig>,
 }
 
 pub use crate::replication::{ReplicationConfig, UpstreamPins};
@@ -448,10 +459,31 @@ impl Config {
         ktav::from_file::<Self, _>(path).map_err(|e| ConfigError::Parse(e.to_string()))
     }
 
+    /// [`Self::validate`] plus the launch-time filesystem preflight of the
+    /// backup destination (privacy and lexical disjointness from `data_dir`,
+    /// [`BackupScheduleConfig::check_launch`]). Only the server launch calls
+    /// it, before it creates any directory, so an invalid schedule refuses the
+    /// launch with the same error as before the preflight moved out of
+    /// [`Self::validate`].
+    pub fn validate_for_launch(&self) -> Result<(), ConfigError> {
+        if let Some(backup) = &self.backup {
+            backup.check_launch(&self.data_dir)?;
+        }
+        self.validate()
+    }
+
     /// Sanity-check a parsed [`Config`]. Returns
     /// [`ConfigError::Validation`] with a human-readable message at the
     /// first violation; callers can surface that as a startup error.
+    /// `backup.destination` is checked for syntax only here; its existence,
+    /// privacy and disjointness from `data_dir` are checked when the server
+    /// launches ([`Self::validate_for_launch`], then
+    /// [`BackupScheduleConfig::resolve`]), so offline subcommands such as
+    /// `restore --from` do not depend on the backup mount.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(backup) = &self.backup {
+            backup.validate()?;
+        }
         self.durability.resolve_policy()?;
         self.transactions.validate()?;
         self.tokens
@@ -485,7 +517,7 @@ impl Config {
             ));
         }
 
-        // `logging::init` parses this via `LevelFilter::from_str`, which silently falls back to
+        // `logging::init_for` parses this via `LevelFilter::from_str`, which silently falls back to
         // INFO on garbage — reject typos here instead of silently changing verbosity.
         let lvl = self.logging.level.to_ascii_lowercase();
         if !matches!(

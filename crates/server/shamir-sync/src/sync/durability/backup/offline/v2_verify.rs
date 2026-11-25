@@ -43,6 +43,18 @@ pub(super) fn verify_manifest_v2(
     snapshot_dir: &Path,
     raw: &[u8],
 ) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
+    let decoded = decode_manifest_v2(raw)?;
+    verify_decoded_manifest_v2(snapshot_dir, decoded, &|| false)
+}
+
+/// Decode-and-classify half of [`verify_manifest_v2`]: UTF-8 + JSON decode,
+/// the ORIGINAL format-version behavior: decoded v1 manifests refuse with
+/// [`BackupError::UnsupportedManifestFormatVersion`], while an unknown
+/// version rejected by `manifest::decode` maps to `ManifestInvalid`; then
+/// the online-section presence checks — ALL pure manifest-byte work, no
+/// payload I/O, so a caller can refuse a candidate on `kind` (or format)
+/// before any tree walk. Retention's kind-first preflight stops right here.
+pub(super) fn decode_manifest_v2(raw: &[u8]) -> Result<online_manifest::ManifestV2, BackupError> {
     let text =
         std::str::from_utf8(raw).map_err(|e| BackupError::ManifestInvalid(format!("utf8: {e}")))?;
     let decoded =
@@ -61,7 +73,20 @@ pub(super) fn verify_manifest_v2(
             return Err(BackupError::MissingOnlineSection("wal"));
         }
     }
+    Ok(decoded)
+}
 
+/// Payload half of [`verify_manifest_v2`] over the ALREADY-decoded manifest
+/// from [`decode_manifest_v2`] (one parse, no re-read): stamp agreement,
+/// confinement, tree walk and re-hash, WAL rules, file-set check.
+/// `cancel` is threaded into every streaming hash, which consults it once
+/// per chunk; [`verify_manifest_v2`] passes `&|| false` (the public verify
+/// paths are never cancelled), retention passes its own flag.
+pub(super) fn verify_decoded_manifest_v2(
+    snapshot_dir: &Path,
+    decoded: online_manifest::ManifestV2,
+    cancel: &dyn Fn() -> bool,
+) -> Result<(ManifestVerifyReport, online_manifest::ManifestV2), BackupError> {
     check_stamp_agreement(snapshot_dir, decoded.format_epoch)?;
 
     // Per-repo store_dir paths are manifest-controlled: validate their
@@ -90,14 +115,27 @@ pub(super) fn verify_manifest_v2(
         return Err(BackupError::CacheManifestPath(entry.path.clone()));
     }
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(decoded.files.len());
+    let mut folded_paths = BTreeSet::new();
     let mut total_bytes = 0u64;
     for entry in &decoded.files {
         reject_canonical_v2_manifest_path(&entry.path)?;
         if accounted.contains(&entry.path) {
             return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
         }
+        if !folded_paths.insert(entry.path.to_lowercase()) {
+            return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
+        }
+        for control_name in [MANIFEST_FILE_NAME, online_manifest::BACKUP_META_FILE_NAME] {
+            let folded = control_name.to_lowercase();
+            if entry.path.to_lowercase() == folded && entry.path != control_name {
+                return Err(BackupError::ManifestInvalid(format!(
+                    "manifest entry \"{}\" reserves the root control-file name \"{}\" with a different spelling",
+                    entry.path, folded
+                )));
+            }
+        }
         let file_path = confined_snapshot_path(snapshot_dir, &entry.path)?;
-        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
+        let (digest, actual_size) = hash_file_streaming(&file_path, cancel).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
                 format!("manifest entry {}: {e}", entry.path),
@@ -115,6 +153,21 @@ pub(super) fn verify_manifest_v2(
         }
         total_bytes += actual_size;
         accounted.insert(entry.path.clone());
+    }
+
+    let mut on_disk = Vec::new();
+    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    let mut disk_identities = BTreeSet::new();
+    for path in &on_disk {
+        let folded = path.to_lowercase();
+        if !disk_identities.insert(folded.clone()) {
+            return Err(BackupError::DuplicateManifestEntry(folded));
+        }
+    }
+    for entry in &decoded.files {
+        if let Some(message) = exact_spelling_mismatch(&entry.path, &on_disk) {
+            return Err(BackupError::ManifestInvalid(message));
+        }
     }
 
     // WAL listing: canonical segment/sidecar names per repo, contiguity
@@ -162,7 +215,7 @@ pub(super) fn verify_manifest_v2(
                 }
                 declared_wal_names.insert(format!("{:08}.wal", segment.seq));
                 let segment_path = confined_snapshot_path(snapshot_dir, &segment.file)?;
-                let (digest, size) = hash_file_streaming(&segment_path).map_err(|e| {
+                let (digest, size) = hash_file_streaming(&segment_path, cancel).map_err(|e| {
                     BackupError::Io(std::io::Error::new(
                         e.kind(),
                         format!("wal segment {}: {e}", segment.file),
@@ -261,8 +314,6 @@ pub(super) fn verify_manifest_v2(
 
     // Every file physically present under snapshot_dir (except the
     // manifest itself and the backup-meta sidecar) must be accounted for.
-    let mut on_disk = Vec::new();
-    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
     for rel in &on_disk {
         if rel == MANIFEST_FILE_NAME || rel == online_manifest::BACKUP_META_FILE_NAME {
             continue;
@@ -434,10 +485,52 @@ fn wal_dir_scan_components(snapshot_dir: &Path, dir: &str) -> Result<bool, Backu
     Ok(true)
 }
 
-/// Resolve an already lexically-validated manifest-controlled path under
-/// `snapshot_dir`, refusing anything that could read outside it BEFORE any
-/// byte of the target is opened. Every path component is walked with
-/// `fs::symlink_metadata` on the fixed snapshot:
+/// Resolve a v2 manifest-controlled path under `snapshot_dir`: the strict
+/// lexical check ([`reject_canonical_v2_manifest_path`], every platform) and
+/// then [`walk_confined`].
+pub(super) fn confined_snapshot_path(
+    snapshot_dir: &Path,
+    entry_path: &str,
+) -> Result<PathBuf, BackupError> {
+    reject_canonical_v2_manifest_path(entry_path)?;
+    walk_confined(snapshot_dir, entry_path)
+}
+
+/// Resolve a v1 manifest entry under `snapshot_dir`: the host-OS shape rule
+/// ([`reject_v1_entry_shape`]) and then [`walk_confined`].
+pub(super) fn confined_v1_snapshot_path(
+    snapshot_dir: &Path,
+    entry_path: &str,
+) -> Result<PathBuf, BackupError> {
+    reject_v1_entry_shape(entry_path)?;
+    walk_confined(snapshot_dir, entry_path)
+}
+
+/// Lexical shape rule for a v1 entry, which a v1 backup writes WITHOUT the v2
+/// naming rules. On Windows it is the strict v2 rule: a piece like `C:` would
+/// reset, and a backslash bundle, the `PathBuf::push` walk. On Unix `:`, `\`
+/// and trailing dots or spaces are literal name characters (a TLS file may be
+/// named `tls:cert.pem` or `key.pem `), so only the component structure is
+/// checked: no empty, `.` or `..` component.
+fn reject_v1_entry_shape(entry_path: &str) -> Result<(), BackupError> {
+    if cfg!(windows) {
+        return reject_canonical_v2_manifest_path(entry_path);
+    }
+    for component in entry_path.split('/') {
+        if component == ".." {
+            return Err(BackupError::UnsafeManifestPath(entry_path.to_string()));
+        }
+        if component.is_empty() || component == "." {
+            return Err(BackupError::UnconfinedManifestPath(entry_path.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Walk an already shape-checked manifest path under `snapshot_dir`, refusing
+/// a symlink or a non-regular entry BEFORE the entry is opened for content
+/// reads (check, then open: the window is not closed here). Every path
+/// component is walked with `fs::symlink_metadata` on the fixed snapshot:
 /// * a missing component is a plain io error (NotFound propagates);
 /// * a SYMLINK component refuses ([`BackupError::UnconfinedManifestPath`]) —
 ///   a symlink planted inside the snapshot cannot retarget a later open;
@@ -445,14 +538,11 @@ fn wal_dir_scan_components(snapshot_dir: &Path, dir: &str) -> Result<bool, Backu
 /// * the final component must be a REGULAR file (devices, FIFOs, sockets
 ///   refuse).
 ///
-/// Containment is then guaranteed lexically: every component is a normal
-/// name (no `..`, no separators, no drive/ADS tricks), every intermediate
-/// hop was verified to be a real directory under the snapshot — there is no
-/// escape left, so no per-file root canonicalize is needed.
-pub(super) fn confined_snapshot_path(
-    snapshot_dir: &Path,
-    entry_path: &str,
-) -> Result<PathBuf, BackupError> {
+/// For an unchanged snapshot, containment follows lexically: every component
+/// is a normal name (no `..`, no separators; no drive or ADS pieces on
+/// Windows), and every intermediate hop was verified to be a real directory
+/// under the snapshot, so no per-file root canonicalize is needed.
+fn walk_confined(snapshot_dir: &Path, entry_path: &str) -> Result<PathBuf, BackupError> {
     let mut current = snapshot_dir.to_path_buf();
     let components: Vec<&str> = entry_path.split('/').collect();
     let last = components.len().saturating_sub(1);
@@ -481,6 +571,22 @@ pub(super) fn confined_snapshot_path(
     Ok(current)
 }
 
+/// Return a spelling diagnostic only when a case-folded disk identity exists.
+pub(crate) fn exact_spelling_mismatch(entry_path: &str, on_disk: &[String]) -> Option<String> {
+    if on_disk.iter().any(|path| path == entry_path) {
+        return None;
+    }
+    on_disk
+        .iter()
+        .find(|path| path.to_lowercase() == entry_path.to_lowercase())
+        .map(|actual| {
+            format!(
+                "manifest entry \"{}\" does not match its exact on-disk spelling \"{}\"",
+                entry_path, actual
+            )
+        })
+}
+
 /// Recursively collect every regular file under `dir` (rooted at `root`) as
 /// a `root`-relative, forward-slash path. THE shared walker: the parent
 /// `offline.rs` v1 path reuses this instead of keeping its own duplicate.
@@ -496,14 +602,15 @@ pub(super) fn collect_relative_file_paths(
         if ft.is_dir() {
             collect_relative_file_paths(root, &path, out)?;
         } else if ft.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/");
-            out.push(rel);
+            let mut rel = Vec::new();
+            for component in path.strip_prefix(root).unwrap_or(&path).components() {
+                let Some(name) = component.as_os_str().to_str() else {
+                    // A JSON manifest cannot name this physically present file; refuse it as unmanifested.
+                    return Err(BackupError::UnmanifestedFile(path.to_path_buf()));
+                };
+                rel.push(name.to_string());
+            }
+            out.push(rel.join("/"));
         }
     }
     Ok(())

@@ -7,6 +7,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::filter::FilterValue;
 use shamir_types::access::{Action, Actor, ResourceMeta, ResourcePath};
 use shamir_types::types::value::QueryValue;
 
@@ -35,6 +36,48 @@ const GET_SOURCE: &str = r#"@entry procedure p() -> i64 {
     let found: { id: i64, label: string }? = db_get("secrets", 1);
     if (is_null(found)) { return -1; }
     return unwrap(found).id;
+}"#;
+
+/// A guest-controlled message that LOOKS like a stable batch code.
+const FORGED_CODE_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    if (true) { throw "server_busy"; }
+    return 0;
+}"#;
+
+/// A transactional `db_execute` over the restricted table: authorization
+/// refuses the read before the transaction runs (it is NOT an `Ok` aborted
+/// response), so the escaping failure is a gateway refusal.
+const TX_READ_REFUSED_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    const b = batch_read(batch_tx(), "rows", "secrets", { id: 1 });
+    let resp = db_execute(request(b));
+    let rows: [{ id: i64 }]? = response_rows(resp, "rows");
+    if (is_null(rows)) { return -1; }
+    return to_i64(len(unwrap(rows)));
+}"#;
+
+/// A transactional `db_execute` that fails DURING execution (unique
+/// violation), so the gateway returns an `Ok` batch response whose
+/// transaction is aborted. The abort is data; the guest wrapper raises a
+/// plain kind-2 error, so no stable code escapes.
+const TX_ABORTED_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    const b = batch_tx();
+    const op = batch_insert(b, "dup", "secrets", { id: 9001, label: "dup" });
+    let resp = db_execute(request(op));
+    let rows: [{ id: i64 }]? = response_inserted(resp, "dup");
+    if (is_null(rows)) { return -1; }
+    return 1;
+}"#;
+
+/// Child procedure whose gateway INSERT is refused (CREATE denial on the
+/// restricted table) - the refusal must survive the parent's `call`.
+const NESTED_CHILD_INSERT_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    let inserted: { id: i64, label: string } = db_insert("secrets", { id: 3, label: "nested" });
+    return inserted.id;
+}"#;
+
+const NESTED_PARENT_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    let child: i64 = call("nested_child_insert", {});
+    return child;
 }"#;
 
 const BATCH_READ_SOURCE: &str = r#"@entry procedure p() -> i64 {
@@ -166,6 +209,63 @@ async fn invoke(db: &ShamirDb, name: &str) -> DbResult<QueryValue> {
         .await
 }
 
+/// Make `secrets.label` unique so a transactional second insert of an existing
+/// label aborts during execution (not during authorization).
+async fn add_unique_label_rule(db: &ShamirDb) {
+    let mut index = Batch::new();
+    index.id("unique_label_index");
+    index.create_index(
+        "unique_label",
+        ddl::create_index("unique_label", TABLE).field("label"),
+    );
+    db.execute(
+        DB_NAME,
+        &index
+            .to_request_via_msgpack()
+            .expect("unique index request"),
+    )
+    .await
+    .expect("create unique index on secrets.label");
+
+    let mut schema = Batch::new();
+    schema.id("unique_label_schema");
+    schema.set_table_schema(
+        "unique_label_schema",
+        ddl::set_table_schema(TABLE).rules([ddl::field(["label"])
+            .string()
+            .required()
+            .unique()
+            .build()]),
+    );
+    db.execute(
+        DB_NAME,
+        &schema
+            .to_request_via_msgpack()
+            .expect("unique schema request"),
+    )
+    .await
+    .expect("set unique schema rule on secrets.label");
+}
+
+/// Run an outer batch `Call` as the restricted actor and return the batch
+/// error's stable code plus its rendered message.
+async fn call_code(db: &ShamirDb, name: &str) -> (Option<String>, String) {
+    let mut batch = Batch::new();
+    batch.id("code_probe");
+    batch.call("result", name, [] as [FilterValue; 0]);
+    let error = db
+        .execute_as(
+            restricted(),
+            DB_NAME,
+            &batch
+                .to_request_via_msgpack()
+                .expect("code probe request encoding"),
+        )
+        .await
+        .expect_err("the probed outer Call must fail");
+    (error.code().map(str::to_string), error.to_string())
+}
+
 async fn seed_row(db: &ShamirDb, id: i64, label: &str) {
     let mut seed = Batch::new();
     seed.id("seed");
@@ -215,16 +315,39 @@ fn assert_gateway_denial(result: DbResult<QueryValue>, operation: &str, action: 
         message.contains("compute error"),
         "expected the guest compute error kind, got: {message}"
     );
+    // A denied READ now carries the unified `unknown_table` code (the SAME
+    // code an absent table answers — the read refusal is not an existence
+    // oracle), which the gateway classifies as a generic execution failure.
+    // CREATE/WRITE/DELETE keep `access_denied`, hence `Permission`.
+    let gateway_class = if action == "READ" {
+        "execution failed"
+    } else {
+        "permission denied"
+    };
     assert!(
-        message.contains(&format!("{operation}: db gateway: permission denied:")),
-        "expected the gateway Permission denial for {operation}, got: {message}"
+        message.contains(&format!("{operation}: db gateway: {gateway_class}:")),
+        "expected the gateway {gateway_class} denial for {operation}, got: {message}"
     );
-    let denial =
-        format!("access denied: User({RESTRICTED_ID}) cannot {action} on db://testdb/main/secrets");
-    assert!(
-        message.contains(&denial),
-        "expected exact table/action denial `{denial}`, got: {message}"
-    );
+    if action == "READ" {
+        assert!(
+            message.contains("table is unavailable"),
+            "expected the fixed unknown_table read refusal, got: {message}"
+        );
+        assert!(
+            !message.contains("access denied:")
+                && !message.contains(&format!("User({RESTRICTED_ID})"))
+                && !message.contains("secrets"),
+            "a read refusal must not disclose table ACL details, got: {message}"
+        );
+    } else {
+        let denial = format!(
+            "access denied: User({RESTRICTED_ID}) cannot {action} on db://testdb/main/secrets"
+        );
+        assert!(
+            message.contains(&denial),
+            "expected exact table/action denial `{denial}`, got: {message}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -336,4 +459,133 @@ async fn shamir_invoker_batch_read_execute_is_denied_independently() {
     );
     assert_native_row(&db, 1, "seeded").await;
     assert_gateway_denial(invoke(&db, "batch_invoker").await, "db_execute", "READ");
+    // The denial must not expose a table ACL message or disclose the table;
+    // the native check above independently confirms the seeded row remains.
+}
+
+/// The outer batch `Call` must report the SAME stable code the stored
+/// procedure's gateway refusal carried - the code rides the escaping typed
+/// error, never a server-side slot and never guest text.
+///
+/// The probe uses an INSERT (a CREATE denial, `access_denied`), one of the
+/// two typed gateway refusal classes. A denied READ carries the unified
+/// `unknown_table` batch code, which the gateway classifies as a generic
+/// execution failure; that class exposes no code to the WASM host (it cannot
+/// name the batch error type), so a read denial arrives without a code.
+#[tokio::test]
+async fn shamir_invoker_gateway_denial_code_reaches_the_outer_call() {
+    let db = setup().await;
+    create_procedure(&db, "insert_invoker", INSERT_SOURCE, Security::Invoker).await;
+
+    let (code, message) = call_code(&db, "insert_invoker").await;
+    assert_eq!(
+        code.as_deref(),
+        Some("access_denied"),
+        "outer Call must report the gateway's stable code, got: {message}"
+    );
+}
+
+/// A refusal in a nested stored call is the CHILD's escaping failure, so its
+/// stable code must reach the outer `Call`. Before this change the nested
+/// gateway was built without a code channel, so the child's code vanished.
+#[tokio::test]
+async fn shamir_nested_gateway_denial_code_reaches_the_outer_call() {
+    let db = setup().await;
+    create_procedure(
+        &db,
+        "nested_child_insert",
+        NESTED_CHILD_INSERT_SOURCE,
+        Security::Invoker,
+    )
+    .await;
+    create_procedure(
+        &db,
+        "nested_parent",
+        NESTED_PARENT_SOURCE,
+        Security::Invoker,
+    )
+    .await;
+
+    let (code, message) = call_code(&db, "nested_parent").await;
+    assert_eq!(
+        code.as_deref(),
+        Some("access_denied"),
+        "the child's gateway code must reach the outer Call, got: {message}"
+    );
+}
+
+/// A transactional `db_execute` over the restricted table is refused during
+/// authorization (before the transaction runs), so it escapes as a gateway
+/// failure rather than an `Ok` aborted response. Nothing is stored outside
+/// the escaping error: the outer `Call` must NOT retain the batch's
+/// `unknown_table` code.
+#[tokio::test]
+async fn shamir_transactional_execute_refusal_sets_no_outer_code() {
+    let db = setup().await;
+    create_procedure(
+        &db,
+        "tx_read_refused",
+        TX_READ_REFUSED_SOURCE,
+        Security::Invoker,
+    )
+    .await;
+
+    let (code, message) = call_code(&db, "tx_read_refused").await;
+    assert_eq!(
+        code,
+        Some("unknown_table".to_string()),
+        "a refused transactional read must preserve its typed gateway code, got: {message}"
+    );
+}
+
+/// A transactional `db_execute` whose gateway call returns an `Ok` aborted
+/// `BatchResponse` does NOT set a code: the abort is data, and the guest's
+/// own kind-2 raise is not a typed gateway refusal.
+#[tokio::test]
+async fn shamir_transactional_abort_data_sets_no_outer_code() {
+    let db = setup().await;
+    add_unique_label_rule(&db).await;
+    seed_row(&db, 9000, "dup").await;
+    create_procedure(&db, "tx_aborted", TX_ABORTED_SOURCE, Security::Definer).await;
+
+    let (code, message) = call_code(&db, "tx_aborted").await;
+    assert_eq!(
+        code, None,
+        "an aborted transactional response is data, not a code, got: {message}"
+    );
+    assert!(
+        message.contains("transactional batch aborted"),
+        "expected the guest's stable transactional-abort message, got: {message}"
+    );
+}
+
+/// A guest `throw` whose text looks like a stable code must NOT become the
+/// outer `Call`'s code: only a server-minted refusal code can supply one.
+#[tokio::test]
+async fn shamir_guest_trap_text_cannot_forge_batch_code() {
+    let db = setup().await;
+    create_procedure(&db, "forged_code", FORGED_CODE_SOURCE, Security::Invoker).await;
+
+    let mut batch = Batch::new();
+    batch.id("forged_code_call");
+    batch.call("result", "forged_code", [] as [FilterValue; 0]);
+    let error = db
+        .execute_as(
+            restricted(),
+            DB_NAME,
+            &batch
+                .to_request_via_msgpack()
+                .expect("forged-code request encoding"),
+        )
+        .await
+        .expect_err("a guest throw must fail the outer batch");
+    assert!(
+        error.to_string().contains("server_busy"),
+        "the guest trap text must still be visible in the message, got: {error:?}"
+    );
+    assert_eq!(
+        error.code(),
+        None,
+        "guest-controlled trap text must never become a stable code, got: {error:?}"
+    );
 }

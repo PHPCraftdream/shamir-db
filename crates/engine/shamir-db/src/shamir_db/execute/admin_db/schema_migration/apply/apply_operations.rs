@@ -14,6 +14,7 @@ use crate::query::admin::{
 };
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::shamir_db::shamir_db::ValidatorRenameMigration;
 use crate::shamir_db::system_store::{
     DatabaseIdentity, JournalEventKind, SchemaMigrationContext, SchemaMigrationStep,
 };
@@ -49,6 +50,11 @@ pub(super) struct FencedRun<'a> {
     /// before executing anything new (R1c step 2b-3b).
     pub(super) resume: bool,
     pub(super) context: &'a SchemaMigrationContext,
+    /// Brief 84 item 3: the validator-rename migration capability from the
+    /// step-10 preflight (`None` without RenameValidator); held for the
+    /// whole run and threaded through `JournalRef` as the
+    /// `RenameValidator` gate-ownership proof.
+    pub(super) rename: Option<ValidatorRenameMigration<'a>>,
 }
 
 /// The fenced run: converts the reserved in-process gate into the live gate
@@ -84,6 +90,7 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
         generation,
         resume,
         context,
+        rename,
     } = run;
     let store = executor.shamir.system_store();
     let metadata = &submission.metadata;
@@ -94,6 +101,7 @@ async fn run_operations_fenced(run: FencedRun<'_>) -> Result<QueryResult, BatchE
         checksum,
         generation,
         context,
+        rename: rename.as_ref(),
     };
     // After the first durable intent, a later journal failure means an
     // effect may already have occurred → in doubt, never plain unavailability.
@@ -253,7 +261,9 @@ async fn resume_operation(
             {
                 ReconcileOutcome::AlreadyApplied(evidence) => evidence,
                 ReconcileOutcome::ExecuteOnce(created_from_absent) => {
-                    if let Err(error) = Box::pin(execute_operation(executor, operation)).await {
+                    if let Err(error) =
+                        Box::pin(execute_operation(executor, journal.rename, operation)).await
+                    {
                         let in_doubt = Box::pin(record_in_doubt(
                             executor,
                             journal,
@@ -370,7 +380,7 @@ async fn run_operation(
     let execution = if ordered_check {
         Ok(())
     } else {
-        Box::pin(execute_operation(executor, operation)).await
+        Box::pin(execute_operation(executor, journal.rename, operation)).await
     };
     if let Err(error) = execution {
         let in_doubt = Box::pin(record_in_doubt(
@@ -465,6 +475,7 @@ fn preserve_family_denial(
 /// admin DDL handler — no DDL is reimplemented here.
 async fn execute_operation(
     executor: &ShamirAdminExecutor,
+    rename: Option<&ValidatorRenameMigration<'_>>,
     operation: &SchemaMigrationOp,
 ) -> Result<(), BatchError> {
     match operation {
@@ -516,7 +527,7 @@ async fn execute_operation(
             Box::pin(admission::authorize_family_operation(executor, operation)).await?;
             let op = admission::family_batch_op(operation)
                 .ok_or_else(|| plain("unsupported migration operation".to_string()))?;
-            Box::pin(execution::execute(executor, &op)).await?;
+            Box::pin(execution::execute_with_rename(executor, &op, rename)).await?;
         }
     }
     Ok(())

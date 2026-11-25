@@ -1,9 +1,9 @@
 use shamir_connect::server::session::Session;
-use shamir_db::query::batch::{BatchError, BatchRequest};
+use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_query_types::batch::{BatchTreeVisitor, IsolationLevel, VisibilityWait};
 use std::sync::Arc;
 
-use crate::tx_registry::{InteractiveTx, TxRegistryError};
+use crate::tx_registry::{InteractiveTx, TxAbortRelease, TxRegistryError};
 
 use super::activity::server_busy_response;
 use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
@@ -40,6 +40,20 @@ fn read_only_tx_write_gate(node_mode: NodeMode, batch: &BatchRequest) -> Option<
 }
 
 impl ShamirDbHandler {
+    /// The releaser a newly parked [`InteractiveTx`] must carry: it is bound to
+    /// the repository RESOLVED for this handle, so a `RenameDb`/`RenameRepo`
+    /// (or a `DropDb`) between `TxBegin` and the end of the transaction cannot
+    /// make the release resolve nothing. `None` (the repository vanished
+    /// between `tx_begin_as` and this insert) logs instead of dropping the
+    /// locks silently.
+    pub fn tx_abort_release(&self, db_name: &str, repo_name: &str) -> TxAbortRelease {
+        let repo = self
+            .db
+            .get_db(db_name)
+            .and_then(|db| db.get_repo(repo_name));
+        super::activity::tx_abort_release(repo)
+    }
+
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
     ///
@@ -76,11 +90,14 @@ impl ShamirDbHandler {
         // fallback. The op-kind is the static discriminant name
         // `tx_open`; no query value ever enters the summary (privacy,
         // D3).
-        let _in_flight =
-            match self.try_track_activity_request(session, db_name, "tx_open", client_rid) {
-                Ok(guard) => guard,
-                Err(()) => return server_busy_response(),
-            };
+        // Visible in activity; interactive transaction rollback via operator
+        // cancellation is deferred to R4b step 3.
+        let _in_flight = match self.try_track_activity_request_with_cancellability(
+            session, db_name, "tx_open", client_rid, false,
+        ) {
+            Ok(guard) => guard,
+            Err(()) => return server_busy_response(),
+        };
 
         // R3-2b — maintenance-gate enrollment for TxBegin. BEGIN can trigger
         // lazy recovery / fresh snapshot registration on the engine side, so
@@ -123,6 +140,7 @@ impl ShamirDbHandler {
             db_name.to_string(),
             repo_name.to_string(),
             INTERACTIVE_TX_MAX_LIFETIME,
+            self.tx_abort_release(db_name, repo_name),
         );
         match self.tx_registry.register_activity(
             handle,
@@ -186,7 +204,9 @@ impl ShamirDbHandler {
     /// the static discriminant summary of the batch (homogeneous batches
     /// keep their `activity_name`; heterogeneous ones are conservatively
     /// `write`), derived in the same pre-flight visitor pass that rejects
-    /// `ListActivity` — never from arguments (privacy, D3).
+    /// `ListActivity`, `CancelRequest`, `CancelTx`, `CancelCursorAdmin`,
+    /// `ListShapeStats` and `ResetShapeStats` —
+    /// never from arguments (privacy, D3).
     pub(super) async fn tx_execute_with_rid(
         &self,
         session: &Session,
@@ -240,20 +260,30 @@ impl ShamirDbHandler {
         // explicitly nontransactional. The SAME walk derives the batch's
         // op-kind summary (static discriminant names only) AND detects a
         // nested visibility_wait (folded walk, R4b-1 follow-up);
-        // precedence is preserved — a `ListActivity` anywhere in the tree
+        // precedence is preserved — an activity control op anywhere in the tree
         // is rejected DURING the walk, before the post-walk
         // visibility_wait check runs.
         let mut seen_op: Option<&'static str> = None;
         let mut uniform_ops = true;
         let mut nested_visibility_wait = false;
         for visit in BatchTreeVisitor::new(&batch.queries) {
-            if matches!(
-                &visit.entry.op,
-                shamir_query_types::batch::BatchOp::ListActivity(_)
-            ) {
+            let control_op = match &visit.entry.op {
+                BatchOp::ListActivity(_) => Some("ListActivity"),
+                BatchOp::CancelRequest(_) => Some("CancelRequest"),
+                BatchOp::CancelTx(_) => Some("CancelTx"),
+                BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
+                // R4b step 4: a shape listing or wipe is never transactional
+                // (node-local telemetry outside the snapshot), and a reset
+                // must never be applied under an open transaction's view of
+                // the repository.
+                BatchOp::ListShapeStats(_) => Some("ListShapeStats"),
+                BatchOp::ResetShapeStats(_) => Some("ResetShapeStats"),
+                _ => None,
+            };
+            if let Some(op) = control_op {
                 return DbResponse::Error {
                     code: "invalid_request".into(),
-                    message: "ListActivity is not allowed inside a transactional batch".into(),
+                    message: format!("{op} is not allowed inside a transactional batch"),
                 };
             }
             let name = visit.entry.op.activity_name();
@@ -329,11 +359,18 @@ impl ShamirDbHandler {
         // before the registry acquire / ctx-lock waits. The per-session
         // cap (see `tx_begin_with_rid`) rejects an exhausted session with
         // the fixed `server_busy` text before any execution.
-        let _in_flight =
-            match self.try_track_activity_request(session, db_name, tx_batch_op_kind, client_rid) {
-                Ok(guard) => guard,
-                Err(()) => return server_busy_response(),
-            };
+        // Visible in activity; interactive transaction rollback via operator
+        // cancellation is deferred to R4b step 3.
+        let _in_flight = match self.try_track_activity_request_with_cancellability(
+            session,
+            db_name,
+            tx_batch_op_kind,
+            client_rid,
+            false,
+        ) {
+            Ok(guard) => guard,
+            Err(()) => return server_busy_response(),
+        };
 
         // Identity-checked stale-failure removals below: `remove_owned`
         // refuses when the reaper already replaced the tx under the same
@@ -428,11 +465,12 @@ impl ShamirDbHandler {
                         // Measure staged size INSIDE the same lock as the engine call.
                         r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                     }
-                    None => Err(BatchError::QueryError {
-                        alias: String::new(),
-                        message: "transaction is already committed or rolled back".into(),
-                        code: None,
-                    }),
+                    None => {
+                        return DbResponse::Error {
+                            code: "tx_not_found".into(),
+                            message: format!("no open transaction for handle {}", tx_handle),
+                        }
+                    }
                 }
             };
             match exec {
@@ -470,7 +508,8 @@ impl ShamirDbHandler {
             // Admin can write directly, not just stage changes. The task owns
             // admission and the bounded slot through execution and cleanup.
             // fire-and-forget: detached by design if the reply waiter is dropped.
-            tokio::spawn(execute)
+            self.owned_mutation_tasks()
+                .spawn(execute)
                 .await
                 .unwrap_or_else(|_| DbResponse::Error {
                     code: "internal_error".into(),

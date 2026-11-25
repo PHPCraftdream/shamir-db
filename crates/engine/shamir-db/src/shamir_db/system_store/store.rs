@@ -88,6 +88,11 @@ pub struct SystemStore {
     durability_tail_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Test seam: durable tails that pass before `durability_tail_faults` starts failing.
     durability_tail_skips: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test seam: armed durability-tail rendezvous handles (see
+    /// `arm_durability_tail_rendezvous`).
+    #[cfg(test)]
+    durability_tail_rendezvous:
+        std::sync::Arc<std::sync::Mutex<Vec<std::sync::Arc<DurabilityTailRendezvous>>>>,
     #[cfg(test)]
     table_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -111,6 +116,27 @@ pub struct SystemStore {
     /// (A7B1FCEC deep-chain allocation oracle).
     #[cfg(test)]
     folder_path_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// One armed durability-tail rendezvous: its `arm` skip counts global tail
+/// ticks from arming; the tick that reaches 1 parks the tail AFTER its
+/// commit has published and BEFORE the WAL sync, until `release`. Test-only.
+#[cfg(test)]
+pub(crate) struct DurabilityTailRendezvous {
+    remaining: std::sync::atomic::AtomicUsize,
+    parked: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl DurabilityTailRendezvous {
+    pub(crate) async fn parked(&self) {
+        self.parked.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -144,6 +170,63 @@ impl SystemStore {
         self.durability_tail_skips
             .store(skip, std::sync::atomic::Ordering::SeqCst);
         self.arm_durability_tail_faults(n);
+    }
+
+    /// Arm the durability-tail rendezvous: the `skip`-th subsequent tail
+    /// (counted like `arm_durability_tail_faults_after`) parks AFTER its
+    /// commit has published and BEFORE its WAL sync. The returned handle
+    /// owns the wait/release: re-arming never disturbs an earlier parked
+    /// tail. Tails past a hook's count pass freely (no decrement wrap).
+    #[cfg(test)]
+    pub(crate) fn arm_durability_tail_rendezvous(
+        &self,
+        skip: usize,
+    ) -> std::sync::Arc<DurabilityTailRendezvous> {
+        let mut armed = self
+            .durability_tail_rendezvous
+            .lock()
+            .expect("durability tail rendezvous mutex");
+        armed.retain(|hook| hook.remaining.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let hook = std::sync::Arc::new(DurabilityTailRendezvous {
+            remaining: std::sync::atomic::AtomicUsize::new(skip),
+            parked: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        armed.push(hook.clone());
+        hook
+    }
+
+    #[cfg(test)]
+    async fn durability_tail_rendezvous_gate(&self) {
+        let armed = self
+            .durability_tail_rendezvous
+            .lock()
+            .expect("durability tail rendezvous mutex")
+            .clone();
+        for hook in armed {
+            loop {
+                let current = hook.remaining.load(std::sync::atomic::Ordering::SeqCst);
+                if current == 0 {
+                    break;
+                }
+                match hook.remaining.compare_exchange(
+                    current,
+                    current - 1,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    Ok(_) => {
+                        if current == 1 {
+                            hook.parked.notify_one();
+                            hook.release.notified().await;
+                        }
+                        break;
+                    }
+                    Err(0) => break,
+                    Err(_) => {}
+                }
+            }
+        }
     }
 
     fn durability_tail_fault_gate(&self) -> DbResult<()> {
@@ -180,18 +263,52 @@ impl SystemStore {
         Ok(())
     }
 
-    /// Create the journal's unique record-key index when it is missing. Boxed at
-    /// the call site: the index-creation future must not widen the init future.
-    ///
-    /// Journal-specific failure mapping: a `UniqueIndexCreationFailed` HERE
-    /// can only be the journal record-key index (this is its dedicated
-    /// creation site), so it is mapped to the typed journal error — without
-    /// echoing the engine's duplicate sample. Generic repo-open failures
-    /// (locks, backend errors) propagate unchanged, never masked.
+    // Classify a journal-table open/rebuild failure as the typed durability
+    // refusal. Outside the typed rebuild wrapper (`IndexRebuildFailed`
+    // naming the journal table) a raw duplicate/codec error is accepted ONLY
+    // on the DIRECT route, where `ensure_journal_index` opened the journal
+    // partition itself. Nothing matches message text; unclassifiable errors
+    // (real backend/lock failures, non-journal tables) are returned as-is.
+    fn map_journal_open_error(direct: bool, error: DbError) -> DbError {
+        let classify = |error: &DbError| match error {
+            DbError::UniqueIndexCreationFailed(..) => {
+                Some(DbError::SchemaMigrationJournalUnreadable(
+                    "the schema migration record-key unique index could not be \
+                     created on open: a journal row's record_key is corrupt"
+                        .into(),
+                ))
+            }
+            // Fixed text: the codec detail can carry a backend string or a
+            // record id and this text reaches the operator-visible refusal.
+            DbError::Codec(_) => Some(DbError::SchemaMigrationJournalUnreadable(
+                "the schema migration journal could not be decoded on open".into(),
+            )),
+            _ => None,
+        };
+        match &error {
+            DbError::IndexRebuildFailed { table, source }
+                if table == TABLE_SCHEMA_MIGRATION_EVENTS =>
+            {
+                if let Some(refusal) = classify(source) {
+                    return refusal;
+                }
+            }
+            _ if direct => {
+                if let Some(refusal) = classify(&error) {
+                    return refusal;
+                }
+            }
+            _ => {}
+        }
+        error
+    }
+
+    /// Create the journal's unique record-key index when it is missing.
     async fn ensure_journal_index(db: &DbInstance) -> DbResult<()> {
         let journal = db
             .get_table(SYSTEM_REPO, TABLE_SCHEMA_MIGRATION_EVENTS)
-            .await?;
+            .await
+            .map_err(|error| Self::map_journal_open_error(true, error))?;
         if !journal
             .unique_index_exists("schema_migration_record_key")
             .await
@@ -199,16 +316,7 @@ impl SystemStore {
             journal
                 .create_unique_index("schema_migration_record_key", &["record_key"])
                 .await
-                .map_err(|error| match error {
-                    DbError::UniqueIndexCreationFailed(..) => {
-                        DbError::SchemaMigrationJournalUnreadable(
-                            "the schema migration record-key unique index could not be \
-                             created on open: a journal row's record_key is corrupt"
-                                .into(),
-                        )
-                    }
-                    other => other,
-                })?;
+                .map_err(|error| Self::map_journal_open_error(true, error))?;
         }
         Ok(())
     }
@@ -259,7 +367,9 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_SCHEMA_MIGRATION_EVENTS).with_indexes());
 
         // DbInstance recovers/certifies before exposing the system repo.
-        db.add_repo_with_durability(repo_config, policy).await?;
+        db.add_repo_with_durability(repo_config, policy)
+            .await
+            .map_err(|error| Self::map_journal_open_error(false, error))?;
         Box::pin(Self::ensure_journal_index(&db)).await?;
 
         let store = Self {
@@ -270,6 +380,8 @@ impl SystemStore {
             catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             durability_tail_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             durability_tail_skips: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            durability_tail_rendezvous: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(test)]
             table_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -515,8 +627,21 @@ impl SystemStore {
     /// tests exercise exactly the final `flush()` line.
     pub(crate) async fn flush_system_repo_durable(&self, table: &TableManager) -> DbResult<()> {
         self.durability_tail_fault_gate()?;
+        // Test rendezvous: parks this caller after the fault gate and before
+        // its explicit sync, so a parked caller has published its committed
+        // rows without establishing any background WAL sync state.
+        #[cfg(test)]
+        self.durability_tail_rendezvous_gate().await;
         self.system_repo()?.sync_wal().await?;
         table.data_store_read_view().flush().await
+    }
+
+    /// The schema-migration journal partition's explicit durable tail: whole
+    /// table persist, then the durable flush.
+    pub(in crate::shamir_db) async fn sync_schema_migration_journal_tail(&self) -> DbResult<()> {
+        let table = self.table(TABLE_SCHEMA_MIGRATION_EVENTS).await?;
+        self.persist_table_interner(&table, None).await?;
+        self.flush_system_repo_durable(&table).await
     }
 
     /// Capture the logical-export read facade without exposing a writable

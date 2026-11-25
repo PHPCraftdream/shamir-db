@@ -2,16 +2,18 @@
 mod activity;
 mod config;
 mod cursor_handlers;
-#[path = "repo_admin/cursor_support.rs"]
+#[path = "repo_admin/support/cursor_support.rs"]
 mod cursor_support;
 #[path = "repo_admin/execute.rs"]
 mod execute;
-#[path = "repo_admin/export_gate.rs"]
+#[path = "repo_admin/support/export_gate.rs"]
 mod export_gate;
 mod handler;
 mod handlers;
 #[path = "repo_admin/native_handler.rs"]
 mod native_handler;
+#[path = "repo_admin/operator_state.rs"]
+mod operator_state;
 #[path = "repo_admin/repo_audit.rs"]
 mod repo_audit;
 #[path = "repo_admin/tx_handlers.rs"]
@@ -30,3 +32,4 @@ pub(crate) use crate::security::user_directory::derive_scram_record;
 pub use config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 pub use handler::{DbRequest, DbResponse, ShamirDbHandler};
 pub use handlers::admin::AdminGlue;
+pub(crate) use repo_audit::CancelRefusalAudit;

@@ -385,6 +385,7 @@ pub fn config_for_with(
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

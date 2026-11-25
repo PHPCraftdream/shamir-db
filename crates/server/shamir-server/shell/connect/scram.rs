@@ -1,4 +1,4 @@
-//! PR1 connection seam: TLS-TCP + SCRAM and IPC + SCRAM through the existing
+//! Native TLS-TCP, WSS, and IPC SCRAM through the existing
 //! SDK (`shamir-client`), verified-pin only
 //! (`docs/dev-artifacts/design/admin-shell.md` §3.2 R5a PR1, §6).
 //!
@@ -25,17 +25,17 @@
 //! fallback, no unbounded wait: `accept_new_host` is always `false` and the
 //! trusted pin is always `Some`.
 
-use std::net::Ipv6Addr;
 use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use shamir_client::{Client, ClientError, ConnectLocalOptions, ConnectOptions};
+use shamir_client::{Client, ClientError, CloseCause, ConnectLocalOptions, ConnectOptions};
 use shamir_connect::Error as ConnectError;
 use shamir_transport_ipc::validate_endpoint;
 use shamir_transport_tcp::framing::FrameError;
+use tokio_tungstenite::tungstenite::Error as WsError;
 
-use super::Profile;
+use super::profile::{Profile, Transport as ProfileTransport};
 use crate::shell::output::ShellError;
 
 /// Outer per-command deadline: 60 s per command including send and wait,
@@ -51,11 +51,12 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// SCRAM frames), started at dial begin.
 const CONNECT_TOTAL: Duration = Duration::from_secs(30);
 
-/// PR1-supported transport selected during [`Connection::prepare`].
+/// SCRAM transport selected during [`Connection::prepare`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transport {
     /// T1: fresh SCRAM over TLS TCP, application-pin validated.
     TlsTcp,
+    NativeWss,
     /// T4: fresh SCRAM over local IPC (Unix socket / named pipe), no TLS.
     Ipc,
 }
@@ -87,26 +88,14 @@ impl Connection {
     /// and the transport-specific address/fields. Incompatible fields (token
     /// CA path on a SCRAM transport, SNI on IPC) are rejected, never ignored.
     pub(in crate::shell) fn prepare(profile: &Profile) -> Result<Connection, ShellError> {
-        let transport_name = profile.transport.trim().to_ascii_lowercase();
-        // Any resume form is refused in every stage (§3.2: never resume).
-        if transport_name.contains("resume") {
-            return Err(ShellError::Resume);
-        }
-        let transport = match transport_name.as_str() {
-            // Plaintext aliases, loopback included: never an admin transport.
-            "plain" | "tcp-plain" | "http" | "ws" => return Err(ShellError::Plaintext),
-            // Native token transports: PR2 surface, refused in PR1.
-            "wss" | "native-wss" | "https" | "rest" | "token" | "token-rest" | "token-wss" => {
+        let transport = match profile.transport_kind()? {
+            ProfileTransport::TlsTcp => Transport::TlsTcp,
+            ProfileTransport::Ipc => Transport::Ipc,
+            ProfileTransport::NativeWss => Transport::NativeWss,
+            ProfileTransport::Plaintext => return Err(ShellError::Plaintext),
+            ProfileTransport::TokenRest | ProfileTransport::TokenWss => {
                 return Err(ShellError::Unsupported);
             }
-            // Browser-profile WSS / HTTP password login: deferred in all
-            // stages (§3.2 deferred row).
-            "browser" | "browser-ws" | "browser-wss" | "http-login" => {
-                return Err(ShellError::Deferred);
-            }
-            "tls" | "tls-tcp" | "tcp-tls" => Transport::TlsTcp,
-            "ipc" | "local" | "unix" | "pipe" => Transport::Ipc,
-            _ => return Err(ShellError::Unsupported),
         };
 
         // Verified pin only (§3.2, §6): missing pin is a hard refusal and
@@ -122,9 +111,10 @@ impl Connection {
             return Err(ShellError::InvalidProfile);
         }
 
+        let username = profile.username.clone().ok_or(ShellError::InvalidProfile)?;
         match transport {
-            Transport::TlsTcp => {
-                let (host, port) = split_host_port(&profile.address)?;
+            Transport::TlsTcp | Transport::NativeWss => {
+                let (host, port) = profile.tls_address()?;
                 // SNI defaults to the profile host when absent.
                 let sni = match profile.sni.as_deref() {
                     Some(sni) if !sni.trim().is_empty() => sni.trim().to_string(),
@@ -136,7 +126,7 @@ impl Connection {
                     port,
                     sni,
                     endpoint: String::new(),
-                    username: profile.username.clone(),
+                    username,
                     pin,
                 })
             }
@@ -156,7 +146,7 @@ impl Connection {
                     port: 0,
                     sni: String::new(),
                     endpoint: profile.address.trim().to_string(),
-                    username: profile.username.clone(),
+                    username,
                     pin,
                 })
             }
@@ -172,17 +162,18 @@ impl Connection {
         password: Zeroizing<Vec<u8>>,
     ) -> Result<Client, ClientError> {
         match self.transport {
-            Transport::TlsTcp => self.connect_tls_tcp(password).await,
+            Transport::TlsTcp | Transport::NativeWss => self.connect_network(password).await,
             Transport::Ipc => self.connect_ipc(password).await,
         }
     }
 
-    /// TLS TCP path: ONE absolute 10 s budget covers the bounded
+    /// TLS TCP / native WSS: ONE absolute 10 s budget covers the bounded
     /// `lookup_host` (IPv6-capable tuple form) AND the TCP connect; the
     /// absolute 30 s budget covers TLS + SCRAM. Only the FIRST resolved
     /// address is used — no fallback address, no retry. The password is
     /// moved into the options, never cloned.
-    async fn connect_tls_tcp(self, password: Zeroizing<Vec<u8>>) -> Result<Client, ClientError> {
+    async fn connect_network(self, password: Zeroizing<Vec<u8>>) -> Result<Client, ClientError> {
+        let native_wss = self.transport == Transport::NativeWss;
         let start = tokio::time::Instant::now();
         let dial_deadline = start + DIAL_TIMEOUT;
         let auth_deadline = start + CONNECT_TOTAL;
@@ -216,9 +207,15 @@ impl Connection {
         // Absolute 30 s backstop around the whole auth; the SDK's own
         // `HandshakeTimeout` (same budget, started at handshake begin) is
         // the typed primary outcome, this only fires if it cannot.
-        tokio::time::timeout_at(auth_deadline, Client::connect(opts))
-            .await
-            .map_err(|_| ClientError::HandshakeTimeout(CONNECT_TOTAL, "scram".into()))?
+        tokio::time::timeout_at(auth_deadline, async {
+            if native_wss {
+                Client::connect_ws(opts).await
+            } else {
+                Client::connect(opts).await
+            }
+        })
+        .await
+        .map_err(|_| ClientError::HandshakeTimeout(CONNECT_TOTAL, "scram".into()))?
     }
 
     /// IPC path: the endpoint was validated in `prepare`; a 10 s dial
@@ -269,6 +266,15 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         } => ShellError::Authentication,
         // Identity rotation pending: hard shell-policy refusal (§3.2/§6).
         ClientError::IdentityRotationPending { .. } => ShellError::PinMismatch,
+        // Native WSS upgrade rejected BEFORE SCRAM: dial_ws.rs wraps the
+        // typed tungstenite error under `Handshake.source` — a connection
+        // failure, not an authentication failure. Real SCRAM failures
+        // carry a `ConnectError` source and fall through to the generic
+        // `Handshake` arm below.
+        ClientError::Handshake {
+            source: Some(source),
+            ..
+        } if source.is::<WsError>() => ShellError::Connection,
         // SCRAM/KDF stage failure; classify by the typed source when one
         // exists (bad password surfaces the server's wire `AuthFailed`
         // wrapped here — pre-auth framing, auth_ok.rs wraps the typed
@@ -279,11 +285,20 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         ClientError::ConnectTimeout(_) | ClientError::HandshakeTimeout(..) => {
             ShellError::Connection
         }
+        ClientError::ConnectionClosed(CloseCause::PeerClosed {
+            code: 4010..=4012, ..
+        }) => ShellError::Authentication,
         // Transport/TLS framing failures, typed and local.
         ClientError::Io(_)
         | ClientError::Tls { .. }
         | ClientError::Transport { .. }
         | ClientError::ConnectionClosed(_) => ShellError::Connection,
+        // Typed replication-quarantine refusal: the SDK's response mapper
+        // rewrites the server's stable `resync_required` code into this
+        // variant BEFORE the shell sees it, so the `Db` code match below
+        // never fires for it — classify the variant directly (the typed
+        // `resync_required` outcome, exit 5).
+        ClientError::ResyncRequired { .. } => ShellError::ResyncRequired,
         // Envelope or DB error: only the allowlisted stable codes are
         // classified; the code/message strings are never carried onward.
         ClientError::Server { code } | ClientError::Db { code, .. } => server_code(&code),
@@ -299,14 +314,20 @@ pub(in crate::shell) fn request_error(error: ClientError) -> ShellError {
         | ClientError::AsOfVisibilityTimeout { .. }
         | ClientError::AsOfFutureVersion { .. }
         | ClientError::AsOfReopenRequired { .. }
-        | ClientError::ResyncRequired { .. }
         | ClientError::VisibilityFutureVersion { .. }
         | ClientError::VisibilityWaitInvalid { .. }
         | ClientError::WriteCommittedVisibilityPending { .. }
         | ClientError::IdEncodingWithRefs { .. } => ShellError::Server,
-        // Token-REST surface: unreachable over the PR1 SCRAM transports;
-        // still typed (credentials rejected), never a fallback path.
-        ClientError::InvalidToken | ClientError::Http { .. } => ShellError::Authentication,
+        // REST and token upgrade errors use status for generic auth/policy
+        // failures. Structured 400/403 denials reach the Db arm above.
+        ClientError::InvalidToken | ClientError::Http { status: 401, .. } => {
+            ShellError::Authentication
+        }
+        ClientError::Http { status: 403, .. } => ShellError::Denied,
+        // REST server answered 408 AFTER the request was dispatched:
+        // post-send timeout, outcome unknown (§6) — not generic exit 5.
+        ClientError::Http { status: 408, .. } => ShellError::Timeout,
+        ClientError::Http { .. } => ShellError::Server,
     }
 }
 
@@ -345,11 +366,51 @@ fn handshake_source(source: Option<Box<dyn std::error::Error + Send + Sync>>) ->
 /// generic server error — the arbitrary code string is never reproduced.
 fn server_code(code: &str) -> ShellError {
     match code {
-        "permission_denied" | "access_denied" => ShellError::Denied,
+        "permission_denied" | "access_denied" | "token_database_denied" | "token_read_only"
+        // REST-only token used on the token WSS upgrade: the server's
+        // typed 403 `token_channel_denied` decoded by the SDK as `Db`
+        // (transport/token/status.rs) — permission refusal (§5 exit 4).
+        | "token_channel_denied" => ShellError::Denied,
+        "token_request_denied" => ShellError::TokenRequestDenied,
+        // Typed P2 point-read miss (`DbResponse::Error` code `not_found`).
+        "not_found" => ShellError::NotFound,
         "not_supported" => ShellError::Unsupported,
+        // Typed ACL-mutation refusals (§4.5/§5): each keeps its own stable
+        // code and a fixed local message; the server text is never echoed.
+        "invalid_owner" => ShellError::InvalidOwner,
+        "hmac_mismatch" => ShellError::HmacMismatch,
+        "hmac_required" => ShellError::HmacRequired,
+        // The addressed database does not exist (the mutation path reports this
+        // instead of a typed "not found" when the caller is an admin).
+        "unknown_db" => ShellError::UnknownDb,
         // Session-level invalidation after a successful connect: the
         // authenticated session is gone; re-login required.
-        "session_expired" | "session_invalidated" => ShellError::Authentication,
+        "session_expired" | "session_invalidated" | "token_revoked" | "token_expired" => {
+            ShellError::Authentication
+        }
+        // Typed bounded server conditions (§5 server-error class, exit 5,
+        // each with its own stable code and fixed local message; the
+        // arbitrary server text is never echoed):
+        // missing table, replication quarantine, oversized result.
+        "unknown_table" => ShellError::UnknownTable,
+        "resync_required" => ShellError::ResyncRequired,
+        "result_too_large" => ShellError::ResultTooLarge,
+        // Read-only follower write refusal (§6 "follower behavior": the
+        // stable diagnostic is surfaced, never retried or redirected).
+        "read_only_replica" => ShellError::ReadOnlyReplica,
+        // Online-copy and schema-migration refusals: each keeps its own
+        // stable code and fixed local message; the server text is never
+        // echoed.
+        "backup_already_running" => ShellError::BackupAlreadyRunning,
+        "backup_invalid_destination" => ShellError::BackupInvalidDestination,
+        "backup_unavailable" => ShellError::BackupUnavailable,
+        "backup_io_error" => ShellError::BackupIo,
+        "online_backup_follower_read_only" => ShellError::OnlineBackupFollowerReadOnly,
+        "schema_migration_follower_read_only" => ShellError::SchemaMigrationFollowerReadOnly,
+        // The VICTIM side of a cooperative cancellation: this session's own
+        // batch was cancelled by another operator. Its effects may be partial,
+        // so it is its own typed refusal, not a generic server failure.
+        "cancelled" => ShellError::Cancelled,
         _ => ShellError::Server,
     }
 }
@@ -367,34 +428,6 @@ fn decode_pin(pin: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Split a required `host:port` TLS address: nonzero port, valid host,
-/// IPv6 in brackets validated as a literal.
-fn split_host_port(address: &str) -> Result<(String, u16), ShellError> {
-    let address = address.trim();
-    if let Some(rest) = address.strip_prefix('[') {
-        let (host, after) = rest.split_once(']').ok_or(ShellError::InvalidProfile)?;
-        let port: u16 = after
-            .strip_prefix(':')
-            .ok_or(ShellError::InvalidProfile)?
-            .parse()
-            .map_err(|_| ShellError::InvalidProfile)?;
-        if port == 0 {
-            return Err(ShellError::InvalidProfile);
-        }
-        host.parse::<Ipv6Addr>()
-            .map_err(|_| ShellError::InvalidProfile)?;
-        return Ok((host.to_string(), port));
-    }
-    let (host, port) = address.rsplit_once(':').ok_or(ShellError::InvalidProfile)?;
-    let valid_host = !host.is_empty()
-        && !host.contains(['[', ']', '/', '\\'])
-        && host.bytes().all(|b| !b.is_ascii_whitespace());
-    if !valid_host {
-        return Err(ShellError::InvalidProfile);
-    }
-    let port: u16 = port.parse().map_err(|_| ShellError::InvalidProfile)?;
-    if port == 0 {
-        return Err(ShellError::InvalidProfile);
-    }
-    Ok((host.to_string(), port))
-}
+#[cfg(test)]
+#[path = "tests/error_mapping.rs"]
+mod error_mapping_tests;

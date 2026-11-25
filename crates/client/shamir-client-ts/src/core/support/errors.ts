@@ -71,6 +71,10 @@ export function isTokenAdminError(err: unknown, code?: TokenAdminErrorCode): err
  *   sealed WAL exceeds `durability.wal_retention_max_bytes` under mode
  *   `refuse_writes`; the refusal clears by itself once the drainer truncates
  *   the WAL, then a retried commit succeeds.
+ * - `server_busy` — an Argon2 KDF permit could not be acquired before a
+ *   user-administration write; the refused creation itself made no change,
+ *   so retrying it after a backoff is safe (this is not a promise that other
+ *   operations in a surrounding batch did not mutate state).
  */
 export const RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
   'timeout',
@@ -78,6 +82,7 @@ export const RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
   'tx_conflict',
   'read_only_replica',
   'wal_retention_exceeded',
+  'server_busy',
 ]);
 
 /** `true` if `code` is a transient failure worth retrying. */

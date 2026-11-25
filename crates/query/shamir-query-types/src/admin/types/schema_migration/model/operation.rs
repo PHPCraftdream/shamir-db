@@ -528,6 +528,31 @@ impl TryFrom<crate::batch::BatchOp> for SchemaMigrationOp {
                     "online-export inspection",
                 ))
             }
+            BatchOp::CancelRequest(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "request cancellation",
+                ))
+            }
+            BatchOp::CancelTx(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "transaction cancellation",
+                ))
+            }
+            BatchOp::CancelCursorAdmin(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "cursor cancellation",
+                ))
+            }
+            BatchOp::ListShapeStats(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "shape statistics listing",
+                ))
+            }
+            BatchOp::ResetShapeStats(_) => {
+                return Err(SchemaMigrationError::UnsupportedOperation(
+                    "shape statistics reset",
+                ))
+            }
         };
         admitted.validate()?;
         Ok(admitted)

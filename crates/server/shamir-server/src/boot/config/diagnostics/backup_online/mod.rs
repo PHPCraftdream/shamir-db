@@ -6,7 +6,9 @@
 
 pub mod adapter;
 pub mod metrics;
+mod progress_attribution;
 pub mod registry;
+pub(crate) mod schedule;
 
 mod admin_port;
 

@@ -37,6 +37,12 @@ pub struct TokenService {
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     gc_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     gc_shutdown: CancellationToken,
+    /// Set by `start_gc` after a collector task was spawned. `gc_live` counts the
+    /// collector tasks that have not ended yet: each task decrements it itself
+    /// when it ends (also by a panic or an abort), and a restart after an
+    /// abandoned `shutdown_gc` can leave two live at once.
+    gc_spawned: std::sync::atomic::AtomicBool,
+    gc_live: Arc<std::sync::atomic::AtomicUsize>,
     mirror_insert_conflict: Arc<std::sync::atomic::AtomicBool>,
     test_generator: Arc<TokenGenerator>,
 }
@@ -89,6 +95,8 @@ impl TokenService {
             clock,
             gc_task: tokio::sync::Mutex::new(None),
             gc_shutdown: CancellationToken::new(),
+            gc_spawned: std::sync::atomic::AtomicBool::new(false),
+            gc_live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             mirror_insert_conflict: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             test_generator: Arc::new(generate_token_parts),
         };
@@ -626,7 +634,12 @@ impl TokenService {
         }
         let gc = self.clone_for_gc();
         let stop = self.gc_shutdown.child_token();
-        *task = Some(tokio::spawn(async move {
+        // Counted before the spawn, under the slot lock; the guard travels into
+        // the task, so a spawn that fails drops it and restores the count.
+        self.gc_live
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let live = LiveCollector(Arc::clone(&self.gc_live));
+        let collector = async move {
             let _ = gc.collect().await;
             let mut interval = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(3600),
@@ -636,12 +649,41 @@ impl TokenService {
             loop {
                 tokio::select! { biased; _ = stop.cancelled() => break, _ = shutdown.cancelled() => break, _ = interval.tick() => { let _ = gc.collect().await; } }
             }
+        };
+        // Collector and guard are ONE value whose fields drop in declaration
+        // order, so the collector (and the store handles it captured) is
+        // destroyed before the guard counts the task out: on a normal return, a
+        // panic, an abort, and for a task that is dropped without ever being
+        // polled. `let guarded = guarded;` makes the block capture it whole.
+        let guarded = GuardedCollector {
+            collector,
+            _live: live,
+        };
+        *task = Some(tokio::spawn(async move {
+            let guarded = guarded;
+            guarded.collector.await;
         }));
+        // Only after the spawn succeeded: a spawn that panicked leaves the
+        // "never started" answer intact.
+        self.gc_spawned
+            .store(true, std::sync::atomic::Ordering::Release);
     }
+    /// Whether every collector has really ended. After a spawn this reads the
+    /// live-collector count the tasks maintain themselves, not the join-handle
+    /// slot: a `shutdown_gc` abandoned at a deadline detaches the handle while
+    /// the collector may still run, and a restart spawns a new one. The slot
+    /// lock makes the answer one snapshot against `start_gc`: a first start can
+    /// not land between the started flag and the stop-token reads. A handle that
+    /// is still in the slot must also report finished, as before. The promise is
+    /// async-task completion: a storage pass already handed to the blocking pool
+    /// keeps its own store clones until that job returns.
     pub async fn gc_task_finished(&self) -> bool {
-        match self.gc_task.lock().await.as_ref() {
-            Some(task) => task.is_finished(),
-            None => self.gc_shutdown.is_cancelled(),
+        let slot = self.gc_task.lock().await;
+        if self.gc_spawned.load(std::sync::atomic::Ordering::Acquire) {
+            self.gc_live.load(std::sync::atomic::Ordering::Acquire) == 0
+                && slot.as_ref().is_none_or(|task| task.is_finished())
+        } else {
+            self.gc_shutdown.is_cancelled()
         }
     }
     pub async fn shutdown_gc(&self) {
@@ -658,6 +700,20 @@ impl TokenService {
             Arc::clone(&self.mutation_gates),
             Arc::clone(&self.clock),
         )
+    }
+}
+/// A collector future with its live-count guard. The field order is the drop
+/// order: the collector goes first, the guard last.
+struct GuardedCollector<F> {
+    collector: F,
+    _live: LiveCollector,
+}
+/// Counts one collector task out when it is dropped: a normal return, a panic
+/// and an abort all end it.
+struct LiveCollector(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for LiveCollector {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 impl Drop for TokenService {

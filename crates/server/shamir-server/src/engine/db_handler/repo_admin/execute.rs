@@ -1,35 +1,15 @@
-//! `execute` — the admitted-batch execution path of [`ShamirDbHandler`]
-//! (moved verbatim out of `handler.rs` by the R4b-1 narrow recovery so the
-//! bridge file stays under the 1000-line limit; identical visibility
-//! (`pub(super)` of the `db_handler` module — every caller lives in that
-//! subtree), same behaviour, no new re-exports).
-//!
-//! R4b-1 in this file:
-//! - the batch is registered in the in-flight activity table (RAII) after
-//!   every cheap fast-reject gate and BEFORE the RI-15 byte-budget wait;
-//! - the op-kind summary is derived during the SAME preflight walk that
-//!   resolves nested visibility waits and validates `ListActivity` form —
-//!   static discriminant names only: a homogeneous batch keeps its exact
-//!   `activity_name` (`read` / `write` / `admin:<op>`), a heterogeneous
-//!   batch is conservatively `write`; no generic `batch` string, and no
-//!   query value ever enters the summary;
-//! - a single standalone `ListActivity` batch routes to the paging worker
-//!   (`activity::list`) through the SHARED byte-budget path — the
-//!   requested `max_result_size` (and the server cap) still bound the
-//!   page, and the same shrink/stash tail applies to the page response as
-//!   to a normal batch response;
-//! - the existing slow-query warning additionally carries the minted
-//!   [`RequestExecId`] and the OPTIONAL client `rid` (ids only — never the
-//!   bearer token or its prefix, no new log lines).
+//! Admitted batch dispatch, activity tracking, and response budgeting.
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::session::Session;
 
-use shamir_db::query::batch::{BatchOp, BatchRequest};
-use shamir_query_types::admin::activity::ListActivityReq;
+use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
+use shamir_query_types::admin::activity::{ListActivityReq, RequestExecId};
+use shamir_query_types::admin::shape_stats::{ListShapeStatsReq, ResetShapeStatsReq};
 use shamir_query_types::admin::types::schema_migration::SchemaMigrationAdminOp;
 use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::read::QueryResult;
+use shamir_query_types::wire::CursorId;
 use shamir_query_types::wire::DbResponse;
 use shamir_sync::subscriptions::SubscriptionRegistry;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +23,7 @@ use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::config::NodeMode;
 use super::cursor_handlers::error_response;
 use super::handlers::backup_handlers;
+use super::operator_state::table_unavailable_response;
 use super::repo_audit;
 use super::subscribe_handler;
 use super::ShamirDbHandler;
@@ -93,6 +74,13 @@ impl ShamirDbHandler {
     /// byte-budget wait, so an operator can see a request stuck waiting
     /// for budget; `client_rid` is the OPTIONAL transport request id
     /// carried alongside the minted [`RequestExecId`].
+    ///
+    /// The three cancel operations (`CancelRequest`, `CancelTx`,
+    /// `CancelCursorAdmin`) bypass admission entirely, so a cancel reaches
+    /// saturated work (or a registry row) even when its session has no
+    /// in-flight slot left.
+    ///
+    /// cancel-safe: NO — drive this future to completion once DB execution starts.
     pub(super) async fn execute_with_rid(
         &self,
         session: &Session,
@@ -140,9 +128,17 @@ impl ShamirDbHandler {
         // scanning the tree a second time.
         enum PreFlightError {
             Db(shamir_db::DbError),
-            ActivityForm(&'static str),
+            ActivityForm(&'static str, &'static str),
         }
         let mut single_activity: Option<ListActivityReq> = None;
+        let mut single_cancel: Option<RequestExecId> = None;
+        let mut single_cancel_tx: Option<u64> = None;
+        let mut single_cancel_cursor: Option<CursorId> = None;
+        // R4b step 4 — the shape-statistics control ops ride the same
+        // standalone, non-transactional form rules as the activity listing
+        // and the cancels.
+        let mut single_list_shapes: Option<ListShapeStatsReq> = None;
+        let mut single_reset_shapes: Option<ResetShapeStatsReq> = None;
         // R4b-1 — classification rides the same walk: static
         // discriminant names only. Vocabulary: a homogeneous batch keeps
         // its exact `activity_name` (`read` / `write` / `admin:<op>`);
@@ -156,7 +152,6 @@ impl ShamirDbHandler {
                 .transactions
                 .resolve_commit_wait(batch.visibility_wait)
                 .map_err(PreFlightError::Db)?;
-            let mut activity_leaves: usize = 0;
             for visit in BatchTreeVisitor::new(&batch.queries) {
                 // R4b-1 — classification rides the same walk: static
                 // discriminant names only.
@@ -166,18 +161,74 @@ impl ShamirDbHandler {
                     Some(prev) if prev != name => uniform_ops = false,
                     _ => {}
                 }
-                if let shamir_query_types::batch::BatchOp::ListActivity(req) = &visit.entry.op {
-                    if visit.body_depth().is_some() {
-                        return Err(PreFlightError::ActivityForm(
-                            "ListActivity cannot be nested inside a Batch/ForEach body",
-                        ));
+                let op = &visit.entry.op;
+                let control_op = match op {
+                    BatchOp::ListActivity(_) => Some("ListActivity"),
+                    BatchOp::CancelRequest(_) => Some("CancelRequest"),
+                    BatchOp::CancelTx(_) => Some("CancelTx"),
+                    BatchOp::CancelCursorAdmin(_) => Some("CancelCursorAdmin"),
+                    // R4b step 4: a shape listing or wipe is never
+                    // transactional and never nested (it addresses
+                    // node-local telemetry, not the batch's data view).
+                    BatchOp::ListShapeStats(_) => Some("ListShapeStats"),
+                    BatchOp::ResetShapeStats(_) => Some("ResetShapeStats"),
+                    _ => None,
+                };
+                if let Some(name) = control_op {
+                    let reason = if visit.body_depth().is_some() {
+                        Some("cannot be nested inside a Batch/ForEach body")
+                    } else if batch.transactional {
+                        Some("is not allowed inside a transactional batch")
+                    } else if batch.queries.len() != 1 {
+                        Some("must be the ONLY operation of its batch")
+                    } else if matches!(
+                        op,
+                        BatchOp::CancelRequest(_)
+                            | BatchOp::CancelTx(_)
+                            | BatchOp::CancelCursorAdmin(_)
+                            // A reset mutates local registry state, so it
+                            // carries the cancels' no-conditions rule; a
+                            // listing follows `ListActivity` and may carry
+                            // `when`/`after` like any other single op.
+                            | BatchOp::ResetShapeStats(_)
+                    ) && (visit.entry.when.is_some() || !visit.entry.after.is_empty())
+                    {
+                        Some("does not support execution conditions or dependencies")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        return Err(PreFlightError::ActivityForm(name, reason));
                     }
-                    activity_leaves += 1;
-                    single_activity = Some(req.clone());
                 }
-                let nested = match &visit.entry.op {
-                    shamir_query_types::batch::BatchOp::Batch(sub) => sub.batch.visibility_wait,
-                    shamir_query_types::batch::BatchOp::ForEach(fe) => fe.batch.visibility_wait,
+                // Visit container bodies separately.
+                let nested = match op {
+                    BatchOp::ListActivity(req) => {
+                        single_activity = Some(req.clone());
+                        None
+                    }
+                    BatchOp::CancelRequest(id) => {
+                        single_cancel = Some(*id);
+                        None
+                    }
+                    BatchOp::CancelTx(handle) => {
+                        single_cancel_tx = Some(*handle);
+                        None
+                    }
+                    BatchOp::CancelCursorAdmin(id) => {
+                        single_cancel_cursor = Some(*id);
+                        None
+                    }
+                    BatchOp::ListShapeStats(req) => {
+                        single_list_shapes = Some(req.clone());
+                        None
+                    }
+                    BatchOp::ResetShapeStats(req) => {
+                        single_reset_shapes = Some(req.clone());
+                        None
+                    }
+                    BatchOp::Batch(sub) => sub.batch.visibility_wait,
+                    BatchOp::ForEach(fe) => fe.batch.visibility_wait,
                     _ => None,
                 };
                 if let Some(nested) = nested {
@@ -200,18 +251,6 @@ impl ShamirDbHandler {
                     }
                 }
             }
-            if activity_leaves > 0 {
-                if batch.transactional {
-                    return Err(PreFlightError::ActivityForm(
-                        "ListActivity is not allowed inside a transactional batch",
-                    ));
-                }
-                if batch.queries.len() != 1 || activity_leaves != 1 {
-                    return Err(PreFlightError::ActivityForm(
-                        "ListActivity must be the ONLY operation of its batch",
-                    ));
-                }
-            }
             Ok(wait)
         })();
         match policy {
@@ -222,10 +261,10 @@ impl ShamirDbHandler {
                     message: e.to_string(),
                 };
             }
-            Err(PreFlightError::ActivityForm(reason)) => {
+            Err(PreFlightError::ActivityForm(name, reason)) => {
                 return DbResponse::Error {
                     code: "invalid_request".into(),
-                    message: reason.to_string(),
+                    message: format!("{name} {reason}"),
                 };
             }
         }
@@ -294,230 +333,269 @@ impl ShamirDbHandler {
             };
         }
 
-        // R4b-1 — in-flight registration. Placed AFTER every cheap gate
-        // (version, form, admin, read-only, HMAC) and BEFORE the RI-15
-        // byte-budget acquire: a request stuck waiting for budget stays
-        // visible as `Running` to the operator. One insert; the RAII guard
-        // below removes the entry, decrements the mirror and releases the
-        // per-session request slot exactly once on EVERY exit path (panic
-        // included). Per-session cap (R4b-1 follow-up): a stamped session
-        // must acquire a slot under `QueryLimitsCap::
-        // max_in_flight_requests_per_session` HERE, before execution and
-        // the budget wait; an exhausted session is rejected with the fixed
-        // `server_busy` wire text (the same code/message the HTTP REST
-        // executor and the serialized launcher overload frame already
-        // emit) BEFORE any execution, so a real write is refused with no
-        // side effect. The cap is skipped ONLY for the stateless
-        // (handle-0) fallback. `op_kind` is the STATIC discriminant
-        // summary derived during the preflight walk.
-        let op_kind = match (seen_op, uniform_ops) {
-            (Some(name), true) => name,
-            _ => "write",
-        };
-        let mut in_flight =
-            match self.try_track_activity_request(session, db_name, op_kind, client_rid) {
-                Ok(guard) => guard,
-                Err(()) => return server_busy_response(),
-            };
-        let exec_id = in_flight.id();
-
-        // RI-15 (CR-B2) — reserve an upfront, pessimistic estimate from the
-        // global in-flight response-byte budget BEFORE execution begins,
-        // using min(request result size, server result cap) as the estimate,
-        // without modifying the request. This is what
-        // actually bounds EXECUTION-time memory (not just write-path
-        // residency): N concurrent requests can no longer all run to
-        // completion and materialize their full result before any of them
-        // is throttled — the (N+1)-th request now blocks HERE, before
-        // `execute_with_policy` ever runs, once the budget is saturated.
-        //
-        // Deliberately placed AFTER every cheap, budget-free fast-reject
-        // above (version check, form, admin gate, read-only gate, HMAC
-        // gate) and AFTER the in-flight registration — those should stay
-        // free of any budget interaction. The reservation follows execution
-        // (including the owned worker when enrolled) and is shrunk to the
-        // ACTUAL serialized size once the final response is known (see the
-        // single tail below), rather than stashed immediately: stashing happens
-        // exactly once, at the end, same as before this change.
-        //
-        // R4b-1 follow-up — the SINGLE-op `ListActivity` route makes NO
-        // upfront reservation: a listing is an operator control-plane
-        // read and must not reserve (let alone park behind) the global
-        // response-byte budget — a separate session can list while the
-        // budget is fully saturated by data workloads, and no arbitrary
-        // memory is reserved for a page whose size is already bounded by
-        // the cap below and the page `limit`. The COMMON serialized
-        // byte/result limit below (the `result_too_large` check against
-        // min(request `max_result_size`, server cap)) is still enforced
-        // for the page like for any other response.
         let reserve_bytes = batch
             .limits
             .max_result_size
             .min(self.query_limits.max_result_size_bytes);
-        let mut budget_guard = if single_activity.is_none() && self.byte_budget.cap().is_some() {
-            Some(self.byte_budget.acquire(reserve_bytes).await)
+        let mut budget_guard = None;
+        // Fixed error headroom is reserved together with the ordinary caller
+        // reservation before DB execution. It is a hard serialized-byte bound,
+        // not permission to grow a live guard after execution.
+        const FIXED_ERROR_ALLOWANCE: usize = 512;
+        let reservation_bytes = reserve_bytes
+            .saturating_add(FIXED_ERROR_ALLOWANCE)
+            .min(self.query_limits.max_result_size_bytes);
+        let control_op =
+            single_cancel.is_some() || single_cancel_tx.is_some() || single_cancel_cursor.is_some();
+        // Keep the request slot through response encoding on tracked paths.
+        let in_flight;
+        let mut typed_canonical_refusal = false;
+        let final_response = if let Some(id) = single_cancel {
+            // Cancel must reach saturated work even if its session has no slots
+            // — true for all three cancel operations, which skip admission.
+            Box::pin(self.cancel_request(session, id)).await
+        } else if let Some(handle) = single_cancel_tx {
+            Box::pin(self.cancel_tx(session, handle)).await
+        } else if let Some(cursor_id) = single_cancel_cursor {
+            Box::pin(self.cancel_cursor_admin(session, cursor_id)).await
         } else {
-            None
-        };
+            let op_kind = match (seen_op, uniform_ops) {
+                (Some(name), true) => name,
+                _ => "write",
+            };
+            let registration =
+                self.try_track_activity_request(session, db_name, op_kind, client_rid);
+            in_flight = match registration {
+                Ok(guard) => guard,
+                Err(()) => return server_busy_response(),
+            };
+            let exec_id = in_flight.id();
+            let cancel = in_flight.cancel_handle();
 
-        let maintenance_enrolled =
-            self.maintenance.is_some() && batch_needs_maintenance_admission(&batch);
-
-        let final_response = if let Some(req) = single_activity {
-            // R4b-1 — single-op `ListActivity` routing. The batch already
-            // passed every gate above and is registered in-flight; route
-            // to the paging worker (`activity::list`) and let the guard's
-            // drop mark it Done + remove it. The worker receives
-            // `Some(exec_id)` so it can EXCLUDE this listing request
-            // itself from the returned `Requests` rows (otherwise every
-            // page could mint a fresh row forever).
-            self.list_activity(session, db_name, &req, Some(exec_id))
-                .await
-        } else {
-            let actor = super::handler::session_actor(session);
-            let repo_observer = self
-                .audit
-                .as_ref()
-                .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
-            let policy = self.execution_policy();
-            let registry = self
-                .admin
-                .as_ref()
-                .and_then(|admin| admin.tables_registry.as_ref());
-            let exec_result;
-            if maintenance_enrolled {
-                // Refuse slot overload before entering the drain set. The
-                // thaw wait stays cancellable in the handler, and pure backup
-                // status/cancel takes neither a slot nor maintenance admission.
-                let Ok(slot) = self.try_owned_mutation_slot() else {
-                    return server_busy_response();
-                };
-                let Some(maintenance) = self.maintenance_admission().await else {
-                    return server_busy_response();
-                };
-                let db = self.db.clone();
-                let db_name = db_name.to_owned();
-                let actor = actor.clone();
-                let registry = registry.cloned();
-                // Detach on disconnect by design: dropping the join handle
-                // must not release admission while a queued Fjall write can
-                // still land. The slot bounds running workers across sessions.
-                let worker = tokio::spawn(
-                    async move {
-                        let _slot = slot;
-                        let _maintenance = maintenance;
-                        let result = Box::pin(db.execute_with_policy_and_repo_observer(
-                            actor,
-                            &db_name,
-                            &batch,
-                            policy,
-                            repo_observer,
-                        ))
-                        .await;
-                        if result.is_ok() {
-                            persist_table_lifecycle(registry.as_deref(), &db_name, &batch);
-                        }
-                        (result, batch, in_flight, budget_guard)
-                    }
-                    .in_current_span(),
-                );
-                match worker.await {
-                    Ok((result, owned_batch, activity, budget)) => {
-                        exec_result = result;
-                        batch = owned_batch;
-                        in_flight = activity;
-                        budget_guard = budget;
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            panicked = error.is_panic(),
-                            request_exec_id = exec_id.0,
-                            "mutation worker failed",
-                        );
-                        return static_error("internal_error", "cannot complete database request");
-                    }
+            // Listing is tracked but never parks behind the shared byte budget.
+            // Other requests register first so operators can see and wake them.
+            // R4b step 4: the shape listing and the shape reset follow the
+            // same rule — both address node-local telemetry (a bounded
+            // in-memory snapshot, or one atomic wipe) and neither may be
+            // held behind a saturated data-path budget. Only the cancel
+            // family is a `control_op` for the encoded-result cap, because
+            // its refusal envelope must reach saturated work; a shape page
+            // stays bounded by the caller's own `max_result_size` exactly
+            // like `ListActivity`.
+            let needs_budget = single_activity.is_none()
+                && single_list_shapes.is_none()
+                && single_reset_shapes.is_none()
+                && self.byte_budget.cap().is_some();
+            if needs_budget {
+                budget_guard = self
+                    .byte_budget
+                    .acquire_cancellable(reservation_bytes, cancel)
+                    .await;
+            }
+            if needs_budget && budget_guard.is_none() {
+                error_response(&BatchError::Cancelled)
+            } else if let Some(req) = single_activity {
+                let response = self
+                    .list_activity(session, db_name, &req, Some(exec_id))
+                    .await;
+                if in_flight.finish() {
+                    response
+                } else {
+                    error_response(&BatchError::Cancelled)
+                }
+            } else if let Some(req) = single_list_shapes {
+                // Read-only, local: no node-mode gate (the registry is
+                // in-memory per-repository telemetry, `is_write() == false`),
+                // exactly like `ListActivity`.
+                let response = self.list_shape_stats(session, db_name, &req).await;
+                if in_flight.finish() {
+                    response
+                } else {
+                    error_response(&BatchError::Cancelled)
+                }
+            } else if let Some(req) = single_reset_shapes {
+                // One in-memory wipe, gated by the same completion shape as
+                // the listing above: the reset claims the commit slot before
+                // it touches the registry, so a cancellation that already
+                // won is answered `cancelled` and nothing is wiped, while a
+                // cancellation arriving after the claim loses to
+                // `finish()`. No node-mode gate for the same reason as the
+                // listing above.
+                let response = self
+                    .reset_shape_stats(session, db_name, &req, in_flight.cancel_handle())
+                    .await;
+                if in_flight.finish() {
+                    response
+                } else {
+                    error_response(&BatchError::Cancelled)
                 }
             } else {
-                exec_result = self
-                    .db
-                    .execute_with_policy_and_repo_observer(
-                        actor.clone(),
-                        db_name,
-                        &batch,
-                        policy,
-                        repo_observer,
-                    )
-                    .await;
-            }
-            match exec_result {
-                Ok(mut response) => {
-                    // Slow-query logging: WARN line for batches whose total
-                    // execution time exceeds the configured threshold. Useful
-                    // for spotting unindexed queries in production. Threshold
-                    // = 0 disables (e.g. in unit tests). R4b-1: the minted
-                    // [`RequestExecId`] and the OPTIONAL client `rid` ride
-                    // along (ids only — no token, no prefix, no new lines).
-                    if self.slow_query.threshold_us > 0
-                        && response.execution_time_us > self.slow_query.threshold_us
-                    {
-                        tracing::warn!(
-                            elapsed_us = response.execution_time_us,
-                            threshold_us = self.slow_query.threshold_us,
-                            db = db_name,
-                            queries = batch.queries.len(),
-                            request_id = ?response.id,
-                            request_exec_id = exec_id.0,
-                            client_rid = ?in_flight.client_rid(),
-                            "slow query",
-                        );
+                // Always await the DB; dropping it can interrupt a commit.
+                let actor = super::handler::session_actor(session);
+                let repo_observer = self
+                    .audit
+                    .as_ref()
+                    .map(|audit| repo_audit::repo_audit_observer(audit.clone(), session));
+                let maintenance_enrolled =
+                    self.maintenance.is_some() && batch_needs_maintenance_admission(&batch);
+                let exec_result = if maintenance_enrolled {
+                    // Acquire before spawning, then move both permits into the
+                    // detachable worker so disconnect cannot admit overlapping writes.
+                    let Ok(slot) = self.try_owned_mutation_slot() else {
+                        return server_busy_response();
+                    };
+                    let Some(maintenance) = self.maintenance_admission().await else {
+                        return server_busy_response();
+                    };
+                    let db = self.db.clone();
+                    let worker_db_name = db_name.to_owned();
+                    let worker_batch = batch.clone();
+                    let worker_actor = actor.clone();
+                    let worker_policy = self.execution_policy();
+                    let worker_cancel = std::sync::Arc::clone(cancel);
+                    let worker = self.owned_mutation_tasks().spawn(
+                        async move {
+                            let _slot = slot;
+                            let _maintenance = maintenance;
+                            db.execute_with_policy_and_repo_observer_and_cancel(
+                                worker_actor,
+                                &worker_db_name,
+                                &worker_batch,
+                                worker_policy,
+                                repo_observer,
+                                Some(worker_cancel),
+                            )
+                            .await
+                        }
+                        .in_current_span(),
+                    );
+                    match worker.await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::error!(
+                                panicked = error.is_panic(),
+                                request_exec_id = exec_id.0,
+                                "mutation worker failed",
+                            );
+                            return static_error(
+                                "internal_error",
+                                "cannot complete database request",
+                            );
+                        }
                     }
-                    if !maintenance_enrolled {
-                        persist_table_lifecycle(registry.map(AsRef::as_ref), db_name, &batch);
-                    }
-                    subscribe_handler::activate_subscriptions(
-                        conn,
-                        &self.db,
-                        db_name,
-                        &batch,
-                        &mut response,
-                        actor.clone(),
-                    )
-                    .await;
+                } else {
+                    self.db
+                        .execute_with_policy_and_repo_observer_and_cancel(
+                            actor.clone(),
+                            db_name,
+                            &batch,
+                            self.execution_policy(),
+                            repo_observer,
+                            Some(cancel.clone()),
+                        )
+                        .await
+                };
+                if !in_flight.finish() {
+                    error_response(&BatchError::Cancelled)
+                } else {
+                    match exec_result {
+                        Ok(mut response) => {
+                            // Slow-query logging: WARN line for batches whose total
+                            // execution time exceeds the configured threshold. Useful
+                            // for spotting unindexed queries in production. Threshold
+                            // = 0 disables (e.g. in unit tests). R4b-1: the minted
+                            // [`RequestExecId`] and the OPTIONAL client `rid` ride
+                            // along (ids only — no token, no prefix, no new lines).
+                            // The pinned test seam overrides the measured
+                            // duration for the decision AND the field; the
+                            // response itself is untouched.
+                            let elapsed_us = self.slow_query_elapsed(response.execution_time_us);
+                            if self.slow_query.threshold_us > 0
+                                && elapsed_us > self.slow_query.threshold_us
+                            {
+                                tracing::warn!(
+                                    elapsed_us = elapsed_us,
+                                    threshold_us = self.slow_query.threshold_us,
+                                    db = db_name,
+                                    queries = batch.queries.len(),
+                                    request_id = ?response.id,
+                                    request_exec_id = exec_id.0,
+                                    client_rid = ?in_flight.client_rid(),
+                                    "slow query",
+                                );
+                            }
+                            persist_table_lifecycle(
+                                self.admin
+                                    .as_ref()
+                                    .and_then(|admin| admin.tables_registry.as_deref()),
+                                db_name,
+                                &batch,
+                            );
+                            let activation_failed = subscribe_handler::activate_subscriptions(
+                                conn,
+                                &self.db,
+                                db_name,
+                                &batch,
+                                &mut response,
+                                actor.clone(),
+                            )
+                            .await;
 
-                    DbResponse::Batch { response }
+                            if activation_failed {
+                                typed_canonical_refusal = true;
+                                table_unavailable_response()
+                            } else {
+                                DbResponse::Batch { response }
+                            }
+                        }
+                        Err(e) => {
+                            typed_canonical_refusal = is_typed_canonical_refusal(&e);
+                            if typed_canonical_refusal {
+                                table_unavailable_response()
+                            } else if is_typed_server_busy_refusal(&e) {
+                                typed_canonical_refusal = true;
+                                server_busy_response()
+                            } else {
+                                error_response(&e)
+                            }
+                        }
+                    }
                 }
-                Err(e) => error_response(&e),
             }
         };
 
-        // RI-15 (CR-B2) — single convergence point for BOTH the success and
-        // error paths (and, R4b-1, the `ListActivity` page path): serialize
-        // the final `DbResponse` envelope exactly ONCE, shrink the upfront
-        // reservation down to that actual size (an error response's tiny
-        // actual size still needs its pessimistic over-reservation narrowed
-        // back down), then stash both the guard and the already-serialized
-        // bytes so `RequestHandler::handle` reuses them instead of encoding
-        // the SAME response a second time.
-        //
-        // The guard is stashed in a task-local (`byte_budget::stash_guard`)
-        // rather than returned from this function: `execute`'s return type
-        // is `DbResponse` (asserted on directly by tests) and the caller,
-        // `RequestHandler::handle`, has a fixed `Result<Vec<u8>, String>`
-        // signature owned by `shamir-connect`. `connection::request_loop`
-        // retrieves the guard with `byte_budget::take_stashed_guard` right
-        // after the dispatch future resolves and rides it inside
-        // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
-        // writer task, after the socket write completes — never in this
-        // dispatch task.
+        // Fixed cancellation error remains a fixed-limit exception, but its
+        // bytes are covered by the pre-execution allowance above.
+        if matches!(
+            &final_response,
+            DbResponse::Error { code, .. }
+                if code == shamir_query_types::wire::error_code::CANCELLED
+        ) {
+            drop(budget_guard);
+            return final_response;
+        }
+
+        // B6: the caller-cap exceptions are typed unknown-table and server_busy
+        // refusals with server-owned fixed text. Their possible bytes were reserved
+        // before execution as part of FIXED_ERROR_ALLOWANCE; never grow a live guard.
+        // All other replies, including resync/as-of errors with contextual
+        // fields, are caller-capped. The guard is stashed until writer completion.
         if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
-            if bytes.len() > reserve_bytes {
-                // Includes arbitrary error strings, not just successful payloads.
+            let fixed_refusal = typed_canonical_refusal;
+            let size_cap = if fixed_refusal {
+                reserve_bytes
+                    .saturating_add(FIXED_ERROR_ALLOWANCE)
+                    .min(self.query_limits.max_result_size_bytes)
+            } else {
+                reserve_bytes
+            };
+            if !control_op && bytes.len() > size_cap {
                 // Release before returning; never stash the rejected payload.
                 drop(budget_guard);
                 return DbResponse::Error {
                     code: "result_too_large".to_string(),
                     message: format!(
-                        "encoded response is {} bytes; maximum is {reserve_bytes}",
+                        "encoded response is {} bytes; maximum is {size_cap}",
                         bytes.len(),
                     ),
                 };
@@ -603,7 +681,11 @@ impl ShamirDbHandler {
 
 /// Record top-level table lifecycle operations in the optional boot-replay
 /// registry. Preserve the existing best-effort semantics on registry errors.
-fn persist_table_lifecycle(registry: Option<&TablesRegistry>, db_name: &str, batch: &BatchRequest) {
+pub(in crate::engine::db_handler) fn persist_table_lifecycle(
+    registry: Option<&TablesRegistry>,
+    db_name: &str,
+    batch: &BatchRequest,
+) {
     let Some(reg) = registry else { return };
     for entry in batch.queries.values() {
         match &entry.op {
@@ -620,6 +702,22 @@ fn persist_table_lifecycle(registry: Option<&TablesRegistry>, db_name: &str, bat
             _ => {}
         }
     }
+}
+
+/// Only the engine's canonical typed refusal is eligible; do not infer it from
+/// rendered Display text, which may contain caller-derived diagnostics.
+fn is_typed_canonical_refusal(error: &BatchError) -> bool {
+    matches!(error,
+        BatchError::QueryError { alias, message, code: Some(code) }
+            if alias.is_empty() && code == "unknown_table" && message == "table is unavailable")
+}
+
+/// Argon2 admission is identified by its stable typed code, never by its
+/// rendered diagnostic; the client receives fixed server-owned refusal text.
+fn is_typed_server_busy_refusal(error: &BatchError) -> bool {
+    matches!(error,
+        BatchError::QueryError { alias, code: Some(code), .. }
+            if alias.is_empty() && code == "server_busy")
 }
 
 #[cfg(test)]

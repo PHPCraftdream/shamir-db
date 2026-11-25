@@ -359,6 +359,14 @@ pub(in crate::wasm) fn map_wasm_error(e: wasmtime::Error, context: &str) -> Func
             FunctionError::FuelExhausted => FunctionError::FuelExhausted,
             FunctionError::AggregateFuelExhausted => FunctionError::AggregateFuelExhausted,
             FunctionError::Interrupted => FunctionError::Interrupted,
+            // A gateway refusal keeps BOTH its server-minted code and (with
+            // the historical `trap:` prefix the raw host-import error used to
+            // get) its rendered message, so a nested stored call's refusal
+            // reaches the outer invoke without stringification.
+            FunctionError::DbRefused { code, message } => FunctionError::DbRefused {
+                code: code.clone(),
+                message: format!("{context} trap: {message}"),
+            },
             // Ordinary compute-class failures stay string-classified.
             other => FunctionError::Compute(format!("{context}: {other}")),
         };

@@ -17,17 +17,18 @@ use crate::admin::{
     DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
     DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
     ExportFunctionOp, ExportStatusOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
-    InternerTouchOp, ListActivityReq, ListOp, ListPublicationsOp, ListSubscriptionsOp,
-    ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RemoveSchemaRuleOp,
-    RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp, RenameIndexOp,
-    RenameRepoOp, RenameTableOp, RenameValidatorOp, ReplicationStatusOp, RollbackMigrationOp,
-    SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartBackupOp, StartExportOp,
-    StartMigrationOp, UnbindValidatorOp,
+    InternerTouchOp, ListActivityReq, ListOp, ListPublicationsOp, ListShapeStatsReq,
+    ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp,
+    RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp, RenameGroupOp,
+    RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp, ReplicationStatusOp,
+    RequestExecId, ResetShapeStatsReq, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
+    SetTableSchemaOp, StartBackupOp, StartExportOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
 use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
+use crate::wire::CursorId;
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use super::op_kind::{op_kind, OpKind};
@@ -210,7 +211,6 @@ pub enum BatchOp {
     CancelBackup(CancelBackupOp),
     /// Operator activity-view listing (read-only, R4b step 1).
     ListActivity(ListActivityReq),
-
     /// Online logical-export admin ops (R3 step 2b), bound to the database in
     /// the request envelope. The wire handler requires a SCRAM superuser;
     /// the export runner checks included-scope read/manage ACLs.
@@ -219,6 +219,45 @@ pub enum BatchOp {
     StartExport(StartExportOp),
     ExportStatus(ExportStatusOp),
     CancelExport(CancelExportOp),
+    /// Cancel an in-flight batch by its server-minted execution id (R4b step 2).
+    CancelRequest(RequestExecId),
+    /// Operator cancellation of an open interactive transaction by its
+    /// activity-view handle (R4b step 3).
+    CancelTx(u64),
+    /// Operator cancellation of another session's result cursor (R4b step 3).
+    CancelCursorAdmin(CursorId),
+    /// Per-shape execution statistics for one repository (read-only, R4b
+    /// step 4): introspection of the node-local shape registry. Must be the
+    /// sole operation of a standalone nontransactional batch; authorization
+    /// (`ActivityView` + `Manage`) is enforced in the server handler, so
+    /// `required_access` returns `None`. The server answers with
+    /// `DbResponse::ShapeStatsPage`.
+    ListShapeStats(ListShapeStatsReq),
+    /// Wipe one repository's node-local shape registry, including the
+    /// `(other)` fold row (R4b step 4). Audited as an admin op, not as data;
+    /// it destroys local telemetry only. Must be the sole operation of a
+    /// standalone nontransactional batch; authorization is enforced in the
+    /// server handler (`ActivityView` + `Manage`), so `required_access`
+    /// returns `None`. The server answers with `DbResponse::ShapeStatsReset`.
+    ResetShapeStats(ResetShapeStatsReq),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelRequestWire {
+    cancel_request: RequestExecId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelTxWire {
+    cancel_tx: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelCursorAdminWire {
+    cancel_cursor_admin: CursorId,
 }
 
 impl Serialize for BatchOp {
@@ -326,6 +365,23 @@ impl Serialize for BatchOp {
             BatchOp::StartExport(op) => op.serialize(serializer),
             BatchOp::ExportStatus(op) => op.serialize(serializer),
             BatchOp::CancelExport(op) => op.serialize(serializer),
+            BatchOp::ListShapeStats(op) => op.serialize(serializer),
+            BatchOp::ResetShapeStats(op) => op.serialize(serializer),
+            BatchOp::CancelRequest(id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_request", id)?;
+                map.end()
+            }
+            BatchOp::CancelTx(handle) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_tx", handle)?;
+                map.end()
+            }
+            BatchOp::CancelCursorAdmin(id) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("cancel_cursor_admin", id)?;
+                map.end()
+            }
         }
     }
 }
@@ -342,6 +398,27 @@ impl<'de> Deserialize<'de> for BatchOp {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BatchOp, A::Error> {
                 let mut qv_map = TMap::default();
                 while let Some((key, value)) = map.next_entry::<String, QueryValue>()? {
+                    // The typed single-key cancel ops must not let a repeated
+                    // discriminator be overwritten before their wire struct
+                    // (and its `deny_unknown_fields`) ever sees the map.
+                    if qv_map.contains_key(&key) {
+                        match key.as_str() {
+                            "cancel_request" => {
+                                return Err(DeError::duplicate_field("cancel_request"))
+                            }
+                            "cancel_tx" => return Err(DeError::duplicate_field("cancel_tx")),
+                            "cancel_cursor_admin" => {
+                                return Err(DeError::duplicate_field("cancel_cursor_admin"))
+                            }
+                            "list_shape_stats" => {
+                                return Err(DeError::duplicate_field("list_shape_stats"))
+                            }
+                            "reset_shape_stats" => {
+                                return Err(DeError::duplicate_field("reset_shape_stats"))
+                            }
+                            _ => {}
+                        }
+                    }
                     qv_map.insert(key, value);
                 }
                 let qv = QueryValue::Map(qv_map);
@@ -564,6 +641,19 @@ impl<'de> Deserialize<'de> for BatchOp {
                     OpKind::CancelExport => {
                         CancelExportOp::deserialize(value).map(BatchOp::CancelExport)
                     }
+                    OpKind::ListShapeStats => {
+                        ListShapeStatsReq::deserialize(value).map(BatchOp::ListShapeStats)
+                    }
+                    OpKind::ResetShapeStats => {
+                        ResetShapeStatsReq::deserialize(value).map(BatchOp::ResetShapeStats)
+                    }
+                    OpKind::CancelRequest => CancelRequestWire::deserialize(value)
+                        .map(|op| BatchOp::CancelRequest(op.cancel_request)),
+                    OpKind::CancelTx => {
+                        CancelTxWire::deserialize(value).map(|op| BatchOp::CancelTx(op.cancel_tx))
+                    }
+                    OpKind::CancelCursorAdmin => CancelCursorAdminWire::deserialize(value)
+                        .map(|op| BatchOp::CancelCursorAdmin(op.cancel_cursor_admin)),
                     OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
                     OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
                     OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
@@ -604,35 +694,5 @@ fn strip_application_schema_marker(qv: QueryValue) -> QueryValue {
             QueryValue::Map(map)
         }
         other => other,
-    }
-}
-
-impl From<ReadQuery> for BatchOp {
-    fn from(q: ReadQuery) -> Self {
-        BatchOp::Read(q)
-    }
-}
-
-impl From<InsertOp> for BatchOp {
-    fn from(i: InsertOp) -> Self {
-        BatchOp::Insert(i)
-    }
-}
-
-impl From<UpdateOp> for BatchOp {
-    fn from(u: UpdateOp) -> Self {
-        BatchOp::Update(u)
-    }
-}
-
-impl From<SetOp> for BatchOp {
-    fn from(s: SetOp) -> Self {
-        BatchOp::Set(s)
-    }
-}
-
-impl From<DeleteOp> for BatchOp {
-    fn from(d: DeleteOp) -> Self {
-        BatchOp::Delete(d)
     }
 }

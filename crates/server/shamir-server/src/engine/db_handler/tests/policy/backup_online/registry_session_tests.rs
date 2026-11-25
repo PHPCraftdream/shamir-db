@@ -24,6 +24,7 @@ use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
+use crate::backup_online::metrics::backup_metrics_snapshot;
 use crate::backup_online::{
     EngineBackupPort, OnlineBackupRegistry, PortRunState, StartBackupError,
 };
@@ -351,6 +352,11 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         .expect("flush after failure within deadline")
         .expect("flush after failure");
     guard.note("flush-returned", "row c durable");
+    // Nextest isolates process-wide metrics. The first (failed) run must not
+    // have published a success, so this admin run is the only possible source.
+    let before = backup_metrics_snapshot();
+    assert_eq!(before.last_success_timestamp_seconds, 0);
+    assert_eq!(before.last_bytes, 0);
     let (second_id, destination) = registry
         .start(other.clone())
         .expect("restart after failure");
@@ -386,7 +392,38 @@ async fn async_failure_then_second_start_succeeds_and_engine_stays_usable() {
         dest_dir.join("manifest.json").exists(),
         "the second run wrote a manifest"
     );
-    verify_manifest(&dest_dir).expect("second snapshot must verify");
+    let verified = verify_manifest(&dest_dir).expect("second snapshot must verify");
+    // Wall-clock-free stamp invariant. `before.last_success_timestamp_seconds`
+    // is 0 (asserted above: the earlier run FAILED, so only this admin run can
+    // stamp) and `last_bytes` below is this run's verified report, so the
+    // stamp: (1) is nonzero, (2) moved past the value observed BEFORE the run,
+    // i.e. it ADVANCED because of THIS run. A broken `note_success` leaves the
+    // cell at the pre-run zero (nothing else in this isolated process writes
+    // it), so (2) fails; a stamp copied from another run's value also fails
+    // (2) because the observed pre-run value was zero.
+    let metrics = backup_metrics_snapshot();
+    assert!(
+        metrics.last_success_timestamp_seconds > 0,
+        "the successful admin run must stamp a nonzero last-success value"
+    );
+    assert!(
+        metrics.last_success_timestamp_seconds > before.last_success_timestamp_seconds,
+        "the last-success stamp must ADVANCE past the pre-run value (mutant: \
+         `note_success` not stamping): before={} after={}",
+        before.last_success_timestamp_seconds,
+        metrics.last_success_timestamp_seconds
+    );
+    let repo_bytes: u64 = after
+        .progress
+        .per_repo
+        .iter()
+        .map(|repo| repo.bytes_hashed)
+        .sum();
+    assert!(
+        verified.total_bytes > repo_bytes,
+        "fixture includes system-store bytes"
+    );
+    assert_eq!(metrics.last_bytes, verified.total_bytes);
     guard.note("second-run", "Done + verified");
 }
 
@@ -697,6 +734,28 @@ async fn runner_panic_publishes_failed_idle_and_second_start_succeeds() {
         "the unwind must remove the protocol-owned output directory"
     );
     guard.note("panic-published", "failed + idle, output cleaned");
+
+    // The §4.8 metrics, BEFORE the next run can touch them: a manual run has
+    // no completion channel, so the guard must still close `active` and count
+    // the copy failure at its own stage (mutant: accounting keyed on the
+    // optional sender — a manual panic then leaves `active` set and loses the
+    // failed-stage increment, which the follow-up run can no longer reveal).
+    let metrics = backup_metrics_snapshot();
+    assert!(
+        !metrics.active,
+        "a manual run that panics must clear `shamir_backup_active`: {metrics:?}"
+    );
+    assert!(
+        metrics
+            .failed_total_by_stage
+            .iter()
+            .any(|(stage, count)| stage == "sealing" && *count >= 1),
+        "the manual panic must be counted once at its failed stage: {metrics:?}"
+    );
+    assert_eq!(
+        metrics.completed_total, 0,
+        "a panicking manual run is never a completed copy: {metrics:?}"
+    );
 
     // The source is usable: a bounded write through the SAME engine (the
     // seal barrier's pause/gate RAII was released on the unwind).

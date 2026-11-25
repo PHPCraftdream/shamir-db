@@ -10,6 +10,7 @@
 //! `RequestHandler::handle` round trip, real in-memory `ShamirDb`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -24,6 +25,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_types::types::record_id::RecordId;
 
@@ -31,6 +33,8 @@ use crate::db_handler::handler::ShamirDbHandler;
 
 const ALICE_SID: [u8; 32] = [0xAA; 32];
 const BOB_SID: [u8; 32] = [0xBB; 32];
+/// Generous per-call bound (hang detector; slow Windows runner).
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Owner of `app.main.items` and its index -- authorized to poll DDL status
 /// on it.
@@ -72,17 +76,20 @@ fn bob_session() -> Session {
 /// orthogonal to what THIS test authorizes: the poll, not the DDL op
 /// itself). Returns the handler and the minted `op_id` string.
 async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
-    let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal64([0xAB; 16]));
-    shamir
-        .create_db_as("app", owner.clone())
+    let shamir = tokio::time::timeout(CALL_TIMEOUT, ShamirDb::init_memory())
         .await
+        .expect("init must complete within the 120s bound")
+        .expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    tokio::time::timeout(CALL_TIMEOUT, shamir.create_db_as("app", owner.clone()))
+        .await
+        .expect("create_db must complete within the 120s bound")
         .expect("create_db");
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
-    shamir
-        .add_repo_as("app", cfg, owner.clone())
+    tokio::time::timeout(CALL_TIMEOUT, shamir.add_repo_as("app", cfg, owner.clone()))
         .await
+        .expect("add repo must complete within the 120s bound")
         .expect("add repo");
 
     let table = shamir
@@ -91,9 +98,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
         .get_table("main", "items")
         .await
         .expect("table exists");
-    table
-        .create_index("idx_city", &["city"])
+    tokio::time::timeout(CALL_TIMEOUT, table.create_index("idx_city", &["city"]))
         .await
+        .expect("create index must complete within the 120s bound")
         .expect("create index");
 
     let mut b = Batch::new();
@@ -107,9 +114,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
             .expect("build drop index"),
     );
     let batch = b.build();
-    let resp = shamir
-        .execute_as(owner, "app", &batch)
+    let resp = tokio::time::timeout(CALL_TIMEOUT, shamir.execute_as(owner, "app", &batch))
         .await
+        .expect("drop index must complete within the 120s bound")
         .expect("drop index");
     let op_id = resp.results["d"]
         .op_id
@@ -123,9 +130,9 @@ async fn build_handler_with_dropped_index() -> (ShamirDbHandler, String) {
 async fn send(handler: &ShamirDbHandler, session: &Session, req: DbRequest) -> DbResponse {
     let bytes = rmp_serde::to_vec_named(&req).expect("encode request");
     let conn = ConnectionServices::without_push(0);
-    let resp_bytes = handler
-        .handle(session, &bytes, &conn)
+    let resp_bytes = tokio::time::timeout(CALL_TIMEOUT, handler.handle(session, &bytes, &conn))
         .await
+        .expect("handle must complete within the 120s bound")
         .expect("handle must not error at the protocol level");
     rmp_serde::from_slice(&resp_bytes).expect("decode response")
 }
@@ -139,8 +146,11 @@ fn get_ddl_op_status_req(op_id: &str) -> DbRequest {
     }
 }
 
+/// A poll naming an ABSENT table answers the SAME typed `unknown_table` a
+/// table-Read ACL denial answers (read-refusal parity: the status poll must
+/// not reveal whether the table exists).
 #[tokio::test]
-async fn rv_db_48da8907_missing_table_status_uses_not_found_code() {
+async fn rv_db_48da8907_missing_table_status_uses_unknown_table_code() {
     let (handler, _) = build_handler_with_dropped_index().await;
     let alice = alice_session();
     let response = send(
@@ -154,7 +164,7 @@ async fn rv_db_48da8907_missing_table_status_uses_not_found_code() {
         },
     )
     .await;
-    assert!(matches!(response, DbResponse::Error { code, .. } if code == "not_found"));
+    assert!(matches!(response, DbResponse::Error { code, .. } if code == "unknown_table"));
 }
 
 /// An actor with NO access to the table must NOT be able to poll a REAL,
@@ -216,6 +226,85 @@ async fn get_ddl_op_status_unauthorized_response_indistinguishable_from_unknown_
         real_code, "access_denied",
         "both must be denied at the authorization gate, before op_id resolution"
     );
+}
+
+/// Close `app.main.items` to every non-admin actor (including its owner) by
+/// chmodding the table itself; the Database/Store ancestors stay readable.
+async fn close_items_table(handler: &ShamirDbHandler) {
+    let mut batch = Batch::new();
+    batch.chmod(
+        "table",
+        ddl::chmod(
+            ResourceRef::Table {
+                table: ["app".into(), "main".into(), "items".into()],
+            },
+            0o000,
+        )
+        .hmac("p1064-ddl-status-invalid-op-id-parity")
+        .build()
+        .expect("build chmod table"),
+    );
+    tokio::time::timeout(
+        CALL_TIMEOUT,
+        handler
+            .db()
+            .execute_as(Actor::System, "app", &batch.build()),
+    )
+    .await
+    .expect("admin chmod must complete within the 120s bound")
+    .expect("admin chmod must succeed");
+}
+
+/// PAIR: an INVALID `op_id` against an existing-but-CLOSED table and against
+/// an ABSENT table must produce the SAME fixed refusal. Availability is
+/// decided BEFORE the id is parsed, so `validation` can never distinguish the
+/// two; the parent survives, so the code is `unknown_table`.
+#[tokio::test]
+async fn invalid_op_id_refusal_is_identical_for_closed_and_absent_tables() {
+    let (handler, _) = build_handler_with_dropped_index().await;
+    let alice = alice_session();
+    close_items_table(&handler).await;
+    let invalid = "not-a-record-id";
+
+    let closed = send(
+        &handler,
+        &alice,
+        DbRequest::GetDdlOpStatus {
+            db: "app".into(),
+            repo: "main".into(),
+            table: "items".into(),
+            op_id: invalid.into(),
+        },
+    )
+    .await;
+    let absent = send(
+        &handler,
+        &alice,
+        DbRequest::GetDdlOpStatus {
+            db: "app".into(),
+            repo: "main".into(),
+            table: "missing".into(),
+            op_id: invalid.into(),
+        },
+    )
+    .await;
+
+    let (closed_code, closed_message) = match closed {
+        DbResponse::Error { code, message } => (code, message),
+        other => panic!("expected the fixed refusal for the closed table, got {other:?}"),
+    };
+    let (absent_code, absent_message) = match absent {
+        DbResponse::Error { code, message } => (code, message),
+        other => panic!("expected the fixed refusal for the absent table, got {other:?}"),
+    };
+
+    assert_eq!(
+        (closed_code.clone(), closed_message.clone()),
+        (absent_code.clone(), absent_message.clone()),
+        "an invalid op_id must not reveal whether the table exists"
+    );
+    assert_eq!(closed_code, "unknown_table");
+    assert_eq!(closed_message, "table is unavailable");
 }
 
 /// Regression guard: the actual owner (authorized) can still poll DDL

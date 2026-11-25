@@ -1,22 +1,19 @@
 //! [`ServerLauncher`]: builds the server runtime from a
 //! [`Config`](crate::config::Config) + bootstrap policy in `launch()`.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
-use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChainWriter};
 use shamir_connect::server::dispatch::RequestHandler;
-use shamir_connect::server::durable_counters::FjallConsumedCounters;
 use shamir_connect::server::lockout::{
     InMemoryLockoutStore, LockoutSnapshotSink, PairDropReason, PairStoreObserver,
 };
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
-use shamir_sync::format_stamp::{check_data_dir, EpochPolicy, IgnoreSet, StampMode};
 
 use shamir_tunables::runtime::RuntimeTunables;
 
@@ -24,14 +21,13 @@ use shamir_db::engine::db_instance::logical_export::MaintenanceGate;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
-use crate::audit_appender::FjallAuditAppender;
-use crate::boot::config::diagnostics::backup_online::OnlineBackupRegistry;
-use crate::bootstrap::{
-    ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
-};
+use crate::boot::config::diagnostics::backup_online::metrics::install_backup_meta_store;
+use crate::boot::config::diagnostics::backup_online::{schedule, OnlineBackupRegistry};
 use crate::byte_budget::ByteBudget;
-use crate::config::Config;
+use crate::config::{Config, ResolvedSchedule};
 use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
@@ -43,15 +39,26 @@ use crate::server::boot_error::BootError;
 use crate::server::bootstrap_mode::BootstrapMode;
 use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
 use crate::server::server_handle::ServerHandle;
-use crate::server_meta::ServerMetaStore;
+use crate::server::server_launcher::audit_teardown::{teardown_audit, AuditTeardown};
 use crate::tables_registry::TablesRegistry;
-use crate::user_directory::FjallUserDirectory;
+use crate::user_directory::ScramDerivationGate;
 
-use super::helpers::{
-    boot_now_ns, default_node_id, kdf_from_config, log_bootstrap_outcome, REPL_RECONCILE_INTERVAL,
-};
+use super::helpers::{boot_now_ns, default_node_id, REPL_RECONCILE_INTERVAL};
 use super::http::BootGuard;
 use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
+use super::load_metrics::bind_load_source;
+
+#[path = "support/rollback_cleanup.rs"]
+mod rollback_cleanup;
+
+use rollback_cleanup::{join_meta_snapshot, log_rollback_cleanup};
+
+// `log_rollback_cleanup` is `pub(super)` inside the private `rollback_cleanup`
+// module, so only a child of THIS module can call it: the shutdown-folder test
+// file is declared here (its `#[path]` keeps the folder layout intact).
+#[cfg(test)]
+#[path = "tests/shutdown/rollback_cleanup_tests.rs"]
+mod rollback_cleanup_tests;
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
@@ -85,12 +92,40 @@ impl ServerLauncher {
     /// "spawn the accept loops". Returns when all listeners are bound but
     /// before any connection arrives.
     pub async fn launch(self) -> Result<ServerHandle, BootError> {
+        self.launch_inner(schedule::runner::spawn).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn launch_with_backup_test(
+        self,
+        spawn_backup: impl FnOnce(
+            ResolvedSchedule,
+            Arc<OnlineBackupRegistry>,
+            String,
+            CancellationToken,
+        ) -> JoinHandle<()>,
+    ) -> Result<ServerHandle, BootError> {
+        self.launch_inner(spawn_backup).await
+    }
+
+    async fn launch_inner(
+        self,
+        spawn_backup: impl FnOnce(
+            ResolvedSchedule,
+            Arc<OnlineBackupRegistry>,
+            String,
+            CancellationToken,
+        ) -> JoinHandle<()>,
+    ) -> Result<ServerHandle, BootError> {
         let ServerLauncher {
             config,
             bootstrap,
             node_mode,
         } = self;
-        config.validate()?;
+        config.validate_for_launch()?;
+        // Operator boot diagnostics: wall-clock origin of this launch, used
+        // with the observed format epoch for the with_operator_boot call.
+        let started_at = std::time::Instant::now();
         let durability = config.durability.resolve_policy()?;
         config.durability.warn_unimplemented_retention();
 
@@ -105,189 +140,22 @@ impl ServerLauncher {
         // executing its tick-branch body, not parked in `select!`, is
         // silently dropped — the cold-start hang we chased through the accept
         // loops). One concept, race-free by construction.
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let shutdown_token = CancellationToken::new();
         let mut boot_guard = BootGuard::new(shutdown_token.clone());
         let conn_tasks = ConnTasks::new(shutdown_token.clone());
 
-        // 1. Durable stores.
-        std::fs::create_dir_all(&config.data_dir)?;
-
-        // Single-instance guard: acquire an advisory OS file lock on
-        // `<data_dir>/.shamir.lock` BEFORE opening any redb store. The
-        // lock is held for the entire process lifetime via the `File`
-        // stored in `ServerHandle._data_dir_lock` — drop releases it
-        // (and the kernel releases on crash). This prevents two servers
-        // from opening the same data_dir and corrupting/contending the
-        // redb stores.
-        let data_dir_lock = crate::maintenance_lock::acquire_server(&config.data_dir)?;
-
-        // Format-stamp gate (design 3.2): between the single-instance lock
-        // and the first store open, so a refusal leaves every store closed.
-        // The configured log file counts as data only when it lives in the
-        // data directory itself (design 3.1).
-        let format_stamp_ignore = config
-            .logging
-            .file
-            .as_ref()
-            .and_then(|log| {
-                let log = Path::new(log);
-                if log.parent() != Some(config.data_dir.as_path()) {
-                    return None;
-                }
-                log.file_name()
-                    .map(|name| IgnoreSet::with_log_file(name.to_string_lossy()))
-            })
-            .unwrap_or_else(IgnoreSet::none);
-        let format_stamp = check_data_dir(
-            &config.data_dir,
-            StampMode::Writer,
-            &format_stamp_ignore,
-            &EpochPolicy::compiled(),
-        )?;
-
-        let meta = Arc::new(
-            ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
-                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
-        );
-
-        let user_dir = Arc::new(
-            FjallUserDirectory::open(config.data_dir.join("users"))
-                .map_err(|e| BootError::UserDirectory(e.to_string()))?,
-        );
-        let counters = Arc::new(
-            FjallConsumedCounters::open(config.data_dir.join("counters"))
-                .map_err(|e| BootError::Counters(e.to_string()))?,
-        );
-
-        let audit_max_bytes = if config.audit.max_file_size_mb == 0 {
-            None
-        } else {
-            Some(config.audit.max_file_size_mb.saturating_mul(1024 * 1024))
-        };
-        let audit_appender = FjallAuditAppender::open_batched_with_rotation(
-            &config.data_dir,
-            std::time::Duration::from_secs(5),
-            audit_max_bytes,
-            config.audit.retention_days,
-        )
-        .map_err(|e| BootError::AuditAppender(e.to_string()))?;
-
-        // Hoisted from step 2 below (CR-A6): the TTL sweep now also needs
-        // `kdf_for_bootstrap` to rotate an expired-and-unused token's SCRAM
-        // credential, so this construction moved ahead of the sweep block.
-        let kdf_for_bootstrap = kdf_from_config(&config.kdf_defaults);
-
-        // 1b. Boot-time bootstrap-token TTL sweep (RI-9 + CR-A6). Runs
-        // unconditionally, in ALL bootstrap modes, BEFORE the bootstrap step
-        // below: a previously-issued token from an earlier `RandomToken`
-        // boot can still be outstanding and expired even if this boot is
-        // `Skip`/`Password`. Best-effort — an I/O failure deleting the file,
-        // or a rotation failure, is logged and does not fail boot. CR-A6:
-        // also rotates the account's SCRAM credential to a fresh random
-        // value — without this an unused, TTL-expired token would still
-        // work as the account's password forever, contradicting the
-        // "one-time token" guarantee.
-        //
-        // F-3: ordering is rotate-FIRST → consume-on-success → delete-file-
-        // last. If the rotate fails — or there is no username to rotate —
-        // the token metadata row is LEFT active so the next boot's sweep
-        // gets another chance. The username MUST be read BEFORE
-        // `consume_bootstrap_token()` clears the bookkeeping row (order
-        // matters); the token path is likewise read before consume.
-        {
-            let now_ns = boot_now_ns()?;
-            if meta.bootstrap_token_expired(now_ns) {
-                let expired_username = meta.bootstrap_username();
-
-                let rotated_ok = match expired_username {
-                    Some(name) => {
-                        match crate::bootstrap::rotate_bootstrap_credential_to_random(
-                            &user_dir,
-                            &name,
-                            kdf_for_bootstrap,
-                            now_ns,
-                        )
-                        .await
-                        {
-                            Ok(()) => true,
-                            Err(e) => {
-                                tracing::warn!(
-                                    ?e,
-                                    "bootstrap: failed to rotate SCRAM credential for expired \
-                                     token -- token left active for retry"
-                                );
-                                false
-                            }
-                        }
-                    }
-                    None => false,
-                };
-
-                if rotated_ok {
-                    let expired_token_path = meta.bootstrap_token_path();
-                    if let Err(e) = meta.consume_bootstrap_token() {
-                        tracing::warn!(?e, "bootstrap: failed to consume expired token record");
-                    }
-                    if let Some(path) = expired_token_path {
-                        if let Err(e) = std::fs::remove_file(&path) {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                tracing::warn!(
-                                    ?path,
-                                    ?e,
-                                    "bootstrap: failed to delete expired token file"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Bootstrap (idempotent).
-        match &bootstrap {
-            BootstrapMode::Password { username, password } => {
-                let outcome = ensure_superuser(
-                    &user_dir,
-                    &config.data_dir,
-                    username,
-                    BootstrapPolicy::Password(password),
-                    &kdf_for_bootstrap,
-                )?;
-                log_bootstrap_outcome(username, &outcome);
-            }
-            BootstrapMode::RandomToken {
-                username,
-                token_path,
-            } => {
-                let name = username.as_deref().unwrap_or(DEFAULT_BOOTSTRAP_NAME);
-                let now_ns = boot_now_ns()?;
-                let outcome = ensure_superuser(
-                    &user_dir,
-                    &config.data_dir,
-                    name,
-                    BootstrapPolicy::RandomToken(token_path.clone()),
-                    &kdf_for_bootstrap,
-                )?;
-                if let BootstrapOutcome::Created {
-                    token: Some(tok),
-                    token_path: Some(path),
-                } = &outcome
-                {
-                    if let Err(e) = meta.set_bootstrap_token(
-                        name,
-                        shamir_connect::common::crypto::sha256(tok.as_bytes()),
-                        now_ns.saturating_add(crate::bootstrap::BOOTSTRAP_TOKEN_TTL_NS),
-                        path.clone(),
-                    ) {
-                        tracing::warn!(?e, "bootstrap: failed to persist token TTL/consume record");
-                    }
-                }
-                log_bootstrap_outcome(name, &outcome);
-            }
-            BootstrapMode::Skip => {
-                tracing::debug!("bootstrap: skipped per BootstrapMode::Skip");
-            }
-        }
+        let super::durable_stores::DurableStores {
+            data_dir_lock,
+            format_stamp,
+            meta,
+            backup,
+            user_dir,
+            counters,
+            audit_appender,
+            audit_chain,
+            kdf_for_bootstrap,
+            observed_format_epoch,
+        } = super::durable_stores::open(&config, &bootstrap).await?;
 
         // 3. In-memory stores.
         //
@@ -332,6 +200,7 @@ impl ServerLauncher {
             config.security.auth_init_rate_per_second,
         ));
         let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
+        let derivation_gate = Arc::new(ScramDerivationGate::new(Arc::clone(&argon2_sem)));
         let session_store = Arc::new(SessionStore::new());
 
         // Spawn the periodic meta-snapshot task. One 60s tick persists
@@ -371,24 +240,8 @@ impl ServerLauncher {
             });
         }
 
-        // 4. Audit chain — load from checkpoint if present.
-        //
-        // CRITICAL: the writer (used by every connection task to emit
-        // audit events) and the scheduler (which periodically persists
-        // the truncation-defence checkpoint) MUST share a single chain
-        // state. Constructing two independent `AuditChain` instances
-        // here produces a split-brain — appends advance one chain while
-        // the checkpoint snapshots the other (empty) one, so audit.log
-        // restarts at seq=1 on every reboot. See
-        // `audit_writer_and_checkpoint_share_chain_state` for the
-        // regression test.
-        let ack = meta
-            .audit_chain_key()
-            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
-        let audit_chain = match meta.audit_checkpoint() {
-            Some((seq, hmac)) => Arc::new(AuditChain::from_checkpoint(ack, seq, hmac)),
-            None => Arc::new(AuditChain::new(ack)),
-        };
+        // 4. Share the recovered chain between the writer and the scheduler
+        // so periodic checkpoints track the same state that appends advance.
         let audit_writer = Arc::new(AuditChainWriter::new_with_shared(
             audit_chain.clone(),
             audit_appender.clone() as Arc<dyn AuditAppender>,
@@ -412,7 +265,8 @@ impl ServerLauncher {
         // ShamirDb in Arc. The builder methods consume Self and return
         // Self, so this must happen on the owned value.
         let (port, resolver) =
-            DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap).into_trait_objects();
+            DirectoryPorts::new(user_dir.clone(), kdf_for_bootstrap, derivation_gate.clone())
+                .into_trait_objects();
         let shamir = Arc::new(
             ShamirDb::init_with_durability(SystemStoreConfig::Fjall(meta_path), durability)
                 .await
@@ -462,7 +316,12 @@ impl ServerLauncher {
                 None => registry,
             })
         };
-        shamir.set_online_backup_admin_port(online_backup_registry);
+        // Staleness evidence survives restarts: seed the gauge from the durable
+        // rows and arm the schedule clock only when a schedule is configured
+        // (`backup.is_some()`); `metrics::note_success` re-persists the
+        // last-success row at every copy success.
+        install_backup_meta_store(Arc::clone(&meta), backup.is_some());
+        shamir.set_online_backup_admin_port(online_backup_registry.clone());
 
         // R3-2b — online logical-export job (support/export_boot.rs).
         let online_export = super::export_boot::maybe_online_export(
@@ -593,12 +452,13 @@ impl ServerLauncher {
         // the first refusal.
         shamir.set_node_read_only(node_mode == crate::db_handler::NodeMode::ReadOnly);
 
-        let handler_builder = ShamirDbHandler::with_admin(
+        let mut handler_builder = ShamirDbHandler::with_admin(
             shamir.clone(),
             AdminGlue {
                 user_dir: user_dir.clone(),
                 kdf: kdf_for_bootstrap,
                 tables_registry: Some(tables_registry.clone()),
+                derivation_gate: derivation_gate.clone(),
             },
         )
         .with_audit_writer(audit_writer.clone())
@@ -618,14 +478,21 @@ impl ServerLauncher {
         .with_byte_budget(byte_budget.clone())
         .with_session_store(session_store.clone())
         .with_node_mode(node_mode)
-        .with_token_service(token_service.clone(), config.tokens.allow_self_service);
-        let handler_builder = match maintenance_gate.as_ref() {
-            Some(gate) => handler_builder.with_maintenance_gate(gate.clone()),
-            None => handler_builder,
-        };
+        .with_token_service(token_service.clone(), config.tokens.allow_self_service)
+        .with_operator_boot(
+            started_at,
+            observed_format_epoch,
+            format_stamp,
+            config.replication.as_ref().and_then(|r| r.node_id.clone()),
+        );
+        if let Some(gate) = maintenance_gate.as_ref() {
+            handler_builder = handler_builder.with_maintenance_gate(gate.clone());
+        }
         let handler_builder =
             super::export_boot::wire_handler(handler_builder, online_export.as_ref());
         let handler_concrete: Arc<ShamirDbHandler> = Arc::new(handler_builder);
+        let cancel_refusal_audit = handler_concrete.cancel_refusal_audit();
+        let handler_owned_tracker = handler_concrete.owned_mutation_tasks();
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete.clone();
@@ -733,6 +600,7 @@ impl ServerLauncher {
         //       of `launch()` — `shutdown()` cancels it once and every accept
         //       loop observes the cancel on its next `select!` poll.
         let SpawnedListeners {
+            conn_limiter,
             bound_addrs,
             bound_ipc_paths,
             listener_tasks,
@@ -766,12 +634,24 @@ impl ServerLauncher {
         {
             Ok(listeners) => listeners,
             Err(error) => {
+                let mut cleanup = shamir_db::ShutdownReport::default();
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
-                audit_appender.shutdown().await;
-                scheduler.shutdown().await;
-                if let Some(snap) = meta_snapshot_task {
-                    let _ = snap.handle.await;
-                }
+                teardown_audit(
+                    AuditTeardown {
+                        cancel_refusal_audit: &cancel_refusal_audit,
+                        appender: &audit_appender,
+                        scheduler,
+                        #[cfg(test)]
+                        drain_probe: None,
+                    },
+                    &mut cleanup,
+                )
+                .await;
+                // The boot error wins: cleanup failures are logged, never
+                // returned in its place.
+                log_rollback_cleanup("listener bind", &cleanup);
+                join_meta_snapshot("listener bind", meta_snapshot_task).await;
                 if let Some(reaper) = interactive_tx_reaper {
                     let _ = reaper.handle.await;
                 }
@@ -814,23 +694,22 @@ impl ServerLauncher {
                     .upgrade()
                     .map_or_else(Default::default, |handler| handler.activity_counts())
             }));
+            bind_load_source(
+                &state,
+                conn_limiter,
+                &session_store,
+                token_service.counters(),
+                &derivation_gate,
+            );
             // Record what the data-path bound to — `/info` surfaces this.
             state.set_bound_addrs(bound_addrs.iter().filter_map(|a| *a).collect());
-            // The Prometheus recorder is global per-process. In integration
-            // tests where multiple servers spawn back-to-back the second
-            // launcher would error on `set_global_recorder`. We swallow
-            // that specific failure (recorder already installed = OK,
-            // we use the existing one) and continue without an exporter
-            // handle in that case.
+            // A duplicate global recorder must not stop boot; the fallback
+            // starts the observability listener without a Prometheus handle.
             // M-tier audit M5: `allow_public_metrics` comes straight from
             // the parsed config (`ObservabilityConfig::allow_public_metrics`,
             // default `false`). A non-loopback `addr` is rejected up-front
             // unless the operator has explicitly opted in.
             let allow_public_metrics = config.observability.allow_public_metrics;
-            // F-29 (#822): thread the same `ByteBudget` used by the request
-            // handler into the observability poller so
-            // `shamir_inflight_response_bytes_used`/`_cap` reflect the real
-            // RI-15 budget this server booted with, not a detached instance.
             let handle = match crate::observability::spawn_with_byte_budget(
                 addr,
                 state.clone(),
@@ -860,13 +739,13 @@ impl ServerLauncher {
                 }
                 Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
             };
-            handle.state.mark_ready();
             Ok(Some(handle))
         }
         .await;
         let observability = match observability_result {
             Ok(handle) => handle,
             Err(error) => {
+                cancel_refusal_audit.close();
                 shutdown_token.cancel();
                 let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 for mut task in listener_tasks {
@@ -904,11 +783,20 @@ impl ServerLauncher {
                     gate.shutdown().await;
                 }
                 token_service.shutdown_gc().await;
-                audit_appender.shutdown().await;
-                scheduler.shutdown().await;
-                if let Some(snap) = meta_snapshot_task {
-                    let _ = snap.handle.await;
-                }
+                let mut cleanup = shamir_db::ShutdownReport::default();
+                teardown_audit(
+                    AuditTeardown {
+                        cancel_refusal_audit: &cancel_refusal_audit,
+                        appender: &audit_appender,
+                        scheduler,
+                        #[cfg(test)]
+                        drain_probe: None,
+                    },
+                    &mut cleanup,
+                )
+                .await;
+                log_rollback_cleanup("observability bind", &cleanup);
+                join_meta_snapshot("observability bind", meta_snapshot_task).await;
                 if let Some(reaper) = interactive_tx_reaper {
                     let _ = reaper.handle.await;
                 }
@@ -949,27 +837,18 @@ impl ServerLauncher {
             crate::server::server_handle::ReplSupervisorTask { handle }
         };
 
-        // R4b-1 (test-only): capture the production-boot artifacts the
-        // activity-gauge source closes over so `server_launcher/tests` can
-        // drive the real handler and scrape the real `/metrics`. Compiled
-        // out of production builds entirely. Computed BEFORE the literal so
-        // `observability` is only borrowed here and moved exactly once,
-        // into the `ServerHandle`; the bound address is the one the server
-        // ACTUALLY bound (`None` — not a fake port-0 sentinel — when no
-        // observability server was configured).
-        #[cfg(test)]
-        let activity_test_seam =
-            observability
-                .as_ref()
-                .map(|obs| crate::server::server_handle::ActivityGaugeTestSeam {
-                    handler: Arc::clone(&handler_concrete),
-                    byte_budget: byte_budget.clone(),
-                    session_store: session_store.clone(),
-                    observability_bound_addr: obs.bound_addr,
-                });
+        if let Some(obs) = &observability {
+            obs.state.mark_ready();
+        }
+        let backup_schedule_task = backup.map(|(resolved, owner)| {
+            let shutdown = shutdown_token.clone();
+            let handle = spawn_backup(resolved, online_backup_registry, owner, shutdown.clone());
+            (shutdown.drop_guard(), handle)
+        });
 
         boot_guard.disarm();
         Ok(ServerHandle {
+            backup_schedule_task,
             token_service,
             bound_addrs,
             bound_ipc_paths,
@@ -977,22 +856,36 @@ impl ServerLauncher {
             http_gates,
             scheduler,
             audit_appender,
+            cancel_refusal_audit,
+            #[cfg(test)]
+            refusal_drain_pending: None,
             shutdown_token,
 
             meta_snapshot_task,
             interactive_tx_reaper,
             cursor_reaper,
             online_export,
+            owned_mutation_tasks: Some(handler_owned_tracker),
             repl_supervisor: supervisor,
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,
             data_dir: config.data_dir.clone(),
             conn_tasks: conn_tasks.clone(),
             format_stamp,
-            _data_dir_lock: data_dir_lock,
+            data_dir_lock: Some(data_dir_lock),
             tunables: Arc::new(RuntimeTunables::new()),
+            // Tests drive the real handler and scrape the actual bound metrics address.
             #[cfg(test)]
-            activity_test_seam,
+            activity_test_seam: observability.as_ref().map(|obs| {
+                crate::server::server_handle::ActivityGaugeTestSeam {
+                    handler: Arc::clone(&handler_concrete),
+                    byte_budget: byte_budget.clone(),
+                    session_store: session_store.clone(),
+                    audit_chain: audit_chain.clone(),
+                    observability_bound_addr: obs.bound_addr,
+                    argon2_sem: argon2_sem.clone(),
+                }
+            }),
             observability,
         })
     }

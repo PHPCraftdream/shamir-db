@@ -79,11 +79,20 @@ Notes: `shamir_batch_duration_seconds` is deliberately **not** a separate series
 
 | Metric | Type | Unit | Labels | Source | Hot-path cost | Normal range |
 |---|---|---|---|---|---|---|
-| `shamir_sessions_active` | gauge | sessions | `db` | session registry count, sampled per-scrape | none (sampled) | 0 – configured cap |
-| `shamir_connections_active` | gauge | conns | — | shamir-sync conn limiter `crates/server/shamir-sync/src/sync/connection/conn_limiter.rs:30,88-90` (`active`) | none (sampled) | 0 – limit |
-| `shamir_connections_rejected_total` | counter | conns | `reason` | NEW `AtomicU64` at the accept/reject site of the limiter | one `fetch_add` on the reject branch | 0; spikes at saturation |
-| `shamir_rate_limit_rejected_total` | counter | reqs | `scope` | ALREADY COVERED — `shamir_token_auth_total{channel="rest",result="rate_limited"}` (`security/perimeter/http_rest/gate.rs:87-99`) and `shamir_token_request_denied_total{endpoint}` (`executor.rs:114,194,235`); cross-reference in the guide, no new series | none (existing counters) | 0; spikes under abuse |
-| `shamir_admission_queue_depth` | gauge | items | — | admission queue length, sampled per-scrape | none (sampled) | < a few |
+| `shamir_connections_active` | gauge | conns | — | shared `ConnLimiter::live()`; counts guards even at cap 0, including initial handshakes and guarded HTTP sockets, not the observability listener | sampled; guard acquire/drop updates live count | 0 – limit if finite |
+| `shamir_connections_limit` | gauge | conns | — | `ConnLimiter::cap()`, shared across data listeners | none (sampled) | configured cap; 0 = unlimited |
+| `shamir_connections_rejected_total` | counter | refusals | — | `ConnLimiter::rejected_total()`; one per refused global-cap acquisition, excludes per-IP cap; resets at restart | one `fetch_add` on global refusal | zero increase/rate; growth = cap hit |
+| `shamir_inflight_response_bytes_used` | gauge | bytes | — | `ByteBudget::used()`; reserved bytes, not RSS | none (sampled) | 0 – cap if finite; temporary overage on correction or oversized escape; 0 if unbounded/untracked |
+| `shamir_inflight_response_bytes_cap` | gauge | bytes | — | `ByteBudget::cap()` | none (sampled) | configured cap; -1 = unbounded/absent |
+| `shamir_response_budget_waiters` | gauge | reservations | — | `ByteBudget::waiters()`; concurrent acquisitions on contended path, recheck availability, not FIFO | atomic increment/decrement on contended path only | 0; persistent nonzero = budget pressure |
+| `shamir_post_auth_rate_limit_rejected_total` | counter | reqs | — | native and token REST/WS per-session post-auth bucket refusals; excludes gate/auth and scope/policy denials | one counter increment per refusal | zero increase/rate; growth = per-session throttling |
+| `shamir_argon2_permits_capacity` | gauge | — | — | boot `Argon2Semaphore::capacity()` | none (sampled) | configured boot cap; constant since boot |
+| `shamir_argon2_permits_available` | gauge | free permits | — | boot `Argon2Semaphore::available().max(0)`; transient optimistic acquisition and clamping can make samples temporarily non-exact | none (sampled) | 0 – capacity; = capacity at rest |
+| `shamir_argon2_busy_refusals_total` | counter | refusals | — | `ScramDerivationGate::busy_refusals()`; one increment per refused request: admission beyond `2 × capacity`, permit acquisition timeout by the 3 s deadline measured from admission, clock-read failure, or inability to construct that deadline — independent of whether the client received the response; excludes post-auth per-session in-flight-slot refusals | one `fetch_add` per refused request | zero increase/rate; growth = admission/permit pressure or clock/deadline failure |
+
+Notes: Sampled per scrape from this boot's sources. The two `shamir_inflight_response_bytes_*` names are retained without aliases; no global 5 s budget poller. Native auth-init in the sync handshake already uses `auth_attempts_total{result="rate_limited"}`; the token admission gate uses `shamir_token_auth_total{channel,result="rate_limited"}`. `shamir_token_request_denied_total{endpoint}` is for scope/policy denials, not post-auth throttling.
+
+Omitted: `shamir_sessions_active{db}` (no bound database on the observation path; global `shamir_active_sessions` unchanged) and `shamir_admission_queue_depth` (no common queue) — these omissions are preserved unchanged. The argon2 gauges/counter above are the boot semaphore and SCRAM gate signals only: no login or bootstrap path is counted by them (SCRAM client runs the KDF and server verifies the proof without a permit; the separately gated SQL hashing function is not this signal). No `shamir_argon2_{in_flight,waiters,capacity}` alias or queue/holder series are added — subtract the available-permit gauge from capacity to estimate running derivations; transient samples can make it non-exact. Waiter counts are not exposed by this boot semaphore.
 
 ### 2.3 Storage (R4a-2)
 

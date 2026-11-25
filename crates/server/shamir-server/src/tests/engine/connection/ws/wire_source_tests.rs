@@ -70,6 +70,7 @@ fn leader_config(temp: &tempfile::TempDir) -> Config {
             allow_public_metrics: false,
         },
         replication: None,
+        backup: None,
     }
 }
 

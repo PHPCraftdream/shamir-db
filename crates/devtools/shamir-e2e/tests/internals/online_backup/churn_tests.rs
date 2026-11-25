@@ -47,11 +47,15 @@ use shamir_client::builder::batch::{Batch, Durability};
 use shamir_client::builder::ddl::{self, RepoEngine};
 use shamir_client::builder::query::Query;
 use shamir_client::builder::write;
+use shamir_query_types::admin::activity::{
+    ActivityKind, ActivityRow, ActivityScope, CancelOutcome, ListActivityReq, RequestExecId,
+};
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::read::query_record::QueryRecord;
 use shamir_test_diag::FlakeGuard;
 use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
+use tokio::time::timeout;
 
 use super::copy_observation::{active_seal_copy, CopyProgress};
 use super::fixture::{self, paced_execute, DB, REPO, REQUEST_TIMEOUT, TABLE};
@@ -598,4 +602,84 @@ fn catalogue_churn_during_online_copy_restores_clean_with_named_exclusions_only(
     handle
         .join()
         .expect("churn thread must not panic after reporting its outcome");
+}
+
+#[test]
+fn typed_cancel_unknown_request_over_tls_scram() {
+    std::thread::Builder::new()
+        .name("typed-cancel-e2e".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build test runtime")
+                .block_on(Box::pin(async {
+                    let data_dir = TempDir::new().expect("persistent data directory");
+                    let booted = fixture::boot(data_dir.path(), true).await;
+                    let reader = fixture::connect(booted.addr(), &booted.password, "reader").await;
+                    fixture::setup(&reader).await;
+                    let control =
+                        fixture::connect(booted.addr(), &booted.password, "control").await;
+
+                    let page = timeout(
+                        REQUEST_TIMEOUT,
+                        control.list_activity(
+                            DB,
+                            ListActivityReq {
+                                scope: ActivityScope::Own,
+                                kind: ActivityKind::Sessions,
+                                limit: None,
+                                continuation: None,
+                            },
+                        ),
+                    )
+                    .await
+                    .expect("list activity deadline")
+                    .expect("list own sessions over SCRAM");
+                    assert!(page.continuation.is_none());
+                    match page.rows.as_slice() {
+                        [ActivityRow::Session {
+                            session_handle: first,
+                            ..
+                        }, ActivityRow::Session {
+                            session_handle: second,
+                            ..
+                        }] => assert_ne!(first, second, "two distinct authenticated sessions"),
+                        rows => panic!("expected exactly two own sessions, got {rows:?}"),
+                    }
+
+                    // The launcher does not expose the repository gate. Exercise the
+                    // unknown-ID wire contract without racing a short-lived read.
+                    // Execution IDs on this fresh server start at 1.
+                    let outcome = timeout(
+                        REQUEST_TIMEOUT,
+                        control.cancel_request(DB, RequestExecId(0)),
+                    )
+                    .await
+                    .expect("cancel request deadline")
+                    .expect("typed cancel reply over SCRAM");
+                    assert_eq!(outcome, CancelOutcome::AlreadyFinished);
+
+                    let mut scan = Batch::new();
+                    scan.query("scan", Query::with_repo(REPO, TABLE).build());
+                    let response = timeout(REQUEST_TIMEOUT, reader.execute(DB, scan.build()))
+                        .await
+                        .expect("control read deadline")
+                        .expect("second session can still read the persistent table");
+                    let result = response.results.get("scan").expect("scan result");
+                    assert!(!result.skipped);
+                    assert!(result.records.is_empty(), "fixture table is empty");
+
+                    timeout(REQUEST_TIMEOUT, control.close())
+                        .await
+                        .expect("control close deadline");
+                    fixture::shutdown(reader, booted).await;
+                }));
+        })
+        .expect("spawn roomy test thread")
+        .join()
+        .expect("typed cancel scenario");
 }

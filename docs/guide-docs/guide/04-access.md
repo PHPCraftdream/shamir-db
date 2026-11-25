@@ -232,7 +232,16 @@ await Batch.create('chmod')
 |---|---|---|
 | admin (owner) | ✅ разрешён | owner → bits `rwx` (0o700 portion) |
 | bob (member of `devs`) | ✅ разрешён | group → bits `r-x` (0o050 portion) |
-| carol (не в группе) | ❌ `access_denied` | other → bits `---` (0o000 portion) |
+| carol (не в группе) | ❌ чтение — `unknown_table` (exit 5); запись — `access_denied` (exit 4) | other → bits `---` (0o000 portion) |
+
+Отказ в доступе к таблице при **чтении данных** приходит кодом
+`unknown_table` — тем же, что и для отсутствующей таблицы, чтобы ACL не
+служил оракулом существования (подробнее — в `07-operations.md`, раздел про
+административный шелл). Тот же отказ для `DescribeTable` и `GetTableSchema`
+маскируется как `unknown_table` с фиксированным ответом table-unavailable
+для закрытой или отсутствующей таблицы. Проверка родительской базы остаётся
+отдельной: отказ `Database Read` по-прежнему даёт `access_denied`.
+**Запись и DDL** сохраняют свои правила отказа.
 
 ### Дефолт — открытый
 

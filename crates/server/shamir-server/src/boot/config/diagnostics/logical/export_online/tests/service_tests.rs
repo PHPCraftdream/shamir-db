@@ -351,16 +351,19 @@ fn verifies_and_publishes_then_wakes_writer() {
 }
 
 #[test]
+/// Mutant: skip thaw on the verification-failure exit from `ExportJob::drive`; `staged_exit` has a parked mutator and its wake handshake fails.
 fn verification_error_cleans_stage_and_wakes_writer() {
     on_big_stack(|| staged_exit(Exit::VerificationError));
 }
 
 #[test]
+/// Mutant: skip thaw on the `Cancelled` exit from `ExportJob::drive`; the mutator parked before cancellation never wakes and the bounded test fails.
 fn cancel_after_stage_cleans_stage_and_wakes_writer() {
     on_big_stack(|| staged_exit(Exit::Cancel));
 }
 
 #[test]
+/// Mutant: skip thaw when shutdown stops a running `ExportJob`; the already-parked writer is not woken and this test fails.
 fn shutdown_after_stage_cleans_stage_and_wakes_writer() {
     on_big_stack(|| staged_exit(Exit::Shutdown));
 }
@@ -419,16 +422,20 @@ fn small_deadline_thaws_drain_even_while_original_writer_is_still_admitted() {
 }
 
 #[test]
+/// Mutant: raise the freeze while returning the denied `start`; the concurrently polled mutator is refused instead of admitted, making the admission assertion fail.
 fn directory_and_scope_denials_precede_freeze() {
     on_big_stack(|| async {
         let fixture = Fixture::new(WorkerControls::default()).await;
-        assert_eq!(
+        let (denied, admission) = tokio::join!(
             fixture
                 .service
-                .start(&fixture.other, options(), CancellationToken::new())
-                .await
-                .unwrap_err(),
-            ServiceError::Denied
+                .start(&fixture.other, options(), CancellationToken::new()),
+            async { fixture.gate.enter_mutation() },
+        );
+        assert_eq!(denied.unwrap_err(), ServiceError::Denied);
+        assert!(
+            admission.is_ok(),
+            "mutator must be admitted concurrently with refusal"
         );
         fixture
             .db
@@ -438,7 +445,10 @@ fn directory_and_scope_denials_precede_freeze() {
             )
             .await
             .unwrap();
-        assert_eq!(fixture.start().await.unwrap_err(), ServiceError::Denied);
+        let denied = fixture.start().await;
+        assert_eq!(denied.unwrap_err(), ServiceError::Denied);
+        // This is an immediate post-refusal admission, not merely a later state check.
+        assert!(fixture.gate.enter_mutation().is_ok());
         assert!(fixture.service.status_for(&fixture.owner, DB).is_none());
         assert!(fixture.service.status_for(&fixture.other, DB).is_none());
         assert!(fixture.gate.enter_mutation().is_ok());

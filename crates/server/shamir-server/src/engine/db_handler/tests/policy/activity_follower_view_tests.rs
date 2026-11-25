@@ -9,8 +9,10 @@
 //! Requests are built exclusively through `shamir-query-builder` and
 //! driven through the public `RequestHandler::handle` wire entry.
 
-use std::future::Future;
+use std::future::{poll_fn, Future};
+use std::path::Path;
 use std::sync::Arc;
+use std::task::Poll;
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -20,12 +22,18 @@ use shamir_connect::server::session::{Session, SessionPermissions, SessionStore}
 use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
-use shamir_db::ShamirDb;
+use shamir_db::{ShamirDb, SystemStoreConfig};
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_types::admin::activity::{ActivityKind, ActivityScope, ListActivityReq};
+use shamir_query_builder::query::Query;
+use shamir_query_types::admin::activity::{
+    ActivityKind, ActivityRequestState, ActivityRow, ActivityScope, CancelOutcome, ListActivityReq,
+    RequestExecId,
+};
+use shamir_query_types::batch::BatchLimits;
 
-use crate::db_handler::config::NodeMode;
+use crate::byte_budget::ByteBudget;
+use crate::db_handler::config::{NodeMode, QueryLimitsCap};
 use crate::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 use crate::version::CURRENT_QUERY_LANG_VERSION;
 
@@ -53,7 +61,7 @@ where
 
 /// Hard per-call bound: every await is bounded, never an unbounded
 /// engine await.
-const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn alice_session() -> Session {
     let mut s = Session::new(
@@ -84,16 +92,19 @@ fn admin_session() -> Session {
 }
 
 /// Follower handler with an attached session store (the activity view's
-/// session source) over an opened in-memory database.
-async fn follower_handler() -> (ShamirDbHandler, Arc<SessionStore>) {
-    let db = ShamirDb::init_memory().await.expect("init memory database");
+/// session source) over an opened persistent database.
+async fn follower_handler(root: &Path) -> (ShamirDbHandler, Arc<SessionStore>) {
+    let db = ShamirDb::init(SystemStoreConfig::Fjall(root.join("system")))
+        .await
+        .expect("init persistent database");
     let owner = Actor::User(principal64([0xAB; 16]));
     db.create_db_as("app", owner.clone())
         .await
         .expect("create_db");
     db.add_repo_as(
         "app",
-        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
+        RepoConfig::new("main", BoxRepoFactory::fjall_raw(root.join("repos/main")))
+            .add_table(TableConfig::new("items")),
         owner.clone(),
     )
     .await
@@ -148,8 +159,12 @@ async fn call(handler: &ShamirDbHandler, session: &Session, req: &DbRequest) -> 
 /// refusal or a permission denial.
 #[test]
 fn follower_allows_own_scope_listing() {
-    on_big_stack(|| async {
-        let (handler, store) = follower_handler().await;
+    let dir = tempfile::tempdir().expect("create persistent fixture directory");
+    let root = dir.path().to_path_buf();
+    on_big_stack(move || async move {
+        let (handler, store) = tokio::time::timeout(CALL_TIMEOUT, follower_handler(&root))
+            .await
+            .expect("initialize follower fixture");
         let alice = store.insert(alice_session().session_id, alice_session());
 
         match call(&handler, &alice, &list_req(ActivityScope::Own)).await {
@@ -168,8 +183,12 @@ fn follower_allows_own_scope_listing() {
 /// `scope: All` listing is allowed; an ordinary user's is denied.
 #[test]
 fn follower_all_scope_follows_the_permission_split() {
-    on_big_stack(|| async {
-        let (handler, store) = follower_handler().await;
+    let dir = tempfile::tempdir().expect("create persistent fixture directory");
+    let root = dir.path().to_path_buf();
+    on_big_stack(move || async move {
+        let (handler, store) = tokio::time::timeout(CALL_TIMEOUT, follower_handler(&root))
+            .await
+            .expect("initialize follower fixture");
         let admin = store.insert(admin_session().session_id, admin_session());
         let alice = store.insert(alice_session().session_id, alice_session());
 
@@ -182,5 +201,106 @@ fn follower_all_scope_follows_the_permission_split() {
             call(&handler, &alice, &list_req(ActivityScope::All)).await,
             DbResponse::Error { ref code, .. } if code == "permission_denied"
         ));
+    });
+}
+
+fn tiny_cancel_req(id: RequestExecId) -> DbRequest {
+    let mut batch = Batch::new();
+    batch.limits(BatchLimits {
+        max_result_size: 1,
+        ..BatchLimits::default()
+    });
+    batch.op(
+        "cancel_request",
+        shamir_query_builder::wire::admin::cancel_request(id),
+    );
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".into(),
+        batch: batch.build(),
+    }
+}
+
+/// An unsigned cancellation by an ordinary user reaches the follower's
+/// cancellation worker despite a saturated budget and session cap. The coarse
+/// admin, follower-write, HMAC and encoded result cap gates must not block it.
+#[test]
+fn follower_allows_unsigned_cancel_request() {
+    let dir = tempfile::tempdir().expect("create persistent fixture directory");
+    let root = dir.path().to_path_buf();
+    on_big_stack(move || async move {
+        let (handler, store) = tokio::time::timeout(CALL_TIMEOUT, follower_handler(&root))
+            .await
+            .expect("initialize follower fixture");
+        let alice = store.insert(alice_session().session_id, alice_session());
+        let admin = store.insert(admin_session().session_id, admin_session());
+        let budget = ByteBudget::new(Some(1));
+        let reservation = tokio::time::timeout(CALL_TIMEOUT, budget.acquire(1))
+            .await
+            .expect("reserve the whole budget before dispatch");
+        assert_ne!(alice.activity_handle(), 0);
+        let handler = handler
+            .with_byte_budget(budget)
+            .with_query_limits(QueryLimitsCap {
+                max_in_flight_requests_per_session: 1,
+                ..QueryLimitsCap::UNLIMITED
+            });
+        let mut batch = Batch::new();
+        batch.limits(BatchLimits {
+            max_result_size: 1,
+            ..BatchLimits::default()
+        });
+        batch.query("read", Query::with_repo("main", "items"));
+        let req = DbRequest::Execute {
+            query_version: CURRENT_QUERY_LANG_VERSION,
+            db: "app".into(),
+            batch: batch.build(),
+        };
+        // The live read owns Alice's only slot and parks on the held budget.
+        let mut target = Box::pin(call(&handler, &alice, &req));
+        poll_fn(|cx| {
+            assert!(target.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(alice.try_acquire_request_slot(1).is_none());
+
+        let DbResponse::ActivityPage { page } =
+            call(&handler, &admin, &list_req(ActivityScope::All)).await
+        else {
+            panic!("expected ActivityPage while the budget is held");
+        };
+        let id = page
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                ActivityRow::Request {
+                    request_exec_id,
+                    state: ActivityRequestState::WaitingBudget,
+                    session_handle: Some(handle),
+                    ..
+                } if *handle == alice.activity_handle() => Some(*request_exec_id),
+                _ => None,
+            })
+            .expect("follower read is parked on the byte budget");
+        assert_ne!(id, RequestExecId(0));
+        assert!(matches!(
+            call(&handler, &alice, &tiny_cancel_req(RequestExecId(0))).await,
+            DbResponse::CancelOutcome {
+                outcome: CancelOutcome::AlreadyFinished,
+            }
+        ));
+        assert!(matches!(
+            call(&handler, &alice, &tiny_cancel_req(id)).await,
+            DbResponse::CancelOutcome {
+                outcome: CancelOutcome::Cancelled,
+            }
+        ));
+        assert!(matches!(
+            target.await,
+            DbResponse::Error { code, .. } if code == "cancelled"
+        ));
+        assert!(alice.try_acquire_request_slot(1).is_some());
+        drop(reservation);
     });
 }

@@ -99,6 +99,7 @@ pub fn config(dir: &Path) -> Config {
         audit: Default::default(),
         observability: Default::default(),
         replication: None,
+        backup: None,
     }
 }
 

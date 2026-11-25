@@ -53,7 +53,6 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::byte_budget::ByteBudget;
@@ -62,6 +61,8 @@ pub mod logging;
 
 mod durability_export;
 mod export;
+#[path = "logging/lifecycle/mod.rs"]
+mod lifecycle;
 mod login_histogram;
 mod visibility_export;
 
@@ -80,10 +81,16 @@ pub use crate::security::backup_metrics::{install_backup_metrics_source, BackupM
 /// per-state source installed via
 /// [`ObservabilityState::set_activity_source`].
 pub use export::activity::ActivityMetricsSnapshot;
+pub use export::activity::LoadMetricsSnapshot;
 
-use crate::security::backup_metrics::{record_backup_metrics, register_backup_metrics};
+pub use lifecycle::{ObservabilityHandle, ObservabilityShutdownOutcome, OBS_TASK_JOIN_TIMEOUT};
+
+use crate::security::backup_metrics::{
+    backup_scrape_snapshot, record_backup_metrics, register_backup_metrics,
+    render_backup_scrape_gauges,
+};
 use durability_export::{record_durability_metrics, register_durability_metrics};
-use export::activity::{render_activity_series, ActivitySource};
+use export::activity::{render_activity_series, render_load_series, ActivitySource, LoadSource};
 use export::functions::{record_functions_metrics, register_functions_metrics};
 use export::replication::{record_replication_metrics, register_replication_metrics};
 use export::{
@@ -91,6 +98,7 @@ use export::{
     register_engine_metrics, register_index_interner_metrics, register_storage_metrics,
     register_transactions_metrics, sample_index_interner_metrics,
 };
+use lifecycle::CancelOnDrop;
 use visibility_export::{record_visibility_metrics, register_visibility_metrics};
 
 /// Live state shared between the HTTP handlers and the boot path.
@@ -111,6 +119,7 @@ pub struct ObservabilityState {
     /// handler via `Weak`, so this state cannot keep the handler alive
     /// past shutdown and never reports a dropped server's mirrors.
     activity_source: ArcSwapOption<ActivitySource>,
+    load_source: ArcSwapOption<LoadSource>,
 }
 
 impl ObservabilityState {
@@ -120,6 +129,7 @@ impl ObservabilityState {
             started_at: std::time::Instant::now(),
             bound_addrs: ArcSwap::from_pointee(Vec::new()),
             activity_source: ArcSwapOption::empty(),
+            load_source: ArcSwapOption::empty(),
         })
     }
 
@@ -143,99 +153,24 @@ impl ObservabilityState {
             .map_or_else(Default::default, |source| source.sample())
     }
 
+    /// Bind this boot's connection and post-auth rate-limit measurements.
+    /// A scrape calls the source once; while unset, those series are omitted.
+    /// A later call replaces the source.
+    pub fn set_load_source(&self, source: Arc<dyn Fn() -> LoadMetricsSnapshot + Send + Sync>) {
+        self.load_source
+            .store(Some(Arc::new(LoadSource::new(source))));
+    }
+
+    fn load_snapshot(&self) -> Option<LoadMetricsSnapshot> {
+        self.load_source.load_full().map(|source| source.sample())
+    }
+
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
 
     pub fn set_bound_addrs(&self, addrs: Vec<SocketAddr>) {
         self.bound_addrs.store(Arc::new(addrs));
-    }
-}
-
-/// Handle to a running observability server. `shutdown` MUST be called
-/// explicitly to stop it — dropping this handle does NOT cancel
-/// `listener_task`/`poller_task` (a bare `CancellationToken` has no
-/// Drop-triggered cancel; that's `tokio_util::sync::DropGuard`'s job,
-/// which this type doesn't use) nor abort the `JoinHandle`s, so an
-/// un-shut-down drop leaks both background tasks running detached.
-pub struct ObservabilityHandle {
-    pub bound_addr: SocketAddr,
-    pub state: Arc<ObservabilityState>,
-    shutdown: CancellationToken,
-    listener_task: JoinHandle<()>,
-    poller_task: JoinHandle<()>,
-}
-
-impl ObservabilityHandle {
-    /// Stop the HTTP listener and the process-metrics poller.
-    ///
-    /// F-68 (#895) cluster D / task #124 added timestamped `tracing` events
-    /// around each of the two `JoinHandle` awaits individually, suspecting
-    /// `axum::serve`'s graceful shutdown waiting on a lingering keep-alive
-    /// connection (`listener_task`). Task #922 / F-68b used that
-    /// instrumentation on a real ubuntu-latest CI hang
-    /// (`metrics_exposes_unbounded_sentinel_when_no_byte_budget` /
-    /// `metrics_exposes_finite_byte_budget_gauges`, run `30757334929`) and it
-    /// disproved that hypothesis: the log showed `listener_task.await`
-    /// returning in ~100µs, then hanging forever on `poller_task.await` with
-    /// no further output. Root cause: `poller_task` (below, in
-    /// `spawn_with_byte_budget`) used to wait on `shutdown_for_poller
-    /// .notified()` inside a `tokio::select!` — `Notify::notify_waiters()`
-    /// only wakes tasks that are actively polling `.notified()` AT THE
-    /// MOMENT it is called; it stores no permit. Same class of race
-    /// `Scheduler`'s own doc comment (`scheduler.rs`, near its
-    /// `shutdown_tx` field) already names precisely: if `notify_waiters()`
-    /// fires before the spawned task has been polled for the first time
-    /// (not yet inside its `select!` at all) — plausible here since
-    /// `tokio::spawn` only schedules the task, it doesn't run it
-    /// synchronously — the notify is silently dropped and the task waits
-    /// out its next `interval.tick()` (5s here) instead. The same is also
-    /// true of the narrower "between loop iterations" window (each
-    /// `select!` re-evaluation creates a *new* `Notified` future with its
-    /// own dead zone) — either window reproduces the observed hang;
-    /// `CancellationToken`'s fix below closes both by construction, so
-    /// distinguishing which one fired in the specific CI repro isn't load
-    /// bearing for the fix. This is the exact same lossy-`Notify` class
-    /// already documented and fixed once in this crate for the root
-    /// shutdown signal (see `ServerHandle::shutdown_token`'s doc comment in
-    /// `server/server_handle.rs`, and `Scheduler`'s broadcast-based fix) —
-    /// this call site was missed during that remediation. Fixed here by
-    /// switching to `tokio_util::sync::
-    /// CancellationToken`, whose `cancel()` is a persistent flag: any
-    /// `.cancelled()` future (existing or newly created) resolves
-    /// immediately once cancelled, closing the race by construction. The
-    /// `tracing` instrumentation is kept (still useful if some other stall
-    /// appears here later).
-    pub async fn shutdown(self) {
-        let shutdown_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: enter, calling cancel()");
-        self.shutdown.cancel();
-        tracing::debug!(
-            elapsed = ?shutdown_started.elapsed(),
-            "ObservabilityHandle::shutdown: cancel() returned"
-        );
-
-        let listener_wait_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: awaiting listener_task");
-        let _ = self.listener_task.await;
-        tracing::debug!(
-            elapsed = ?listener_wait_started.elapsed(),
-            "ObservabilityHandle::shutdown: listener_task.await returned \
-             (axum::serve's with_graceful_shutdown resolved)"
-        );
-
-        let poller_wait_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: awaiting poller_task");
-        let _ = self.poller_task.await;
-        tracing::debug!(
-            elapsed = ?poller_wait_started.elapsed(),
-            "ObservabilityHandle::shutdown: poller_task.await returned"
-        );
-
-        tracing::debug!(
-            total_elapsed = ?shutdown_started.elapsed(),
-            "ObservabilityHandle::shutdown: exit"
-        );
     }
 }
 
@@ -278,15 +213,6 @@ pub enum ObservabilityError {
 /// gauges. Snapshotted every 5 s in the background poller. Pass `None`
 /// when no RepoTxGate is running yet; the gauges are still registered at
 /// zero so Prometheus scrapers see them from the first scrape.
-///
-/// `byte_budget` — F-29 (#822): optional RI-15 global in-flight
-/// response-byte budget to bridge into Prometheus gauges
-/// (`shamir_inflight_response_bytes_used`/`_cap`), snapshotted every 5 s
-/// in the same background poller alongside `tx_metrics`. Pass `None` in
-/// contexts that don't construct a `ByteBudget` (e.g. tests that call
-/// `spawn` directly without a full server boot) — the gauges are still
-/// registered at zero so Prometheus scrapers see them from the first
-/// scrape.
 ///
 /// `shamir_db` — #984: optional `Arc<ShamirDb>` used to compute the
 /// `shamir_degraded_indexes_total` gauge (count of indexes stuck in
@@ -335,8 +261,11 @@ pub async fn spawn(
     .await
 }
 
-/// Same as [`spawn`], plus an optional [`ByteBudget`] to bridge into the
-/// `shamir_inflight_response_bytes_used`/`_cap` gauges (F-29, #822), and an
+/// Same as [`spawn`], plus an optional [`ByteBudget`] sampled on each
+/// `/metrics` scrape. The existing `shamir_inflight_response_bytes_used` and
+/// `shamir_inflight_response_bytes_cap` names are preserved, alongside
+/// `shamir_response_budget_waiters`. Absent or unbounded budgets report
+/// zero used bytes, a cap of -1 and zero waiters. Also accepts an
 /// optional `Arc<shamir_db::ShamirDb>` to bridge into the
 /// `shamir_degraded_indexes_total` gauge (#984). Split out so `spawn`'s
 /// existing call sites/signature (already used directly by
@@ -448,26 +377,6 @@ pub async fn spawn_with_byte_budget(
         "GC entries deleted"
     );
 
-    // RI-15 / F-29 (#822) — global in-flight response-byte budget gauges.
-    // `used()`/`cap()` are cheap `AtomicUsize` loads (see `byte_budget.rs`);
-    // snapshotted every poller cycle below alongside the tx/gc gauges.
-    metrics::describe_gauge!(
-        "shamir_inflight_response_bytes_used",
-        metrics::Unit::Bytes,
-        "Bytes currently reserved against the RI-15 global in-flight \
-         response-byte budget (sum across every concurrently-executing \
-         batch/connection)"
-    );
-    metrics::describe_gauge!(
-        "shamir_inflight_response_bytes_cap",
-        metrics::Unit::Bytes,
-        "Configured cap (bytes) on the RI-15 global in-flight \
-         response-byte budget. -1 means the budget is unbounded (operator \
-         explicitly opted out via `max_inflight_response_bytes: null`) — \
-         distinguishable from a legitimate cap because a real cap can \
-         never be negative"
-    );
-
     // #984 — degraded (non-Ready) index count gauge. O(number of
     // indexes across ALREADY-OPEN tables), in-memory only, zero store
     // reads. Does NOT force-open closed tables — so the gauge reflects
@@ -492,14 +401,6 @@ pub async fn spawn_with_byte_budget(
     metrics::gauge!("shamir_tx_aborted_storage_total").set(0.0);
     metrics::gauge!("shamir_gc_runs_total").set(0.0);
     metrics::gauge!("shamir_gc_entries_deleted_total").set(0.0);
-    metrics::gauge!("shamir_inflight_response_bytes_used").set(0.0);
-    metrics::gauge!("shamir_inflight_response_bytes_cap").set(
-        byte_budget
-            .as_ref()
-            .and_then(ByteBudget::cap)
-            .map(|c| c as f64)
-            .unwrap_or(-1.0),
-    );
     metrics::gauge!("shamir_degraded_indexes_total").set(0.0);
 
     // VIS-4c: visibility acknowledgement/reconciliation family, zero-touch.
@@ -519,19 +420,30 @@ pub async fn spawn_with_byte_budget(
     register_backup_metrics();
     register_transactions_metrics();
 
-    // 4. Background poller: refresh process metrics every 5 s. Cheap
+    // Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
     collector.collect();
+
+    // 4. Bind the socket BEFORE any task is spawned: a bind failure must not
+    //    leave a live poller behind. The launch rollback can only cancel what
+    //    it was handed, and a task spawned before the fallible bind is not
+    //    among the handle's fields yet (finding: a rolled-back observability
+    //    binding used to leave its 5 s poller running on a surviving runtime).
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(ObservabilityError::Bind)?;
+    let bound_addr = listener.local_addr().map_err(ObservabilityError::Bind)?;
+    tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
+
     // F-68b (#922): `CancellationToken`, not `Notify::notify_waiters()` — see
-    // `ObservabilityHandle::shutdown`'s doc comment (this file) for the
+    // `ObservabilityHandle::shutdown`'s doc comment (`lifecycle/handle.rs`) for the
     // lossy-`Notify` missed-wakeup bug this replaced (confirmed root cause of
     // a real 600s ubuntu-latest CI hang) and the precedent in
     // `server/server_handle.rs`'s `shutdown_token` doc comment.
     let shutdown = CancellationToken::new();
     let shutdown_for_poller = shutdown.clone();
     let tx_metrics_clone = tx_metrics;
-    let byte_budget_clone = byte_budget;
     let shamir_db_clone = shamir_db.clone();
     let poller_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -542,41 +454,51 @@ pub async fn spawn_with_byte_budget(
                 biased;
                 _ = shutdown_for_poller.cancelled() => break,
                 _ = interval.tick() => {
-                    collector.collect();
-                    if let Some(ref tx_m) = tx_metrics_clone {
-                        let snap = tx_m.snapshot();
-                        metrics::gauge!("shamir_tx_started_total").set(snap.txs_started as f64);
-                        metrics::gauge!("shamir_tx_committed_total").set(snap.txs_committed as f64);
-                        metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
-                        metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
-                        metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
-                        record_transactions_metrics(&snap);
-                        metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
-                        metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
-                    }
-                    // RI-15 / F-29 (#822): `used()` moves every request, so it
-                    // (unlike `cap()`, fixed at boot and already set once at
-                    // registration above) needs a fresh snapshot every cycle.
-                    if let Some(ref bb) = byte_budget_clone {
-                        metrics::gauge!("shamir_inflight_response_bytes_used").set(bb.used() as f64);
-                    }
-                    // #984: degraded-index count — O(indexes) in-memory walk,
-                    // zero store reads.
-                    if let Some(ref db) = shamir_db_clone {
-                        let degraded = db.degraded_index_count().await;
-                        metrics::gauge!("shamir_degraded_indexes_total")
-                            .set(degraded as f64);
+                    // The tick BODY awaits the database
+                    // (`degraded_index_count`), so the outer `select!` alone
+                    // only observes cancellation before or after a tick: a
+                    // poller already inside that await would keep the task
+                    // alive until the await returns and hold the `Arc<ShamirDb>`
+                    // with it. Race the whole body against the same token, so
+                    // the cancel lands on the NEXT POLL, not after the await.
+                    let collect_tick = async {
+                        collector.collect();
+                        if let Some(ref tx_m) = tx_metrics_clone {
+                            let snap = tx_m.snapshot();
+                            metrics::gauge!("shamir_tx_started_total").set(snap.txs_started as f64);
+                            metrics::gauge!("shamir_tx_committed_total").set(snap.txs_committed as f64);
+                            metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
+                            metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
+                            metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
+                            record_transactions_metrics(&snap);
+                            metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
+                            metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
+                        }
+                        // #984: degraded-index count — O(indexes) in-memory walk,
+                        // zero store reads.
+                        if let Some(ref db) = shamir_db_clone {
+                            let degraded = db.degraded_index_count().await;
+                            metrics::gauge!("shamir_degraded_indexes_total")
+                                .set(degraded as f64);
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_for_poller.cancelled() => break,
+                        _ = collect_tick => {}
                     }
                 }
             }
         }
     });
 
-    // 4. Build the router.
+    // 5. Build the router.
     let app_state = AppState {
         state: state.clone(),
         prom: prom_handle,
         db: shamir_db,
+        byte_budget,
+        shutdown: shutdown.clone(),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -585,13 +507,7 @@ pub async fn spawn_with_byte_budget(
         .route("/info", get(info_handler))
         .with_state(app_state);
 
-    // 5. Bind + spawn the listener.
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(ObservabilityError::Bind)?;
-    let bound_addr = listener.local_addr().map_err(ObservabilityError::Bind)?;
-    tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
-
+    // 6. Spawn the listener over the socket bound in step 4.
     let shutdown_for_serve = shutdown.clone();
     let listener_task = tokio::spawn(async move {
         let serve = axum::serve(listener, app);
@@ -622,9 +538,9 @@ pub async fn spawn_with_byte_budget(
     Ok(ObservabilityHandle {
         bound_addr,
         state,
-        shutdown,
-        listener_task,
-        poller_task,
+        shutdown_on_drop: CancelOnDrop(shutdown),
+        listener_task: Some(listener_task),
+        poller_task: Some(poller_task),
     })
 }
 
@@ -634,7 +550,13 @@ struct AppState {
     /// `None` when `install_recorder = false` AND no prior install
     /// happened — `/metrics` then returns `503`.
     prom: Option<PrometheusHandle>,
+    byte_budget: Option<ByteBudget>,
     db: Option<Arc<shamir_db::ShamirDb>>,
+    /// The server's own cancellation token (the one the listener and the
+    /// poller wait on). `/metrics` races its database sample against it, so a
+    /// scrape in flight during shutdown answers promptly instead of holding an
+    /// `Arc<ShamirDb>` for the whole length of the await.
+    shutdown: CancellationToken,
 }
 
 // --------------------------------------------------------------------------
@@ -657,20 +579,60 @@ async fn readyz(State(s): State<AppState>) -> Response {
 async fn metrics_handler(State(s): State<AppState>) -> Response {
     match &s.prom {
         Some(h) => {
-            if let Some(db) = &s.db {
-                sample_gate_metrics(db);
-                sample_index_interner_metrics(db).await;
+            // The database sample below is the only part of a scrape that can
+            // take real time, and `axum::serve`'s graceful shutdown WAITS for
+            // this handler: a cancelled server must not stay reachable (and
+            // must not keep an `Arc<ShamirDb>` alive) for the length of the
+            // await. Race the whole sample against the server's own token, so
+            // the answer is a prompt 503 — same body and status as the
+            // not-ready path — instead of a held database.
+            let sample_db = async {
+                if let Some(db) = &s.db {
+                    sample_gate_metrics(db);
+                    sample_index_interner_metrics(db).await;
+                }
+            };
+            tokio::select! {
+                biased;
+                () = s.shutdown.cancelled() => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response();
+                }
+                () = sample_db => {}
             }
             record_functions_metrics();
             record_replication_metrics();
-            record_backup_metrics();
+            // ONE snapshot per scrape for the whole backup family: the
+            // counters/active/bytes go through the shared recorder, while the
+            // four LAST-VALUE gauges are rendered from this same snapshot
+            // straight into the body below (`render_backup_scrape_gauges`).
+            // They are never stored in the shared recorder, so an older
+            // overlapping scrape cannot republish an older value.
+            let backup_snapshot = backup_scrape_snapshot();
+            if let Some(snapshot) = backup_snapshot.as_ref() {
+                record_backup_metrics(snapshot);
+            }
             // R4b-1: the four `shamir_active_*` gauges are rendered from
             // THIS server's per-state source and appended after the
             // process-global recorder's text. They never go through the
             // shared recorder, so a concurrent scrape of another server
             // in the same process cannot return those counts here.
             let activity_series = render_activity_series(&s.state.activity_snapshot());
-            (StatusCode::OK, format!("{}{}", h.render(), activity_series)).into_response()
+            let mut rendered = h.render();
+            rendered.push_str(&activity_series);
+            render_load_series(
+                &mut rendered,
+                s.state.load_snapshot(),
+                s.byte_budget.as_ref(),
+            );
+            if let Some(snapshot) = backup_snapshot.as_ref() {
+                // A leading newline if the previous body did not end with one,
+                // so the first appended `# TYPE` line starts on its own line.
+                if !rendered.ends_with('\n') {
+                    rendered.push('\n');
+                }
+                rendered.push_str(&render_backup_scrape_gauges(snapshot));
+            }
+            (StatusCode::OK, rendered).into_response()
         }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,

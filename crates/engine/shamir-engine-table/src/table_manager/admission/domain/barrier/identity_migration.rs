@@ -222,6 +222,22 @@ impl TableManager {
         Ok(())
     }
 
+    /// Attach THIS table's identity to rebuild-classification failures
+    /// (duplicate-key backfill, undecodable record bytes) so a caller can
+    /// tell WHICH table's rebuild failed structurally, without matching
+    /// message text. Real backend and lock errors pass through untouched.
+    fn classify_rebuild_failure(table: &str, error: DbError) -> DbError {
+        match error {
+            source @ (DbError::UniqueIndexCreationFailed(..) | DbError::Codec(_)) => {
+                DbError::IndexRebuildFailed {
+                    table: table.to_owned(),
+                    source: Box::new(source),
+                }
+            }
+            error => error,
+        }
+    }
+
     /// The three-step protocol itself. `force` skips the cheap `need` check
     /// (the re-run path); the non-forced entry points gate on it.
     async fn run_base_identity_migration(
@@ -266,7 +282,8 @@ impl TableManager {
                 });
             self.index_manager_ref()
                 .create_index_from_stream(def.clone(), stream)
-                .await?;
+                .await
+                .map_err(|error| Self::classify_rebuild_failure(&self.name, error))?;
             // Metrics: the open-time identity migration re-invokes the create
             // path over existing definitions — one rebuild observation per
             // completed backfill.
@@ -278,7 +295,10 @@ impl TableManager {
             );
         }
         if !unique_defs.is_empty() {
-            let records = self.collect_all_current_records().await?;
+            let records = self
+                .collect_all_current_records()
+                .await
+                .map_err(|error| Self::classify_rebuild_failure(&self.name, error))?;
             for def in &unique_defs {
                 self.index_manager_ref()
                     .sweep_postings_for_rebuild(true, def.name_interned)
@@ -286,7 +306,8 @@ impl TableManager {
                 let rebuild_start = Instant::now();
                 self.index_manager_ref()
                     .create_unique_index_from_records_borrowed(def.clone(), &records)
-                    .await?;
+                    .await
+                    .map_err(|error| Self::classify_rebuild_failure(&self.name, error))?;
                 // Metrics: same rebuild classification as the regular loop.
                 observe_build(
                     self.index_build_observer().as_ref(),

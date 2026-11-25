@@ -4,3 +4,5 @@ pub(in crate::shamir_db) mod apply_journal;
 mod apply_operations;
 
 pub(super) use admission::apply_application_schema;
+#[cfg(test)]
+pub(in crate::shamir_db) use admission::{AppliedRetryPause, APPLIED_RETRY_PAUSE};

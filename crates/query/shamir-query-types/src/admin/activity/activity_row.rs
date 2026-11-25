@@ -81,10 +81,6 @@ pub enum ActivityRow {
 }
 
 /// State of an in-flight request execution.
-///
-/// Step 1 carries `Running` / `Done` only; the `Running → Committing` /
-/// `Cancelled` transitions belong to the cancellation step and are encoded
-/// in the server's state word, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityRequestState {
@@ -92,6 +88,16 @@ pub enum ActivityRequestState {
     Running,
     /// Finished (committed or returned); about to be deregistered.
     Done,
+    /// Entered commit; no longer cancellable.
+    Committing,
+    /// A cancellation request won before commit.
+    Cancelled,
+    /// Parked waiting for a record lock.
+    WaitingLock,
+    /// Parked waiting for a visibility position.
+    WaitingVisibility,
+    /// Parked waiting for byte-budget capacity.
+    WaitingBudget,
 }
 
 /// State of an interactive transaction.

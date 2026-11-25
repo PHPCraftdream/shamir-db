@@ -13,18 +13,23 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use shamir_query_builder::application_schema_plan;
+use shamir_query_builder::application_schema_status;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::batch::IntoBatchOp;
 use shamir_query_builder::ddl;
 use shamir_query_builder::SchemaMigration;
 use shamir_query_builder::{filter, write};
 use shamir_query_types::admin::types::schema_migration::{
-    SchemaMigrationBody, SchemaMigrationOp, SchemaMigrationPlanRequest, SchemaMigrationPredecessor,
+    SchemaMigrationApplyRequest, SchemaMigrationBody, SchemaMigrationOp,
+    SchemaMigrationPlanRequest, SchemaMigrationPredecessor, SchemaMigrationStatusRequest,
     SchemaMigrationSubmission, SchemaMigrationTarget,
 };
+use shamir_query_types::WriteOp;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 use super::helpers::{body, checksum, context, persistent_db};
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
 use crate::shamir_db::system_store::{DatabaseIdentity, JournalEventKind, SchemaMigrationStep};
 use crate::types::value::QueryValue;
 use crate::ShamirDb;
@@ -457,7 +462,17 @@ async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
         .await
         .unwrap();
 
-    // Owned fence, no effect attempted yet: in progress.
+    // Owned fence, no effect attempted yet, and the fence was acquired
+    // through the journal API so the process-local slot is VACANT: the
+    // shared classification (brief 84, finding 6) falls through to the
+    // durable journal rule — an interrupted history reports IN DOUBT even
+    // though the tail is only `started`. This is the plan arm's legacy
+    // difference resolved in STATUS's favor: the legacy §4.2 code here was
+    // `schema_migration_in_progress`; the shared code is the stricter
+    // refusal and agrees with STATUS
+    // (`status_with_an_owned_fence_reports_the_in_flight_owner`). Without
+    // the shared helper the plan arm classified the tail kind first and
+    // reported in progress, disagreeing with STATUS for the same journal.
     let request = plan_request(
         &identity,
         predecessor(None, 0, [0; 32]),
@@ -466,7 +481,7 @@ async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
     let error = run_plan(&db, request.clone())
         .await
         .expect_err("an owned fence refuses plan");
-    assert_code(error, "schema_migration_in_progress");
+    assert_code(error, "schema_migration_in_doubt");
 
     // After a durable operation intent the migration is in doubt.
     store
@@ -488,6 +503,129 @@ async fn plan_refuses_while_a_migration_is_in_flight_or_in_doubt() {
         .await
         .expect_err("an in-doubt migration refuses plan");
     assert_code(error, "schema_migration_in_doubt");
+}
+
+#[tokio::test]
+async fn lifecycle_reserved_validator_holder_is_in_progress_for_status_plan_and_apply() {
+    let (_dir, db) = persistent_db().await;
+    db.create_db("serving").await.unwrap();
+    db.create_db("testdb").await.unwrap();
+    db.add_repo(
+        "testdb",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()),
+    )
+    .await
+    .unwrap();
+    let mut create_table = Batch::new();
+    create_table.op("table", ddl::create_table("sentinel").repo("main").build());
+    db.execute("testdb", &create_table.to_request_via_msgpack().unwrap())
+        .await
+        .unwrap();
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 2)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0)
+        )"#,
+    )
+    .unwrap();
+    db.create_validator_from_wasm("shared_guard", &wasm, false)
+        .await
+        .unwrap();
+    db.bind_validator(
+        "testdb",
+        "main",
+        "sentinel",
+        "shared_guard",
+        vec![WriteOp::Insert],
+        1500,
+    )
+    .await
+    .unwrap();
+    let serving = db
+        .system_store()
+        .schema_migration_identity("serving")
+        .await
+        .unwrap();
+    let identity = db
+        .system_store()
+        .schema_migration_identity("testdb")
+        .await
+        .unwrap();
+
+    // Mirror APPLY's real validator-rename preflight: hold replication
+    // control while deriving the real binding holder and keep the returned
+    // capability alive for every classification call below.
+    let control = db.lock_replication_control().await;
+    let rename = db
+        .begin_validator_rename_migration(&["shared_guard".to_string()], Some(serving), &control)
+        .await
+        .unwrap_or_else(|_| panic!("validator rename preflight must succeed"));
+    drop(control);
+    // Ordinary mutation observers retain Lifecycle's generic conflict code;
+    // the migration admission classifier observes its in-progress meaning.
+    assert_eq!(
+        db.schema_migration_refusal_code(identity),
+        None,
+        "ordinary write observers keep Lifecycle as a generic conflict"
+    );
+
+    let pristine = db
+        .system_store()
+        .read_schema_migration_history(identity)
+        .await
+        .unwrap();
+    let migration = SchemaMigration::new("alpha-001", 1, "fresh table migration")
+        .op(ddl::create_table("items_1").repo("main").build())
+        .expect("typed create-table operation is admitted")
+        .build()
+        .expect("test migration body is valid");
+
+    let status = run_status(&db, identity).await;
+    assert_eq!(str_field(&status, "error"), "schema_migration_in_progress");
+    let plan_error = run_plan(
+        &db,
+        plan_request(
+            &identity,
+            predecessor(None, 0, [0; 32]),
+            vec![submission(&migration)],
+        ),
+    )
+    .await
+    .expect_err("PLAN must classify the holder lifecycle reservation");
+    assert_code(plan_error, "schema_migration_in_progress");
+    let apply_error = run_apply(
+        &db,
+        SchemaMigrationApplyRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: identity.0,
+            },
+            expected_predecessor: predecessor(None, 0, [0; 32]),
+            expected_fence_generation: 0,
+            migration: submission(&migration),
+        },
+    )
+    .await
+    .expect_err("fresh APPLY must classify the holder lifecycle reservation");
+    assert_code(apply_error, "schema_migration_in_progress");
+
+    let after = db
+        .system_store()
+        .read_schema_migration_history(identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, pristine,
+        "the three refusals write no journal events"
+    );
+    assert!(!db.get_db("testdb").unwrap().has_table("main", "items_1"));
+    drop(rename);
+    assert_eq!(
+        db.schema_migration_refusal_code(identity),
+        None,
+        "the Lifecycle reservation is released after the capability drops"
+    );
 }
 
 #[test]
@@ -646,4 +784,176 @@ async fn plan_lists_function_and_validator_warnings_and_registrations() {
         registered.contains(&"row_guard".to_string()),
         "the validator registration must be listed: {registered:?}"
     );
+}
+
+/// One shared classification (brief 84, finding 6): run the STATUS arm and
+/// return the typed record (the sibling `status_tests` runner is private to
+/// that module).
+async fn run_status(db: &ShamirDb, identity: DatabaseIdentity) -> QueryValue {
+    let mut b = Batch::new();
+    b.op(
+        "status",
+        application_schema_status(SchemaMigrationStatusRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: identity.0,
+            },
+        }),
+    );
+    let request = b.to_request_via_msgpack().unwrap();
+    let response = db.execute("testdb", &request).await.unwrap();
+    response.results["status"].records[0]
+        .as_value()
+        .into_owned()
+}
+
+/// Run one APPLY batch through the normal batch entry point (the sibling
+/// `apply` fixtures are `pub(super)` to their own module).
+async fn run_apply(
+    db: &ShamirDb,
+    request: SchemaMigrationApplyRequest,
+) -> Result<QueryValue, crate::query::batch::BatchError> {
+    let mut b = Batch::new();
+    b.op(
+        "apply",
+        shamir_query_builder::apply_application_schema_migration(request),
+    );
+    let request = b.to_request_via_msgpack().unwrap();
+    let response = db.execute("testdb", &request).await?;
+    Ok(response.results["apply"].records[0].as_value().into_owned())
+}
+
+/// Brief 84, finding 6 — case B: a LIVE runner past its last journal intent.
+/// The process-local gate is held at the acquisition generation while the
+/// journal's last unresolved event is an `operation_intent`. STATUS and
+/// APPLY report/refuse `schema_migration_in_progress`; PLAN must agree.
+/// Without the shared classification PLAN sampled the journal tail FIRST
+/// and reported `schema_migration_in_doubt` for the same state.
+#[tokio::test]
+async fn plan_agrees_with_status_on_a_live_runner_past_its_intent() {
+    let (_dir, db) = persistent_db().await;
+    db.create_db("testdb").await.unwrap();
+    let store = db.system_store();
+    let identity = store.schema_migration_identity("testdb").await.unwrap();
+    let migration = body("alpha-001", 1);
+    let metadata = migration.metadata.clone();
+    let digest = checksum(&migration);
+    let generation = store
+        .acquire_schema_migration_fence(identity, 0, metadata.clone(), migration, false, &context())
+        .await
+        .unwrap();
+    store
+        .append_schema_migration_event(
+            identity,
+            generation,
+            metadata,
+            digest,
+            SchemaMigrationStep {
+                kind: JournalEventKind::OperationIntent,
+                operation_index: Some(0),
+                evidence: None,
+            },
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    // The live runner: the process-local gate is held (test seam for the
+    // in-process owner); the guard stays alive for the whole scenario.
+    let mut gate = db
+        .reserve_schema_migration_gate("testdb")
+        .expect("the slot is vacant before the runner is staged");
+    gate.hold(generation);
+    assert_eq!(
+        db.schema_migration_gate_generation("testdb"),
+        Some(generation)
+    );
+
+    // STATUS agrees with the live slot: in progress.
+    let status = run_status(&db, identity).await;
+    assert_eq!(str_field(&status, "error"), "schema_migration_in_progress");
+
+    // APPLY of the SAME migration refuses in progress: a live runner is
+    // never taken over.
+    let apply_error = run_apply(
+        &db,
+        SchemaMigrationApplyRequest {
+            protocol_version: 1,
+            target: SchemaMigrationTarget {
+                database_identity: identity.0,
+            },
+            expected_predecessor: predecessor(None, 0, [0; 32]),
+            expected_fence_generation: 0,
+            migration: submission(&body("alpha-001", 1)),
+        },
+    )
+    .await
+    .expect_err("a live runner refuses an identical apply");
+    assert_code(apply_error, "schema_migration_in_progress");
+
+    // PLAN must agree with both: the slot decides over the journal tail.
+    let request = plan_request(
+        &identity,
+        predecessor(None, 0, [0; 32]),
+        vec![submission(&body("alpha-002", 2))],
+    );
+    let error = run_plan(&db, request)
+        .await
+        .expect_err("a live runner past its intent refuses plan");
+    assert_code(error, "schema_migration_in_progress");
+}
+
+/// Brief 84, finding 6 — case A: a FAILED post-commit `started` tail. The
+/// gate marker holds the interrupted run's generation while the journal's
+/// last unresolved event is still only `started`. STATUS reports in doubt
+/// (the marker decides); PLAN must agree. Without the shared classification
+/// PLAN reached the old `started` arm first and reported
+/// `schema_migration_in_progress` for the same state.
+#[tokio::test]
+async fn plan_agrees_with_status_on_a_failed_started_tail() {
+    let (_dir, db) = persistent_db().await;
+    db.create_db("testdb").await.unwrap();
+    let store = db.system_store();
+    let identity = store.schema_migration_identity("testdb").await.unwrap();
+    let migration = body("alpha-001", 1);
+    let metadata = migration.metadata.clone();
+    let generation = store
+        .acquire_schema_migration_fence(identity, 0, metadata, migration, false, &context())
+        .await
+        .unwrap();
+
+    // The failed run: hold the gate, then fail post-commit — the guard's
+    // Drop converts the live slot into the retained in-doubt marker at the
+    // run's acquisition generation.
+    let mut gate = db
+        .reserve_schema_migration_gate("testdb")
+        .expect("the slot is vacant before the runner is staged");
+    gate.hold(generation);
+    drop(gate);
+    assert_eq!(
+        db.schema_migration_gate_in_doubt_generation("testdb"),
+        Some(generation),
+        "the failed run retains its in-doubt marker"
+    );
+    let history = store.read_schema_migration_history(identity).await.unwrap();
+    assert_eq!(
+        history.unresolved.last().map(|event| event.kind),
+        Some(JournalEventKind::Started),
+        "the journal tail is still only `started`"
+    );
+
+    // STATUS agrees with the marker: in doubt.
+    let status = run_status(&db, identity).await;
+    assert_eq!(str_field(&status, "error"), "schema_migration_in_doubt");
+
+    // PLAN must agree: the marker decides over the `started` tail.
+    let request = plan_request(
+        &identity,
+        predecessor(None, 0, [0; 32]),
+        vec![submission(&body("alpha-002", 2))],
+    );
+    let error = run_plan(&db, request)
+        .await
+        .expect_err("a failed post-commit started tail refuses plan");
+    assert_code(error, "schema_migration_in_doubt");
 }

@@ -25,6 +25,13 @@ pub enum DbError {
     )]
     UniqueIndexCreationFailed(String, usize, String),
 
+    /// An open-time index/identity rebuild of a specific table failed. The
+    /// `table` field carries the failing table's own identity, so callers
+    /// classify per-table damage structurally instead of matching message
+    /// text; the original error is preserved as `source`.
+    #[error("index rebuild failed for table '{table}': {source}")]
+    IndexRebuildFailed { table: String, source: Box<DbError> },
+
     /// An error originating from the underlying storage backend.
     #[error("Storage backend error: {0}")]
     Storage(String),

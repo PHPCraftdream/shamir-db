@@ -42,6 +42,7 @@
 //! produces a different final hmac → `audit_chain_verify_failed` event.
 
 use crate::common::crypto::{constant_time_eq, hmac_sha256};
+use crate::common::types::limits::MAX_FRAME_SIZE_DATA;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -72,6 +73,85 @@ pub struct AuditEntry {
     pub prev_hmac: [u8; 32],
     /// HMAC of this entry — populated by [`AuditChain::append`].
     pub hmac: [u8; 32],
+}
+
+/// Decimal digit count of a u64 column (bounded: at most 20).
+fn decimal_len(value: u64) -> usize {
+    value.checked_ilog10().map_or(1, |e| e as usize + 1)
+}
+
+/// Extra bytes added by the appender's field escaping (`\`, tab, LF
+/// become two-byte sequences; every other character keeps its UTF-8
+/// byte length).
+fn escape_extra(field: &str) -> usize {
+    field
+        .bytes()
+        .filter(|&b| b == b'\\' || b == b'\t' || b == b'\n')
+        .count()
+}
+
+/// Byte length of the URL-safe **unpadded** base64 encoding of `n`
+/// bytes: full 3-byte groups emit 4 chars, a 1-byte remainder emits 2
+/// and a 2-byte remainder emits 3 (8 bytes → 11, 32 bytes → 43).
+fn base64_len(n: usize) -> Option<usize> {
+    (n / 3).checked_mul(4)?.checked_add(match n % 3 {
+        0 => 0,
+        1 => 2,
+        _ => 3,
+    })
+}
+
+impl AuditEntry {
+    /// Exact byte length of the fixed-format log line the durable
+    /// appender emits for this entry, including the terminating LF:
+    /// `seq` and `ts_ns` as decimal, five escaped text fields, the
+    /// 11-char base64 of the 8-byte session prefix, unpadded base64 of
+    /// the details (variable), 43-char base64 per 32-byte HMAC, ten
+    /// tabs and one LF. `None` on arithmetic overflow (treated as too
+    /// large). `seq` must already be assigned: its decimal width is
+    /// part of the line, so validating at a zero placeholder would
+    /// under-count by up to 19 bytes.
+    fn emitted_log_line_len(&self) -> Option<usize> {
+        self.emitted_len_without_seq()?
+            .checked_add(decimal_len(self.seq))
+    }
+
+    /// Line length without `seq`'s decimal width — an allocation-free
+    /// preflight lower bound when combined with at least one seq digit.
+    fn emitted_len_without_seq(&self) -> Option<usize> {
+        let mut len = decimal_len(self.ts_ns);
+        for field in [
+            &self.event,
+            &self.transport,
+            &self.user,
+            &self.ip_subnet,
+            &self.result,
+        ] {
+            len = len
+                .checked_add(field.len())?
+                .checked_add(escape_extra(field))?;
+        }
+        len = len
+            .checked_add(base64_len(self.session_id_prefix.len())?)?
+            .checked_add(base64_len(self.details_canonical_msgpack.len())?)?
+            .checked_add(base64_len(self.prev_hmac.len())?)?
+            .checked_add(base64_len(self.hmac.len())?)?
+            .checked_add(10)? // tabs between the eleven columns
+            .checked_add(1)?; // terminating LF
+        Some(len)
+    }
+
+    /// Shared exact-size admission: refuse any entry whose emitted log
+    /// line would exceed [`MAX_RECORD_BYTES`] (the recovery reader's
+    /// ceiling), so nothing the writer accepts can be rejected at boot.
+    /// Typed input refusal, evaluated before any state change; call it
+    /// only after `seq` has been assigned.
+    pub fn validate_log_record_size(&self) -> Result<(), AuditError> {
+        match self.emitted_log_line_len() {
+            Some(len) if len <= MAX_RECORD_BYTES => Ok(()),
+            _ => Err(AuditError::RecordTooLarge),
+        }
+    }
 }
 
 /// Build the canonical byte-string of an entry (excluding `hmac`).
@@ -170,6 +250,21 @@ pub struct AuditChain {
 /// debug/test window is capped.
 pub const RETAINED_ENTRIES: usize = 4096;
 
+/// Maximum accepted byte length of one emitted audit log line,
+/// including its terminating LF — the same ceiling the recovery reader
+/// enforces (base64-encoded `MAX_FRAME_SIZE_DATA` post-auth frame plus
+/// maximum escaped text lengths, two decimal u64 columns, the fixed
+/// base64 columns (11 for the 8-byte session prefix, 43 per 32-byte
+/// HMAC), ten tabs and LF/optional CR). The writer refuses any record
+/// above this so no record it persists can be refused at boot.
+pub const MAX_RECORD_BYTES: usize = MAX_FRAME_SIZE_DATA.div_ceil(3) * 4
+    + 2 * (u16::MAX as usize + 4 * u8::MAX as usize)
+    + 2 * 20
+    + 11
+    + 2 * 43
+    + 10
+    + 2;
+
 struct ChainInner {
     next_seq: u64,
     prev_hmac: [u8; 32],
@@ -254,11 +349,38 @@ impl AuditChain {
             prev_hmac: [0u8; 32],
             hmac: [0u8; 32],
         };
+        // Allocation-free preflight BEFORE any clone or canonical
+        // allocation of the unbounded details: with at least one seq
+        // digit this is a lower bound on the emitted line, so a refusal
+        // here is final. The exact check runs under `inner` once `seq`
+        // is assigned, still before any state change or publication.
+        let len_without_seq = entry
+            .emitted_len_without_seq()
+            .ok_or(AuditError::RecordTooLarge)?;
+        if len_without_seq
+            .checked_add(1)
+            .ok_or(AuditError::RecordTooLarge)?
+            > MAX_RECORD_BYTES
+        {
+            return Err(AuditError::RecordTooLarge);
+        }
         let mut retained = entry.clone();
         let mut canonical = canonical_bytes(&entry)?;
         let mut g = self.inner.lock();
         entry.seq = g.next_seq;
         entry.prev_hmac = g.prev_hmac;
+        // Exact seq-width admission before any state mutation.
+        if len_without_seq
+            .checked_add(decimal_len(entry.seq))
+            .ok_or(AuditError::RecordTooLarge)?
+            > MAX_RECORD_BYTES
+        {
+            return Err(AuditError::RecordTooLarge);
+        }
+        // The durable format requires a checkpoint successor below u64::MAX.
+        if g.next_seq >= u64::MAX - 1 {
+            return Err(AuditError::SequenceExhausted { next: g.next_seq });
+        }
         canonical[..8].copy_from_slice(&entry.seq.to_be_bytes());
         let prev_at = canonical.len() - 32;
         canonical[prev_at..].copy_from_slice(&entry.prev_hmac);
@@ -267,7 +389,7 @@ impl AuditChain {
         retained.prev_hmac = entry.prev_hmac;
         retained.hmac = entry.hmac;
         g.prev_hmac = entry.hmac;
-        g.next_seq = g.next_seq.saturating_add(1);
+        g.next_seq += 1; // guarded above: at most `MAX - 2` here
         if g.entries.len() >= RETAINED_ENTRIES {
             g.entries.pop_front();
         }
@@ -415,6 +537,36 @@ pub enum AuditError {
         /// Name of the field whose encoded length exceeded its prefix.
         field: &'static str,
     },
+    /// A log record's emitted line exceeds [`MAX_RECORD_BYTES`] — the
+    /// same ceiling the recovery reader enforces. The writer refuses
+    /// such input before publication; this is a typed input refusal,
+    /// not a persistence failure (no fail-closed latch).
+    #[error(
+        "audit record exceeds the {}-byte log record ceiling",
+        MAX_RECORD_BYTES
+    )]
+    RecordTooLarge,
+    /// Sequence space is exhausted: the next record would produce a
+    /// checkpoint successor that recovery cannot resume (`u64::MAX` or
+    /// overflow). Refused before publication without latching persistence.
+    #[error("audit sequence space exhausted: refusing to consume sequence {next}")]
+    SequenceExhausted {
+        /// The sequence the append would have consumed.
+        next: u64,
+    },
+    /// The writer latched an append refusal: an event was requested and
+    /// never written, so a checkpoint must not certify the log as complete.
+    /// The latch trips on ANY inner-chain refusal — sequence exhaustion and
+    /// typed-input refusals (e.g. `FieldTooLong`, `RecordTooLarge`) alike.
+    /// The variant name is kept for its existing callers, which all match
+    /// the variant rather than its text; it therefore means "an audit event
+    /// was requested and not written", not specifically exhaustion. Raised
+    /// by [`AuditChainWriter::checkpoint_now`].
+    #[error(
+        "an audit event was requested and was not written; the audit \
+         checkpoint cannot certify the log"
+    )]
+    SequenceExhaustedUnaudited,
     /// Entry's `hmac` doesn't match its canonical bytes.
     #[error("audit HMAC mismatch at {at}")]
     HmacMismatch {
@@ -459,6 +611,24 @@ pub trait AuditAppender: Send + Sync {
 pub struct AuditChainWriter {
     chain: Arc<AuditChain>,
     appender: Arc<dyn AuditAppender>,
+    /// Latched by [`Self::append`] when the inner chain refuses an event for
+    /// ANY reason — [`AuditError::SequenceExhausted`] or a typed-input refusal
+    /// such as [`AuditError::RecordTooLarge`] / [`AuditError::FieldTooLong`]:
+    /// that event was never written. Latching only the exhaustion case left
+    /// every other refusal certifiable, which let a caller that ignores the
+    /// append error (the token service warns and continues) deliver a secret
+    /// whose audit event does not exist.
+    ///
+    /// LIMIT — this is NOT a gate on every checkpoint write. The flag is read
+    /// only by [`Self::checkpoint_now`]; the writer's own periodic checkpoint
+    /// after an append (`Self::append`, every 1000 entries) and the appender's
+    /// rotation/close hooks still persist checkpoints after a refusal. Those
+    /// checkpoints stay sequence-consistent because a refusal consumes no
+    /// sequence, predecessor HMAC or retained-window entry — what remains
+    /// uncertifiable is the audit trail as a whole, not the counter.
+    /// Monotonic — never cleared — and atomic only, so it adds no lock and no
+    /// ordering constraint.
+    append_failed: std::sync::atomic::AtomicBool,
 }
 
 impl AuditChainWriter {
@@ -470,6 +640,7 @@ impl AuditChainWriter {
         Self {
             chain: Arc::new(chain),
             appender,
+            append_failed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -477,7 +648,11 @@ impl AuditChainWriter {
     /// also be handed to the scheduler so `checkpoint_now` observes the
     /// state mutated by `append`.
     pub fn new_with_shared(chain: Arc<AuditChain>, appender: Arc<dyn AuditAppender>) -> Self {
-        Self { chain, appender }
+        Self {
+            chain,
+            appender,
+            append_failed: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// Snapshot of the shared chain handle — useful when the writer
@@ -489,6 +664,12 @@ impl AuditChainWriter {
     }
 
     /// Append + appender.append + appender.checkpoint (every 1000 entries).
+    ///
+    /// A refusal leaves the chain state untouched but latches
+    /// [`Self::checkpoint_now`]: that event was never written, so the writer
+    /// never certifies the log again. An append failure from the appender
+    /// latches `persistence_failed` instead, which fails both `append` and
+    /// `checkpoint_now`.
     #[allow(clippy::too_many_arguments)]
     pub fn append(
         &self,
@@ -511,7 +692,7 @@ impl AuditChainWriter {
                 "audit writer is fail-closed".into(),
             ));
         }
-        let entry = self.chain.append(
+        let entry = match self.chain.append(
             event,
             transport,
             user,
@@ -520,7 +701,19 @@ impl AuditChainWriter {
             result,
             details_canonical_msgpack,
             ts_ns,
-        )?;
+        ) {
+            Ok(entry) => entry,
+            // ANY refusal means THIS event was never written. Latch it — not
+            // only sequence exhaustion — so a later checkpoint cannot certify
+            // a log that lost an event; the refusal itself is unchanged and
+            // stays before publication, and no state (sequence, predecessor
+            // HMAC, retained window) was consumed by it.
+            Err(other) => {
+                self.append_failed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(other);
+            }
+        };
         self.appender.append_entry(&entry).map_err(|error| {
             self.chain
                 .persistence_failed
@@ -544,7 +737,20 @@ impl AuditChainWriter {
 
     /// Force checkpoint NOW (caller schedules this every 60s for
     /// tighter truncation-detection bounds).
+    ///
+    /// Refuses with [`AuditError::SequenceExhaustedUnaudited`] once
+    /// [`Self::append`] has latched ANY append failure (sequence exhaustion
+    /// and every typed-input refusal alike): the log is missing an event, so
+    /// reporting a successful checkpoint would let the caller treat the audit
+    /// trail as complete. The variant keeps its name for its existing callers;
+    /// its `Display` text was reworded to "an audit event was requested and
+    /// was not written" and is not asserted anywhere — only that reworded
+    /// wording's absence of the old "sequence space is exhausted" phrase is
+    /// pinned, by `audit_recovery_gate_tests`.
     pub fn checkpoint_now(&self) -> Result<(), AuditError> {
+        if self.append_failed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AuditError::SequenceExhaustedUnaudited);
+        }
         let _gate = self.chain.durable_gate.lock();
         if self
             .chain

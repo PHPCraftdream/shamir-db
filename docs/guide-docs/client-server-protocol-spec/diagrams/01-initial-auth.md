@@ -19,7 +19,7 @@ sequenceDiagram
     C->>S: auth_init { user, client_nonce(32), binding_mode=0x01, version=1 }
 
     rect rgb(255, 230, 230)
-    Note over S: ⚠ Pre-Argon2id binding_mode policy check<br/>(защита от DoS amplification)
+    Note over S: binding_mode policy checked before challenge<br/>(login proof verification runs no server-side password KDF)
     S->>S: Reject silently если binding_mode не входит в listener policy
     end
 
@@ -60,7 +60,7 @@ sequenceDiagram
 
 ## Ключевые свойства
 
-- **Pre-Argon2id binding_mode check** (шаг 4) — защита от DoS amplification
+- **binding_mode policy** — checked before challenge (шаг 4); login proof verification runs no server-side password KDF
 - **Constant-time fake path** (шаг 6) — anti-enumeration через HKDF
 - **All three crypto operations always computed** (шаг 9) — устраняет timing oracle
 - **Latency padding** на negative path — устраняет real/fake distinguisher на microsecond уровне
@@ -70,7 +70,9 @@ sequenceDiagram
 ## Edge cases
 
 - **Pre-state GC:** state без proof через `HANDSHAKE_TIMEOUT` (≥15s) → drop
-- **Argon2id semaphore exhaustion:** `MAX_CONCURRENT_ARGON2=64` → `server_busy`
-- **Rate limit per subnet:** `RATE_LIMIT_AUTH_INIT_PER_SUBNET=10/sec` → `rate_limited`
+- **Server-side Argon2id:** login proof-verify runs NO server-side Argon2id and never refuses login on semaphore exhaustion; the Argon2 permit applies only to privileged user-creation derivation (AUTH §8.1)
+- **Rate limit per subnet:** `security.auth_init_rate_per_second` (по умолчанию `10/sec`, допустимо `1..=100_000`) → соединение закрывается без тела ответа, пишется `tracing::info!` и audit-событие `rate_limited`, инкрементируется `auth_attempts_total{result="rate_limited"}`; ошибка `rate_limited` клиенту не возвращается
+- **Throttle перед первым кадром:** тот же per-subnet лимит применяется к принятому соединению до чтения первого кадра (`shamir-sync/src/sync/connection/handshake.rs:729-758`), поэтому отсекается и клиент, не приславший ни одного кадра
+- **HTTP-коды здесь не описаны:** diagram покрывает только native initial auth; 429 `rate_limited` (по частоте или по отказу в слоте конкурентности) и 503 `server_busy` от HTTP login — в AUTH_PROTOCOL §2.5
 - **Lockout** (50 fails/час per (subnet, user)): silent (генерик `authentication_failed`)
 - **`rotation_in_progress` в auth_ok** (during overlap window) → клиент handles via §6.5
