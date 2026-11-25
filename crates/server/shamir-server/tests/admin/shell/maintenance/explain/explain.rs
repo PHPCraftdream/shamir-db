@@ -14,8 +14,7 @@
 //!   opens nothing for an explained command, so the two maps must be
 //!   identical — a future implementation that "helpfully" opens the store
 //!   fails here instead of silently mutating an operator's data;
-//! * `backup schedule show` is the typed `unsupported_prerequisite`
-//!   refusal, never a placeholder success;
+//! * `backup schedule show` is a working command with a live server response;
 //! * an explained command accepts NO options: `backup restore --yes` is
 //!   refused at parse time with the typed `usage` code and exit 1;
 //! * the PIN against the server's own argument parser.
@@ -284,31 +283,6 @@ fn explained_commands_change_nothing_on_disk() {
     assert_eq!(
         before, after,
         "an explained command changed the fixture data directory"
-    );
-}
-
-/// `backup schedule show` is a capability this release does not carry: the
-/// typed `unsupported_prerequisite` error (exit 6), never a placeholder
-/// success record.
-#[test]
-fn schedule_show_is_unsupported_not_a_placeholder_success() {
-    let fixture = super::harness::boot("schedule_show_is_unsupported_not_a_placeholder_success");
-    let run = super::harness::run_shell(&fixture, &["--", "backup", "schedule", "show"]);
-    super::harness::assert_exit(&run, 6);
-    let value = record(&run, "backup schedule show");
-    assert_eq!(
-        value["kind"].as_str(),
-        Some("error"),
-        "an unsupported capability is an error record"
-    );
-    assert_eq!(
-        value["code"].as_str(),
-        Some("unsupported_prerequisite"),
-        "the schedule view must refuse with the typed capability code"
-    );
-    assert!(
-        value["data"].is_null(),
-        "an error envelope never carries data"
     );
 }
 
