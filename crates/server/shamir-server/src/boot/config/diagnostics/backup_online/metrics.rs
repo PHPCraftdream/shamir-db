@@ -260,7 +260,7 @@ pub fn backup_metrics_snapshot() -> BackupMetricsSnapshot {
 
 /// Installing a schedule starts it with no last-run and no next-run record.
 pub(crate) fn install_schedule_info(info: ScheduleInfo) -> u64 {
-    // Reserve zero for no installed generation; wrapping follows AtomicU64 semantics.
+    // Generations start at 1; exhausting a u64 counter is unreachable.
     let generation = SCHEDULE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     STATE.schedule.store(Some(Arc::new(ScheduleCell {
         generation,
