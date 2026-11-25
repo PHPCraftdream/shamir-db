@@ -35,8 +35,8 @@ impl RepoInstance {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// Cancellation stops waiting but does not interrupt a cold open once
-    /// handed off. The task holds the repository permit through recovery and
+    /// Cancelling the lookup stops waiting; a cold open already started moves to
+    /// a runtime task that keeps the repository permit through recovery and
     /// publication.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         let table = self.core.get_table(table_name).await?;

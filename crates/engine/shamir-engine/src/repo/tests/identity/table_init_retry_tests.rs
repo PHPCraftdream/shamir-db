@@ -91,6 +91,20 @@ async fn setup_failure_retries_with_coherent_mvcc() {
 }
 
 #[tokio::test]
+async fn cold_open_completes_through_a_blocking_sync_bridge() {
+    // One runtime thread is blocked by the bridge: the open must not wait for
+    // another task of this runtime to make progress.
+    let repo = make_repo();
+    let table = futures::executor::block_on(repo.get_table("orders")).unwrap();
+    assert_coherent(&repo, &table);
+    let unfenced = futures::executor::block_on(repo.core.get_table_unfenced("orders")).unwrap();
+    assert!(Arc::ptr_eq(
+        &table.mvcc_store().unwrap(),
+        &unfenced.mvcc_store().unwrap(),
+    ));
+}
+
+#[tokio::test]
 async fn cancelled_caller_keeps_cold_open_admitted_until_publication() {
     const DEADLINE: Duration = Duration::from_secs(120);
     let repo = make_repo();

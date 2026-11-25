@@ -9,7 +9,10 @@ use crate::table::table_manager::table_token_for;
 use crate::table::{table_store_names, TableManager};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{fully_unwrap_store, Repo as _, Store};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::OnceCell;
 
 impl RepoCore {
@@ -85,8 +88,8 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// Cancellation stops waiting but does not interrupt a cold open once
-    /// handed off. The task holds the repository permit through recovery and
+    /// Cancelling the lookup stops waiting; a cold open already started moves to
+    /// a runtime task that keeps the repository permit through recovery and
     /// publication.
     pub(crate) async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         self.rename_fence.check_table_rename_fence(table_name)?;
@@ -124,8 +127,8 @@ impl RepoCore {
 
     /// Trusted embedding: the returned raw table handle does not authorize actors.
     ///
-    /// Cancellation stops waiting but does not interrupt a cold open once
-    /// handed off. The task holds the repository permit through recovery and
+    /// Cancelling the lookup stops waiting; a cold open already started moves to
+    /// a runtime task that keeps the repository permit through recovery and
     /// publication.
     pub(crate) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         if let Some(table) = self.catalog.initialized_table(table_name) {
@@ -150,17 +153,11 @@ impl RepoCore {
     ) -> DbResult<TableManager> {
         let core = self.clone();
         let table_name = table_name.to_owned();
-        // Detach by design if the waiter is dropped: blocking recovery can
-        // outlive its awaiter, so the task must own the original permit through
-        // recovery and publication. The mutex bounds cold opens to one per repo.
-        // Keep the deep cold-init future boxed as in the inline admitted paths.
-        let task =
-            tokio::spawn(async move { Box::pin(core.get_table_ctx(&table_name, &permit)).await });
-        match task.await {
-            Ok(result) => result,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => Err(DbError::Internal(error.to_string())),
-        }
+        // Runs on the caller's task (a sync-over-async caller keeps working);
+        // the permit moves with the work if the caller is dropped.
+        // The deep cold-init future stays boxed as in the inline admitted paths.
+        HandoffOnDrop::new(async move { Box::pin(core.get_table_ctx(&table_name, &permit)).await })
+            .await
     }
 
     /// Admitted twin of `get_table`: requires the caller to
@@ -378,5 +375,57 @@ impl RepoCore {
     /// `RepoInstance::fk_reverse_cache` delegate.
     pub(crate) fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
         &self.fk_reverse_cache
+    }
+}
+
+/// Polls a cold open on the awaiting task. A caller dropped mid-open hands the
+/// rest to a runtime task, so blocking recovery still ends under its permit.
+struct HandoffOnDrop<T: Send + 'static> {
+    work: Option<Pin<Box<dyn Future<Output = T> + Send>>>,
+    started: bool,
+    polling: bool,
+}
+
+impl<T: Send + 'static> HandoffOnDrop<T> {
+    fn new(work: impl Future<Output = T> + Send + 'static) -> Self {
+        Self {
+            work: Some(Box::pin(work)),
+            started: false,
+            polling: false,
+        }
+    }
+}
+
+impl<T: Send + 'static> Future for HandoffOnDrop<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let this = self.get_mut();
+        this.started = true;
+        this.polling = true;
+        let Some(work) = this.work.as_mut() else {
+            unreachable!("cold open polled after completion");
+        };
+        let polled = work.as_mut().poll(cx);
+        this.polling = false;
+        if polled.is_ready() {
+            this.work = None;
+        }
+        polled
+    }
+}
+
+impl<T: Send + 'static> Drop for HandoffOnDrop<T> {
+    fn drop(&mut self) {
+        // Never started: nothing ran. Unwinding out of a poll: do not resume.
+        if !self.started || self.polling {
+            return;
+        }
+        let Some(work) = self.work.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(work));
+        }
     }
 }
