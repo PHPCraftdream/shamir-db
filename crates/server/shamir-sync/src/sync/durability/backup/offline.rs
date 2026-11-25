@@ -700,7 +700,7 @@ pub fn verify_retention_candidate_cancellable(
 }
 
 /// Crate-private unleased verify of the EXACT snapshot the online writer just published (the
-/// protocol's `self_verify` of the child it wrote). The writer cannot lease the child it is
+/// protocol's self-verification of the child it wrote). The writer cannot lease the child it is
 /// still writing; this entry takes that one path, so the self-check never waits behind
 /// retention's exclusive lease and can never unlease an older sibling — any other verify stays
 /// on the leased [`verify_manifest`]. Not exported past the backup module: only

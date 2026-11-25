@@ -913,6 +913,16 @@ fn run_steps(
             OnlineBackupFailure::Verify(error.to_string()),
         )
     })?;
+    // The verifier reopens the manifest: it must be the bytes read above,
+    // or the payload was checked against a different manifest.
+    let verified = fs::read_to_string(dest_dir.join("manifest.json"))
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    if verified != raw {
+        return Err(failed(
+            BackupStage::Verifying,
+            OnlineBackupFailure::Verify("manifest.json changed during self-verification".into()),
+        ));
+    }
     // Test-only seam: observe the point after successful
     // self-verification, immediately before Done. Deliberately NO
     // cancellation check here — production keeps finishing the run: the

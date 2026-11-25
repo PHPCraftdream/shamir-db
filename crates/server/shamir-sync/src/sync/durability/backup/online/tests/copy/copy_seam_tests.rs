@@ -500,7 +500,7 @@ fn cancel_at_the_c_to_d_boundary_reports_copying_and_cleans_up() {
 }
 
 /// Cancellation raised after successful self-verification (F→G): the
-/// seam fires in `protocol.rs` between `self_verify` and the success
+/// seam fires in `protocol.rs` between the self-verification and the success
 /// return, and there is DELIBERATELY no cancellation check there (no
 /// production change — documented behaviour). The run still ends Done:
 /// valid published output on disk, pins released, source untouched —
