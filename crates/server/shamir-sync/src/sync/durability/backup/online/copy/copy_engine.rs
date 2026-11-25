@@ -749,7 +749,6 @@ fn run_copy_pass_inner(
     let mut changed_files = 0u64;
     let mut missing_files = 0u64;
     let mut synced_dirs: Vec<PathBuf> = Vec::new();
-    let mut tree_entries_changed = false;
     for source_path in listing {
         if let Some(gate) = gate {
             gate.check(cancel)?;
@@ -772,11 +771,7 @@ fn run_copy_pass_inner(
         if let Some(parent) = dest_path.parent() {
             // A parent-directory failure is a DESTINATION error and
             // always propagates: it can never be a vanished source.
-            let parent_missing = !parent.is_dir();
             fs::create_dir_all(parent).map_err(|error| dest_at(parent, error))?;
-            if parent_missing {
-                tree_entries_changed = true;
-            }
             if !synced_dirs.contains(&parent.to_path_buf()) {
                 synced_dirs.push(parent.to_path_buf());
             }
@@ -838,36 +833,26 @@ fn run_copy_pass_inner(
         };
         #[cfg(test)]
         test_seams::fire_after_copy(&source_path);
-        tree_entries_changed = true;
         copied.push((rel_slash, source_path, dest_path, copy.0, copy.1, false));
     }
-    if tree_entries_changed {
-        for dir in &synced_dirs {
-            if let Some(gate) = gate {
-                gate.check(cancel)?;
-            }
-            fsync_dir_fallible(dir)?;
-            if let Some(gate) = gate {
-                gate.check(cancel)?;
-            }
-        }
+    for dir in &synced_dirs {
         if let Some(gate) = gate {
             gate.check(cancel)?;
         }
-        // A pass that copied nothing (an empty WAL directory) never created
-        // its destination root: there are no new entries to make durable.
-        if dest_root.is_dir() {
-            fsync_dir_fallible(dest_root)?;
-        }
+        fsync_dir_fallible(dir)?;
         if let Some(gate) = gate {
             gate.check(cancel)?;
         }
-    } else if let Some(gate) = gate {
-        // No byte was written and no directory was created: no
-        // destination entry changed during this pass, so no directory
-        // fsync is owed — every entry is already durable from the pass
-        // that created it (fsync of an unchanged directory is a no-op).
-        // One cooperative check keeps the gate's cancel/clock semantics.
+    }
+    if let Some(gate) = gate {
+        gate.check(cancel)?;
+    }
+    // A pass that copied nothing (an empty WAL directory) never created
+    // its destination root: there are no new entries to make durable.
+    if dest_root.is_dir() {
+        fsync_dir_fallible(dest_root)?;
+    }
+    if let Some(gate) = gate {
         gate.check(cancel)?;
     }
 

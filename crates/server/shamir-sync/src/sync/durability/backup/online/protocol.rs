@@ -895,12 +895,18 @@ fn run_steps(
         .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     manifest::write_backup_meta(dest_dir)
         .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
-    // Self-verification (design 4.2 step F): `verify_writer_snapshot`
-    // re-hashes every manifest `files` entry against the snapshot on
-    // disk with the same size+sha256 comparison, and adds confinement,
-    // duplicate, cache-path, WAL-segment re-hash, unmanifested-file and
-    // stamp agreement checks — a strict superset of the removed
-    // pre-pass loop, so each entry is hashed exactly once.
+    // Self-verification (design 4.2 step F). The manifest read and decode
+    // keep their own failure classification (an io or `manifest-failed`
+    // reason, not `verify-failed`). The payload check is the verifier
+    // `verify_writer_snapshot`: it hashes every manifest `files` entry
+    // against the snapshot on disk with the size+sha256 comparison and adds
+    // confinement, duplicate, cache-path, WAL-segment re-hash,
+    // unmanifested-file and stamp agreement checks, so the former
+    // pre-pass over `files` is gone (WAL segments are still re-hashed by
+    // the verifier's WAL check).
+    let raw = fs::read_to_string(dest_dir.join("manifest.json"))
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    manifest::decode(&raw).map_err(|error| failed(BackupStage::Verifying, error))?;
     verify_writer_snapshot(dest_dir).map_err(|error| {
         failed(
             BackupStage::Verifying,
