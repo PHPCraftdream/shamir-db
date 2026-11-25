@@ -18,6 +18,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::sync::durability::backup::online::progress::BackupProgress;
 
+use super::metrics::ScheduleStateSnapshot;
 use super::registry::{BackupStatusSnapshot, OnlineBackupRegistry, StartBackupError};
 
 #[async_trait]
@@ -109,6 +110,66 @@ fn snapshot_value(snapshot: &BackupStatusSnapshot) -> QueryValue {
             QueryValue::Str(last_error.clone()),
         );
     }
+    if let Some(schedule) = super::metrics::schedule_state() {
+        value.insert("schedule".to_string(), schedule_section_value(&schedule));
+    }
+    QueryValue::Map(value)
+}
+
+fn schedule_section_value(state: &ScheduleStateSnapshot) -> QueryValue {
+    let mut value = new_map();
+    value.insert("enabled".to_string(), QueryValue::Bool(true));
+    value.insert(
+        "interval_seconds".to_string(),
+        QueryValue::Int(state.info.interval_secs as i64),
+    );
+    if let Some(window) = &state.info.window {
+        value.insert("window".to_string(), QueryValue::Str(window.clone()));
+    }
+    value.insert(
+        "keep_last".to_string(),
+        QueryValue::Int(state.info.keep_last as i64),
+    );
+    value.insert(
+        "run_on_start".to_string(),
+        QueryValue::Bool(state.info.run_on_start),
+    );
+    if let Some(next) = state.next_run_unix_ns {
+        value.insert(
+            "next_run_unix_ns".to_string(),
+            QueryValue::Str(next.to_string()),
+        );
+    }
+    if let Some(run) = &state.last_run {
+        let mut last_run = new_map();
+        last_run.insert(
+            "started_at_unix_ns".to_string(),
+            QueryValue::Str(run.started_at_unix_ns.to_string()),
+        );
+        last_run.insert(
+            "result".to_string(),
+            QueryValue::Str(run.result.to_string()),
+        );
+        last_run.insert("stage".to_string(), QueryValue::Str(run.stage.clone()));
+        if let Some(reason) = &run.reason {
+            last_run.insert("reason".to_string(), QueryValue::Str(reason.clone()));
+        }
+        value.insert("last_run".to_string(), QueryValue::Map(last_run));
+    }
+    let mut runs = new_map();
+    for (key, count) in [
+        ("scheduled_started", state.scheduled_runs[0]),
+        ("scheduled_skipped_busy", state.scheduled_runs[1]),
+        ("scheduled_skipped_window", state.scheduled_runs[2]),
+        ("scheduled_failed", state.scheduled_runs[3]),
+        ("scheduled_completed", state.scheduled_runs[4]),
+        ("failure_streak", state.scheduled_failure_streak),
+        ("retention_deleted", state.retention_deleted_total),
+        ("retention_failed", state.retention_failed_total),
+    ] {
+        runs.insert(key.to_string(), QueryValue::Int(count as i64));
+    }
+    value.insert("runs".to_string(), QueryValue::Map(runs));
     QueryValue::Map(value)
 }
 

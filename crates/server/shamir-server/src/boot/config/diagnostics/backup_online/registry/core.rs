@@ -826,14 +826,6 @@ impl RunJob {
         }
         // Final record publication, `running = false` LAST (the record stayed
         // `running` — admission refused — through retention).
-        // A failed SCHEDULED outcome is logged ONCE here with the same
-        // path-free stage/reason vocabulary it stores: never the raw error.
-        if let (Err(error), true) = (&outcome, scheduled_run) {
-            let rendered = error.stage_and_reason();
-            if let Some((stage, reason)) = rendered.split_once(": ") {
-                tracing::warn!(stage, reason, "scheduled backup run failed");
-            }
-        }
         let mut record = record.lock();
         record.progress = progress;
         record.repos_created_during = repos_created_during;
@@ -843,6 +835,13 @@ impl RunJob {
             (Err(error), false) => Some(full_error_chain(error)),
             (Ok(_), _) => None,
         };
+        // The scheduled run's LAST-RUN record publishes at the final
+        // publication, before `running = false`: the run's own typed outcome
+        // (completed / typed-cancelled / failed) with the stable path-free
+        // vocabulary; a failure keeps the ONCE log with identical fields.
+        if scheduled_run {
+            backup_metrics::note_scheduled_run_outcome(&outcome, record.started_at_unix_ns);
+        }
         record.running = false;
         drop(record);
         guard.disarm();
