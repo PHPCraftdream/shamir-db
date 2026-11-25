@@ -746,51 +746,250 @@ curl http://127.0.0.1:9090/info       # → msgpack: uptime, bound_addrs, ready
 
 ### `/metrics`
 
-Prometheus text format. `/metrics` требует рабочего Prometheus recorder; процессный recorder общий для одного процесса и устанавливается один раз. Если второй observability-enabled сервер в том же процессе не смог установить собственный recorder, он всё равно запускает listener с fallback без handle: его `/metrics` отвечает `503 Service Unavailable`, а не выдаёт метрики первого сервера. Метрики:
+`/metrics` требует рабочего Prometheus recorder; процессный recorder общий для одного процесса и устанавливается один раз. Если второй observability-enabled сервер в том же процессе не смог установить собственный recorder, он всё равно запускает listener с fallback без handle: его `/metrics` отвечает `503 Service Unavailable`, а не выдаёт метрики первого сервера.
 
-|| Метрика | Тип | Описание |
-||---|---|---|
-|| `process_cpu_seconds_total` | counter | CPU time |
-|| `process_resident_memory_bytes` | gauge | RSS |
-|| `process_open_fds` | gauge | Открытые файловые дескрипторы |
-|| `auth_attempts_total{result=…}` | counter | Аутентификации (success, bad_proof, locked_out, …) |
-|| `shamir_tx_started_total` | counter | Транзакции начатые |
-|| `shamir_tx_committed_total` | counter | Транзакции закоммиченные |
-|| `shamir_tx_aborted_ssi_total` | counter | SSI-конфликты |
-|| `shamir_tx_aborted_expired_total` | counter | Истёкшие tx |
-|| `shamir_gc_runs_total` | counter | GC-циклы |
-|| `shamir_gc_entries_deleted_total` | counter | GC-удаления |
-|| `shamir_visibility_ack_total{mode,result}` | counter | Acknowledgement outcomes: `mode=strict\|bounded`, `result=visible\|pending_timeout\|pending_reopen\|error` (VIS-4c) |
-|| `shamir_visibility_ack_wait_seconds_bucket{mode,result,le}` | gauge (cumulative histogram) | Duration of acknowledgements that ACTUALLY waited; the non-blocking fast path is counted only in `shamir_visibility_ack_total` |
-|| `shamir_visibility_ack_wait_seconds_count{mode,result}` | gauge | Observed waits per label set |
-|| `shamir_visibility_pending_total{reason,kind}` | counter | Pending outcomes: `reason=timeout\|reopen_required`, `kind=explicit_tx\|implicit_batch\|direct_write` |
-|| `shamir_visibility_read_wait_timeouts_total` | counter | AsOf reads that timed out waiting for visibility |
-|| `shamir_visibility_reconciliation_total{result}` | counter | `WaitForVisibility` outcomes |
-|| `shamir_visibility_reconciliation_wait_seconds_bucket{result,le}` | gauge | Reconciliation wait durations |
-|| `shamir_visibility_ack_waiters{db,repo}` | gauge | Acknowledgements currently parked (reuses the completion tracker's waiter registration) |
-|| `shamir_gate_*` | gauge | REPO-DIAGNOSTICS per-repo gate snapshot (allocation high water, visible floor, oldest blocker, …) |
-|| `shamir_wal_size_bytes{db,repo}` | gauge | Приблизительный размер WAL на диске: активный сегмент + запечатанные удержанные (Mem-бэкенд пишет 0) |
-|| `shamir_wal_segments{db,repo}` | gauge | Удержанные файлы сегментов WAL: запечатанные + один активный (Mem-бэкенд пишет 0) |
-|| `shamir_wal_truncation_lag_versions{db,repo}` | gauge | Отставание truncate: max committed version минус старейшая усекаемая версия |
-|| `shamir_group_commit_waiters{db,repo}` | gauge | Участники группового коммита, ожидающие покрытия WAL fsync |
-|| `shamir_wal_bytes_total{db,repo}` | counter | Байты полезной нагрузки WAL с момента создания каталога WAL |
-|| `shamir_wal_fsync_seconds{db,repo}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность раунда sync-worker: replay снапшота + fsync приёмника (тот же интервал, что `shamir_wal_sync_duration_ns`); `le` и `_sum` — в секундах |
-|| `shamir_index_entries{db,repo,table,index}` | gauge | Записи в индексах, снимок за scrape (усечение до 64 таблиц / 32 индексов на репозиторий) |
-|| `shamir_index_build_seconds{db,repo,kind}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность завершённой сборки индекса, в секундах |
-|| `shamir_index_rebuild_seconds{db,repo,kind}` | histogram (`_bucket`/`_count`/`_sum`) | Длительность завершённого rebuild (doctor/repair, миграция identity), в секундах |
-|| `shamir_interner_names{db,repo}` | gauge | Число интернированных имён полей |
-|| `shamir_interner_high_water{db,repo}` | gauge | Персистентный high-water mark интернера |
-|| `shamir_export_tables_truncated{db,repo}` | gauge (1/0) | Усечение по лимитам кардинальности активно |
-|| `shamir_export_tables_known{db,repo}` | gauge | Всего открытых таблиц, известных репозиторию |
-|| `shamir_backup_started_total{kind}` | counter | Запущенные online-backup прогоны (`kind=online`) |
-|| `shamir_backup_completed_total{kind}` | counter | Успешно завершённые online-backup прогоны (`kind=online`) |
-|| `shamir_backup_failed_total{kind,stage}` | counter | Неудачные online-backup прогоны по стадии сбоя (`stage=preparing\|captured\|copying\|sealing\|verifying`) |
-|| `shamir_backup_active` | gauge (0/1) | 1, пока online-backup выполняется |
-|| `shamir_backup_bytes_copied` | gauge (bytes) | Кумулятивные байты, скопированные завершёнными online-backup прогонами |
-|| `shamir_backup_duration_seconds` | gauge (seconds) | Длительность последней **успешной** online-backup копии (не выставляется до первого успеха) |
-|| `shamir_backup_writer_block_seconds{phase}` | gauge (seconds) | Последнее закрытое окно блокировки writer'ов (`phase=capture\|seal`), включая неудачные удержания; не выставляется до первого закрытого окна |
-|| `shamir_backup_pin_seconds` | gauge (seconds) | Длительность удержания truncation-pin; не экспортируется, пока не измеряется |
-|| `shamir_backup_wal_segments_copied_total` | counter | Скопированные сегменты WAL; не экспортируется, пока протокол не отдаёт счётчик сегментов |
+#### Процессы и сессии
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `process_cpu_seconds_total` | counter | нет | CPU-время процесса | `rate` по нагрузке | Рост — проверить профиль запросов и нагрузку |
+| `process_resident_memory_bytes` | gauge | нет | RSS процесса, байты | зависит от нагрузки | Рост — проверить утечки и размер ответов |
+| `process_open_fds` | gauge | нет | Открытые файловые дескрипторы | ниже лимита | Сверить `process_max_fds` и открытые соединения |
+| `process_max_fds` | gauge | нет | Лимит файловых дескрипторов | конфигурация ОС | Неожиданное значение — проверить лимиты процесса |
+| `process_virtual_memory_bytes` | gauge | нет | Виртуальная память, байты | по профилю процесса | Рост — проверить память процесса |
+| `process_virtual_memory_max_bytes` | gauge | нет | Максимум виртуальной памяти | лимит ОС | Сверить с настройками среды |
+| `process_start_time_seconds` | gauge | нет | Время старта процесса Unix | постоянное до рестарта | Изменение означает перезапуск |
+| `process_threads` | gauge | нет | Число потоков процесса | по нагрузке | Рост — проверить блокирующую работу |
+| `requests_in_flight` | gauge | нет | Запросы в обработке | зависит от нагрузки | Сверить с активными запросами и длительными операциями |
+| `shamir_active_requests` | gauge | нет | Активные запросы этого сервера | без устойчивого роста | Рост — проверить долгие запросы и отмену |
+| `shamir_active_sessions` | gauge | нет | Открытые сессии сервера | по числу клиентов | Неожиданный рост — проверить клиентские disconnect |
+| `shamir_active_transactions` | gauge | нет | Открытые интерактивные транзакции | кратковременно ненулевое | Проверить незавершённые транзакции |
+| `shamir_active_cursors` | gauge | нет | Открытые курсоры | по числу активных чтений | Проверить закрытие курсоров |
+| `shutdown_unclean_total` | counter | нет | Некорректные завершения процесса | прирост 0 | Проверить ошибки shutdown, flush и deadline |
+
+#### Аутентификация и токены
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `auth_attempts_total{result}` | counter | `result=success\|bad_proof\|locked_out\|unknown_user\|rate_limited\|unsupported_version\|policy\|io_or_decode` | Результаты native-аутентификации | ошибки редки | Разбить по результату, проверить трафик и credentials |
+| `shamir_token_auth_total{channel,result}` | counter | `channel=rest\|ws`; `result=success\|invalid\|forbidden\|rate_limited\|unavailable` | Результаты token-аутентификации | отказы редки | Проверить token gate и клиентские токены |
+| `shamir_token_request_denied_total{endpoint}` | counter | `endpoint` | Отказы по scope/policy | прирост 0 | Проверить scope и политику endpoint |
+| `shamir_token_active_ws` | gauge | нет | Сумма активных token-WS сокетов по всем токенам и владельцам; нет глобального лимита. На токен — не более `tokens.max_sockets_per_token` (по умолчанию 8), на владельца — не более `tokens.max_sockets_per_owner` (по умолчанию 32); верхняя граница gauge — число активных токенов × `max_sockets_per_token` | зависит от числа активных токенов | Проверить число WS-подключений и лимиты на токен/владельца |
+| `shamir_token_listener_plaintext_remote` | gauge | нет | Включён ли удалённый plaintext token listener | обычно серия отсутствует или 0 | Наличие серии означает неверную конфигурацию удалённого plaintext listener; проверить конфигурацию listener |
+| `shamir_token_request_duration_seconds{endpoint,quantile}` | gauge (summary-квантиль) | `endpoint`; `quantile=0.0|0.5|0.9|0.95|0.99|0.999|1.0` | Квантили длительности token-запросов (rolling summary экспортёра) | суб-секунды обычно | Рост p95/0.99 — проверить обработчик и хранилище |
+| `shamir_token_request_duration_seconds_count{endpoint}` | counter | `endpoint` | Число наблюдений длительности | соразмерно запросам | Сверить с потоком запросов |
+| `shamir_token_request_duration_seconds_sum{endpoint}` | gauge | `endpoint` | Сумма длительностей, секунды | пропорционально count | Сверить среднее время |
+
+Экспортёр (pinned 0.18.3) для этой серии рендерит summary, а не histogram, поэтому серии `_bucket` нет; источник — 0.16.2 `recorder.rs` (0.18.3 локально недоступен, поведение подтверждается живым scrape в CI).
+| `shamir_login_http_total{endpoint,result}` | counter | `endpoint=begin\|finish`; `result=challenge\|issued\|authentication_failed\|policy_denied\|rate_limited\|server_busy\|invalid_request` | Исходы HTTP login | ошибки и отказы редки | Проверить TLS/authority, клиентский поток и логи |
+| `shamir_login_http_begin_duration_seconds_bucket{le}` | gauge, кумулятивный bucket | `le`; границы 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.1, 0.25, 0.5, 1, 5, 120 секунд и `+Inf` | Время BEGIN login, кумулятивные bucket | сверять p95 с границами | Рост — проверить KDF и нагрузку |
+| `shamir_login_http_begin_duration_seconds_count` | counter | нет | Число наблюдений BEGIN | соразмерно запросам | Сверить с `result` BEGIN |
+| `shamir_login_http_begin_duration_seconds_sum` | gauge | нет | Сумма длительностей BEGIN, секунды | пропорционально count | Проверить p95 и нагрузку KDF |
+| `shamir_login_http_finish_duration_seconds_bucket{le}` | gauge, кумулятивный bucket | `le`; те же границы в секундах, что BEGIN, и `+Inf` | Время FINISH login | сверять p95 с границами | Рост — проверить proof и хранилище |
+| `shamir_login_http_finish_duration_seconds_count` | counter | нет | Число наблюдений FINISH | соразмерно запросам | Сверить с `result` FINISH |
+| `shamir_login_http_finish_duration_seconds_sum` | gauge | нет | Сумма длительностей FINISH, секунды | пропорционально count | Проверить p95 и нагрузку |
+| `shamir_login_http_pending` | gauge | нет | Текущие ожидающие записи | кратковременно ненулевое | Проверить завершение login и истечение записей |
+| `shamir_login_http_kdf_ineligible_users` | gauge | нет | Число пользователей, не подходящих для KDF | соответствует политике | Проверить состояние учётных записей |
+| `shamir_login_http_pair_slots` | gauge | нет | Занятые парные слоты | ниже ёмкости | Проверить bounded pair state |
+| `shamir_login_http_evictions{reason}` | counter | `reason=fair_share\|expired` | Вытеснения pending-записей | обычно 0 | Проверить лимиты и срок жизни записей |
+| `shamir_login_http_accounting_dropped{reason}` | counter | `reason=arrival_table_full\|credit_table_full\|pin_budget\|pair_quota\|pair_table_full` | Потерянный учёт запросов | прирост 0 | Проверить capacity таблиц и pair quota |
+| `shamir_login_http_audit_dropped` | counter | нет | Потерянные audit-события | прирост 0 | Проверить audit consumer и storage |
+| `shamir_post_auth_rate_limit_rejected_total` | counter | нет | Отказы посессионного лимита после auth | прирост 0 | Проверить паттерны запросов сессии |
+| `shamir_argon2_busy_refusals_total` | counter | нет | Отказы Argon2 admission/ожидания permit/часов | прирост 0 | Сначала проверить часы, затем capacity и blocking pool |
+| `shamir_argon2_permits_capacity` | gauge | нет | Ёмкость пула permit Argon2 | равна конфигурации | Проверить `argon2_concurrent_max` |
+| `shamir_argon2_permits_available` | gauge | нет | Свободные permit Argon2 | `0..capacity` | Устойчивый ноль — проверить admission и нагрузку |
+
+#### Транзакции и GC
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_tx_started_total` | gauge-снимок | нет | Начатые транзакции | по нагрузке | Сопоставить с завершениями |
+| `shamir_tx_committed_total` | gauge-снимок | нет | Зафиксированные транзакции | по нагрузке | Проверить ошибки commit |
+| `shamir_tx_aborted_ssi_total` | gauge-снимок | нет | SSI-аборты | редки | Проверить конфликтующую нагрузку |
+| `shamir_tx_aborted_expired_total` | gauge-снимок | нет | Истёкшие транзакции | редки | Проверить долгие транзакции |
+| `shamir_tx_aborted_storage_total` | gauge-снимок | нет | Аборты по ошибкам storage | 0 | Проверить WAL и логи storage |
+| `shamir_tx_aborted_unique_total` | counter | нет | Аборты по уникальности | редки | Проверить конфликтующие записи |
+| `shamir_tx_aborted_phantom_total` | counter | нет | Phantom-аборты | редки | Проверить параллельные транзакции |
+| `shamir_tx_materialization_deferred_total` | counter | нет | Commit с отложенной материализацией | не выше темпа транзакций | Проверить поток commit и материализацию |
+| `shamir_tx_post_wal_orphans_total` | counter | нет | Операции orphan после WAL | 0 | Проверить recovery и логи |
+| `shamir_gc_runs_total` | gauge-снимок | нет | Запуски GC | растёт по расписанию | Проверить запуск GC |
+| `shamir_gc_entries_deleted_total` | gauge-снимок | нет | Удалённые GC записи | зависит от churn | Проверить старые версии и GC |
+| `shamir_degraded_indexes_total` | gauge-снимок | нет | Деградированные индексы | 0 | Проверить ремонт индекса и журнал |
+
+#### Видимость и шлюз репозитория
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_gate_allocation_high_water{db,repo}` | gauge | `db,repo` | Высшую выделенную версию | монотонная граница | Сопоставить с commit и durable watermark |
+| `shamir_gate_visible_floor{db,repo}` | gauge | `db,repo` | Нижнюю видимую границу | движется за commit | Проверить blocker и recovery |
+| `shamir_gate_last_committed{db,repo}` | gauge | `db,repo` | Последнюю committed-версию | растёт при записи | Проверить WAL при остановке роста |
+| `shamir_gate_durable_watermark{db,repo}` | gauge | `db,repo` | Durable watermark | не опережает commit | Проверить fsync и WAL |
+| `shamir_gate_requires_reopen{db,repo}` | gauge | `db,repo` | Требование повторного открытия, 0/1 | 0 | При 1 выполнить recovery/reopen runbook |
+| `shamir_gate_visibility_waiters{db,repo}` | gauge | `db,repo` | Ожидающие видимости | обычно 0 | Проверить возраст блокирующей версии |
+| `shamir_gate_unsettled_versions{db,repo}` | gauge | `db,repo` | Неразрешённые версии | кратковременно мало | Проверить transaction и replay |
+| `shamir_gate_pending_versions{db,repo}` | gauge | `db,repo` | Версии, ожидающие GC/разрешения | обычно мало | Проверить состояние gate |
+| `shamir_gate_missing_versions{db,repo}` | gauge | `db,repo` | Отсутствующие версии | 0 | Проверить WAL recovery |
+| `shamir_gate_oldest_blocker_age_seconds{db,repo}` | gauge | `db,repo` | Возраст старейшего blocker | около 0 | Проверить `class`, версию, transaction/replay |
+| `shamir_gate_oldest_blocker_version{db,repo}` | gauge | `db,repo` | Версию старейшего blocker | 0 при отсутствии | Найти соответствующий blocker |
+| `shamir_gate_oldest_blocker_class{db,repo,class}` | gauge, one-hot | `db,repo,class=none\|active_tail\|orphan_awaiting_replay\|unresolved_ticket\|pending_unclassified\|unknown` | Класс blocker | `none=1` без blocker | Проверить указанную причину и recovery |
+| `shamir_gate_orphan_replay_consecutive_failures{db,repo}` | gauge | `db,repo` | Последовательные ошибки replay | 0 | Проверить recovery и журнал |
+| `shamir_gate_orphan_replay_attempts_total{db,repo}` | counter | `db,repo` | Попытки replay | по необходимости | Сопоставить с неуспешными replay |
+| `shamir_orphan_replay_failures_total{db,repo}` | counter | `db,repo` | Ошибки replay orphan | 0 | Проверить recovery и storage |
+| `shamir_visibility_ack_total{db,repo,mode,result}` | counter | `mode=strict\|bounded`; `result=visible\|pending_timeout\|pending_reopen\|error` | Исход ACK видимости | ошибки редки | Проверить blocker и mode |
+| `shamir_visibility_ack_wait_seconds_bucket{db,repo,mode,result,le}` | кумулятивный gauge-сэмпл | `db,repo,mode,result,le` | Длительность реально ожидавших ACK; кумулятивные bucket | быстрый путь не учитывается | Проверить blocker и ожидание |
+| `shamir_visibility_ack_wait_seconds_count{db,repo,mode,result}` | counter | `db,repo,mode,result` | Число реально ожидавших ACK | соразмерно ACK | Проверить mode/result и blocker |
+| `shamir_visibility_pending_total{db,repo,reason,kind}` | counter | `reason=timeout\|reopen_required`; `kind=explicit_tx\|implicit_batch\|direct_write` | Pending исходы видимости | обычно 0 | Проверить gate blocker и WAL |
+| `shamir_visibility_read_wait_timeouts_total{db,repo}` | counter | `db,repo` | Таймауты AsOf-ожидания | 0 | Проверить видимость запрошенной версии |
+| `shamir_visibility_reconciliation_total{db,repo,result}` | counter | `result=visible\|pending_timeout\|pending_reopen\|error` | Исходы reconciliation | pending редки | Проверить orphan replay и blocker |
+| `shamir_visibility_reconciliation_wait_seconds_bucket{db,repo,result,le}` | кумулятивный gauge-сэмпл | `db,repo,result,le` | Длительность reconciliation ожиданий | короткие ожидания | Проверить replay и blocker |
+| `shamir_visibility_reconciliation_wait_seconds_count{db,repo,result}` | counter | `db,repo,result` | Число reconciliation ожиданий | соразмерно исходам | Проверить результат и длительность |
+| `shamir_visibility_ack_waiters{db,repo}` | gauge | `db,repo` | ACK, припаркованные на completion tracker | 0 | Проверить gate blocker |
+
+При старте series zero-touch: `shamir_visibility_ack_total`, `shamir_visibility_ack_wait_seconds_bucket`, `shamir_visibility_ack_wait_seconds_count`, `shamir_visibility_pending_total`, `shamir_visibility_read_wait_timeouts_total`, `shamir_visibility_reconciliation_total`, `shamir_visibility_reconciliation_wait_seconds_count`, `shamir_visibility_reconciliation_wait_seconds_bucket` и `shamir_visibility_ack_waiters` рендерятся с нулевыми значениями без меток `db,repo`; затем появляются с `db,repo` по мере открытия репозиториев.
+
+#### WAL и долговечность
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_wal_size_bytes{db,repo}` | gauge | `db,repo` | Приблизительный размер удержанного WAL | ограничен retention | Проверить удержание сегментов |
+| `shamir_wal_segments{db,repo}` | gauge | `db,repo` | Удержанные WAL сегменты | единицы-десятки | Рост — проверить truncate |
+| `shamir_wal_truncation_lag_versions{db,repo}` | gauge | `db,repo` | Отставание truncate | небольшое | Проверить backlog и worker |
+| `shamir_group_commit_waiters{db,repo}` | gauge | `db,repo` | Ожидающих покрытия fsync | ниже параллелизма commit | Проверить latency fsync |
+| `shamir_wal_bytes_total{db,repo}` | counter | `db,repo` | Записанные байты WAL | растёт с записью | `rate` и сверка нагрузки |
+| `shamir_wal_fsync_seconds_bucket{db,repo,le}` | gauge, кумулятивный bucket | `db,repo,le` | Раунды sync-worker в секундах | обычно субмиллисекундные | Проверить storage latency |
+| `shamir_wal_fsync_seconds_count{db,repo}` | counter | `db,repo` | Число раундов sync-worker | по активности WAL | Сверить с write rate |
+| `shamir_wal_fsync_seconds_sum{db,repo}` | gauge | `db,repo` | Сумма длительностей fsync, секунды | соразмерно count | Проверить среднее и storage |
+| `shamir_wal_effective_commit{db,repo}` | gauge | `db,repo` | WAL commit tier: 0 buffered, 1 synced | заданная конфигурация | Проверить режим commit |
+| `shamir_replication_serve{db,repo}` | gauge | `db,repo` | Эффективный режим serving durability | 0 — durable | Сверить режим репликации |
+| `shamir_wal_backend_mem{db,repo}` | gauge | `db,repo` | WAL in-memory: 1 да, 0 нет/не инициализирован | ожидаемый backend | Проверить backend |
+| `shamir_wal_synced_lag_versions{db,repo}` | gauge | `db,repo` | Непокрытый span W−R | 0 | Проверить sync/recoverability |
+| `shamir_wal_watermark_w{db,repo}` | gauge | `db,repo` | Максимум записанной WAL версии W | следует за записями | Проверить WAL writer |
+| `shamir_wal_recoverable_through{db,repo}` | gauge | `db,repo` | Непрерывный recoverability prefix R | близко к W | Проверить sync и recovery |
+| `shamir_replication_confirmed_bound{db,repo}` | gauge | `db,repo` | Последняя подтверждённая pull-граница до clamp | в пределах W | Сверить follower receipt |
+| `shamir_replication_served_bound{db,repo}` | gauge | `db,repo` | Последняя отданная граница min(confirmed,W,R) | не выше recoverable | Проверить W/R и receipt |
+| `shamir_wal_pending_versions{db,repo}` | gauge | `db,repo` | Непокрытый span W−R | 0 | Проверить sync worker |
+| `shamir_wal_first_pending_version{db,repo}` | gauge | `db,repo` | Первая непокрытая позиция R+1 | 0, если нет | Проверить recoverability |
+| `shamir_wal_first_pending_age_ns{db,repo}` | gauge | `db,repo` | Нижняя оценка возраста первой непокрытой версии, нс | малое значение | Проверить sync backlog |
+| `shamir_wal_sync_now_calls{db,repo}` | counter | `db,repo` | Запросы sync, включая уже покрытые | по demand | Сопоставить с раундами |
+| `shamir_wal_sync_rounds{db,repo}` | counter | `db,repo` | Завершённые раунды sync-worker | по записи | Проверить производительность sync |
+| `shamir_wal_sync_coalesced{db,repo}` | counter | `db,repo` | Запросы, присоединившиеся к работающему worker | по нагрузке | Проверить конкуренцию sync |
+| `shamir_wal_sync_errors{db,repo}` | counter | `db,repo` | Ошибки раундов sync | 0 | Проверить WAL/storage логи |
+| `shamir_wal_sync_duration_ns{db,repo}` | counter | `db,repo` | Суммарное время sync, наносекунды | по нагрузке | Проверить latency storage |
+| `shamir_replication_pull_held_back_ns{db,repo}` | counter | `db,repo` | Суммарное ожидание pull, нс | низкое | Проверить recoverability |
+| `shamir_replication_pull_held_back_count{db,repo}` | counter | `db,repo` | Pull, задержанные recoverability | 0 | Проверить W/R |
+| `shamir_repo_history_epoch_bumps_total{db,repo}` | counter | `db,repo` | Сдвиги history epoch при unclean-open | обычно 0 | Проверить shutdown/reseed |
+| `shamir_journal_checkpoint_failures_total{db,repo}` | counter | `db,repo` | Ошибки clean-horizon checkpoint | 0 | Проверить journal и I/O |
+| `shamir_journal_checkpoints_total{db,repo}` | counter | `db,repo` | Успешные runtime checkpoints | по работе | Проверить horizon progression |
+| `shamir_journal_retention_overflow_total{db,repo}` | counter | `db,repo` | Измерения выше retention cap | 0 | Проверить retention настройку |
+| `shamir_journal_retention_refusals_total{db,repo}` | counter | `db,repo` | Отказы записи enforcement retention | 0 | Проверить журнал и лимит |
+| `shamir_journal_retention_gaps_total{db,repo}` | counter | `db,repo` | Durable retention GAP записи | 0 | Проверить recovery/fencing |
+| `shamir_journal_channel_dropped_total{db,repo}` | counter | `db,repo` | События journal, потерянные из-за переполнения канала | 0 | Проверить consumer и нагрузку |
+
+#### Хранилище
+
+Нет экспортируемой метрики дискового объёма репозитория/таблицы или свободного filesystem. `shamir_wal_size_bytes{db,repo}` и `shamir_wal_segments{db,repo}` описывают WAL, а не свободное место на диске.
+
+#### Запросы и нагрузка
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_query_duration_seconds_bucket{db,repo,op,le}` | gauge, кумулятивный bucket | `op=read\|write\|batch\|tx\|function`, плюс `db,repo,le` | Длительности операций, секунды | обычно 1 мс–1 с | Проверить p95 и тип операции |
+| `shamir_query_duration_seconds_count{db,repo,op}` | counter | `db,repo,op` | Число операций | соразмерно запросам | Сверить поток запросов |
+| `shamir_query_duration_seconds_sum{db,repo,op}` | gauge | `db,repo,op` | Сумма длительностей, секунды | пропорционально count | Проверить среднее/p95 |
+| `shamir_query_errors_total{db,repo,code}` | counter | `db,repo`; `code=write_committed_visibility_pending|visibility_future_version|visibility_wait_invalid|as_of_visibility_timeout|repo_requires_reopen|as_of_future_version|as_of_reopen_required|table_migrating|version_conflict|tx_conflict|index_drain_in_progress|resync_required|subscription_catalogue_invalid|replication_destination_bound|replication_destination_quarantined|interner_quota_exceeded|other` | Ошибки запросов из закрытого словаря code | около 0 | Разбить по code и проверить логи |
+| `shamir_query_rows_viewed_total{db,repo}` | counter | `db,repo` | Просмотренные движком строки | соответствует сканированию | Сопоставить с returned и запросами |
+| `shamir_query_rows_returned_total{db,repo}` | counter | `db,repo` | Возвращённые строки | соответствует страницам | Сверить с клиентскими запросами |
+| `shamir_shapes_tracked{db,repo}` | gauge | `db,repo` | Отслеживаемые формы, максимум 256 | ниже 256 | Рост — разнообразие форм запросов |
+| `shamir_connections_active` | gauge | нет | Соединения с ConnLimiter guard | в пределах limit | Проверить активные клиенты |
+| `shamir_connections_limit` | gauge | нет | Глобальный лимит соединений; 0 без ограничения | конфигурация | Проверить лимит |
+| `shamir_connections_rejected_total` | counter | нет | Отказы на глобальном лимите | прирост 0 | Проверить активность и limit |
+| `shamir_inflight_response_bytes_used` | gauge | нет | Зарезервированные байты бюджета ответов, не RSS | не выше cap | Проверить ожидания и резервы batch |
+| `shamir_inflight_response_bytes_cap` | gauge | нет | Предел бюджета; −1 без ограничения | конфигурация | Проверить конфигурацию |
+| `shamir_response_budget_waiters` | gauge | нет | Ожидающие резервирование байтов | 0 | Проверить used/cap и result caps |
+
+Гистограмма запросов измеряет разные spans для `read`, `write`, `batch`, `tx` и `function`; дочерние spans не складываются между метками. Опрос нагрузки выполняется при scrape; названия `shamir_inflight_response_bytes_*` сохранены для совместимости. `shamir_argon2_busy_refusals_total` учитывает gate admission сверх `2 × capacity`, timeout permit и ошибки часов/deadline; это не число доставленных ответов. Устойчивый рост: сперва проверить часы (NTP/виртуализация), затем конфигурацию permit и нагрузку blocking pool. Свободные permit — приблизительная оценка, не точное число активных вычислений.
+
+#### Индексы и интернер
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_index_entries{db,repo,table,index}` | gauge | `db,repo,table,index`; агрегат `(other)` идёт без метки `index` | Число записей в индексах | порядка строк таблицы | Проверить таблицу и индекс; лимит 64 таблицы/32 индекса |
+| `shamir_index_build_seconds_bucket{db,repo,kind,le}` | gauge, кумулятивный bucket | `db,repo,kind=regular|sorted|fts,le` | Длительность первичной сборки, секунды | по размеру данных | Проверить p95 и размер индекса |
+| `shamir_index_build_seconds_count{db,repo,kind}` | counter | `db,repo,kind=regular|sorted|fts` | Число завершённых сборок | по изменениям схемы | Сверить с операциями DDL |
+| `shamir_index_build_seconds_sum{db,repo,kind}` | gauge | `db,repo,kind=regular|sorted|fts` | Сумма времени сборки, секунды | пропорционально count | Проверить среднее и нагрузку |
+| `shamir_index_rebuild_seconds_bucket{db,repo,kind,le}` | gauge, кумулятивный bucket | `db,repo,kind=regular|sorted|fts,le` | Длительность rebuild, секунды | по размеру данных | Проверить p95 и repair |
+| `shamir_index_rebuild_seconds_count{db,repo,kind}` | counter | `db,repo,kind=regular|sorted|fts` | Число завершённых rebuild | обычно редко | Проверить doctor/repair и миграции |
+| `shamir_index_rebuild_seconds_sum{db,repo,kind}` | gauge | `db,repo,kind=regular|sorted|fts` | Сумма времени rebuild, секунды | пропорционально count | Проверить среднее и размер данных |
+| `shamir_interner_names{db,repo}` | gauge | `db,repo` | Число интернированных имён полей | рост с новыми именами | Проверить бесконтрольную генерацию схемы |
+| `shamir_interner_high_water{db,repo}` | gauge | `db,repo` | Персистентный high-water интернера | монотонен | Сопоставить с числом полей |
+| `shamir_export_tables_truncated{db,repo}` | gauge | `db,repo`, значение 0/1 | Усечение метрик по лимиту cardinality | 0 | При 1 использовать агрегат `(other)` |
+| `shamir_export_tables_known{db,repo}` | gauge | `db,repo` | Известные открытые таблицы | соответствует открытым таблицам | Сверить с truncated и open registry |
+
+Закрытые репозитории, таблицы и индексы не видны; полные метки ограничены 64 таблицами и 32 индексами на репозиторий, остаток свёрнут в `(other)`. Отдельная серия `shamir_gc_pending_versions` не существует: используется `shamir_gate_pending_versions`.
+
+#### Функции
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_function_duration_seconds_bucket{db,repo,le}` | gauge, кумулятивный bucket | `db,repo,le` | Время внешних вызовов WASM глубины 0 | обычно микросекунды–миллисекунды | Проверить p95 и WASM нагрузку |
+| `shamir_function_duration_seconds_count{db,repo}` | counter | `db,repo` | Число внешних вызовов | по трафику | Сверить вызовы функций |
+| `shamir_function_duration_seconds_sum{db,repo}` | gauge | `db,repo` | Сумма времени вызовов, секунды | пропорционально count | Проверить среднее и долгие вызовы |
+| `shamir_function_fuel_consumed_total{db,repo}` | counter | `db,repo` | Израсходованный fuel | по нагрузке | Проверить частоту и стоимость вызовов |
+| `shamir_function_call_depth_high_water{db,repo}` | gauge | `db,repo` | Максимальная глубина вызова | ниже настроенного предела | Проверить рекурсивные вызовы |
+| `shamir_compile_cache_hits_total` | counter | нет | Попадания compile cache | растут после прогрева | Проверить cache и перезапуски |
+| `shamir_compile_cache_misses_total` | counter | нет | Промахи compile cache | низкий темп после прогрева | Проверить смену модулей и cache |
+| `shamir_compile_cache_bytes` | gauge | нет | Размер on-disk compile cache, байты | зависит от модулей | Проверить лимиты и содержимое cache |
+| `shamir_compile_cache_entries` | gauge | нет | Записи on-disk compile cache | зависит от модулей | Проверить churn модулей |
+| `shamir_module_admission_rejected_total{reason}` | counter | `reason` из закрытого набора | Отказы admission модулей | 0 | Проверить причину в метке и модуль |
+
+Длительность функции учитывает внешний вызов глубины 0, включая вложенное время, ошибки и отмену; метки не содержат имя функции.
+
+#### Репликация
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_replication_lag_versions{db,repo}` | gauge | `db,repo` | Отставание durable bookmark follower | небольшое | Проверить leader write rate, follower и сеть |
+| `shamir_replication_lag_seconds{db,repo}` | gauge | `db,repo` | Возраст последней receipt/advance | интерпретировать с lag versions | Может расти при здоровом idle; проверить запись leader |
+| `shamir_replication_stream_state{db,repo,state}` | gauge, one-hot | `state=starting\|streaming\|backing_off\|stopped` | Состояние replication stream | streaming при активности | Проверить соединение и причины backoff |
+| `shamir_replication_reconnects_total{db,repo}` | counter | `db,repo` | Пересоздания источника stream | обычно редко | Проверить сеть и supervisor |
+| `shamir_repl_resync_required_total` | counter | нет | Требования resync | 0 | Проверить журнал и identity |
+| `shamir_repl_identity_mismatch_total{reason}` | counter | `reason` | Несовпадения identity peer | 0 | Проверить lineage/epoch; не обходить fencing |
+
+Снимки агрегируют состояния и lag по ролям; receipt age способен расти при здоровом простое без новых версий, поэтому его нужно оценивать совместно с `shamir_replication_lag_versions`.
+
+#### Backup
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_backup_started_total{kind}` | counter | `kind=online` | Запущенные online backup | растёт по расписанию | Сверить расписание и завершения |
+| `shamir_backup_completed_total{kind}` | counter | `kind=online` | Успешные online backup | растёт вместе с started | Проверить failed и логи backup |
+| `shamir_backup_failed_total{kind,stage}` | counter | `kind=online`; `stage=preparing\|captured\|copying\|sealing\|verifying\|done\|failed` | Неудачные прогоны по стадии | прирост 0 | По stage проверить соответствующую фазу |
+| `shamir_backup_active` | gauge | нет, 0/1 | Выполняется ли backup | кратковременно 1 | Долгий 1 — проверить зависший прогон |
+| `shamir_backup_bytes_copied` | gauge | нет | Суммарные скопированные байты завершённых прогонов | растёт при успехе | Проверить прогресс и размер копии |
+| `shamir_backup_duration_seconds` | gauge | нет | Длительность последней успешной копии | сравнивать с предыдущими | Проверить прогресс фаз и storage |
+| `shamir_backup_writer_block_seconds{phase}` | gauge | `phase=capture\|seal` | Последнее закрытое окно блокировки writer, секунды | краткие окна | Проверить длительность barrier |
+| `shamir_backup_last_success_timestamp_seconds` | gauge | нет | Unix-время последнего успешного backup | свежее по расписанию | Проверить расписание и completed |
+| `shamir_backup_last_duration_seconds` | gauge | нет | Длительность последнего успешного backup | сравнивать последовательно | Проверить рост длительности |
+| `shamir_backup_last_bytes` | gauge | нет | Байты manifest последней успешной копии | зависит от данных | Сравнить с предыдущим backup |
+| `shamir_backup_scheduled_runs_total{result}` | counter | `result=started\|skipped_busy\|skipped_window\|failed\|completed` | События расписания | по расписанию | Проверить пропуски и ошибки |
+| `shamir_backup_scheduled_failure_streak` | gauge | нет | Последовательные плановые ошибки | 0 | Проверить backup logs и storage |
+| `shamir_backup_schedule_enabled` | gauge | нет, 0/1 | Включено ли расписание | соответствует конфигурации | Проверить schedule config |
+| `shamir_backup_schedule_started_timestamp_seconds` | gauge | нет | Время запуска расписания | ненулевое при enable | Проверить запуск schedule |
+| `shamir_backup_retention_deleted_total` | counter | нет | Удалённые retention объекты | зависит от срока хранения | Проверить retention policy |
+| `shamir_backup_retention_failed_total` | counter | нет | Ошибки очистки retention | 0 | Проверить права и storage |
+| `shamir_backup_retention_untouched` | gauge | нет | Объекты, не затронутые очисткой | зависит от политики | Проверить возраст и retention |
+
+`shamir_backup_pin_seconds` и `shamir_backup_wal_segments_copied_total` описаны, но не экспортируются: snapshot fields равны `None`, поскольку протокол пока не измеряет удержание pin и число WAL-сегментов. Метрики backup отражают последнюю успешную копию и плановые исходы; freshness/failure/retention alerts определены только в `shamir-backup.rules.yml`.
+
+#### Активность
+
+| Серия | Тип | Метки | Что измеряет | Норма | Отклонение и первая проверка |
+|---|---|---|---|---|---|
+| `shamir_cancellations_total{result}` | counter | `result=cancelled\|already_finished\|already_committing\|not_cancellable` | Попытки отмены запросов, транзакций и курсоров | зависит от клиентского трафика | Проверить источник отмен и длительные запросы |
+
+Серии `shamir_active_*` — без меток, это снимки конкретного сервера. `shamir_sessions_active`, `shamir_admission_queue_depth`, `shamir_repo_disk_bytes` и `shamir_table_disk_bytes` — design names, не экспортируются; для ожиданий версии используется `shamir_gate_pending_versions`.
+
+#### Подробности по семействам
 
 Серии WAL/storage (R4a-2) — снапшоты за scrape, метки только `db`/`repo`
 (у bucket-серий дополнительно `le`):
@@ -2571,25 +2770,35 @@ scrape_configs:
       - targets: ['127.0.0.1:9090']
 ```
 
-И примеры alert-правил:
-* `auth_attempts_total{result="bad_proof"}` > threshold → brute-force alert.
-* `shamir_tx_aborted_ssi_total` growing → contention hot-spot.
-* `increase(shamir_visibility_ack_total{result="pending_timeout"}[5m])` > 0 →
-  commits are answering Pending (bounded mode): a writer version is unsettled —
-  correlate with `shamir_gate_oldest_blocker_*` before restarting anything.
-* `increase(shamir_visibility_pending_total{reason="reopen_required"}[5m])` > 0 →
-  the repository needs reopen/recovery attention, not client retries.
-* `increase(shamir_visibility_read_wait_timeouts_total[5m])` > 0 → AsOf reads
-  are waiting past `read_visibility_timeout_ms`: check the blocking writer.
-* `shamir_visibility_ack_waiters` near the connection limit → acknowledgement
-  parking is consuming connection slots; switch the service to
-  `visibility_ack_mode = "bounded"` (connection-resource liveness).
-* `increase(shamir_visibility_reconciliation_total{result="pending_timeout"}[15m])`
-  high → callers reconcile repeatedly against a stalled version; investigate
-  `shamir_gate_unsettled_versions` / orphan-replay counters.
-* Expiry of any of these waits also emits a rate-limited WARN log (at most one
-  per repository per 5 s) with `target`, `visible_through`, `blocking_version`
-  and `elapsed_ms` — alert on the metric, read the log for the position.
+Загрузите `deploy/alerts/shamir.rules.yml` и `deploy/alerts/shamir-backup.rules.yml` через `rule_files`, запустите `promtool check rules` и reload Prometheus. Backup freshness остаётся только в backup rules, без дублирования. Импортируйте `deploy/grafana/shamir-dashboard.json` или provision через dashboard provider; задайте datasource и фильтры `db`/`repo` (schema v39). Host-level filesystem alerts настраивайте через node_exporter: ShamirDB не экспортирует метрику свободного места файловой системы.
+
+Пороги ниже — стартовые значения; они дают время на кратковременные всплески или выявляют существенный backlog, их следует подстроить под рабочую нагрузку и retention.
+
+|| Алерт | Порог | for | severity | Почему такое стартовое значение |
+||---|---|---|---|---|
+|| ShamirWalTruncationBacklog | `>10000` версий | 10m | warning | Выявляет значимый backlog, не реагируя на короткое отставание truncate. |
+|| ShamirWalGrowth | `>10485760` байт/с и `>10000` версий lag | 10m | warning | Одновременно требует быстрого роста WAL и накопления backlog, снижая шум штатной записи. |
+|| ShamirReplicaLagVersions | `>1000` версий | 5m | warning | Отделяет заметное отставание от кратковременной разницы потока. |
+|| ShamirReplicaReceiptAge | `>300` секунд и lag `>0` | 5m | warning | Возраст receipt один не тревожит при healthy-idle; требуется и ненулевое отставание. |
+|| ShamirQueryErrorGrowth | любое увеличение за 15m | 5m | warning | Любая новая ошибка заслуживает проверки, но окно и for отсекают единичные короткие колебания. |
+|| ShamirGateBlockerStuck | возраст blocker `>300` секунд | 5m | warning | Долгоживущий blocker важен и без ожидающих ACK, поэтому сигнал независим от waiters. |
+|| ShamirVisibilityBlocked | blocker `>300` секунд и waiters `>0` | 5m | warning | Подтверждает, что старый blocker уже удерживает клиентов. |
+|| ShamirVisibilityPendingTimeout | любое увеличение timeout за 5m | 5m | warning | Timeout — редкий признак задержки gate, требующий проверки после устойчивого окна. |
+|| ShamirVisibilityReopenRequired | любое увеличение reopen_required за 5m | 5m | critical | Reopen fencing указывает на неопределённый WAL outcome и требует немедленного внимания. |
+|| ShamirVisibilityReadWaitTimeouts | любое увеличение за 5m | 5m | warning | Таймауты чтения видимости не ожидаются в штатном режиме. |
+|| ShamirVisibilityReconciliationLoop | `>5` pending_timeout за 15m | 10m | warning | Порог отделяет повторяющиеся ошибки reconciliation от одиночного сбоя. |
+|| ShamirAuthenticationAnomaly | `>1` отказа/с за 5m | 5m | warning | Выявляет устойчивый поток ошибок, не единичную ошибку пользователя. |
+|| ShamirReplicationIdentityMismatch | любое увеличение за 15m | 1m | critical | Любое несовпадение identity нарушает fencing и требует проверки до продолжения. |
+|| ShamirArgon2Refusals | rate `>0`/с | 5m | warning | Устойчивые отказы admission заметны без тревоги на краткий отказ. |
+|| ShamirConnectionSaturation | любое увеличение за 5m | 2m | warning | Фактический отказ подключения подтверждает насыщение лимита; короткий for помогает быстро реагировать. |
+|| ShamirPostAuthRateLimit | любое увеличение за 5m | 5m | warning | Показывает устойчивое ограничение сессий, а не единичную попытку. |
+|| ShamirResponseBudgetWaiters | waiters `>0` | 5m | warning | Ожидание должно быть устойчивым, чтобы исключить краткий contention. |
+|| ShamirResponseBudgetNearCap | used/cap `>90%` | 5m | warning | Запас менее 10% — ранний сигнал давления до явного ожидания. |
+|| ShamirActiveRequestsGrowth | `>100` запросов и рост `>0.1`/с | 10m | warning | Сочетает существенный абсолютный уровень и длительный рост, исключая небольшой всплеск. |
+
+Ни одно правило файла не читает timestamp-серию напрямую, а `BackupStale` в `shamir-backup.rules.yml` защищает нулевой случай.
+
+`shamir.rules.yml` содержит WAL, replica, query, visibility, auth и saturation alerts; конкретные выражения и runbook annotations находятся в самом файле. Backup freshness/failure/retention rules определены только в `shamir-backup.rules.yml`.
 
 ## Что важно знать уже сейчас (дозированно)
 
