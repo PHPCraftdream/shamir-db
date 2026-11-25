@@ -466,41 +466,44 @@ impl SubscriptionSupervisor {
                                 ..
                             },
                         ) => {
-                        let from_version = if let ReplError::JournalGap { from_version, .. } = &e {
-                            *from_version
-                        } else {
-                            gap_at
-                        };
-                        let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
-                        terminal::mark_with_retry(
-                            &local,
-                            &sub_name,
-                            "resync_required",
-                            &tok_exit,
-                            generation,
-                            || {
-                                let l = Arc::clone(&local_m);
-                                let n = name_m.clone();
-                                async move {
-                                    l.mark_subscription_resync_required_generation(
-                                        &n,
-                                        gap_at,
-                                        from_version,
-                                        generation,
-                                    )
-                                    .await
-                                }
-                            },
-                        )
-                        .await;
-                        #[cfg(test)]
-                        terminal::mark_gate_complete();
-                        warn!(
-                            subscription = %sub_name,
-                            error = %e,
-                            "follower loop terminated; subscription marked resync_required"
-                        );
-                    }
+                            let from_version =
+                                if let ReplError::JournalGap { from_version, .. } = &e {
+                                    *from_version
+                                } else {
+                                    gap_at
+                                };
+                            let (local_m, name_m) = (Arc::clone(&local), sub_name.clone());
+                            #[cfg(test)]
+                            terminal::mark_gate_wait(tok_gate.clone()).await;
+                            terminal::mark_with_retry(
+                                &local,
+                                &sub_name,
+                                "resync_required",
+                                &tok_exit,
+                                generation,
+                                || {
+                                    let l = Arc::clone(&local_m);
+                                    let n = name_m.clone();
+                                    async move {
+                                        l.mark_subscription_resync_required_generation(
+                                            &n,
+                                            gap_at,
+                                            from_version,
+                                            generation,
+                                        )
+                                        .await
+                                    }
+                                },
+                            )
+                            .await;
+                            #[cfg(test)]
+                            terminal::mark_gate_complete();
+                            warn!(
+                                subscription = %sub_name,
+                                error = %e,
+                                "follower loop terminated; subscription marked resync_required"
+                            );
+                        }
                         Err(
                             e @ (ReplError::IdentityMismatch { .. }
                             | ReplError::Seed(
