@@ -6,3 +6,5 @@ pub mod hmac_tests;
 pub mod shape_stats_hmac_tests;
 #[cfg(feature = "crypto")]
 mod token_admin_hmac_tests;
+#[cfg(feature = "crypto")]
+mod online_export_hmac_tests;

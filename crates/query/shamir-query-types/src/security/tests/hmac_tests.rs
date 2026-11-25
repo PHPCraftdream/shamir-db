@@ -1,4 +1,4 @@
-use crate::admin::activity::{ActivityKind, ActivityScope, ListActivityReq};
+use crate::admin::activity::{ActivityKind, ActivityScope, ListActivityReq, RequestExecId};
 use crate::admin::{CreateFunctionOp, DropDbOp, DropTableOp, GroupRef, ResourceRef};
 use crate::auth::SecretString;
 use crate::batch::BatchOp;
@@ -962,24 +962,21 @@ fn online_backup_ops_are_not_hmac_gated() {
 }
 
 #[test]
-fn online_export_ops_are_not_hmac_gated() {
-    // R3 2b: the online logical-export ops follow the online-backup
-    // policy — NotGated (nothing destructive; superuser-only admin
-    // classification at the handler), and no canonical v2 arm, so the
-    // canonical encoder rejects them as unsupported.
-    for wire in [
-        serde_json::json!({
-            "start_export": true,
-            "database": "appdb"
-        }),
-        serde_json::json!({
-            "export_status": true
-        }),
-        serde_json::json!({
-            "cancel_export": true
-        }),
+fn cancel_request_is_not_hmac_gated() {
+    let op = BatchOp::CancelRequest(RequestExecId(42));
+    assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+    assert!(matches!(
+        canonical_batch_op("", &op),
+        Err(crate::hmac::CanonicalOpError::UnsupportedOperation)
+    ));
+}
+
+#[test]
+fn cancel_tx_and_cursor_admin_are_not_hmac_gated() {
+    for op in [
+        BatchOp::CancelTx(7),
+        BatchOp::CancelCursorAdmin(crate::wire::CursorId(9)),
     ] {
-        let op: BatchOp = serde_json::from_value(wire).unwrap();
         assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
         assert!(matches!(
             canonical_batch_op("", &op),

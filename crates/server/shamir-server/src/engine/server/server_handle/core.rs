@@ -661,8 +661,6 @@ impl ServerHandle {
             fire_scheduled_join_probe();
             owner.join_schedule(report).await;
         }
-        // 3. Drain the audit chain + scheduler.
-        self.audit_appender.shutdown().await;
         tracing::debug!(stage = "mutation_worker_join", "shutdown stage");
         if let Some(tracker) = &self.owned_mutation_tasks {
             tracker.close();
