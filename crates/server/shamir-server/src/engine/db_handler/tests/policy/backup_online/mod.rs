@@ -5,3 +5,4 @@ pub mod online_backup_dispatch_tests;
 pub mod port_fault_injection_tests;
 pub mod registry_session_tests;
 pub mod restore;
+pub mod schedule_section_tests;

@@ -7,10 +7,24 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::super::metrics::{enable_schedule, note_scheduled, ScheduledResult};
+use super::super::metrics::{
+    enable_schedule, install_schedule_info, note_scheduled, ScheduleInfo, ScheduledResult,
+};
+use super::super::progress_attribution::unix_nanos;
 use super::super::registry::ScheduledRunSignals;
 use super::super::{OnlineBackupRegistry, StartBackupError};
 use crate::config::{DailyWindow, ResolvedSchedule};
+
+/// Clears this scheduler's schedule cells on ANY exit of the task's future:
+/// normal end, unwind, or future drop (task abort). Checked against the
+/// scheduler's generation, so an older exit never clears a newer schedule.
+struct ScheduleCellsGuard(u64);
+
+impl Drop for ScheduleCellsGuard {
+    fn drop(&mut self) {
+        super::super::metrics::clear_schedule_state_if(self.0);
+    }
+}
 
 pub(crate) fn spawn(
     schedule: ResolvedSchedule,
@@ -42,28 +56,55 @@ fn spawn_with_observer(
     mut on_terminal: impl FnMut(bool) + Send + 'static,
 ) -> JoinHandle<()> {
     let boot = Instant::now();
+    let boot_unix_nanos = unix_nanos();
+    let generation = install_schedule_info(ScheduleInfo {
+        interval_secs: schedule.interval.as_secs(),
+        window: schedule.window.as_ref().map(DailyWindow::label),
+        keep_last: schedule.retention.keep_last,
+        run_on_start: schedule.run_on_start,
+    });
     enable_schedule();
-    tokio::spawn(run(
-        (boot, schedule.interval, schedule.run_on_start),
-        schedule.window,
-        shutdown,
-        local_minute_of_day,
-        move || {
-            registry.start_scheduled(
-                schedule.destination.clone(),
-                owner.clone(),
-                schedule.retention,
-            )
-        },
-        move |result| {
-            note_scheduled(result);
-            match result {
-                ScheduledResult::Completed => on_terminal(true),
-                ScheduledResult::Failed => on_terminal(false),
-                _ => {}
-            }
-        },
-    ))
+    let cells_guard = ScheduleCellsGuard(generation);
+    let boot_for_publish = boot;
+    tokio::spawn(async move {
+        let _cells_guard = cells_guard;
+        run_with_anchor(
+            (boot, schedule.interval, schedule.run_on_start),
+            schedule.window,
+            shutdown,
+            local_minute_of_day,
+            move || {
+                registry.start_scheduled(
+                    schedule.destination.clone(),
+                    owner.clone(),
+                    schedule.retention,
+                )
+            },
+            move |result| {
+                note_scheduled(result);
+                match result {
+                    ScheduledResult::Completed => on_terminal(true),
+                    ScheduledResult::Failed => on_terminal(false),
+                    _ => {}
+                }
+            },
+            move |next| {
+                let nanos = next
+                    .map(|deadline| {
+                        boot_unix_nanos
+                            .saturating_add(
+                                deadline
+                                    .saturating_duration_since(boot_for_publish)
+                                    .as_nanos(),
+                            )
+                            .min(u128::from(u64::MAX)) as u64
+                    })
+                    .unwrap_or(0);
+                super::super::metrics::note_next_run_unix_ns(generation, nanos);
+            },
+        )
+        .await;
+    })
 }
 
 /// One admitted run the scheduler is still tracking. The slot clears only on
@@ -81,20 +122,43 @@ enum Signal {
     Finished,
 }
 
-/// cancel-safe: NO — cancel the shared registry root and join this task so it can drain an admitted run through cleanup.
+/// Test-only entry: the runner tests call this wrapper. Unit tests own no global schedule cells, so publication is a no-op.
+#[cfg(test)]
 pub(super) async fn run(
+    (boot, interval, run_on_start): (Instant, Duration, bool),
+    window: Option<DailyWindow>,
+    shutdown: CancellationToken,
+    local_minute: impl FnMut() -> u32,
+    start: impl FnMut() -> Result<ScheduledRunSignals, StartBackupError>,
+    note: impl FnMut(ScheduledResult),
+) {
+    run_with_anchor(
+        (boot, interval, run_on_start),
+        window,
+        shutdown,
+        local_minute,
+        start,
+        note,
+        |_: Option<Instant>| {},
+    )
+    .await;
+}
+
+async fn run_with_anchor(
     (boot, interval, run_on_start): (Instant, Duration, bool),
     window: Option<DailyWindow>,
     shutdown: CancellationToken,
     mut local_minute: impl FnMut() -> u32,
     mut start: impl FnMut() -> Result<ScheduledRunSignals, StartBackupError>,
     mut note: impl FnMut(ScheduledResult),
+    mut publish_next: impl FnMut(Option<Instant>),
 ) {
     let mut next = if run_on_start {
         Some(boot)
     } else {
         boot.checked_add(interval)
     };
+    publish_next(next);
     let mut in_flight: Option<InFlight> = None;
     while let Some(deadline) = next {
         tokio::select! {
@@ -105,7 +169,7 @@ pub(super) async fn run(
                     if let Some(run) = in_flight.as_mut() {
                         run.outcome_received = true;
                     }
-                    note(terminal(result));
+                    note(outcome_result(result));
                 }
                 Signal::Finished => in_flight = None,
             },
@@ -137,6 +201,7 @@ pub(super) async fn run(
                     }
                 }
                 next = next_deadline(deadline, interval, Instant::now());
+                publish_next(next);
             }
         }
     }
@@ -147,7 +212,7 @@ pub(super) async fn run(
         // Drain the admitted run: exactly one outcome note, then the late
         // signal once retention and the final publication are over.
         if !run.outcome_received {
-            note(terminal(run.outcome.await));
+            note(outcome_result(run.outcome.await));
         }
         let _ = run.finished.await;
     }
@@ -191,6 +256,12 @@ fn terminal(result: Result<bool, oneshot::error::RecvError>) -> ScheduledResult 
     } else {
         ScheduledResult::Failed
     }
+}
+
+fn outcome_result(result: Result<bool, oneshot::error::RecvError>) -> ScheduledResult {
+    // `false` means the protocol outcome was Err: registry.rs:693-700 derives
+    // it from `outcome.is_err()` before publishing `!failed`; it is not a cancel signal.
+    terminal(result)
 }
 
 pub(super) fn next_deadline(

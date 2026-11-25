@@ -26,6 +26,7 @@ use shamir_server_security::observability::{install_backup_metrics_source, Backu
 
 use crate::server_meta::ServerMetaStore;
 use crate::sync::durability::backup::online::progress::BackupStage;
+use crate::sync::durability::backup::online::protocol::{BackupReport, OnlineBackupError};
 
 /// Lowercase stage labels, mirroring the `BackupStage` serde naming; index
 /// order matches the variant order in [`BackupStage`].
@@ -69,6 +70,44 @@ struct SuccessfulBackup {
     bytes: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct ScheduleInfo {
+    pub interval_secs: u64,
+    pub window: Option<String>,
+    pub keep_last: usize,
+    pub run_on_start: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ScheduledLastRun {
+    pub started_at_unix_ns: u128,
+    pub result: &'static str,
+    pub stage: String,
+    pub reason: Option<String>,
+}
+
+/// One immutable record of the live schedule: the configuration, its owner
+/// generation and the two run records. Every update replaces the whole cell
+/// through one compare-and-swap loop, so a check of the generation and the
+/// write it guards are one atomic step.
+#[derive(Clone)]
+struct ScheduleCell {
+    generation: u64,
+    info: ScheduleInfo,
+    last_run: Option<ScheduledLastRun>,
+    next_run_unix_ns: Option<u64>,
+}
+
+pub(crate) struct ScheduleStateSnapshot {
+    pub info: ScheduleInfo,
+    pub last_run: Option<ScheduledLastRun>,
+    pub next_run_unix_ns: Option<u64>,
+    pub scheduled_runs: [u64; 5],
+    pub scheduled_failure_streak: u64,
+    pub retention_deleted_total: u64,
+    pub retention_failed_total: u64,
+}
+
 struct BackupMetricsState {
     started: AtomicU64,
     completed: AtomicU64,
@@ -91,6 +130,7 @@ struct BackupMetricsState {
     retention_deleted: AtomicU64,
     retention_failed: AtomicU64,
     retention_untouched: AtomicU64,
+    schedule: ArcSwapOption<ScheduleCell>,
 }
 
 impl BackupMetricsState {
@@ -117,12 +157,14 @@ impl BackupMetricsState {
             retention_deleted: AtomicU64::new(0),
             retention_failed: AtomicU64::new(0),
             retention_untouched: AtomicU64::new(0),
+            schedule: ArcSwapOption::empty(),
         }
     }
 }
 
 static STATE: LazyLock<BackupMetricsState> = LazyLock::new(BackupMetricsState::new);
 static SOURCE_INSTALLED: OnceLock<()> = OnceLock::new();
+static SCHEDULE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide durable meta handle used to persist the last-success stamp.
 ///
@@ -214,6 +256,107 @@ pub fn backup_metrics_snapshot() -> BackupMetricsSnapshot {
         pin_seconds: None,
         wal_segments_copied_total: None,
     }
+}
+
+/// Installing a schedule starts it with no last-run and no next-run record.
+pub(crate) fn install_schedule_info(info: ScheduleInfo) -> u64 {
+    // Reserve zero for no installed generation; wrapping follows AtomicU64 semantics.
+    let generation = SCHEDULE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    STATE.schedule.store(Some(Arc::new(ScheduleCell {
+        generation,
+        info,
+        last_run: None,
+        next_run_unix_ns: None,
+    })));
+    generation
+}
+
+/// Replace the live cell with an updated copy through one compare-and-swap
+/// loop. With `owner` the update applies only while that generation is still
+/// installed; without it, to whatever schedule is installed.
+fn update_schedule_cell(owner: Option<u64>, apply: impl Fn(&mut ScheduleCell)) {
+    STATE.schedule.rcu(|current| match current {
+        Some(cell) if owner.is_none_or(|generation| generation == cell.generation) => {
+            let mut next = (**cell).clone();
+            apply(&mut next);
+            Some(Arc::new(next))
+        }
+        other => other.clone(),
+    });
+}
+
+/// Only the live scheduler may publish the next-run cell.
+pub(crate) fn note_next_run_unix_ns(generation: u64, ns: u64) {
+    update_schedule_cell(Some(generation), |cell| {
+        cell.next_run_unix_ns = (ns != 0).then_some(ns);
+    });
+}
+
+/// Only the live scheduler starts scheduled runs, so this is the live
+/// schedule's last-run record. The registry does not know the generation: a
+/// run admitted by a scheduler that was replaced while the run was in flight
+/// still publishes into the new schedule (in-process replacement only).
+pub(crate) fn note_schedule_last_run(run: ScheduledLastRun) {
+    update_schedule_cell(None, |cell| cell.last_run = Some(run.clone()));
+}
+
+/// Publish the scheduled run's own typed outcome at the registry's FINAL
+/// publication (before `running = false`), using a stable, path-free vocabulary.
+/// A failure keeps the once-only log with identical message and fields.
+pub(crate) fn note_scheduled_run_outcome(
+    outcome: &Result<BackupReport, OnlineBackupError>,
+    started_at_unix_ns: u128,
+) {
+    let (result, stage, reason) = match outcome {
+        Ok(_) => ("completed", "done".to_string(), None),
+        Err(error) => {
+            let rendered = error.stage_and_reason();
+            let (stage, reason) = match rendered.split_once(": ") {
+                Some((stage, reason)) => (stage.to_string(), Some(reason.to_string())),
+                None => (rendered.clone(), None),
+            };
+            tracing::warn!(
+                stage = stage.as_str(),
+                reason = reason.as_deref().unwrap_or(""),
+                "scheduled backup run failed"
+            );
+            let result = if matches!(error, OnlineBackupError::Cancelled { .. }) {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            (result, stage, reason)
+        }
+    };
+    note_schedule_last_run(ScheduledLastRun {
+        started_at_unix_ns,
+        result,
+        stage,
+        reason,
+    });
+}
+
+/// An older scheduler's exit must not clear a newer generation.
+pub(crate) fn clear_schedule_state_if(generation: u64) {
+    STATE.schedule.rcu(|current| match current {
+        Some(cell) if cell.generation == generation => None,
+        other => other.clone(),
+    });
+}
+
+/// A status read takes plain loads only: the metrics snapshot's scrape-time
+/// `fetch_min` write-back must not run on a BackupStatus read.
+pub(crate) fn schedule_state() -> Option<ScheduleStateSnapshot> {
+    let cell = STATE.schedule.load_full()?;
+    Some(ScheduleStateSnapshot {
+        info: cell.info.clone(),
+        last_run: cell.last_run.clone(),
+        next_run_unix_ns: cell.next_run_unix_ns,
+        scheduled_runs: std::array::from_fn(|i| STATE.scheduled_runs[i].load(Ordering::Relaxed)),
+        scheduled_failure_streak: STATE.scheduled_failure_streak.load(Ordering::Acquire),
+        retention_deleted_total: STATE.retention_deleted.load(Ordering::Relaxed),
+        retention_failed_total: STATE.retention_failed.load(Ordering::Relaxed),
+    })
 }
 
 fn install_snapshot_source() {
@@ -422,6 +565,12 @@ pub(crate) fn set_export_last_success_for_test(seconds: u64) {
     STATE
         .export_last_success_seconds
         .store(seconds, Ordering::Release);
+}
+
+/// TEST-ONLY raw read of the exported stamp cell (a plain load, no clamp).
+#[cfg(test)]
+pub(crate) fn export_last_success_seconds_for_test() -> u64 {
+    STATE.export_last_success_seconds.load(Ordering::Acquire)
 }
 
 /// Note a run start (registry `start` after the runner thread spawned).

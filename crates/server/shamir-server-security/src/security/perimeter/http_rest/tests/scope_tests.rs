@@ -480,6 +480,22 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
 }
 
 #[test]
+fn backup_status_is_denied_for_every_token_mode_channel_and_scope() {
+    let request = execute(shamir_query_builder::ddl::backup_status(), "db");
+    let allow = ["db".to_owned()];
+    for endpoint in [Endpoint::Rest, Endpoint::Ws] {
+        for mode in [TokenMode::ReadOnly, TokenMode::ReadWrite] {
+            for databases in [None, Some(allow.as_slice())] {
+                assert_eq!(
+                    classify_request(&request, mode, databases, endpoint),
+                    Decision::Denied("token_request_denied")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn operator_status_and_point_read_are_denied_for_every_token_mode_channel_and_scope() {
     // Admin-shell R5 PR3 (release design §3.3): the two new top-level
     // variants are NOT in the token read-only subset. A scoped database
