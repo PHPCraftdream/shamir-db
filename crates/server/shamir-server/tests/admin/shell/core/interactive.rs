@@ -176,7 +176,12 @@ impl InteractiveChild {
         self.send_line(command).await;
         tokio::time::timeout(Duration::from_secs(180), async {
             let mut response = String::new();
-            let first = self.next_output_line().await;
+            let mut first = self.next_output_line().await;
+            // The secret prompt (`password: `, then a newline once the secret
+            // line is read) precedes the first result of every child.
+            while first.trim() == "password:" {
+                first = self.next_output_line().await;
+            }
             assert_eq!(first, heading, "unexpected interactive result heading");
             append_bounded(&mut response, &first);
             loop {

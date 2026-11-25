@@ -28,7 +28,7 @@ use super::state_data_common::{scram_profile, Relay, TOKEN_SUBSET};
 #[test]
 fn export_online_lifecycle_completes_with_opaque_receipt() {
     let fixture = boot_export("export_online_lifecycle_completes_with_opaque_receipt");
-    seed_catalogue(&fixture);
+    seed_export_database(&fixture, EXPORT_LIFE_DB);
     let profile = scram_profile(&fixture, "tls-tcp", &fixture.tls_addr.to_string());
     overwrite_profile(&fixture, &profile);
     fixture
@@ -40,7 +40,7 @@ fn export_online_lifecycle_completes_with_opaque_receipt() {
         false,
         None,
         &[],
-        &["--", "export", "online", "start", DB_NAME, "--yes"],
+        &["--", "export", "online", "start", EXPORT_LIFE_DB, "--yes"],
         std::time::Duration::from_secs(720),
     );
     assert_safe_output(&fixture, &run);
@@ -48,7 +48,10 @@ fn export_online_lifecycle_completes_with_opaque_receipt() {
     let record: Value = serde_json::from_slice(&run.stdout).expect("terminal export JSONL");
     assert_eq!(record["command"], "export online start");
     assert_eq!(record["kind"], "result");
-    assert_eq!(record["data"]["phase"], "done");
+    assert_eq!(
+        record["data"]["phase"], "done",
+        "terminal export record: {record}"
+    );
     assert_opaque_label(
         record["data"]["export_id"].as_str().expect("export label"),
         "ex",
@@ -415,6 +418,65 @@ fn interactive_export_cancel_reaches_an_enumerated_terminal_phase() {
             owner_run
         });
     assert_safe_streams(&fixture, &owner_run.stdout, &owner_run.stderr);
+}
+
+/// A small plain database for the lifecycle probe: the shared shell catalogue
+/// carries content (an index with control characters in its name, a schema
+/// table) that the exporter may refuse, and this probe must prove the success
+/// path of a batch `start`.
+const EXPORT_LIFE_DB: &str = "exportlifedb";
+
+fn seed_export_database(fixture: &ShellFixture, db: &'static str) {
+    const SERVER_ROUTING_DB: &str = "default";
+    let addr = fixture.tls_addr;
+    let pin = fixture.pin;
+    let password = Zeroizing::new(fixture.canary.as_bytes().to_vec());
+    fixture
+        .rt
+        .run_timeout(Duration::from_secs(120), async move {
+            let client = super::harness::connect_tls_owned(addr, pin, password)
+                .await
+                .expect("export seed connect");
+            let mut mk_db = Batch::new();
+            mk_db.id("mk-export-db");
+            mk_db.create_db("mk", ddl::create_db(db));
+            client
+                .execute(SERVER_ROUTING_DB, mk_db.build())
+                .await
+                .expect("create the export database");
+            let mut mk_repo = Batch::new();
+            mk_repo.id("mk-export-repo");
+            mk_repo.create_repo(
+                "mr",
+                ddl::create_repo("main").engine(ddl::RepoEngine::Fjall),
+            );
+            client
+                .execute(db, mk_repo.build())
+                .await
+                .expect("create the export repository");
+            let mut mk_table = Batch::new();
+            mk_table.id("mk-export-table");
+            mk_table.create_table("tb", ddl::create_table("rows").repo("main"));
+            client
+                .execute(db, mk_table.build())
+                .await
+                .expect("create the export table");
+            let mut rows = Batch::new();
+            for index in 0..3 {
+                rows.insert(
+                    format!("ins-{index}"),
+                    shamir_query_builder::write::insert("rows").row(shamir_query_builder::doc! {
+                        "id" => format!("row-{index}"),
+                        "marker" => "export-life",
+                    }),
+                );
+            }
+            client
+                .execute(db, rows.build())
+                .await
+                .expect("insert the export rows");
+            client.close().await;
+        });
 }
 
 /// Wall-clock bound of the post-cancel terminal wait (a hang DETECTOR: a
