@@ -464,30 +464,6 @@ fn build_wal_dir_entry(repo: &str, dir_rel: &str, files: &[CopiedFile]) -> WalDi
     }
 }
 
-/// Self-verification before success (design 4.2 step F): re-hash every
-/// file the manifest describes against the snapshot on disk.
-fn self_verify(dest_dir: &Path, raw: &str) -> Result<(), OnlineBackupFailure> {
-    let decoded = manifest::decode(raw)?;
-    for entry in &decoded.files {
-        let path = dest_dir.join(&entry.path);
-        let (sha256, size) = copy_engine::hash_file(&path)
-            .map_err(|error| OnlineBackupFailure::Verify(format!("{}: {error}", entry.path)))?;
-        if sha256 != entry.sha256 || size != entry.size_bytes {
-            return Err(OnlineBackupFailure::Verify(format!(
-                "{}: hash mismatch",
-                entry.path
-            )));
-        }
-    }
-    // The same verifier `verify` runs on a finished snapshot (WAL listing,
-    // unmanifested files), so a snapshot that reports success also verifies.
-    // Unleased and path-exact: the writer cannot lease the child it is
-    // still publishing, and no sibling of it is unleased here.
-    verify_writer_snapshot(dest_dir)
-        .map_err(|error| OnlineBackupFailure::Verify(error.to_string()))?;
-    Ok(())
-}
-
 /// Per-repo seal re-copy outputs whose final hashes define the snapshot
 /// (design 4.2 step E): consistency points, per-repo WAL dirs, repo store
 /// files (snapshot-relative paths) and the residual store pass covering
@@ -919,9 +895,34 @@ fn run_steps(
         .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
     manifest::write_backup_meta(dest_dir)
         .map_err(|error| publication_failed(BackupStage::Verifying, dest_dir, error))?;
+    // Self-verification (design 4.2 step F). The manifest read and decode
+    // keep their own failure classification (an io or `manifest-failed`
+    // reason, not `verify-failed`). The payload check is the verifier
+    // `verify_writer_snapshot`: it hashes every manifest `files` entry
+    // against the snapshot on disk with the size+sha256 comparison and adds
+    // confinement, duplicate, cache-path, WAL-segment re-hash,
+    // unmanifested-file and stamp agreement checks, so the former
+    // pre-pass over `files` is gone (WAL segments are still re-hashed by
+    // the verifier's WAL check).
     let raw = fs::read_to_string(dest_dir.join("manifest.json"))
         .map_err(|error| failed(BackupStage::Verifying, error))?;
-    self_verify(dest_dir, &raw).map_err(|error| failed(BackupStage::Verifying, error))?;
+    manifest::decode(&raw).map_err(|error| failed(BackupStage::Verifying, error))?;
+    verify_writer_snapshot(dest_dir).map_err(|error| {
+        failed(
+            BackupStage::Verifying,
+            OnlineBackupFailure::Verify(error.to_string()),
+        )
+    })?;
+    // The verifier reopens the manifest: it must be the bytes read above,
+    // or the payload was checked against a different manifest.
+    let verified = fs::read_to_string(dest_dir.join("manifest.json"))
+        .map_err(|error| failed(BackupStage::Verifying, error))?;
+    if verified != raw {
+        return Err(failed(
+            BackupStage::Verifying,
+            OnlineBackupFailure::Verify("manifest.json changed during self-verification".into()),
+        ));
+    }
     // Test-only seam: observe the point after successful
     // self-verification, immediately before Done. Deliberately NO
     // cancellation check here — production keeps finishing the run: the
