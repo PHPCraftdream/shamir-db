@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -163,13 +163,24 @@ impl ShellFixture {
         hex::encode(self.pin)
     }
 
-    pub fn shutdown_with_timeout(&mut self, timeout: Duration) {
+    /// Shut down the server under an absolute deadline. The job's own timeout is
+    /// recomputed from the deadline when the job runs and an overrun PANICS the
+    /// job (it is never discarded as a success); the caller-side bound carries a
+    /// slack so that panic is the one reported. Callers on Drop paths must catch
+    /// the resulting caller panic.
+    pub fn shutdown_with_deadline(&mut self, deadline: Instant) {
         if let Some(server) = self.server.take() {
-            self.rt.run(async move {
-                let _ = tokio::time::timeout(timeout, server.shutdown())
-                    .await
-                    .expect("server shutdown deadline");
-            });
+            let cap = deadline.saturating_duration_since(Instant::now());
+            self.rt
+                .run_timeout(cap + super::runtime::DEADLINE_SLACK, async move {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if tokio::time::timeout(remaining, server.shutdown())
+                        .await
+                        .is_err()
+                    {
+                        panic!("fixture server shutdown exceeded the common deadline");
+                    }
+                });
         }
     }
 }
