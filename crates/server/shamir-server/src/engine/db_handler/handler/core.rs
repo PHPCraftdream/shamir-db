@@ -297,7 +297,6 @@ pub struct ShamirDbHandler {
     #[cfg(test)]
     pub(in crate::engine::db_handler) begin_pause: super::test_seams::BeginPause,
 }
-
 impl ShamirDbHandler {
     pub(crate) fn cancel_refusal_audit(&self) -> Arc<CancelRefusalAudit> {
         Arc::clone(&self.cancel_refusal_audit)
@@ -831,10 +830,10 @@ impl ShamirDbHandler {
         // exact `response` value once (to shrink its upfront RI-15
         // reservation down to the actual size) and stashed those bytes
         // via `stash_serialized_response`. Reuse them here instead of
-        // encoding a second time — every OTHER dispatch arm above
-        // (`Ping`, `ChangePassword*`, cursor ops, etc.) never stashes
-        // anything, so this naturally falls through to the fresh
-        // serialize for them.
+        // encoding a second time. Cursor page fetches stash too under a
+        // finite budget or cap (a fetch that loses the terminal removal
+        // discards it); the other arms (`Ping`, `ChangePassword*`, ...)
+        // never stash, so they fall through to the fresh serialize.
         if let Some(bytes) = crate::byte_budget::take_stashed_serialized_response() {
             return Ok(bytes);
         }
