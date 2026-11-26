@@ -127,6 +127,19 @@ impl ColdOpenTasks {
             .closed = true;
     }
 
+    /// Reopen admission when a shutdown WINDOW has ended (the flush finished
+    /// or failed) and the repository stays in use: embedders and tests flush
+    /// mid-life and keep opening tables afterwards. A shutdown future dropped
+    /// mid-window never reaches this call, so an abandoned shutdown stays
+    /// closed.
+    pub(crate) fn reopen(&self) {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closed = false;
+    }
+
     /// Wait until no registered cold open is live, or `false` at `deadline`.
     pub(crate) async fn drain(&self, deadline: tokio::time::Instant) -> bool {
         loop {
