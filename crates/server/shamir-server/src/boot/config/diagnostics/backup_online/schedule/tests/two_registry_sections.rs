@@ -741,11 +741,14 @@ async fn window_excluding_now_skips_both_ticks_and_never_admits_a_run() {
 /// stamp. The huge value is published at the runner's FIRST POLL
 /// (`run_on_start = false` publishes `boot + interval` before any tick), so
 /// no run is admitted and no timer elapses. The interval alone (~550 years =
-/// 1.7357e19 ns) stays just under u64::MAX (1.8447e19 ns) so the
-/// monotonically-based `Instant::checked_add` still succeeds on every
-/// supported platform; the published stamp crosses u64::MAX because the
-/// epoch wall clock already sits ~1.77e18 ns in (valid while the epoch is
-/// younger than ~34.7 years more, i.e. past 2061).
+/// 550*365*86_400 s = 1.73448e19 ns) stays just under u64::MAX
+/// (1.8446744e19 ns); `Instant::checked_add` of such an interval is expected
+/// to succeed on the CI platforms (fitting in u64 nanoseconds is not a proof
+/// for every platform). The published stamp is `boot_unix_ns + interval_ns`,
+/// which exceeds u64::MAX as soon as the epoch is OLDER than
+/// u64::MAX − interval_ns = 1.1019441e18 ns ≈ 34.9 years — the case since
+/// late 2004 — and the epoch only ages, so the crossing holds permanently
+/// (today the epoch sits ~1.79e18 ns in, giving ~1.91e19 ns).
 ///
 /// Mutant: "clamping at the cell instead of the adapter" — restoring the
 /// pre-store clamp in `runner.rs` makes the cell carry `u64::MAX`, and the
@@ -754,9 +757,10 @@ async fn window_excluding_now_skips_both_ticks_and_never_admits_a_run() {
 /// `spawn_for_test`'s real publish closure.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn huge_interval_next_run_survives_u128_to_the_cell_unclamped() {
-    // ~550 years: nanos = 1.7357e19 ns, just under u64::MAX (1.8447e19) so
-    // `Instant::checked_add` succeeds; the epoch stamp added on top pushes
-    // the PUBLISHED value beyond u64::MAX.
+    // ~550 years: nanos = 550*365*86_400 s = 1.73448e19 ns, just under
+    // u64::MAX (1.8446744e19), so `Instant::checked_add` is expected to
+    // succeed; the epoch stamp added on top (~1.79e18 ns) pushes the
+    // PUBLISHED value beyond u64::MAX.
     let interval_secs = 550u64 * 365 * 86_400;
     let interval = Duration::from_secs(interval_secs);
     let interval_nanos = interval.as_nanos();
