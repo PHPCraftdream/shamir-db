@@ -67,6 +67,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::mutation_tracker::MutationTasks;
 use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
@@ -79,7 +80,6 @@ use shamir_db::query::batch::BatchError;
 use shamir_db::ShamirDb;
 use shamir_query_types::hmac as canon;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::task::TaskTracker;
 
 use crate::boot::config::diagnostics::logical::export_online::OnlineExport;
 use crate::byte_budget::ByteBudget;
@@ -233,8 +233,9 @@ pub struct ShamirDbHandler {
     pub(in crate::engine::db_handler) allow_self_service: bool,
     /// R4b-1 — in-flight request table backing the activity view's
     /// `Requests` rows and the `shamir_active_requests` gauge. Shared
-    /// across all clones of the handler (`Arc`). One insert + one RAII
-    /// removal per admitted batch — the entire hot-path cost. READERS are
+    /// across all clones of the handler (`Arc`). One checked id mint
+    /// (a CAS loop), one insert and one RAII removal (an identity peek, then
+    /// the remove) per admitted batch — the entire hot-path cost. READERS are
     /// lock-free (`scc::HashIndex::iter` / `peek_with` under an epoch
     /// `Guard`); the WRITERS take brief internal bucket locks. The RAII
     /// guard additionally owns the per-session in-flight request slot
@@ -255,7 +256,7 @@ pub struct ShamirDbHandler {
     // Bound owned mutation tasks across all connection clones, even when
     // the response byte budget is unbounded or reserves zero bytes.
     owned_mutation_slots: Arc<Semaphore>,
-    owned_mutation_tasks: Arc<TaskTracker>,
+    owned_mutation_tasks: Arc<MutationTasks>,
     /// Counts requests decoded by the raw native request path only; token REST and WebSocket decode separately and are not counted. Production has no reader; cost is one Relaxed add per native request.
     pub(in crate::engine::db_handler) decoded_requests: Arc<std::sync::atomic::AtomicU64>,
     /// R4b-3 — per-server cancellation outcome counters (one fixed slot
@@ -360,7 +361,7 @@ impl ShamirDbHandler {
             owned_mutation_slots: Arc::new(Semaphore::new(
                 shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
             )),
-            owned_mutation_tasks: Arc::new(TaskTracker::new()),
+            owned_mutation_tasks: Arc::new(MutationTasks::new()),
             online_export: None,
             operator_boot: None,
             #[cfg(test)]
@@ -405,7 +406,7 @@ impl ShamirDbHandler {
             owned_mutation_slots: Arc::new(Semaphore::new(
                 shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT,
             )),
-            owned_mutation_tasks: Arc::new(TaskTracker::new()),
+            owned_mutation_tasks: Arc::new(MutationTasks::new()),
             online_export: None,
             operator_boot: None,
             #[cfg(test)]
@@ -513,7 +514,7 @@ impl ShamirDbHandler {
         Some(gate.wait_for_mutation().await)
     }
 
-    pub(crate) fn owned_mutation_tasks(&self) -> Arc<TaskTracker> {
+    pub(crate) fn owned_mutation_tasks(&self) -> Arc<MutationTasks> {
         Arc::clone(&self.owned_mutation_tasks)
     }
 
@@ -532,11 +533,10 @@ impl ShamirDbHandler {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// R4b-1 — mint a fresh, process-unique request-exec id for an
-    /// admitted BATCH (handler-local `AtomicU64`, like `next_cursor_id`).
-    pub(in crate::engine::db_handler) fn next_request_exec_id(&self) -> u64 {
-        self.next_request_exec_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    /// R4b-1 — mint a fresh, CHECKED batch request-exec id (`None` at
+    /// range exhaustion; see `export_activity::next_batch_exec_id`).
+    pub(in crate::engine::db_handler) fn next_request_exec_id(&self) -> Option<u64> {
+        super::export_activity::next_batch_exec_id(&self.next_request_exec_id)
     }
 }
 
