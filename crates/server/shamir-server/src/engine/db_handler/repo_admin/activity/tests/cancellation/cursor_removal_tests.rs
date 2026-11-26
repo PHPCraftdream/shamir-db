@@ -85,8 +85,9 @@ async fn seed_rows(handler: &ShamirDbHandler, owner: &Session) {
 }
 
 /// A 10-row create page over 11 seeded rows has `has_more=true`, registering
-/// the cursor; fetch returns one row (`1 <= 10`) and removes it at the final-page
-/// call site. Kills the id-only-removal mutant there, not merely in the helper.
+/// the cursor; the terminal fetch returns one row and pauses before removal.
+/// An id-only removal followed by same-ID replacement must preserve the
+/// replacement, while the losing terminal fetch must not return the old page.
 #[tokio::test]
 async fn final_page_fetch_preserves_replacement_cursor() {
     tokio::time::timeout(TIMEOUT, async {
@@ -114,39 +115,43 @@ async fn final_page_fetch_preserves_replacement_cursor() {
             Arc::clone(&reached),
             Arc::clone(&resume),
         );
-        let task_handler = handler.clone();
         let task_owner = session(1, 1);
-        let task = tokio::spawn(async move {
-            task_handler
-                .fetch_next(&task_owner, cursor_id, Some(10))
-                .await
-        });
-        tokio::time::timeout(TIMEOUT, reached.wait())
-            .await
-            .expect("fetch removal seam not reached");
-        drop(
-            handler
-                .cursor_registry()
-                .remove(cursor_id.0)
-                .expect("remove selected cursor"),
+        let (fetch_result, _) = tokio::join!(
+            async { handler.fetch_next(&task_owner, cursor_id, Some(10)).await },
+            async {
+                tokio::time::timeout(TIMEOUT, reached.wait())
+                    .await
+                    .expect("fetch removal seam not reached");
+                drop(
+                    handler
+                        .cursor_registry()
+                        .remove(cursor_id.0)
+                        .expect("remove selected cursor"),
+                );
+                let snapshot = RepoTxGate::new(0, 12).open_snapshot().await;
+                let replacement = Cursor::new(
+                    ReadQuery::new("items"),
+                    PaginationMode::Offset,
+                    snapshot,
+                    0,
+                    10,
+                    replacement_owner.session_id,
+                    "app".into(),
+                    "main".into(),
+                );
+                handler
+                    .cursor_registry()
+                    .register(cursor_id.0, replacement_owner.session_id, replacement, 4)
+                    .unwrap();
+                tokio::time::timeout(TIMEOUT, resume.wait())
+                    .await
+                    .expect("resume within bound");
+            },
         );
-        let snapshot = RepoTxGate::new(0, 12).open_snapshot().await;
-        let replacement = Cursor::new(
-            ReadQuery::new("items"),
-            PaginationMode::Offset,
-            snapshot,
-            0,
-            10,
-            replacement_owner.session_id,
-            "app".into(),
-            "main".into(),
-        );
-        handler
-            .cursor_registry()
-            .register(cursor_id.0, replacement_owner.session_id, replacement, 4)
-            .unwrap();
-        resume.wait().await;
-        assert!(matches!(task.await.unwrap(), DbResponse::CursorPage { cursor_id: got, .. } if got == cursor_id));
+        assert!(matches!(
+            fetch_result,
+            DbResponse::Error { code, .. } if code == "cursor_not_found"
+        ));
         assert!(handler
             .cursor_registry()
             .get_owned(cursor_id.0, &replacement_owner.session_id)
