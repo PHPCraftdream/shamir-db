@@ -938,7 +938,6 @@ impl ServerLauncher {
                     audit_chain: audit_chain.clone(),
                     observability_bound_addr: obs.bound_addr,
                     argon2_sem: argon2_sem.clone(),
-                    user_dir: Arc::clone(&user_dir),
                 }
             }),
             observability,

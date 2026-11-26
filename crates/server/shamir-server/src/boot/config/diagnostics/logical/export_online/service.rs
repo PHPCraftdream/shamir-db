@@ -429,6 +429,13 @@ impl OnlineExport {
         let _preparing = Arc::clone(&self.prepare_slot)
             .try_acquire_owned()
             .map_err(|_| ServiceError::AlreadyRunning)?;
+        // Recheck under the preparation permit, before the first I/O: a drain
+        // that already took and released both slots began after the token was
+        // cancelled, so a start that acquired the permit late sees it here
+        // and never touches the catalogue after shutdown declared export idle.
+        if self.runtime.shutdown.is_cancelled() {
+            return Err(ServiceError::Shutdown);
+        }
 
         let user_id = session.user_id;
         let owner = ExportOwner {

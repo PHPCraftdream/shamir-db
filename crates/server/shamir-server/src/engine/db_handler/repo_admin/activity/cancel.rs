@@ -415,8 +415,9 @@ impl ShamirDbHandler {
                         } else {
                             tracing::warn!(
                                 tx_handle,
-                                "cancel release task was cancelled; the registry's \
-                                 Drop release covers the locks"
+                                "cancel release task was cancelled before it finished; the \
+                                 transaction context went with it, so the registry's Drop \
+                                 cannot retry the record-lock release"
                             );
                         }
                     }

@@ -131,8 +131,9 @@ impl ShutdownOwner {
     /// and keep reaping past [`Self::settle_tx_release_tails`]' admission
     /// close: each such release would land on the DETACHED refusal arm of
     /// `spawn_abort_release`, untracked and able to overlap the repository
-    /// flush. The report entry names exactly that consequence; the shutdown
-    /// is unclean either way.
+    /// flush. The timeout is recorded BEFORE the post-abort wait (an outer
+    /// deadline dropping this future mid-wait must not lose it), and a reaper
+    /// task that panicked is reported too; the shutdown is unclean either way.
     pub(crate) async fn join_tx_reaper(
         &mut self,
         bound: Option<(tokio::time::Instant, Duration)>,
@@ -143,27 +144,27 @@ impl ShutdownOwner {
         };
         match bound {
             Some((deadline, budget)) => {
-                if tokio::time::timeout_at(deadline, &mut reaper.handle)
-                    .await
-                    .is_err()
-                {
-                    // Stop the producer before the tail admission closes
-                    // below. The abort lands at the reaper's next await; the
-                    // join after it only waits out one in-flight sweep.
-                    reaper.handle.abort();
-                    let _ = (&mut reaper.handle).await;
-                    report.add_error(format!(
-                        "interactive transaction reaper join exceeded {budget:?}; the reaper \
-                         was aborted, but its final sweep may have started record-lock \
-                         releases that tail admission can no longer track — they run \
-                         detached and may overlap the repository flush"
-                    ));
+                match tokio::time::timeout_at(deadline, &mut reaper.handle).await {
+                    Ok(joined) => report_reaper_failure(joined, report),
+                    Err(_) => {
+                        // Recorded before the post-abort wait below.
+                        report.add_error(format!(
+                            "interactive transaction reaper join exceeded {budget:?}; the \
+                             reaper was aborted and its final sweep awaited before tail \
+                             admission closes"
+                        ));
+                        // Stop the producer before the tail admission closes
+                        // below. The abort lands at the reaper's next await;
+                        // the join after it only waits out one in-flight sweep.
+                        reaper.handle.abort();
+                        report_reaper_failure((&mut reaper.handle).await, report);
+                    }
                 }
             }
             None => {
                 // Awaited THROUGH `&mut` (same borrow discipline as the
                 // bounded branch above): the handle stays in the owner.
-                let _ = (&mut reaper.handle).await;
+                report_reaper_failure((&mut reaper.handle).await, report);
             }
         }
         // Joined (or aborted and joined): the handle is consumed, and polling a
@@ -250,5 +251,17 @@ impl ShutdownOwner {
         // Released here, after the scheduled worker finished — never
         // explicitly unlocked (drop is the release).
         drop(self.data_dir_lock.take());
+    }
+}
+
+/// A reaper task that ended by panicking is a shutdown failure; the
+/// cancellation of our own `abort` is the expected end and is not.
+fn report_reaper_failure(joined: Result<(), tokio::task::JoinError>, report: &mut ShutdownReport) {
+    if let Err(error) = joined {
+        if !error.is_cancelled() {
+            report.add_error(format!(
+                "interactive transaction reaper task failed: {error}"
+            ));
+        }
     }
 }

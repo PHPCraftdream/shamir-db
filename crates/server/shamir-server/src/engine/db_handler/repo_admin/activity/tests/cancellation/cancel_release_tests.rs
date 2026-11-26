@@ -29,6 +29,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::{Batch, Isolation};
 use shamir_query_builder::{doc, filter, write};
+use shamir_query_types::admin::CancelOutcome;
 use shamir_query_types::batch::IsolationLevel;
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_sync::durability::tx_cancel::TxParkedState;
@@ -155,7 +156,9 @@ fn wire_cancel(_handler: &ShamirDbHandler, _caller: &Session, id: u64) -> DbRequ
 async fn cancel_reply_awaits_the_record_lock_release() {
     tokio::time::timeout(TIMEOUT, async {
         let (db, handler, _owner_actor) = fixture().await;
-        let writer = session(3, 3, false);
+        // Superuser: the fixture database is owned by another principal, so a
+        // plain user would be refused at the seed insert.
+        let writer = session(3, 3, true);
         let mut seed = Batch::new();
         seed.id("ins");
         seed.insert("i", write::insert(TABLE).rows([doc! { "n" => 1 }]));
@@ -175,34 +178,38 @@ async fn cancel_reply_awaits_the_record_lock_release() {
             mvcc.locks_len() > baseline,
             "the staged write holds the row's record lock"
         );
-        // A waiter on the same record lock: its completion after the cancel
-        // shows the freed lock is usable end-to-end. (Whether it had already
-        // PARKED before the cancel is not observable — see the NOTE below.)
+        let cancelled =
+            wire_request(&handler, &writer, wire_cancel(&handler, &writer, handle)).await;
+        assert!(
+            matches!(
+                &cancelled,
+                DbResponse::CancelOutcome {
+                    outcome: CancelOutcome::Cancelled
+                }
+            ),
+            "the idle transaction must be cancelled: {cancelled:?}"
+        );
+        // THE assertion: with the awaited release tail the locks are gone the
+        // moment the reply is in hand — no yield, no wait. No competing writer
+        // exists yet: `locks_len` counts entries, and an entry a waiter pinned
+        // is retired only when its last lease drops, so a waiter started
+        // earlier could keep the count above the baseline after a correct
+        // release.
+        assert_eq!(
+            mvcc.locks_len(),
+            baseline,
+            "the record lock must be released BEFORE the cancel reply returns"
+        );
+        // A writer on the same record: its completion shows the freed lock is
+        // usable end-to-end.
         let waiter_handler = Arc::new(handler.clone());
-        let waiter_session = session(4, 4, false);
+        let waiter_session = session(4, 4, true);
         let mut blocked = Batch::new();
         blocked.transactional().isolation(Isolation::Pessimistic);
         blocked.update("blocked", update_where(1, -1));
         let waiter = AbortOnDropHandle::new(tokio::spawn(async move {
             wire_request(&waiter_handler, &waiter_session, execute(blocked.build())).await
         }));
-        // NOTE: no park handshake exists (no waiter-count surface, no
-        // lock-acquire seam), so the waiter may or may not have attempted the
-        // lock before the cancel; the test claims only its eventual completion.
-        assert!(
-            matches!(
-                wire_request(&handler, &writer, wire_cancel(&handler, &writer, handle)).await,
-                DbResponse::CancelOutcome { .. }
-            ),
-            "cancel the idle transaction"
-        );
-        // THE assertion: with the awaited release tail the locks are gone the
-        // moment the reply is in hand — no yield, no wait.
-        assert_eq!(
-            mvcc.locks_len(),
-            baseline,
-            "the record lock must be released BEFORE the cancel reply returns"
-        );
         let response = tokio::time::timeout(TIMEOUT, waiter)
             .await
             .expect("the waiter on the released lock must complete after the release")

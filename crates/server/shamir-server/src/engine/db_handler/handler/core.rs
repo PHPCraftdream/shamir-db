@@ -233,8 +233,9 @@ pub struct ShamirDbHandler {
     pub(in crate::engine::db_handler) allow_self_service: bool,
     /// R4b-1 — in-flight request table backing the activity view's
     /// `Requests` rows and the `shamir_active_requests` gauge. Shared
-    /// across all clones of the handler (`Arc`). One insert + one RAII
-    /// removal per admitted batch — the entire hot-path cost. READERS are
+    /// across all clones of the handler (`Arc`). One checked id mint
+    /// (a CAS loop), one insert and one RAII removal (an identity peek, then
+    /// the remove) per admitted batch — the entire hot-path cost. READERS are
     /// lock-free (`scc::HashIndex::iter` / `peek_with` under an epoch
     /// `Guard`); the WRITERS take brief internal bucket locks. The RAII
     /// guard additionally owns the per-session in-flight request slot

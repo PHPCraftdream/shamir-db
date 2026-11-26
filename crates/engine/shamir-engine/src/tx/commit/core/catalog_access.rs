@@ -93,6 +93,13 @@ impl RepoCore {
     /// a runtime task that keeps the repository permit through recovery and
     /// publication.
     pub(crate) async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
+        self.rename_fence.check_table_rename_fence(table_name)?;
+        // An ALREADY-OPEN table is served while shutdown drains (the drainer
+        // and the flush resolve open tables by name); only a FRESH cold open
+        // is refused below.
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
         // Refuse a FRESH cold open once shutdown is draining, BEFORE the
         // admission permit and before any store lookup (the registered open
         // below may already have submitted a blocking store open the drain
@@ -101,10 +108,6 @@ impl RepoCore {
             return Err(DbError::Internal(
                 "repository shutdown in progress; cold table open refused".into(),
             ));
-        }
-        self.rename_fence.check_table_rename_fence(table_name)?;
-        if let Some(table) = self.catalog.initialized_table(table_name) {
-            return Ok(table);
         }
         let permit = self
             .durability_handle
@@ -141,14 +144,15 @@ impl RepoCore {
     /// a runtime task that keeps the repository permit through recovery and
     /// publication.
     pub(crate) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
-        // Fresh-open refusal, as in `get_table` above.
+        // Already-open tables are served during the drain; a FRESH cold open
+        // is refused, as in `get_table` above.
+        if let Some(table) = self.catalog.initialized_table(table_name) {
+            return Ok(table);
+        }
         if self.cold_opens.is_closed() {
             return Err(DbError::Internal(
                 "repository shutdown in progress; cold table open refused".into(),
             ));
-        }
-        if let Some(table) = self.catalog.initialized_table(table_name) {
-            return Ok(table);
         }
         let permit = self
             .durability_handle

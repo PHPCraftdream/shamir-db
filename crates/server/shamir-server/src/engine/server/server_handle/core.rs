@@ -130,7 +130,6 @@ pub(in crate::engine::server) struct ActivityGaugeTestSeam {
     /// pre-occupy the pool to force a typed busy refusal in `CreateScramUser`,
     /// and observe it free again after. Shares the derivation gate's `Arc`.
     pub argon2_sem: Arc<shamir_connect::server::argon2_semaphore::Argon2Semaphore>,
-    pub user_dir: Arc<shamir_server_security::user_directory::FjallUserDirectory>,
 }
 
 /// Owner of the runtime state of a launched server.

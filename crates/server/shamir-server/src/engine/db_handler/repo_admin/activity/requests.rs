@@ -13,8 +13,9 @@
 //! [`HashIndex::iter`]`(&scc::Guard)` and [`HashIndex::peek_with`] —
 //! epoch-based, lock-free reader paths. The WRITERS (`insert_sync`,
 //! `remove_sync`) do take brief internal bucket locks, but they are used
-//! only on the registration/deregistration path (one insert + one removal
-//! per batch, the whole hot-path cost); readers never block on them —
+//! only on the registration/deregistration path (one checked id mint, one
+//! insert and one identity-checked removal per batch, the whole hot-path
+//! cost); readers never block on them —
 //! `HashMap::iter_sync` / `DashMap::iter` were rejected because they take
 //! locks a reader would contend on.
 //!
@@ -322,8 +323,8 @@ impl crate::db_handler::ShamirDbHandler {
     /// R4b-1 — register one admitted unit of work in the in-flight
     /// activity table and return the RAII guard that owns the entry AND
     /// the per-session in-flight request slot (released on drop, every
-    /// exit path). ONE insert + ONE removal per admission (the whole
-    /// hot-path cost); the minted [`RequestExecId`] and the carried
+    /// exit path). One checked id mint, ONE insert and ONE identity-checked
+    /// removal per admission (the whole hot-path cost); the minted [`RequestExecId`] and the carried
     /// client `rid` are read off the returned guard
     /// ([`InFlightRequest::id`], [`InFlightRequest::client_rid`]). Shared
     /// by the batch execute path and the interactive-tx open/execute
