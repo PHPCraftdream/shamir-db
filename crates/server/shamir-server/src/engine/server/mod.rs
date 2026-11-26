@@ -19,7 +19,7 @@ mod server_launcher;
 mod store_release_barrier;
 
 pub use boot_error::BootError;
-pub use bootstrap_mode::BootstrapMode;
+pub use bootstrap_mode::{BootstrapMode, Cli, Subcmd};
 #[cfg(test)]
 pub(crate) use server_handle::drain_connections;
 #[cfg(test)]

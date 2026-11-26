@@ -41,16 +41,20 @@
 //!   `src/main.rs` at all — they live on the `Args` structs covered by this
 //!   half, which is why they are pinned here rather than below.
 //! * **inline-variant pin** — `backup-verify`, `backup`, `restore` and
-//!   `doctor` are declared INLINE in `src/main.rs` as `Subcmd` variants,
-//!   and `Cli`/`Subcmd` are private to the binary, so no test in this
-//!   crate can even name them. That half of the pin therefore lives in the
-//!   binary's own unit test (`src/tests/cli_inline_subcommands.rs`, wired
-//!   into `main.rs` as a `#[path]` child): it parses each advertised token
+//!   `doctor` are declared INLINE in
+//!   `src/engine/server/bootstrap_mode.rs` as `Subcmd` variants, which
+//!   this crate does not parse. That half of the pin lives
+//!   in the library's `#[cfg(test)]` module
+//!   (`src/tests/security/cli_inline_subcommands.rs`, run by CI's `--lib`
+//!   selection): it parses each advertised token
 //!   list through `Cli::try_parse_from` and matches the resulting variant
 //!   and its fields, so the real parser — not the source text — decides.
-//!   The tokens it pins are exactly the lines below:
-//!   `backup-verify SNAPSHOT`, `backup --to DIR`, `restore --from SNAPSHOT`
-//!   and `doctor --db DB --repo REPO --table TABLE --apply --pretty --json`.
+//!   The tokens it pins are the printed lines `backup-verify SNAPSHOT`,
+//!   `backup --to DIR`, `restore --from SNAPSHOT` and `doctor`; its doctor
+//!   test additionally parses `--db DB --repo REPO --table TABLE --apply
+//!   --pretty --json`, flags the printed line does not carry. The standalone
+//!   `backup-verify SNAPSHOT` dispatch in `main.rs` bypasses clap and is
+//!   exercised by `tests/admin/shell/maintenance/verify.rs`.
 //!   This file keeps asserting what remains truthful here without the
 //!   parser: the EXACT printed manual lines.
 
@@ -317,10 +321,11 @@ fn explained_command_options_are_refused() {
 /// structs) are pinned by parsing them too.
 ///
 /// Inline half: `backup-verify`, `backup`, `restore` and `doctor` are
-/// `Subcmd` variants declared inline in `src/main.rs`, and `Cli`/`Subcmd`
-/// are private to the binary — nothing in this crate can parse them. That
-/// half is pinned by the binary's own unit test
-/// (`src/tests/cli_inline_subcommands.rs`), which feeds each advertised
+/// `Subcmd` variants declared inline in `src/engine/server/bootstrap_mode.rs`
+/// (re-exported as `shamir_server::server::{Cli, Subcmd}`) — this crate does
+/// not parse them. That half is pinned by the library's `#[cfg(test)]`
+/// unit test
+/// (`src/tests/security/cli_inline_subcommands.rs`), which feeds each advertised
 /// token list to `Cli::try_parse_from` and matches the parsed variant and
 /// its fields. This test therefore asserts the real-parser half only; the
 /// four inline manuals keep their exact printed lines pinned by
@@ -406,11 +411,12 @@ fn printed_flags_exist_in_the_server_argument_parser() {
     .expect("the flag `format-migrate` advertises must exist on its real args");
 
     // Inline-half pointer: `backup-verify`, `backup`, `restore` and
-    // `doctor` are `Subcmd` variants declared in `src/main.rs`, and both
-    // `Cli` and `Subcmd` are private to the binary, so this crate cannot
-    // name them and no parse can happen here. Their half of the pin lives
-    // in the binary's own unit test, `src/tests/cli_inline_subcommands.rs`
-    // (a `#[path]` child of `main.rs`), which runs
+    // `doctor` are `Subcmd` variants declared in
+    // `src/engine/server/bootstrap_mode.rs`, which this crate does not
+    // parse. Their half of the pin lives
+    // in the library's `#[cfg(test)]` unit test,
+    // `src/tests/security/cli_inline_subcommands.rs`
+    // (run by CI's `--lib` selection), which runs
     // `Cli::try_parse_from` over each advertised token list — the exact
     // `backup-verify SNAPSHOT`, `backup --to DIR`, `restore --from DIR` and
     // `doctor --db/--repo/--table/--apply/--pretty/--json` lines printed

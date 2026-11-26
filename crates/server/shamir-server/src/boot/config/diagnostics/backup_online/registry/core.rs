@@ -203,7 +203,12 @@ pub struct OnlineBackupRegistry {
     /// per-thread state; no process-global arming.
     #[cfg(test)]
     pending_step_callback: Mutex<Option<BackupStepCallback>>,
-    /// Test-only callback after successful protocol return.
+    /// Test-only (R2d-FIX-C): a one-shot post-run callback the NEXT
+    /// `start` moves onto its runner thread, invoked once after a
+    /// SUCCESSFUL protocol return and before the guard stamp, the
+    /// completion capture and the retention pass — fixture surgery (e.g.
+    /// renaming the published child to a fixed name) with no production
+    /// seam.
     #[cfg(test)]
     pending_post_run_callback: Mutex<Option<TestPostRunCallback>>,
     /// Shared mutation gate; backup runs are enrolled for their full lifetime.

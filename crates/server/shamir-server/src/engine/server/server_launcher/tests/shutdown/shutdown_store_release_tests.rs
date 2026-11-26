@@ -471,3 +471,157 @@ where
             .block_on(body())
     })
 }
+
+/// The `DiscoveryGap` report text: an undecidable store marker under the
+/// data directory must reach the REAL shutdown report with the stage's
+/// own summary and detail -- never as a release, a `StillLocked`, or the
+/// generic outer expiry.
+///
+/// The dangling `version` marker is the exact discovery-gap fixture the
+/// barrier tests use (`a_dangling_version_marker_is_a_discovery_gap`);
+/// here it is planted before boot so the REAL shutdown's release stage
+/// walks over it.
+///
+/// Mutant: the `UnverifiedReason::DiscoveryGap` arm of the report match
+/// (`server_handle/core.rs`) swapped for another reason's text, dropped,
+/// or routed to a bare log line -- the exact summary/detail/prefix
+/// assertions then fail.
+#[cfg(unix)]
+#[test]
+fn a_discovery_gap_reaches_the_shutdown_report_with_its_own_verdict() {
+    let guard = FlakeGuard::with_watchdog(
+        "a_discovery_gap_reaches_the_shutdown_report_with_its_own_verdict",
+        Duration::from_secs(300),
+    );
+    try_install_global_tracing_ring();
+    let temp = tempfile::tempdir().expect("test root");
+    let data_dir = temp.path().join("data");
+    create_private_dir(&data_dir).expect("private data directory");
+    let gapped = data_dir.join("gap_store");
+    std::fs::create_dir_all(&gapped).expect("gap store dir");
+    std::os::unix::fs::symlink(
+        gapped.join("missing-version-target"),
+        gapped.join("version"),
+    )
+    .expect("dangling version marker");
+    std::fs::write(gapped.join("lock"), b"").expect("lock marker");
+    guard.mark("dangling version marker planted");
+
+    let report = drain_with_undecidable_store(data_dir);
+    guard.mark("shutdown drained");
+
+    let error = report
+        .errors()
+        .iter()
+        .find(|error| error.contains("store release could not be verified"))
+        .expect("the discovery gap must reach the report as an unverified release");
+    assert!(
+        error.contains("store discovery was incomplete"),
+        "the verdict must carry the DiscoveryGap summary: {error}"
+    );
+    assert!(
+        error.contains(
+            "the store set could not be fully discovered, or a discovered marker could no longer be verified",
+        ),
+        "the verdict must carry the DiscoveryGap detail: {error}"
+    );
+    assert!(
+        error.contains("UNKNOWN") && error.contains("`Locked`"),
+        "the verdict must leave the release state UNKNOWN with the relaunch warning: {error}"
+    );
+    assert!(
+        !report.is_clean(),
+        "an UNKNOWN release is unclean: {report:?}"
+    );
+    assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
+}
+
+/// The `ProbeError` report text: a discovered store whose `lock` marker
+/// cannot be opened (here: a directory named `lock`) must reach the REAL
+/// shutdown report with the stage's own summary and detail -- the probe
+/// ran but observed nothing decidable.
+///
+/// Mutant: the `UnverifiedReason::ProbeError` arm of the report match
+/// (`server_handle/core.rs`) swapped for another reason's text, dropped,
+/// or routed to a bare log line -- the exact summary/detail/prefix
+/// assertions then fail.
+#[test]
+fn a_probe_error_reaches_the_shutdown_report_with_its_own_verdict() {
+    let guard = FlakeGuard::with_watchdog(
+        "a_probe_error_reaches_the_shutdown_report_with_its_own_verdict",
+        Duration::from_secs(300),
+    );
+    try_install_global_tracing_ring();
+    let temp = tempfile::tempdir().expect("test root");
+    let data_dir = temp.path().join("data");
+    create_private_dir(&data_dir).expect("private data directory");
+    let broken = data_dir.join("broken_store");
+    std::fs::create_dir_all(broken.join("lock")).expect("a `lock` DIRECTORY");
+    std::fs::write(broken.join("version"), b"3").expect("version marker");
+    guard.mark("unopenable lock marker planted");
+
+    let report = drain_with_undecidable_store(data_dir);
+    guard.mark("shutdown drained");
+
+    let error = report
+        .errors()
+        .iter()
+        .find(|error| error.contains("store release could not be verified"))
+        .expect("the probe error must reach the report as an unverified release");
+    assert!(
+        error.contains("the store-release blocking job ended without a result"),
+        "the verdict must carry the ProbeError summary: {error}"
+    );
+    assert!(
+        error.contains("discovery or a lock probe did not complete successfully"),
+        "the verdict must carry the ProbeError detail: {error}"
+    );
+    assert!(
+        !error.contains("store discovery was incomplete")
+            && !error.contains("did not complete before its deadline"),
+        "the ProbeError verdict must not borrow the DiscoveryGap or PoolStarved text: {error}"
+    );
+    assert!(
+        error.contains("UNKNOWN") && error.contains("`Locked`"),
+        "the verdict must leave the release state UNKNOWN with the relaunch warning: {error}"
+    );
+    assert!(
+        !report.is_clean(),
+        "an UNKNOWN release is unclean: {report:?}"
+    );
+    assert_eq!(report.exit_code(), 70, "unclean report: {report:?}");
+}
+
+/// One real launch + bounded drain over a data directory whose store set
+/// the barrier cannot decide; shared by the two verdict-text tests.
+fn drain_with_undecidable_store(data_dir: PathBuf) -> shamir_db::ShutdownReport {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let handle = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                BOUND,
+                Box::pin(
+                    ServerLauncher {
+                        config: boot_config(data_dir),
+                        bootstrap: BootstrapMode::Skip,
+                        node_mode: NodeMode::ReadWrite,
+                    }
+                    .launch(),
+                ),
+            )
+            .await
+        })
+        .expect("launcher boot within the bound")
+        .expect("launcher boot");
+    runtime.block_on(async {
+        tokio::time::timeout(
+            BOUND,
+            crate::runtime::drain_server(handle, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the embedding shutdown must finish within the bound")
+    })
+}

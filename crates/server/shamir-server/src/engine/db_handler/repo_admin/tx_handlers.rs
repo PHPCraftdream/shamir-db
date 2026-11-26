@@ -194,6 +194,8 @@ impl ShamirDbHandler {
         } else {
             it
         };
+        // The release-tail owner is bound by the registry at registration
+        // (`TxRegistry::register_activity`), never by the caller.
         match self.tx_registry.register_activity(
             handle,
             it,
@@ -560,13 +562,15 @@ impl ShamirDbHandler {
             // Admin can write directly, not just stage changes. The task owns
             // admission and the bounded slot through execution and cleanup.
             // fire-and-forget: detached by design if the reply waiter is dropped.
-            self.owned_mutation_tasks()
-                .spawn(execute)
-                .await
-                .unwrap_or_else(|_| DbResponse::Error {
+            match self.owned_mutation_tasks().spawn(execute) {
+                Some(worker) => worker.await.unwrap_or_else(|_| DbResponse::Error {
                     code: "internal_error".into(),
                     message: "cannot complete database request".into(),
-                })
+                }),
+                // Shutdown closed worker admission; refuse instead of starting
+                // work the flush cannot wait for.
+                None => server_busy_response(),
+            }
         } else {
             execute.await
         }
