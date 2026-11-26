@@ -48,8 +48,8 @@ mod state_data_token_subset;
 mod access_activity_access;
 #[path = "access_activity/activity.rs"]
 mod access_activity_activity;
-#[path = "access_activity/manage_root_holder.rs"]
-mod access_activity_manage_root_holder;
+#[path = "access_activity/holders/mod.rs"]
+mod access_activity_holders;
 #[path = "access_activity/mutations.rs"]
 mod access_activity_mutations;
 #[path = "access_activity/rights_gaps.rs"]

@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use shamir_db::ShutdownReport;
 
-use crate::audit_appender::FjallAuditAppender;
+use crate::audit_appender::{FjallAuditAppender, FlusherJoinFailure};
 use crate::db_handler::CancelRefusalAudit;
 use crate::scheduler::Scheduler;
 
@@ -199,20 +199,13 @@ pub(crate) async fn teardown_audit(parts: AuditTeardown<'_>, report: &mut Shutdo
         // A join that returned an error still stopped the task, so the final
         // close may run; its buffered entries are drained by that close.
         Ok(Ok(())) => {}
-        Ok(Err(message)) => {
-            // Two shapes arrive here as one string: an INNER blocking job the
-            // task reported (the job had already ended, so the wrapper's
-            // completion DOES prove the blocking work stopped), and an OUTER
-            // `JoinError` (the task panicked or was cancelled — nothing proves
-            // its blocking work stopped). Only the first may be followed by a
-            // final close.
-            let latched = parts.appender.last_failure();
-            let inner_ended = latched
-                .as_deref()
-                .is_some_and(|cause| latched_cause(&message) == cause);
-            if !inner_ended {
-                flusher_stopped = false;
-            }
+        Ok(Err(failure)) => {
+            // The VARIANT decides whether the blocking work provably stopped,
+            // never a string comparison with the latch: an inner job failure
+            // was reported by a task that completed (the close may run), a
+            // lost task proves nothing (the close must not).
+            flusher_stopped = matches!(failure, FlusherJoinFailure::InnerBlockingJobFailed(_));
+            let message = failure.into_message();
             report.add_error(format!("{ERR_FLUSHER_JOIN}: {message}"));
             reported_flusher = Some(message);
             complete = false;

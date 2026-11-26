@@ -615,3 +615,44 @@ pub(super) fn collect_relative_file_paths(
     }
     Ok(())
 }
+
+/// Cheap format-version peek so v2 snapshots route to the v2 verifier
+/// while v1 keeps its own manifest rules (design 4.5).
+pub(super) fn peek_manifest_format_version(raw: &[u8]) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    value
+        .get("format_version")?
+        .as_u64()
+        .map(|version| version as u32)
+}
+
+/// The exact decoded manifest a successful verification already produced,
+/// handed to the caller without a second parse of `manifest.json`.
+/// `pub(super)` — restore.rs is the intended consumer, via the offline
+/// re-export. One enum per version so consumers derive the version's
+/// rules (inventory exemptions) from the variant, never a second decode.
+#[derive(Debug)]
+pub(in crate::sync::durability::backup) enum VerifiedManifest {
+    /// A v1 (offline stop-and-copy) manifest.
+    V1(super::Manifest),
+    /// A v2 (online) manifest.
+    V2(online_manifest::ManifestV2),
+}
+
+impl VerifiedManifest {
+    /// The manifest's file list, verbatim as verified.
+    pub(in crate::sync::durability::backup) fn files(&self) -> &[super::ManifestFileEntry] {
+        match self {
+            VerifiedManifest::V1(manifest) => &manifest.files,
+            VerifiedManifest::V2(manifest) => &manifest.files,
+        }
+    }
+
+    /// Whether this manifest's VERSION exempts the root `backup.meta.json`
+    /// sidecar from the on-disk inventory (v2: yes, v1: no) — the same
+    /// rule each verifier applies, derived here from the variant itself
+    /// so the restore-side ledger can mirror its verifier exactly.
+    pub(in crate::sync::durability::backup) fn allows_backup_meta(&self) -> bool {
+        matches!(self, VerifiedManifest::V2(_))
+    }
+}
