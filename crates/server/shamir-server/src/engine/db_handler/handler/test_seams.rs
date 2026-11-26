@@ -2,14 +2,98 @@ use std::sync::Arc;
 
 use super::ShamirDbHandler;
 
+type GetRecordIdentityPauseBarriers = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
+
+#[derive(Default, Clone)]
+pub(in crate::engine::db_handler) struct GetRecordIdentityPause(
+    Arc<std::sync::Mutex<Option<GetRecordIdentityPauseBarriers>>>,
+);
+
+impl GetRecordIdentityPause {
+    pub(in crate::engine::db_handler) fn install(
+        &self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) {
+        *self.0.lock().expect("get-record pause mutex poisoned") = Some((reached, resume));
+    }
+
+    pub(in crate::engine::db_handler) async fn pause(&self) {
+        let pause = self
+            .0
+            .lock()
+            .expect("get-record pause mutex poisoned")
+            .take();
+        if let Some((reached, resume)) = pause {
+            reached.wait().await;
+            resume.wait().await;
+        }
+    }
+}
+
 pub(super) type CommitPause = (u64, Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
+
+#[derive(Default, Clone)]
+pub(in crate::engine::db_handler) struct CreateCursorIdentityPause(
+    Arc<std::sync::Mutex<Option<GetRecordIdentityPauseBarriers>>>,
+);
+
+impl CreateCursorIdentityPause {
+    pub(in crate::engine::db_handler) fn install(
+        &self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) {
+        *self.0.lock().expect("create-cursor pause mutex poisoned") = Some((reached, resume));
+    }
+
+    pub(in crate::engine::db_handler) async fn pause(&self) {
+        let pause = self
+            .0
+            .lock()
+            .expect("create-cursor pause mutex poisoned")
+            .take();
+        if let Some((reached, resume)) = pause {
+            reached.wait().await;
+            resume.wait().await;
+        }
+    }
+}
 
 type BeginPauseBarriers = (Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>);
 
+type FetchIdentityPauseBarriers = GetRecordIdentityPauseBarriers;
+
 #[derive(Default, Clone)]
-pub(in crate::engine::db_handler) struct BeginPause(
-    Arc<std::sync::Mutex<Option<BeginPauseBarriers>>>,
+pub(in crate::engine::db_handler) struct FetchIdentityPause(
+    Arc<std::sync::Mutex<Option<FetchIdentityPauseBarriers>>>,
 );
+
+impl FetchIdentityPause {
+    pub(in crate::engine::db_handler) fn install(
+        &self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) {
+        *self.0.lock().expect("fetch pause mutex poisoned") = Some((reached, resume));
+    }
+
+    pub(in crate::engine::db_handler) async fn pause(&self) {
+        let pause = self.0.lock().expect("fetch pause mutex poisoned").take();
+        if let Some((reached, resume)) = pause {
+            reached.wait().await;
+            resume.wait().await;
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub(in crate::engine::db_handler) struct BeginPause {
+    state: Arc<std::sync::Mutex<Option<BeginPauseBarriers>>>,
+    get_record_identity: GetRecordIdentityPause,
+    create_cursor_identity: CreateCursorIdentityPause,
+    fetch_identity: FetchIdentityPause,
+}
 
 impl BeginPause {
     pub(in crate::engine::db_handler) fn install(
@@ -17,11 +101,15 @@ impl BeginPause {
         reached: Arc<tokio::sync::Barrier>,
         resume: Arc<tokio::sync::Barrier>,
     ) {
-        *self.0.lock().expect("begin pause mutex poisoned") = Some((reached, resume));
+        *self.state.lock().expect("begin pause mutex poisoned") = Some((reached, resume));
     }
 
     pub(in crate::engine::db_handler) async fn pause(&self) {
-        let pause = self.0.lock().expect("begin pause mutex poisoned").take();
+        let pause = self
+            .state
+            .lock()
+            .expect("begin pause mutex poisoned")
+            .take();
         if let Some((reached, resume)) = pause {
             reached.wait().await;
             resume.wait().await;
@@ -30,6 +118,61 @@ impl BeginPause {
 }
 
 impl ShamirDbHandler {
+    /// Install this handler instance's one-shot pause after GetRecord's pre-check.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn with_get_record_identity_pause(
+        self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.begin_pause
+            .get_record_identity
+            .install(reached, resume);
+        self
+    }
+
+    /// Pause GetRecord once after its identity pre-check.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) async fn get_record_identity_pause(&self) {
+        self.begin_pause.get_record_identity.pause().await;
+    }
+
+    /// Install this handler instance's one-shot pause after CreateCursor acquires its table.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn with_create_cursor_identity_pause(
+        self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.begin_pause
+            .create_cursor_identity
+            .install(reached, resume);
+        self
+    }
+
+    /// Pause CreateCursor once after table acquisition and before identity re-check.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) async fn create_cursor_identity_pause(&self) {
+        self.begin_pause.create_cursor_identity.pause().await;
+    }
+
+    /// Install this handler instance's one-shot pause after FetchNext acquires its table.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) fn with_fetch_identity_pause(
+        self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.begin_pause.fetch_identity.install(reached, resume);
+        self
+    }
+
+    /// Pause FetchNext once after table acquisition and before identity re-check.
+    #[cfg(test)]
+    pub(in crate::engine::db_handler) async fn fetch_identity_pause(&self) {
+        self.begin_pause.fetch_identity.pause().await;
+    }
+
     /// Reads the raw-native-path decode counter (test-only reader).
     #[cfg(test)]
     pub(in crate::engine::db_handler) fn decoded_request_count(&self) -> u64 {
