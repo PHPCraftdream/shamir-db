@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266  # v2
 
       # Release profile: the native twins of the compute kernels must be optimised for the
       # ratio to mean anything (the default bench profile is opt-level 1).
